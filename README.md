@@ -44,7 +44,7 @@ appropriately.
 
 ## UEVR version
 
-**Latest tested: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138).**
+**Latest tested: [nightly-01138](https://github.com/praydog/UEVR-nightly/releases/tag/nightly-01138-158232aa0703f39014931a8a2320e0633c3c47d4).**
 
 This is the build the mod is developed and tested against, and the one to use if you want a known-good
 setup.
