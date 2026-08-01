@@ -195,6 +195,11 @@ re-downloaded.
   3. **Loss of session focus on OpenXR** — the SteamVR dashboard, an overlay app, or a remote-desktop
      connection stops controller poses updating at the runtime level. Give the game focus and press
      something to recover. Though this doesn't always appear to work. Any feedback on reliable fixes are welcome.
+- **Changing your real-world stance breaks tracking.** Standing up if you started seated, or sitting
+  down if you started standing, throws the weapon and the aim off — the mod's reference is tied to
+  where your play space was when it started, and moving your head to a different height invalidates
+  it. **Reset your play area / recentre** and it comes back. Pick a stance before you inject and stay
+  in it; if you want to switch, expect to recentre afterwards.
 - **Buttons mapped wrong?** You're on the OpenVR runtime. See [Runtime](#runtime-use-openxr) for the
   one-line fix.
 - **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A

@@ -48,6 +48,15 @@ Two known causes:
    compositor — but it mis-assigns the control layout, which is the worse problem, so OpenXR is
    the supported runtime and this is a known trade-off rather than a reason to switch.
 
+**Tracking went wrong after I stood up / sat down.**
+Expected, and it needs a **play area reset / recentre** to fix. The weapon and aim are referenced to
+the play space as it was when the session started, so changing your real-world stance moves your head
+to a height that reference does not account for and everything reads off.
+
+Recentre through your runtime's play-area reset (SteamVR: long-press the system button, or Settings →
+Play Area), and it comes back. Pick standing or seated before you inject and stay in it — if you do
+want to switch mid-session, just expect to recentre afterwards.
+
 **Aim feels laggy or overshoots on fast sweeps.**
 Edit `halo_vr.cfg` live: raise `ffgain` toward 1.2 for lag, raise `dgain` toward 0.3 for
 overshoot. If small motions buzz, raise `dead` slightly (0.6–0.8).
