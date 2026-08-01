@@ -269,8 +269,7 @@ split by feature to make that easier.
 - **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
   configuration descends from, and for making **CutsceneDetectionPlugin** available to the community.
   That plugin ships in this profile's `plugins\` folder and handles cutscene comfort — disabling
-  decoupled pitch, switching to a 2D view and damping camera shake while a cutscene plays. It is
-  **not our code**, and it is the one component here we did not write.
+  decoupled pitch, switching to a 2D view and damping camera shake while a cutscene plays.
 
 ### Referenced mod credit
 

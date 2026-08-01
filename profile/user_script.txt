@@ -1,0 +1,22 @@
+; Halo: Campaign Evolved VR -- console commands UEVR runs on inject.
+;
+; Inherited from the LunchAndVR community profile this configuration descends from. Kept because it
+; is an observed fix rather than a guess: alpha has to survive the post-processing chain for the
+; compositing this profile relies on to come out right.
+r.PostProcessing.PropagateAlpha 1
+
+; ---------------------------------------------------------------------------------------------
+; Performance rungs. All OFF by default -- the defaults are tuned for image quality, so only reach
+; for these if your framerate is short, and uncomment ONE at a time so you can tell what actually
+; bought you the frames.
+;
+; r.ScreenPercentage 90
+; r.VolumetricFog 0
+; r.Shadow.MaxCSMResolution 1024
+; r.SSR.Quality 1
+
+; MegaLights is compiled into this game, but whether the project actually enables it is unconfirmed
+; and no per-eye lighting artifacts have been reported on this profile. Uncomment ONLY if you see
+; lighting that shimmers or sparkles differently between your two eyes.
+;
+; r.MegaLights.Allow 0
