@@ -1445,12 +1445,10 @@ void update() {
             if (was != want) {
                 if (want) {
                     // ENTER: neutralise the actuator now; drop the aim reference (restored from
-                    // the saved calibration on exit); zero the accumulated turn so the re-primed
-                    // view starts clean; invalidate the render-rate rig target so the stereo hook
-                    // stops re-applying a stale one.
+                    // the saved calibration on exit); invalidate the render-rate rig target so
+                    // the stereo hook stops re-applying a stale one.
                     g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false;
                     g_have_ref = false;
-                    g_turn_offset = 0.0f;
                     g_rigw_valid = false;
                 } else {
                     // EXIT: re-anchor against wherever the game camera is now. The view lock was
@@ -1460,8 +1458,15 @@ void update() {
                     // it.
                     g_have_ref = false;
                     g_rig_neutral_valid = false;
-                    g_turn_offset = 0.0f;
                 }
+                // g_turn_offset is deliberately PRESERVED across both transitions. The rig and
+                // aim mappings fold `rig_turn * g_turn_offset` / `aim_turn * g_turn_offset` into
+                // their room->game frames, so zeroing it here rotated the hand-to-weapon mapping
+                // by the entire accumulated snap turn at the moment of exit -- observed in the
+                // field as the weapon sitting ~45 deg wrong after a Pelican drop-off that
+                // followed one 45 deg snap. The view stays seamless anyway, because the re-prime
+                // compensates: it captures base = current - turn, so base + turn lands exactly on
+                // the current view (see on_pre_calculate_stereo_view_offset).
                 API::get()->log_info("[Halo-CampE-UEVR] STICK MODE %s (route=%d rigcomp=%d pawnmatch=%d "
                                      "gameplay=%d force=%d) -- %s",
                                      want ? "ENTER" : "EXIT",
@@ -2825,8 +2830,8 @@ public:
         // STICK MODE: the game camera must reach the eyes unmodified -- the chase camera turning
         // the rendered view IS the gamepad experience the mode exists to restore. Holding the lock
         // UNPRIMED the whole time is also the exit re-anchor: the first frame after stick mode
-        // ends captures the then-current camera yaw as the new base, so leaving a vehicle never
-        // restores a stale heading from before it.
+        // ends re-primes against the then-current camera yaw (turn-compensated -- see the prime
+        // below), so leaving a vehicle never restores a stale heading from before it.
         if (g_stick_mode.load()) { g_lock_primed = false; return; }
 
         // JUDDER FIX -- ASSIGN the locked yaw, never subtract a tick-latched delta.
@@ -2845,8 +2850,12 @@ public:
         if (is_double) {
             auto* r = reinterpret_cast<UEVR_Rotatord*>(rotation);
             g_dbg_view_in = (float)r->yaw;
-            if (!g_lock_primed.load()) {   // first frame: capture where the view currently is
-                g_locked_view_yaw = (float)r->yaw;
+            if (!g_lock_primed.load()) {
+                // PRIME WITH COMPENSATION: capture base = current - turn, so what the lock
+                // renders (base + turn) equals the current view exactly. A plain capture is only
+                // correct while turn == 0 (the original first-frame case); after a stick-mode
+                // exit the PRESERVED turn offset would otherwise be counted twice.
+                g_locked_view_yaw = (float)r->yaw - g_turn_offset.load();
                 g_lock_primed = true;
             } else {
                 r->yaw = (double)locked;
@@ -2855,7 +2864,8 @@ public:
         } else {
             g_dbg_view_in = rotation->yaw;
             if (!g_lock_primed.load()) {
-                g_locked_view_yaw = rotation->yaw;
+                // Same compensated prime as the double branch above.
+                g_locked_view_yaw = rotation->yaw - g_turn_offset.load();
                 g_lock_primed = true;
             } else {
                 rotation->yaw = locked;
