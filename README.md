@@ -235,6 +235,14 @@ re-downloaded.
   than staying pinned to the world. They're positioned against the game's flat view, which the mod
   now steers with your controller — so the marker follows your hand instead of the objective.
   Navigate by the world rather than the markers for now.
+- **Directional sound doesn't follow your head.** Positional audio is spatialised against the game's
+  own view, not against where you're actually looking, so turning your head leaves the sound field
+  behind: a firefight to your left keeps sounding like it's to your left even after you turn to face
+  it. Turning with the stick *does* realign it, because that rotates the game's view as well — so
+  sound stays correct relative to your body and drifts only by however far your head is turned off
+  it. Worst when you rely on audio to locate something off-screen. No workaround beyond stick-turning
+  toward what you're listening for; a proper fix means moving the game's audio listener onto the
+  headset pose, which the mod doesn't currently touch.
 - The reticule ring appears a few seconds after a mission loads (its material streams in late).
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
