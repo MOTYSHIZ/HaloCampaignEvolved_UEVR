@@ -239,6 +239,16 @@ std::atomic<bool> g_dpad_shift_active{false};
 // (the frontend uses its own) and from "no FP rig", which covers loads and transitions.
 std::atomic<bool> g_in_menu{true};
 
+// True while STICK MODE has the motion stack stood down -- vehicle seats, cutscenes, death, the
+// post-load window: the sticks reach the game untouched and the game camera owns the rendered
+// view, exactly like gamepad play. Computed by the detector in update() (game thread), consumed
+// by both hooks. Config.hpp's stick-mode block carries the full doctrine.
+std::atomic<bool> g_stick_mode{false};
+
+// The pawn the FP rig was last resolved under -- "on foot", as far as motion aim is concerned.
+// Tracked, not raw: pawns here are pooled shells. Game thread only.
+TrackedObject g_stick_pawn_base;
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -1142,6 +1152,7 @@ void hud_reticle_follow(float aim_pitch, float aim_yaw, uint32_t tick) {
     if (!g_cfg.hud_follow) return;
     if (!g_have_render_yaw.load()) return;      // no composed view yet -- pre-injection or menu
     if (g_in_menu.load()) return;               // frontend has no first-person reticle to move
+    if (g_stick_mode.load()) return;            // stick mode: the game's own reticle is correct as drawn
 
     if (g_reticle_count == 0) return;   // scan is driven from update(), not from here
 
@@ -1389,6 +1400,77 @@ void update() {
                                  (int)was_menu, (int)now_menu, (int)frontend, (int)no_rig,
                                  (int)g_menu_widget_open.load(), narrow(pcn).c_str());
         }
+
+        // ---- STICK MODE detector (doctrine in Config.hpp). Evaluated here, above the early-out
+        // gates, for the same reason menu state is: it must keep updating in the very states it
+        // exists to detect.
+        //
+        // Core signal: gameplay is running but the game is not rendering a first-person weapon --
+        // the weapon-actor route is how that is observable from outside (vehicle seats, cutscenes,
+        // death, the post-load window). The pawn baseline and rig-component liveness ride along in
+        // the log only: WHICH of the three flips per vehicle seat is recon R1
+        // (docs\VEHICLE_CAMERA_FINDINGS.md), and one logged vehicle entry settles it.
+        {
+            const bool gameplay    = (pc0 != nullptr) && !frontend;
+            const bool route_alive = fp_weapon_route_alive();
+
+            auto* pawn = API::get()->get_local_pawn(0);
+            auto* base = g_stick_pawn_base.get_checked(L"Pawn");
+            if (route_alive && pawn != nullptr && base != pawn) {
+                g_stick_pawn_base.set(pawn);   // (re)baseline while the FP weapon is live
+                base = pawn;
+            }
+            const bool pawn_match = (pawn != nullptr) && (pawn == base);
+
+            const bool signal = g_cfg.stick_mode && gameplay && !route_alive;
+
+            // Debounce, in ~32 Hz ticks. Enter is slow on purpose: a weapon swap kills the route
+            // for up to the resolve cadence (~2 s), and flapping the camera mode mid-fight is
+            // worse than a late vehicle transition. Exit is quick -- the route reviving IS a
+            // successful resolve, which is already debounce enough.
+            static uint32_t on_streak = 0, off_streak = 0;
+            const uint32_t need_on  = (uint32_t)(clampf(g_cfg.stick_on_s,  0.1f, 30.0f) * 32.0f);
+            const uint32_t need_off = (uint32_t)(clampf(g_cfg.stick_off_s, 0.03f, 30.0f) * 32.0f);
+
+            bool want = g_stick_mode.load();
+            if (signal) { off_streak = 0; if (++on_streak  >= need_on)  want = true;  }
+            else        { on_streak  = 0; if (++off_streak >= need_off) want = false; }
+
+            // Force bypasses the detector outright -- the A/B lever, and the manual fallback if
+            // some vehicle seat keeps its FP weapon alive and the detector misses.
+            if      (!g_cfg.stick_mode || g_cfg.stick_force == 2) want = false;
+            else if (g_cfg.stick_force == 1)                      want = true;
+
+            const bool was = g_stick_mode.exchange(want);
+            if (was != want) {
+                if (want) {
+                    // ENTER: neutralise the actuator now; drop the aim reference (restored from
+                    // the saved calibration on exit); zero the accumulated turn so the re-primed
+                    // view starts clean; invalidate the render-rate rig target so the stereo hook
+                    // stops re-applying a stale one.
+                    g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false;
+                    g_have_ref = false;
+                    g_turn_offset = 0.0f;
+                    g_rigw_valid = false;
+                } else {
+                    // EXIT: re-anchor against wherever the game camera is now. The view lock was
+                    // held unprimed throughout, so the next stereo frame adopts the current camera
+                    // yaw as the new base; the aim reference re-captures (restoring the saved
+                    // hand-to-aim offset) on the next armed tick; the rig neutral re-captures with
+                    // it.
+                    g_have_ref = false;
+                    g_rig_neutral_valid = false;
+                    g_turn_offset = 0.0f;
+                }
+                API::get()->log_info("[Halo-CampE-UEVR] STICK MODE %s (route=%d rigcomp=%d pawnmatch=%d "
+                                     "gameplay=%d force=%d) -- %s",
+                                     want ? "ENTER" : "EXIT",
+                                     (int)route_alive, (int)rig_component_alive(), (int)pawn_match,
+                                     (int)gameplay, g_cfg.stick_force,
+                                     want ? "sticks pass through, the game camera owns the view"
+                                          : "motion aim re-anchoring");
+            }
+        }
     }
 
     // ---- WHY THE DRIVER STOPPED. Logged on every CHANGE of state, never per frame.
@@ -1566,7 +1648,9 @@ void update() {
     const float ctrl_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
 
     // Reference capture: record the hand-to-aim offset once so enabling never snaps the view.
-    if (!g_have_ref.load()) {
+    // Not while stick mode holds the stack down -- a reference captured against a vehicle camera
+    // is garbage, and the exit transition re-captures the moment the stack re-arms.
+    if (!g_stick_mode.load() && !g_have_ref.load()) {
         g_ref_ctrl_yaw   = ctrl_yaw;
         g_ref_ctrl_pitch = ctrl_pitch;
 
@@ -1619,14 +1703,18 @@ void update() {
         g_dbg_ctrl_yaw = ctrl_yaw; g_dbg_aim_yaw = (float)aim_yaw;
     }
 
-    if (!g_cfg.aim_rate_render) {
+    if (!g_cfg.aim_rate_render && !g_stick_mode.load()) {
         static AimLawState tick_law;
         float rx = 0.0f, ry = 0.0f;
         aim_control_law(tick_law, ctrl_yaw, ctrl_pitch, aim_yaw, aim_pitch, g_last_dt.load(), &rx, &ry);
         g_out_rx = rx; g_out_ry = ry;
     }
-    g_aim_law_armed = true;
-    g_driving = true;
+    // STICK MODE: the law stays disarmed (cleared at entry), so both hook paths pass the player's
+    // right stick straight through -- the whole point of the mode.
+    if (!g_stick_mode.load()) {
+        g_aim_law_armed = true;
+        g_driving = true;
+    }
 
     // ---- MEASURE THE ACTUAL TURN RATE and adapt the gain (see shape()).
     {
@@ -1899,7 +1987,12 @@ void update() {
 
         // NOTE: the rig KEEPS BEING DRIVEN while calibrating -- it is pinned to a fixed WORLD
         // transform rather than left at a fixed RELATIVE one. See the calibration branch below.
-        if (rig != nullptr) {
+        //
+        // NOT while stick mode is engaged: whatever g_rig_component points at then is either a
+        // stale recycled shell (vehicle seat) or a rig the game is not rendering -- and with
+        // stickforce=1 on foot, freezing the arms is the honest picture of the stack being down.
+        // RESOLUTION (above) keeps running either way; the route reviving is how stick mode ends.
+        if (rig != nullptr && !g_stick_mode.load()) {
             // ROTATION -- must be RELATIVE TO THE PARENT, which is the aim.
             //
             // A scene component's relative transform COMPOSES on top of its parent, and the parent
@@ -2568,7 +2661,9 @@ void update() {
     // ------------------------------------------------------------------ TURNING
     // Consumes the player's raw right-stick X (sampled in the XInput hook before the aim value
     // replaced it). Adjusts the locked view yaw, so the world turns while aim stays on the gun.
-    if (g_cfg.turn_mode != 0) {
+    // Stands down in stick mode: the right stick IS the game's look input there, and consuming it
+    // for snap turn would rotate the player twice.
+    if (g_cfg.turn_mode != 0 && !g_stick_mode.load()) {
         const float sx = g_raw_stick_x.load();
         const bool past_dz = std::fabs(sx) > g_cfg.turn_dz;
 
@@ -2601,9 +2696,10 @@ void update() {
                              g_move_rot_deg.load(), g_move_applied.load(), g_cfg.move_src,
                              g_dbg_view_a.load(), g_dbg_view_b.load(), g_dbg_hmd_yaw.load(),
                              g_locked_view_yaw.load(), g_turn_offset.load(), (float)aim_yaw);
-        API::get()->log_info("[Halo-CampE-UEVR] t%u ctrl=%.1f aim=%.1f err=%.1f stick=%.2f | viewIn=%.1f viewOut=%.1f turn=%.1f JUDDER=%.2f",
+        API::get()->log_info("[Halo-CampE-UEVR] t%u ctrl=%.1f aim=%.1f err=%.1f stick=%.2f | viewIn=%.1f viewOut=%.1f turn=%.1f JUDDER=%.2f%s",
             g_ticks.load(), ctrl_yaw, (float)aim_yaw, g_dbg_err_yaw.load(), g_out_rx.load(),
-            g_dbg_view_in.load(), g_dbg_view_out.load(), g_turn_offset.load(), g_judder_max.load());
+            g_dbg_view_in.load(), g_dbg_view_out.load(), g_turn_offset.load(), g_judder_max.load(),
+            g_stick_mode.load() ? "  [STICK MODE]" : "");
         API::get()->log_info("[Halo-CampE-UEVR]   rig: travel=%.3fm rigOff=(%.1f,%.1f,%.1f)cm roll=%.1f | pos=(%.3f,%.3f,%.3f) SURVIVE_DRIFT=%.2fcm",
             g_ctrl_travel_max.load(), g_dbg_rig_x.load(), g_dbg_rig_y.load(), g_dbg_rig_z.load(),
             g_dbg_rig_roll.load(), g_dbg_pos_x.load(), g_dbg_pos_y.load(), g_dbg_pos_z.load(),
@@ -2689,7 +2785,7 @@ public:
                 API::get()->log_info("[Halo-CampE-UEVR] stereo view index observed = %d", index); }
         }
         if (g_cfg.rig_render && g_cfg.attach_mode == 0
-            && g_rigw_valid.load() && !g_in_menu.load()) {
+            && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()) {
             auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
             auto* par = g_rig_parent;
             if (rig != nullptr && par != nullptr) {
@@ -2725,6 +2821,13 @@ public:
         }
 
         if (rotation == nullptr || !g_cfg.view_lock) return;
+
+        // STICK MODE: the game camera must reach the eyes unmodified -- the chase camera turning
+        // the rendered view IS the gamepad experience the mode exists to restore. Holding the lock
+        // UNPRIMED the whole time is also the exit re-anchor: the first frame after stick mode
+        // ends captures the then-current camera yaw as the new base, so leaving a vehicle never
+        // restores a stale heading from before it.
+        if (g_stick_mode.load()) { g_lock_primed = false; return; }
 
         // JUDDER FIX -- ASSIGN the locked yaw, never subtract a tick-latched delta.
         //
@@ -2834,7 +2937,10 @@ public:
             // D-PAD SHIFT: right stick up turns the LEFT stick into a d-pad.
             // Not in menus: this ZEROES the left stick to turn it into a d-pad, which in a menu
             // would silently kill the primary navigation axis.
+            // Not in stick mode either: the right stick is the game's own look/orbit input there,
+            // so "stick up" is LOOK UP -- shifting on it would kill throttle/steering mid-look.
             if (g_cfg.map_dpad_shift && ry > g_cfg.map_rstick_dz
+                && !g_stick_mode.load()
                 && !(g_in_menu.load() && g_cfg.menu_suppress)) {
                 const float lx = (float)state->Gamepad.sThumbLX / 32767.0f;
                 const float ly = (float)state->Gamepad.sThumbLY / 32767.0f;
@@ -2889,7 +2995,9 @@ public:
                 }
 
                 // Injected AFTER the rebind, so this mask reaches the game untouched.
-                if (g_cfg.map_rstick_down != 0 && ry < -g_cfg.map_rstick_dz) {
+                // Not in stick mode: looking down with the right stick must not press crouch.
+                if (g_cfg.map_rstick_down != 0 && ry < -g_cfg.map_rstick_dz
+                    && !g_stick_mode.load()) {
                     state->Gamepad.wButtons |= (WORD)g_cfg.map_rstick_down;
                 }
             }
@@ -2912,7 +3020,11 @@ public:
         //   * a menu is up -- the correction rotates by (view - aim), so which way you happen to be
         //     facing decides whether "up" reads as up. Menus have no world frame, so the raw stick
         //     is always the right answer there.
-        if (g_cfg.move_rot != 0.0f && !g_dpad_shift_active.load() && !g_in_menu.load()) {
+        // Also skipped in stick mode: the game camera owns the view there, so its own
+        // camera-relative movement is already correct -- rotating the stick on top of it is what
+        // bends vehicle steering.
+        if (g_cfg.move_rot != 0.0f && !g_dpad_shift_active.load() && !g_in_menu.load()
+            && !g_stick_mode.load()) {
             const float lx = (float)state->Gamepad.sThumbLX / 32767.0f;
             const float ly = (float)state->Gamepad.sThumbLY / 32767.0f;
             if (lx != 0.0f || ly != 0.0f) {

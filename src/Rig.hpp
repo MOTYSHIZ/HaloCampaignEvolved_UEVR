@@ -68,6 +68,19 @@ extern BorrowedMarker g_aim_marker;
 uevr::API::UObject* resolve_rig();
 uevr::API::UObject* follow_object(uevr::API::UObject* obj, const wchar_t* prop);
 
+// Is the cached first-person-weapon route still live -- i.e. is the game rendering an FP weapon
+// right now? The same TrackedObject + attachment walk as the resolve fast path; a live handle is
+// left untouched (only resolve_rig re-establishes a dead one). This is stick mode's core detector:
+// the route dies in vehicle seats, cutscenes, death and the post-load window, and -- unlike
+// g_rig_component, a raw pointer that goes stale-non-null -- a dead route is DETECTED, not
+// silently followed.
+bool fp_weapon_route_alive();
+
+// Diagnostic twin for the transition logs: is the rig COMPONENT itself still tracked-live? A
+// weapon swap kills the route but keeps the rig (it is the pawn's component); what a vehicle seat
+// does to it is exactly recon question R1, which this answers with one log line.
+bool rig_component_alive();
+
 // Write the rig's RELATIVE transform. Never the world transform -- see the note at the top.
 bool rig_set_rotation(uevr::API::UObject* rig, double pitch, double yaw, double roll);
 bool rig_set_location(uevr::API::UObject* rig, double x, double y, double z);
