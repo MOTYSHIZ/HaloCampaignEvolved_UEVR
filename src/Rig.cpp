@@ -97,6 +97,32 @@ static API::UObject* rig_through_weapon(API::UObject* wpn) {
     return par;
 }
 
+// Tracked mirror of the resolved rig component, for rig_component_alive() below. Refreshed only
+// when the resolved pointer CHANGES: TrackedObject::set() is an O(n) object-array scan, fine on a
+// rare acquisition and exactly the periodic cost resolve_rig's fast path exists to avoid.
+static TrackedObject g_rig_track;
+
+static void note_resolved_rig(API::UObject* rig) {
+    if (rig != nullptr && g_rig_track.ptr != rig) g_rig_track.set(rig);
+}
+
+// Stick mode's core signal (see Rig.hpp). Read-only walk; a live g_fp_weapon is left untouched.
+bool fp_weapon_route_alive() {
+    auto* w = g_fp_weapon.get();
+    if (w == nullptr) return false;
+    const std::wstring cn = class_name_of(w);
+    if (cn.find(L"_FP_")       == std::wstring::npos ||
+        cn.find(L"WeaponActor") == std::wstring::npos) return false;
+    return rig_through_weapon(w) != nullptr;
+}
+
+// Diagnostic for the stick-mode transition logs: does the rig COMPONENT still occupy its object-
+// array slot? A weapon swap kills the route but not this; what a vehicle seat does to it is recon
+// R1, answered by this appearing in one log line.
+bool rig_component_alive() {
+    return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C") != nullptr;
+}
+
 API::UObject* resolve_rig() {
     // ---- FAST PATH. The sweep below is a full object-array walk with a class-name string built
     // per object, and it ran unconditionally every ~2 s even with a perfectly good rig already
@@ -113,7 +139,7 @@ API::UObject* resolve_rig() {
             const std::wstring cn = class_name_of(w);
             if (cn.find(L"_FP_")       != std::wstring::npos &&
                 cn.find(L"WeaponActor") != std::wstring::npos) {
-                if (auto* rig = rig_through_weapon(w)) return rig;
+                if (auto* rig = rig_through_weapon(w)) { note_resolved_rig(rig); return rig; }
             }
         }
         g_fp_weapon.reset();   // handle is no good; the sweep re-establishes it
@@ -138,6 +164,7 @@ API::UObject* resolve_rig() {
         if (auto* par = rig_through_weapon(obj)) {
             // Remember the ROUTE, with its array slot, so the next call can skip this sweep.
             g_fp_weapon.set_at(obj, i);
+            note_resolved_rig(par);
             return par;
         }
     }
