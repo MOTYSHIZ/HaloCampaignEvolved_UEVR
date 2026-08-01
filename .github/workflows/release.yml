@@ -21,14 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned to the nightly this mod targets (nightly-01138). actions/checkout resolves a bare SHA
-      # directly -- a shallow `git clone --depth N` cannot, because the pin falls outside the most
-      # recent N commits as upstream moves on.
+      # Pinned to the nightly this mod targets (nightly-01138 = 158232a).
+      #
+      # The ref MUST be the full 40-character SHA. actions/checkout fetches by ref, and GitHub's
+      # fetch-by-SHA rejects the abbreviated form -- `git fetch origin 158232a` fails with
+      # "couldn't find remote ref", while the full SHA succeeds. A short SHA only resolves locally,
+      # where the object is already present, which is why COMPILING.md can use the short form.
       - name: Fetch UEVR SDK (pinned to the nightly this mod targets)
         uses: actions/checkout@v4
         with:
           repository: praydog/UEVR
-          ref: 158232a
+          ref: 158232aa0703f39014931a8a2320e0633c3c47d4
           path: sdk-uevr
 
       - name: Build + package
