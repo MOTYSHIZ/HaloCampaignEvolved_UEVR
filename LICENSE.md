@@ -25,6 +25,12 @@ SOFTWARE.
 This licence covers **this project's own** code, configuration and original art.
 It does not cover, and this project does not redistribute, any Halo game asset.
 
+The release also bundles one **third-party** component, `plugins\CutsceneDetectionPlugin.dll`
+(cutscene comfort; see the Credits section of README.md). It is not our work, is **not** covered by
+the MIT licence above, and carries whatever terms its own author sets. It is a standalone UEVR
+plugin loaded separately by UEVR -- it is not linked into this project's code, and neither is a
+derivative of the other.
+
 The UEVR plugin SDK headers this project builds against are © praydog and are
 **not** vendored here — they are fetched from https://github.com/praydog/UEVR at
 build time under their own terms. See COMPILING.md.

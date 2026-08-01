@@ -266,7 +266,11 @@ split by feature to make that easier.
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
 - **[pancreations / Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR)** — independent prior
   art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach.
-- **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this configuration descends from.
+- **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
+  configuration descends from, and for making **CutsceneDetectionPlugin** available to the community.
+  That plugin ships in this profile's `plugins\` folder and handles cutscene comfort — disabling
+  decoupled pitch, switching to a 2D view and damping camera shake while a cutscene plays. It is
+  **not our code**, and it is the one component here we did not write.
 
 ### Referenced mod credit
 
@@ -305,8 +309,10 @@ just keep the copyright notice. Note that the UEVR plugin SDK this builds agains
 carries its own terms, which is why it is fetched at build time rather than vendored here.
 
 This is an unofficial fan project, not affiliated with or endorsed by Microsoft, Xbox Game Studios,
-or Halo Studios. It distributes **no game assets** — only configuration, original code, and
-original art. Halo is a trademark of Microsoft Corporation.
+or Halo Studios. It distributes **no game assets** — only configuration, original code, original art,
+and one third-party community plugin (`plugins\CutsceneDetectionPlugin.dll`, credited above, which
+carries its own terms and is not covered by this project's MIT licence). Halo is a trademark of
+Microsoft Corporation.
 
 ### AI Usage
 

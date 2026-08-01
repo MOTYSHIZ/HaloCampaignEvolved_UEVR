@@ -1,6 +1,11 @@
-# Build outputs - the DLL is assembled into the release zip, never committed.
+# Build outputs - our own DLL is assembled into the release zip, never committed.
 build/
 *.dll
+
+# ...except the third-party cutscene plugin, which is SHIPPED CONTENT rather than a build output.
+# Without this exception the blanket *.dll rule above silently drops it from the repo, and the
+# release zip would then be missing a file the README tells users they have.
+!profile/plugins/*.dll
 *.obj
 *.pdb
 *.exp
