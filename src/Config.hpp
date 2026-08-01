@@ -115,6 +115,33 @@ struct Config {
     float smooth_dps   = 90.0f;   // degrees per second at full deflection
     float turn_dz      = 0.5f;    // stick deflection required to register
 
+    // STICK MODE. In vehicle seats the game binds the chase camera to the aim vector, so motion
+    // aim swings the whole camera with the hand -- and the view lock half-fights it (yaw pinned
+    // while the camera ORBITS, pitch not pinned at all). The playable answer there is the same
+    // one every gamepad player gets: right stick = camera/aim, view rides the game camera.
+    //
+    // While stick mode is engaged the whole motion stack stands down -- aim law, view lock,
+    // snap/smooth turn, movement rotation, rig driver, right-stick remaps -- and the sticks reach
+    // the game untouched. Every lever degrades toward "stock game in stereo", never toward broken
+    // aim, the same fail-closed direction as the ControlRotation validation.
+    //
+    // DETECTION is "the game is not rendering a first-person weapon for the pawn the rig was
+    // resolved under": the FP weapon-actor route dies (seated, cutscene, dead, post-load) or the
+    // local pawn stops being the one the rig belongs to (possession swap). Both are exact
+    // object-identity checks; neither calls into Blam objects. g_rig_component itself CANNOT be
+    // the signal -- it is a raw cached pointer that stays stale-non-null across a vehicle entry
+    // (nothing clears it short of a PlayerController change).
+    bool  stick_mode   = true;
+    // 0 = auto-detect; 1 = always stick mode; 2 = never. 1/2 bypass the detector outright -- the
+    // A/B lever, and the manual fallback if the detector misses on some vehicle. Live-reloaded.
+    int   stick_force  = 0;
+    // Debounce, seconds. Enter is the slower edge: a weapon swap kills the weapon-actor route for
+    // up to a couple of seconds until the next resolve, and flapping the camera mode mid-fight is
+    // worse than a late vehicle transition. Exit is quick -- the route coming back IS the resolve
+    // succeeding, which is already debounce enough.
+    float stick_on_s   = 3.0f;
+    float stick_off_s  = 0.25f;
+
     // WEAPON RIG -- drives the first-person rig from the controller so the gun follows the hand.
     bool  rig_enabled  = true;
     bool  rig_loc      = true;    // drive translation as well as rotation
