@@ -262,14 +262,22 @@ split by feature to make that easier.
 
 ## Credits
 
-- **[praydog](https://github.com/praydog/UEVR)** — UEVR itself, the fix that made it work for Halo so early, and the plugin SDK this is built on. Hail to the king.
+**Special thanks to [elliotttate](https://github.com/elliotttate)** — for hosting the Flat2VR
+community, without which none of this work would have found the people who made it possible, and for
+writing **CutsceneDetectionPlugin**, which ships in this profile's `plugins\` folder and handles
+cutscene comfort (disabling decoupled pitch, switching to a 2D view and damping camera shake while a
+cutscene plays). That plugin is his work, not ours.
+
+**Special thanks to [praydog](https://github.com/praydog/UEVR)** — for UEVR itself, which every one
+of these projects stands on, for the nonstandard 5.5.4 fix that had this game rendering in VR within
+days of its release, and for the plugin SDK this mod is written against. Hail to the king.
+
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
 - **[pancreations / Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR)** — independent prior
   art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach.
 - **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
-  configuration descends from, and for making **CutsceneDetectionPlugin** available to the community.
-  That plugin ships in this profile's `plugins\` folder and handles cutscene comfort — disabling
-  decoupled pitch, switching to a 2D view and damping camera shake while a cutscene plays.
+  configuration descends from, and for bundling elliotttate's cutscene plugin with it, which is how
+  this project found it.
 
 ### Referenced mod credit
 
@@ -309,9 +317,9 @@ carries its own terms, which is why it is fetched at build time rather than vend
 
 This is an unofficial fan project, not affiliated with or endorsed by Microsoft, Xbox Game Studios,
 or Halo Studios. It distributes **no game assets** — only configuration, original code, original art,
-and one third-party community plugin (`plugins\CutsceneDetectionPlugin.dll`, credited above, which
-carries its own terms and is not covered by this project's MIT licence). Halo is a trademark of
-Microsoft Corporation.
+and elliotttate's community cutscene plugin (`plugins\CutsceneDetectionPlugin.dll`, credited above,
+which is his work rather than ours and so isn't covered by this project's MIT licence). Halo is a
+trademark of Microsoft Corporation.
 
 ### AI Usage
 
