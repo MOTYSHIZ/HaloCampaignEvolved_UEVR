@@ -1,0 +1,22 @@
+# Line-ending policy. Worth setting BEFORE the first commit: added later, it forces a
+# mass-renormalisation commit that touches every file and buries real history.
+#
+# Without this, the result depends on each contributor's core.autocrlf setting, so someone with a
+# different setting sees whole-file diffs on files they never edited.
+
+# Normalise everything text-like to LF in the repository; check out native to the platform.
+* text=auto
+
+# Windows-only tooling. Keep CRLF in the working tree so these run correctly when a contributor
+# has autocrlf disabled -- PowerShell tolerates LF, but .bat/.cmd genuinely misbehave without CRLF.
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# Never touch these.
+*.png  binary
+*.dll  binary
+*.zip  binary
+*.lib  binary
+*.exp  binary
+*.obj  binary

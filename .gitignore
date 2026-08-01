@@ -1,0 +1,7 @@
+# Build outputs - the DLL is assembled into the release zip, never committed.
+build/
+*.dll
+*.obj
+*.pdb
+*.exp
+*.lib

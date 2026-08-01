@@ -1,0 +1,19 @@
+# Keeps the GitHub Actions in .github/workflows/ up to date.
+#
+# This exists because release.yml pins softprops/action-gh-release to a commit SHA rather than a
+# tag. A SHA cannot be moved by an upstream retag -- which is the point -- but it also means the
+# action never updates itself, including for security fixes. Dependabot opens a PR when a newer
+# version exists, so the pin stays deliberate instead of quietly going stale.
+#
+# Expect an early PR moving action-gh-release from v2 to v3: that is a major-version bump and a
+# behaviour change, so review it rather than merging on sight.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
