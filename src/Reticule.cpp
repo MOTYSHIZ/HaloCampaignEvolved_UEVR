@@ -597,13 +597,33 @@ void reticule_widget_ensure(API::UObject* rig) {
         (uint8_t)clampf((float)g_cfg.aim_widget_blend, 0.0f, 2.0f);
 
     // The MIC itself, not a MID of the parent Material.
-    if (auto* mic = API::get()->find_uobject<API::UObject>(
+    //
+    // Preferred: the VR-editor pass-through variant, which multiplies SlateUI by
+    // EyeAdaptationInverse. The stock Widget3D pass is unlit but still multiplied by the scene's
+    // PRE-EXPOSURE, so in bright scenes the authored reticle colours tonemap to near-black -- the
+    // long-standing "dark crosshair". The game's cook omits the VREditor materials; the optional
+    // HaloCEReticleColor LogicMod supplies them, and this loads on demand from that pak. Without
+    // the pak this resolves null and the stock (exposure-crushed) MIC keeps prior behaviour.
+    //
+    // CREDIT: elliotttate's HaloCampaignEvolved-UEVR identified the pre-exposure mechanism, the
+    // EyeAdaptationInverse antidote, and ships the LogicMod pak (used with permission).
+    auto* mic = find_or_load_material(
+        "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
+        "WidgetVRPassThrough_Translucent_OneSided");
+    if (mic == nullptr) {
+        mic = API::get()->find_uobject<API::UObject>(
             L"MaterialInstanceConstant /Engine/EngineMaterials/Widget3DPassThrough_Translucent."
-            L"Widget3DPassThrough_Translucent")) {
+            L"Widget3DPassThrough_Translucent");
+    }
+    if (mic != nullptr) {
         alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
         *reinterpret_cast<int32_t*>(p) = 0;
         *reinterpret_cast<void**>(p + 8) = mic;
         comp->call_function(L"SetMaterial", p);
+        API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %s",
+                             mic->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos
+                                 ? "VREditor exposure-compensated (LogicMod)"
+                                 : "stock Widget3DPassThrough (pre-exposure applies)");
     }
 
     // Space FIRST: setting the widget before the space can build the render target for the wrong
