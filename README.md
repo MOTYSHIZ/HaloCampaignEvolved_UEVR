@@ -108,12 +108,18 @@ again — see [Known issues](#known-issues). That's an annoyance; wrong button m
 |---|---|
 | Right controller aim | Weapon aim (the game's aim follows it) |
 | Left stick | Move, relative to where you look |
+| Left stick **click** | Sprint |
 | Right stick left/right | Snap turn |
 | Right stick **up (hold)** | Shift layer: left stick becomes the d-pad:<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad down (hold)** — Drop weapon |
 | Right stick **down** | Crouch |
+| Right stick **click** | Melee |
+| Right trigger | Fire |
+| Left trigger | Weapon zoom — **not working yet**, see [Known issues](#known-issues) |
+| Left grip | Throw grenade |
+| Right A | Jump |
+| Right Y | Switch weapon |
 | Left X | Equipment / overshield |
 | Right B | Reload (in menus: **Back**) |
-| Triggers / grips / A / Y | As the game's gamepad layout |
 
 The mod ships with a working calibration out of the box — try it as-is first. If the weapon doesn't
 sit right in your hand, or shots don't land where you're pointing, see **Custom calibration** below.
