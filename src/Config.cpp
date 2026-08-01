@@ -215,6 +215,10 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "mapto")         == 0) g_cfg.map_to          = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "perflog")       == 0) g_cfg.perf_log        = (v != 0.0);
         else if (_stricmp(key, "rigfast")       == 0) g_cfg.rig_fast        = (v != 0.0);
+        else if (_stricmp(key, "stickmode")     == 0) g_cfg.stick_mode      = (v != 0.0);
+        else if (_stricmp(key, "stickforce")    == 0) g_cfg.stick_force     = (int)v;
+        else if (_stricmp(key, "stickon")       == 0) g_cfg.stick_on_s      = clampf((float)v, 0.1f, 30.0f);
+        else if (_stricmp(key, "stickoff")      == 0) g_cfg.stick_off_s     = clampf((float)v, 0.03f, 30.0f);
 }
 
 bool parse_config_file(const char* path) {
