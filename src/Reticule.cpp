@@ -824,18 +824,42 @@ void apply_widget_tint(API::UObject* comp, bool force) {
     const float rgb   = gain * g_cfg.aim_widget_tint;
     const float alpha = g_cfg.aim_widget_alpha;
 
-    static float applied_rgb = -1.0f, applied_alpha = -1.0f;
-    if (!force && rgb == applied_rgb && alpha == applied_alpha) return;
-    applied_rgb = rgb; applied_alpha = alpha;
+    // VERIFY AGAINST THE COMPONENT, never against a cache of what we last wrote.
+    //
+    // The component rebuilds its material and render target behind our back -- SetDrawSize and the
+    // component's own internal material update both do it -- and the tint reverts to its default of
+    // 1.0 when that happens. A "did the config value change?" cache cannot see that: it still
+    // believes the gain is applied, so the crosshair silently drops to unity gain and goes dark
+    // until something else forces a rewrite. That presents as the tint working, then intermittently
+    // not, with no config change involved.
+    //
+    // So read the live value back and re-assert on mismatch. This is what makes the gain durable
+    // rather than a one-shot that happens to survive. (elliotttate's plugin does the same, for the
+    // same reason.)
+    auto* live = comp->get_property_data<float>(L"TintColorAndOpacity");
+    const bool matches = live != nullptr &&
+                         std::fabs(live[0] - rgb)   < 0.001f &&
+                         std::fabs(live[1] - rgb)   < 0.001f &&
+                         std::fabs(live[2] - rgb)   < 0.001f &&
+                         std::fabs(live[3] - alpha) < 0.001f;
+    if (!force && matches) return;
+
+    // Log only on a real change, so a per-tick re-assert cannot flood the log.
+    const bool reverted = !force && live != nullptr && !matches;
 
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
     auto* c = reinterpret_cast<float*>(p);
     c[0] = rgb; c[1] = rgb; c[2] = rgb; c[3] = alpha;
     comp->call_function(L"SetTintColorAndOpacity", p);
 
-    API::get()->log_info("[Halo-CampE-UEVR] widget tint -> %.2f (gain %.2f x tint %.2f, alpha %.2f)%s",
-                         rgb, gain, g_cfg.aim_widget_tint, alpha,
-                         g_ret_widget_exposure_compensated ? " [exposure-compensated material]" : "");
+    static float last_logged = -1.0f;
+    if (force || rgb != last_logged || reverted) {
+        last_logged = rgb;
+        API::get()->log_info("[Halo-CampE-UEVR] widget tint -> %.2f (gain %.2f x tint %.2f, alpha %.2f)%s%s",
+                             rgb, gain, g_cfg.aim_widget_tint, alpha,
+                             g_ret_widget_exposure_compensated ? " [exposure-compensated material]" : "",
+                             reverted ? "  <-- REVERTED by the component, re-asserted" : "");
+    }
 }
 
 void reticule_widget_finish() {
@@ -929,9 +953,28 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
     }
     reticule_widget_finish();
 
-    // Live gain: only writes when the value actually changes, so aimwidgetgain can be dialled in
-    // headset without a restart and costs nothing on the steady path.
+    // Live gain, verified against the component each tick (see apply_widget_tint): the write only
+    // happens when the value has actually drifted, so the steady path is a property read.
     apply_widget_tint(comp, /*force=*/false);
+
+    // KEEP THE RENDER TARGET LIVE.
+    //
+    // We detach the authored reticle from the HUD's widget tree, which also takes it off the path
+    // that normally marks it dirty. A UWidgetComponent only re-renders its target when something
+    // requests a redraw, so the quad can end up showing a FROZEN frame: the crosshair still looks
+    // plausible (it is a static shape most of the time) while anything transient -- the hit marker,
+    // the fire/heat animation -- appears once and then never updates again.
+    //
+    // Requesting a redraw on a cadence rather than every tick: enough to animate, while keeping the
+    // engine call off the hot path (a per-tick UFunction call is the pattern that has cost us
+    // framerate before). ~5 Hz at the 32 Hz tick.
+    {
+        static uint32_t redraw_tick = 0;
+        if ((redraw_tick++ % 6) == 0) {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            comp->call_function(L"RequestRedraw", p);
+        }
+    }
 
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
       auto* d = reinterpret_cast<double*>(p);
