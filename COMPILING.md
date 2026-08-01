@@ -87,6 +87,29 @@ If you split one, the pattern is:
    declaration in one translation unit becomes an ambiguous overload once the header also declares
    it. The compiler catches this, but the message points at the *call site*, not the declaration.
 
+## Development builds (`HALO_VR_DEV`)
+
+The plugin carries diagnostic tooling — material hunts, reflection dumps, render-target pixel
+probes — used to investigate how the game renders. Each walks the entire UObject array (~296,000
+objects on this title), so **none of it is compiled into a normal build**: it sits behind a
+compile-time switch, in the spirit of Unreal's `WITH_EDITOR`.
+
+```cpp
+#include "DevTools.hpp"
+#if HALO_VR_DEV
+    ... diagnostic-only code ...
+#endif
+```
+
+`HALO_VR_DEV` defaults to **0**, so `scriptsuild.ps1` and CI produce a clean player build with
+nothing to remember or strip. To compile the diagnostics in, define it:
+
+The repo's own dev loop does this for you; contributors who want the diagnostics can add the
+define to the compiler arguments in `scriptsuild.ps1`.
+
+If a diagnostic key in `halo_vr.cfg` seems to do nothing, that is expected on a normal build — the
+code is not there. Rebuild with the switch defined.
+
 ## Notes for contributors
 
 - The game must be closed while deploying — the DLL is locked while injected.

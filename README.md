@@ -161,11 +161,12 @@ important knobs:
 | `ffgain` | 1.0 | Velocity feedforward strength; raise if fast sweeps lag, lower if they overshoot |
 | `dgain` | 0.15 | Damping against overshoot/rubber-banding |
 | `dead` | 0.5 | Aim deadband in degrees |
-| `aimmeshcr/cg/cb` | blue | Reticule ring colour (RGB 0–1) |
+| `aimmesh` | 0 | Optional geometric ring at the aim point (off; the game's own crosshair now shows in colour) |
+| `aimmeshcr/cg/cb` | blue | Ring colour, if `aimmesh=1` (RGB 0–1) |
 | `aimmeshscale` | 0.14 | Ring size |
 | `aimreticuledist` | 500 | Ring distance from you, in cm |
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
-| `aimwidgetgain` | 4.0 | Brightness of the hosted crosshair; raise if it reads dark outdoors |
+| `aimwidgetgain` | 256 | Brightness of the hosted crosshair. Unlit UI is scaled down by the scene's exposure, so it needs a large multiplier; lower it if the crosshair blooms |
 | `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step |
 | `stickmode` | 1 | Switch to gamepad controls in vehicles, turrets and cutscenes (see [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets)) |
