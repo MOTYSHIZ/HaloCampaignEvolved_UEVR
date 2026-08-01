@@ -269,6 +269,85 @@ std::atomic<bool>  g_snap_latched{false};
 std::atomic<float> g_last_dt{0.033f};   // engine tick delta, for smooth turn
 
 
+// ---------------------------------------------------------------- PERIODIC-WORK TIMING
+// update() gates several expensive operations behind tick counters, and a periodic microstutter
+// was reported with three of them at similar periods. Nothing here had ever been frame-timed, so
+// the suspects could only be ranked by reading the code -- which is how you fix the wrong one.
+//
+// Each site is timed ONLY on the ticks it actually does its work (the timer sits inside the gate,
+// not around it), so `n` is a real count of runs and `mean` is the true cost of a run rather than
+// an average over the ticks that early-returned.
+//
+// Stats are RESET every report window. A latching max would show the worst hitch since injection
+// forever, which cannot show whether a fix worked.
+enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_COUNT };
+const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   " };
+
+struct PerfStat {
+    double   max_ms = 0.0;
+    double   sum_ms = 0.0;
+    uint32_t n      = 0;
+};
+PerfStat g_perf[PERF_COUNT];
+
+// QPC ticks -> milliseconds. The frequency is fixed for the life of the process, so it is read once.
+double perf_tick_ms() {
+    static const double f = [] {
+        LARGE_INTEGER q{};
+        return QueryPerformanceFrequency(&q) && q.QuadPart != 0 ? 1000.0 / (double)q.QuadPart : 0.0;
+    }();
+    return f;
+}
+
+// Times from construction to end of scope and folds the result into one site's stat.
+// Captures the enable flag at construction so a live config edit mid-scope cannot unbalance it.
+struct PerfScope {
+    PerfSite      site;
+    LARGE_INTEGER t0{};
+    bool          on;
+
+    explicit PerfScope(PerfSite s) : site(s), on(g_cfg.perf_log) {
+        if (on) QueryPerformanceCounter(&t0);
+    }
+    ~PerfScope() {
+        if (!on) return;
+        LARGE_INTEGER t1{};
+        QueryPerformanceCounter(&t1);
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * perf_tick_ms();
+        PerfStat& p = g_perf[site];
+        if (ms > p.max_ms) p.max_ms = ms;
+        p.sum_ms += ms;
+        ++p.n;
+    }
+    PerfScope(const PerfScope&) = delete;
+    PerfScope& operator=(const PerfScope&) = delete;
+};
+
+// Dump and reset. Also prints the MEASURED tick rate: every period in this plugin is expressed in
+// ticks, and the conversion to seconds was assumed (~30 Hz) and never verified -- if it is wrong,
+// every documented interval is wrong with it.
+void perf_report(uint32_t tick) {
+    if (!g_cfg.perf_log) return;
+    static uint32_t last = 0;
+    if (tick - last < 600) return;
+    last = tick;
+
+    const float dt = g_last_dt.load();
+    API::get()->log_info("[Halo-CampE-UEVR] PERF window=600 ticks dt=%.1fms (%.1f Hz tick)",
+                         dt * 1000.0f, dt > 0.0f ? 1.0f / dt : 0.0f);
+    for (int i = 0; i < PERF_COUNT; ++i) {
+        PerfStat& p = g_perf[i];
+        if (p.n == 0) {
+            API::get()->log_info("[Halo-CampE-UEVR]   %s  (did not run)", kPerfName[i]);
+        } else {
+            API::get()->log_info("[Halo-CampE-UEVR]   %s  n=%u  max=%.3fms  mean=%.3fms  total=%.2fms",
+                                 kPerfName[i], p.n, p.max_ms, p.sum_ms / (double)p.n, p.sum_ms);
+        }
+        p = PerfStat{};
+    }
+}
+
+
 // Adaptive gain and shape() are in MotionAimControl.cpp -- they are part of the control law.
 
 // ---------------------------------------------------------------- POSE-MATCH CALIBRATION
@@ -814,6 +893,12 @@ void material_hunt(uint32_t tick) {
 // answer to that question -- widgets are added to the viewport when shown and removed when closed.
 TrackedObject g_menu_candidates[8];
 int  g_menu_candidate_count = 0;
+
+// Whether menu_poll's PRIMARY path (the UI-manager subsystem) is answering. When it is, the
+// candidate list below is dead weight -- menu_poll returns before ever reading it -- and the
+// object-array sweep that fills it has one less reason to run. Starts true so that the very first
+// scan is not skipped before menu_poll has had a chance to decide.
+std::atomic<bool> g_ui_manager_ok{true};
 std::atomic<bool> g_menu_widget_open{false};
 
 // ---- THE AUTHORITATIVE MENU SIGNAL
@@ -891,6 +976,28 @@ void reticle_rescan(uint32_t tick) {
     // is exactly when a scan must back off, not when it should run hardest.
     if (tick - g_reticle_scan_tick < 120) return;
     g_reticle_scan_tick = tick;
+
+    // DOES ANYONE ACTUALLY READ THIS? Measured at 100-125 ms per sweep on the game thread -- ten
+    // frames at 90 Hz -- and it ran five times per 20 s forever. That is the periodic microstutter.
+    //
+    // The throttle above bounds how OFTEN it runs; it never asked whether it should run at all.
+    // Everything the sweep produces has exactly two consumers, and in the shipping profile both go
+    // quiet seconds after a level loads:
+    //   g_reticles         -> hud_reticle_follow (returns immediately when hudfollow=0, the default)
+    //                      -> the widget reticule's ONE-SHOT pick, done once the component binds
+    //   g_menu_candidates  -> menu_poll's FALLBACK only, dead while the UI-manager subsystem answers
+    // So after the widget bound, this was rebuilding two arrays that nothing would ever look at.
+    //
+    // Each condition is re-tested every 120 ticks rather than latched, so turning hudfollow on in
+    // the config, or losing the widget binding, brings the scan straight back. That is why this is
+    // a demand check and not a "scanned once, done" flag.
+    const bool needed = g_cfg.menu_dump                              // discovery: the sweep IS the product
+                     || g_cfg.hud_follow                             // moves/hides the flat reticle
+                     || reticle_widget_needs_pick()                  // still choosing a widget to host
+                     || (g_cfg.menu_detect && !g_ui_manager_ok.load());   // candidates are the fallback
+    if (!needed) return;
+
+    PerfScope _perf(PERF_RETICLE);   // inside the gate: times the sweep, not the 119 early-outs
     g_reticle_count = 0;
 
     auto* arr = API::get()->get_uobject_array();
@@ -980,6 +1087,7 @@ void menu_poll(uint32_t tick) {
 
     // PRIMARY: ask the game. Cheap enough to poll and correct by construction.
     if (auto* uim = find_ui_manager()) {
+        g_ui_manager_ok = true;
         const bool ui_active = call_ret_bool(uim, L"IsUIActiveState");
         const bool prev = g_menu_widget_open.exchange(ui_active);
         if (prev != ui_active) {
@@ -987,6 +1095,8 @@ void menu_poll(uint32_t tick) {
         }
         return;
     }
+
+    g_ui_manager_ok = false;
 
     // FALLBACK ONLY. Kept because the subsystem lookup could fail on a future build, but it cannot
     // see the pause menu (nested widgets never report IsInViewport) -- so this is a degraded mode,
@@ -1186,8 +1296,13 @@ void update() {
     // also be turned back ON from the file without a restart.
     if (tick - g_cfg_check_tick >= 64) {
         g_cfg_check_tick = tick;
+        PerfScope _perf(PERF_CFG);
         load_config();
     }
+
+    // Above every early-out below, so the numbers still arrive when the driver is disabled or
+    // parked in a menu -- "it stutters at the frontend too" is a diagnosis, not a gap.
+    perf_report(tick);
 
     // ---- Calibrate button/key, edge-detected on the GAME THREAD.
     // Both sources are polled here rather than in the XInput hook, because a keyboard key is not
@@ -1712,7 +1827,8 @@ void update() {
         // until null" can pin the driver to residue with no symptom other than nothing moving.
         if ((tick - g_rig_resolve_tick.load()) >= 60) {
             g_rig_resolve_tick = tick;
-            auto* found = resolve_rig();
+            API::UObject* found = nullptr;
+            { PerfScope _perf(PERF_RIG); found = resolve_rig(); }
             auto* prev  = reinterpret_cast<API::UObject*>(g_rig_component.load());
             if (found != nullptr && found != prev) {
                 g_rig_component = found;

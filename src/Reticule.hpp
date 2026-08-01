@@ -51,4 +51,12 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin);
 // The widget class the config asks us to host.
 std::wstring wanted_widget_class();
 
+// True while the widget reticule still has to CHOOSE a widget out of g_reticles -- i.e. while the
+// object-array scan that fills g_reticles still has a consumer.
+//
+// Exposed so reticle_rescan() can stop sweeping once nothing reads its output. Picking is one-shot:
+// after the component binds (or latches failed) this goes false and stays false, unless the binding
+// is dropped, in which case it goes true again and the scan resumes on its own.
+bool reticle_widget_needs_pick();
+
 } // namespace halo

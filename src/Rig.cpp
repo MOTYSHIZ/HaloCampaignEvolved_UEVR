@@ -81,7 +81,44 @@ API::UObject* follow_object(API::UObject* obj, const wchar_t* prop) {
 
 // Find the live FP rig by walking BACK from a first-person weapon actor:
 //     weapon actor -> RootComponent -> AttachParent == BPC_FP_SkeletalMesh_C
+// The weapon actor the rig was last reached through. Caching the WEAPON (not the rig) is what
+// makes skipping the sweep safe: the rig is still re-derived by walking attachment from a live
+// weapon actor on every call, so the "never adopt by class match" invariant above is untouched.
+// A TrackedObject, not a raw pointer, so a recycled array slot is detected rather than followed.
+static TrackedObject g_fp_weapon;
+
+// weapon actor -> RootComponent -> AttachParent, accepted only if the parent really is the rig.
+// nullptr means "this weapon actor no longer leads to a rig" -- the caller's cue to sweep.
+static API::UObject* rig_through_weapon(API::UObject* wpn) {
+    auto* root = follow_object(wpn, L"RootComponent");
+    auto* par  = follow_object(root, L"AttachParent");
+    if (par == nullptr) return nullptr;
+    if (class_name_of(par).find(L"BPC_FP_SkeletalMesh_C") == std::wstring::npos) return nullptr;
+    return par;
+}
+
 API::UObject* resolve_rig() {
+    // ---- FAST PATH. The sweep below is a full object-array walk with a class-name string built
+    // per object, and it ran unconditionally every ~2 s even with a perfectly good rig already
+    // resolved -- one of the periodic-microstutter suspects. Re-deriving through the cached weapon
+    // actor is O(1) and reaches the SAME rig by the SAME attachment walk.
+    //
+    // Safe against a weapon swap, which creates a new actor: if the old one is gone, recycled, or
+    // no longer attached to the rig, every check below fails and we fall through to the sweep.
+    // Safe against a stale-but-attached one too -- the rig is the PAWN's component and does not
+    // change when the gun does, so the derived answer is still correct. Pawn changes (level load,
+    // respawn) clear g_rig_component and re-resolve from scratch on the next tick.
+    if (g_cfg.rig_fast) {
+        if (auto* w = g_fp_weapon.get()) {
+            const std::wstring cn = class_name_of(w);
+            if (cn.find(L"_FP_")       != std::wstring::npos &&
+                cn.find(L"WeaponActor") != std::wstring::npos) {
+                if (auto* rig = rig_through_weapon(w)) return rig;
+            }
+        }
+        g_fp_weapon.reset();   // handle is no good; the sweep re-establishes it
+    }
+
     auto* arr = API::get()->get_uobject_array();
     if (arr == nullptr) return nullptr;
 
@@ -98,11 +135,9 @@ API::UObject* resolve_rig() {
         auto* cls = obj->get_class();
         if (cls != nullptr && obj == cls->get_class_default_object()) continue;
 
-        auto* root = follow_object(obj, L"RootComponent");
-        auto* par  = follow_object(root, L"AttachParent");
-        if (par == nullptr) continue;
-
-        if (class_name_of(par).find(L"BPC_FP_SkeletalMesh_C") != std::wstring::npos) {
+        if (auto* par = rig_through_weapon(obj)) {
+            // Remember the ROUTE, with its array slot, so the next call can skip this sweep.
+            g_fp_weapon.set_at(obj, i);
             return par;
         }
     }

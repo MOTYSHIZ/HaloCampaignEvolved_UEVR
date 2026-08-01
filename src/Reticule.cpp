@@ -477,6 +477,12 @@ void reticule_mesh_ensure(API::UObject* rig) {
 TrackedObject g_ret_widget_comp;
 bool g_ret_widget_failed = false;
 
+// Mirrors the early-out in reticule_widget_ensure() below EXACTLY -- if that gate changes, change
+// this with it, or the scan feeding it will stop while it is still waiting for a widget.
+bool reticle_widget_needs_pick() {
+    return g_cfg.aim_widget && g_ret_widget_comp.empty() && !g_ret_widget_failed;
+}
+
 // Which widget class the reticule hosts. Normally the first-person reticle; aimwidgetclass
 // overrides it for the colour diagnostic. This has to be consulted by BOTH the object-array scan
 // that collects candidates and the picker that chooses among them -- if only the picker consults

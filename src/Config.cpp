@@ -213,6 +213,8 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "mapfrom")       == 0) g_cfg.map_from        = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "mapbtnlog")   == 0) g_cfg.map_btn_log    = (v != 0.0);
         else if (_stricmp(key, "mapto")         == 0) g_cfg.map_to          = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "perflog")       == 0) g_cfg.perf_log        = (v != 0.0);
+        else if (_stricmp(key, "rigfast")       == 0) g_cfg.rig_fast        = (v != 0.0);
 }
 
 bool parse_config_file(const char* path) {

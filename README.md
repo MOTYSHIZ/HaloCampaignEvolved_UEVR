@@ -282,7 +282,10 @@ days of its release, and for the plugin SDK this mod is written against. Hail to
   art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach.
 - **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
   configuration descends from, and for bundling elliotttate's cutscene plugin with it, which is how
-  this project found it.
+  this project found it. Also for reporting the periodic microstutter fixed in this release, and —
+  more usefully than the report itself — for pinning it to *this* profile rather than his own. That
+  one observation is what turned an open-ended performance hunt into a search of our own plugin,
+  where the cause turned out to be two full object-array sweeps burning ~5% of game-thread time.
 
 ### Referenced mod credit
 

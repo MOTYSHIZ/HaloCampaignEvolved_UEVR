@@ -628,6 +628,33 @@ struct Config {
     // Log every XInput button-mask change, so the Quest->XInput mapping can be READ rather than
     // assumed. Off by default; it is noisy.
     bool  map_btn_log     = false;
+
+    // ---- FRAME-TIME INSTRUMENTATION --------------------------------------------------------
+    // Time the PERIODIC work in update() and report max/mean per site every ~600 ticks.
+    //
+    // Exists because the periodic microstutter report had three plausible suspects at similar
+    // periods and no way to tell them apart: nothing in this plugin had ever been frame-timed.
+    // Guessing between them costs a rebuild per guess and can "fix" the wrong one by coincidence.
+    //
+    // Ships OFF. Cost when on is one QueryPerformanceCounter pair per instrumented site per
+    // period (not per frame), which is noise -- but the log lines are not, and a user who is not
+    // debugging should not pay for them. Turn on to diagnose a stutter report from someone whose
+    // machine reproduces it and ours does not.
+    bool  perf_log        = false;
+
+    // ---- RIG RESOLUTION FAST PATH ----------------------------------------------------------
+    // 1 = re-derive the rig through a CACHED first-person weapon actor, falling back to the full
+    //     object-array sweep whenever that handle fails to produce a rig.
+    // 0 = full sweep every time (the original behaviour, kept for A/B).
+    //
+    // The invariant from Rig.cpp is preserved either way: the rig is still reached THROUGH a live
+    // weapon actor, never adopted by class match, so binding to pooled residue stays structurally
+    // impossible. Only the SEARCH for the weapon actor is skipped, and only while the cached
+    // handle still resolves.
+    //
+    // Live-switchable on purpose -- it is the A/B for the stutter, and flipping it in the file
+    // beats a rebuild.
+    bool  rig_fast        = true;
 };
 
 extern Config g_cfg;
