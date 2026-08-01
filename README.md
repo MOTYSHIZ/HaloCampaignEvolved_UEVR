@@ -44,7 +44,7 @@ appropriately.
 
 ## UEVR version
 
-**Latest tested: [nightly-01138](https://github.com/praydog/UEVR-nightly/releases/tag/nightly-01138-158232aa0703f39014931a8a2320e0633c3c47d4).**
+**Latest tested: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138).**
 
 This is the build the mod is developed and tested against, and the one to use if you want a known-good
 setup.
@@ -165,6 +165,7 @@ important knobs:
 | `aimmeshscale` | 0.14 | Ring size |
 | `aimreticuledist` | 500 | Ring distance from you, in cm |
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
+| `aimwidgetgain` | 4.0 | Brightness of the hosted crosshair; raise if it reads dark outdoors |
 | `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step |
 | `stickmode` | 1 | Switch to gamepad controls in vehicles, turrets and cutscenes (see [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets)) |

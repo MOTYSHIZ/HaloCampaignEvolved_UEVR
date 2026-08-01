@@ -478,6 +478,11 @@ void reticule_mesh_ensure(API::UObject* rig) {
 TrackedObject g_ret_widget_comp;
 bool g_ret_widget_failed = false;
 
+// True when the widget quad ended up on a material that cancels pre-exposure (the VREditor
+// EyeAdaptationInverse pass). That material preserves the authored colours at unit tint; the stock
+// pass needs an emissive gain instead. Set when the material is chosen, consumed by the tint.
+bool g_ret_widget_exposure_compensated = false;
+
 // Mirrors the early-out in reticule_widget_ensure() below EXACTLY -- if that gate changes, change
 // this with it, or the scan feeding it will stop while it is still waiting for a widget.
 bool reticle_widget_needs_pick() {
@@ -621,10 +626,12 @@ void reticule_widget_ensure(API::UObject* rig) {
         *reinterpret_cast<int32_t*>(p) = 0;
         *reinterpret_cast<void**>(p + 8) = mic;
         comp->call_function(L"SetMaterial", p);
+        g_ret_widget_exposure_compensated =
+            mic->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos;
         API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %s",
-                             mic->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos
-                                 ? "VREditor exposure-compensated (LogicMod)"
-                                 : "stock Widget3DPassThrough (pre-exposure applies)");
+                             g_ret_widget_exposure_compensated
+                                 ? "VREditor exposure-compensated (LogicMod) -- tint gain 1.0"
+                                 : "stock Widget3DPassThrough -- compensating with aimwidgetgain");
     }
 
     // Space FIRST: setting the widget before the space can build the render target for the wrong
@@ -794,6 +801,43 @@ void reticule_widget_ensure(API::UObject* rig) {
 // render target. Retried every tick until it succeeds, then latched.
 bool g_ret_widget_finished = false;
 
+// EMISSIVE GAIN -- why the hosted crosshair needs one.
+//
+// `TintColorAndOpacity` is a straight multiplier on the widget's colour. The stock Widget3D pass is
+// unlit but its output is still multiplied by the scene's PRE-EXPOSURE before the filmic tonemapper,
+// so in a bright scene Halo's authored cyan lands near black. Multiplying the tint back up cancels
+// that. The render target itself always held the correct colours (measured: R83 G197 B216) -- only
+// the display path was crushing them.
+//
+// On the exposure-compensated material the gain must be 1.0 or the colours blow out instead.
+//
+// Re-applied whenever the value changes, so the gain can be dialled live in-headset: edit
+// `aimwidgetgain` and the next tick picks it up. The component can also rebuild its material
+// (SetDrawSize replaces the MID), which would silently drop the tint -- `force` re-asserts it.
+//
+// CREDIT: the pre-exposure diagnosis and the fallback-gain approach are elliotttate's.
+void apply_widget_tint(API::UObject* comp, bool force) {
+    if (comp == nullptr) return;
+
+    const float gain = g_ret_widget_exposure_compensated ? 1.0f
+                                                         : g_cfg.aim_widget_gain;
+    const float rgb   = gain * g_cfg.aim_widget_tint;
+    const float alpha = g_cfg.aim_widget_alpha;
+
+    static float applied_rgb = -1.0f, applied_alpha = -1.0f;
+    if (!force && rgb == applied_rgb && alpha == applied_alpha) return;
+    applied_rgb = rgb; applied_alpha = alpha;
+
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    auto* c = reinterpret_cast<float*>(p);
+    c[0] = rgb; c[1] = rgb; c[2] = rgb; c[3] = alpha;
+    comp->call_function(L"SetTintColorAndOpacity", p);
+
+    API::get()->log_info("[Halo-CampE-UEVR] widget tint -> %.2f (gain %.2f x tint %.2f, alpha %.2f)%s",
+                         rgb, gain, g_cfg.aim_widget_tint, alpha,
+                         g_ret_widget_exposure_compensated ? " [exposure-compensated material]" : "");
+}
+
 void reticule_widget_finish() {
     if (g_ret_widget_finished) return;
     auto* comp = g_ret_widget_comp.get_checked(L"WidgetComponent");
@@ -856,11 +900,7 @@ void reticule_widget_finish() {
 
     // Tint is applied here rather than at creation for the same reason as everything else in this
     // function: the component is only fully built after it has ticked once.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      auto* c = reinterpret_cast<float*>(p);
-      c[0] = g_cfg.aim_widget_tint; c[1] = g_cfg.aim_widget_tint;
-      c[2] = g_cfg.aim_widget_tint; c[3] = g_cfg.aim_widget_alpha;
-      comp->call_function(L"SetTintColorAndOpacity", p); }
+    apply_widget_tint(comp, /*force=*/true);
 
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; comp->call_function(L"RequestRedraw", p); }
 
@@ -888,6 +928,10 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
         return;
     }
     reticule_widget_finish();
+
+    // Live gain: only writes when the value actually changes, so aimwidgetgain can be dialled in
+    // headset without a restart and costs nothing on the steady path.
+    apply_widget_tint(comp, /*force=*/false);
 
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
       auto* d = reinterpret_cast<double*>(p);

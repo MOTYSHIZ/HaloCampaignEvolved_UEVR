@@ -552,6 +552,13 @@ struct Config {
     // it back without touching the widget itself.
     float aim_widget_tint  = 1.0f;   // applied to R,G,B
     float aim_widget_alpha = 1.0f;
+    // EMISSIVE GAIN for the hosted crosshair. The stock Widget3D pass is unlit but its output is
+    // still multiplied by the scene's PRE-EXPOSURE before tonemapping, so Halo's authored cyan
+    // lands near black in bright scenes -- the long-standing "dark crosshair". This multiplies it
+    // back up. Live-tunable: raise if the crosshair still reads dark outdoors, lower if it blows
+    // out or looks washed. Forced to 1.0 automatically when the exposure-compensated VREditor
+    // material is in use (that one preserves authored colour at unit tint).
+    float aim_widget_gain  = 4.0f;
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
     float rig_clamp    = 0.0f;

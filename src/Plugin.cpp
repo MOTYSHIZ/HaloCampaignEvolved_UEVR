@@ -89,6 +89,7 @@
 
 // Live config + calibration persistence. Defines g_cfg, which nearly everything below reads.
 #include "Config.hpp"
+#include "DevTools.hpp"
 
 // UE object/name helpers: TrackedObject (recycle-safe handles), FName resolution, class names.
 #include "UeObject.hpp"
@@ -585,6 +586,7 @@ void dump_hud_visibility_once(uint32_t tick) {
 // attempt so far has been hostage to whether the chosen material family renders at all.
 // ReadRenderTargetPixel(WorldContextObject, TextureRenderTarget2D*, int32 X, int32 Y) -> FColor.
 void probe_render_target_pixels(API::UObject* rt) {
+#if HALO_VR_DEV
     auto* pc = API::get()->get_player_controller(0);
     if (rt == nullptr || pc == nullptr) return;
 
@@ -613,6 +615,9 @@ void probe_render_target_pixels(API::UObject* rt) {
         }
     }
     if (logged == 0) API::get()->log_info("[Halo-CampE-UEVR] RTPIXEL scan: no pixels with alpha > 8");
+#else
+    // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
 }
 
 // Asset loading helpers (load_asset_by_path, find_or_load_material, import_texture_file,
@@ -629,6 +634,7 @@ int     g_tex_hunt_hits = 0;
 
 
 void texture_param_hunt(uint32_t tick) {
+#if HALO_VR_DEV
     if (!g_cfg.tex_hunt || g_tex_hunt_done) return;
     static uint32_t last = 0;
     if (tick - last < 2) return;
@@ -699,6 +705,9 @@ void texture_param_hunt(uint32_t tick) {
         g_tex_hunt_done = true;
         API::get()->log_info("[Halo-CampE-UEVR] TEXHUNT complete: %d MIC(s) with texture overrides", g_tex_hunt_hits);
     }
+#else
+    // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
 }
 
 // Log every parameter override on a material instance: names via FName::to_string, plus values.
@@ -713,6 +722,7 @@ void texture_param_hunt(uint32_t tick) {
 // followed and dumped too (their MIC/MID layers carry the overridden names, which are the usable
 // ones for SetXParameterValue).
 void dump_material_params(API::UObject* mat, const char* label, int depth = 0) {
+#if HALO_VR_DEV
     if (mat == nullptr || depth > 3) return;
 
     constexpr size_t OFF_SCALAR = 392, OFF_VECTOR = 408, OFF_TEXTURE = 440, OFF_PARENT = 272;
@@ -768,10 +778,14 @@ void dump_material_params(API::UObject* mat, const char* label, int depth = 0) {
     } else {
         API::get()->log_info("[Halo-CampE-UEVR]   (base UMaterial: parameters live in its expression graph, not walkable here)");
     }
+#else
+    // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
 }
 
 // One-shot driver for the matdump config key.
 void run_mat_dump() {
+#if HALO_VR_DEV
     static std::string done;
     if (g_cfg.mat_dump[0] == 0 || done == g_cfg.mat_dump) return;
     done = g_cfg.mat_dump;
@@ -797,6 +811,9 @@ void run_mat_dump() {
         }
         dump_material_params(m, path.c_str());
     }
+#else
+    // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
 }
 
 // ---------------------------------------------------------------- MATERIAL HUNT
@@ -816,6 +833,7 @@ int32_t g_mat_hunt_last_n = 0;    // array size at completion, to detect later s
 int     g_mat_hunt_passes = 0;
 
 void material_hunt(uint32_t tick) {
+#if HALO_VR_DEV
     if (!g_cfg.mat_hunt || g_mat_hunt_done) return;
 
     static uint32_t last = 0;
@@ -894,6 +912,9 @@ void material_hunt(uint32_t tick) {
             g_mat_hunt_hits = 0;
         }
     }
+#else
+    // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
 }
 
 
