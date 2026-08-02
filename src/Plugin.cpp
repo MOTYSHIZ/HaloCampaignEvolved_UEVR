@@ -1413,12 +1413,27 @@ void update() {
         run_mat_dump();
         texture_param_hunt(tick);
 
-        const bool now_menu = frontend || no_rig || g_menu_widget_open.load();
+        // NOT `no_rig`. It was here as a cheap stand-in for "a load or transition, so nothing the
+        // player presses matters" -- but it also means "no first-person weapon", which is exactly
+        // a VEHICLE SEAT, and that made every menu binding fire during a ride.
+        //
+        // It only bites when the rig pointer is genuinely null while seated. BOARDING from on foot
+        // leaves it stale-non-null (nothing clears it short of a PlayerController change), which is
+        // why this survived testing; LOADING A CHECKPOINT THAT SPAWNS YOU IN A VEHICLE does not --
+        // the PC change clears the pointer, and with no first-person weapon to walk back from it
+        // never re-resolves. The whole ride then ran with UI bindings: right-controller B rewritten
+        // to "back" and every gameplay remap stood down. Field-reported 2026-08-02; the player had
+        // to reach for a keyboard to get out of the vehicle.
+        //
+        // The two remaining terms are the real signals and cover what no_rig was standing in for:
+        // `frontend` is the PlayerController class, and `g_menu_widget_open` is the game's own
+        // UI-manager state (verified: pause menu closed -> false, open -> true).
+        const bool now_menu = frontend || g_menu_widget_open.load();
         const bool was_menu = g_in_menu.exchange(now_menu);
         if (was_menu != now_menu) {
-            API::get()->log_info("[Halo-CampE-UEVR] IN_MENU %d -> %d (frontend=%d norig=%d widget=%d) pc=%s",
-                                 (int)was_menu, (int)now_menu, (int)frontend, (int)no_rig,
-                                 (int)g_menu_widget_open.load(), narrow(pcn).c_str());
+            API::get()->log_info("[Halo-CampE-UEVR] IN_MENU %d -> %d (frontend=%d widget=%d norig=%d) pc=%s",
+                                 (int)was_menu, (int)now_menu, (int)frontend,
+                                 (int)g_menu_widget_open.load(), (int)no_rig, narrow(pcn).c_str());
         }
 
         // ---- STICK MODE detector (doctrine in Config.hpp). Evaluated here, above the early-out
@@ -3115,16 +3130,21 @@ public:
                     state->Gamepad.wButtons &= (WORD)~g_cfg.map_menu_back;
                     state->Gamepad.wButtons |= XINPUT_GAMEPAD_B;
                 }
-            } else {
+            } else if (!g_stick_mode.load()) {
+                // Every remap below is an ON-FOOT convenience, so none of them run while seated:
+                // the promise stick mode makes (and the README documents) is that the pad behaves
+                // exactly as the game's own layout in a vehicle. That matters beyond tidiness --
+                // this rebind consumes a button whose native action while seated may be the one
+                // that gets you OUT of the vehicle.
                 if (g_cfg.map_from != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.map_from) != 0) {
                     state->Gamepad.wButtons &= (WORD)~g_cfg.map_from;
                     if (g_cfg.map_to != 0) state->Gamepad.wButtons |= (WORD)g_cfg.map_to;
                 }
 
                 // Injected AFTER the rebind, so this mask reaches the game untouched.
-                // Not in stick mode: looking down with the right stick must not press crouch.
-                if (g_cfg.map_rstick_down != 0 && ry < -g_cfg.map_rstick_dz
-                    && !g_stick_mode.load()) {
+                // (Stick mode is already excluded by the branch condition above -- in a vehicle
+                // the right stick is the camera, and looking down must not press crouch.)
+                if (g_cfg.map_rstick_down != 0 && ry < -g_cfg.map_rstick_dz) {
                     state->Gamepad.wButtons |= (WORD)g_cfg.map_rstick_down;
                 }
             }
