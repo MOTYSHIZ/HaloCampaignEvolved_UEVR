@@ -1477,6 +1477,40 @@ void update() {
                                           : "motion aim re-anchoring");
             }
         }
+
+        // ---- VEHICLE HARD BRAKE: either grip -> the brake key, while stick mode is engaged.
+        // Sits ABOVE the early-out gates on purpose: every path that stops this function must
+        // release the key first, or a pose/HMD loss mid-brake would leave Ctrl logically stuck.
+        // (A hard crash mid-brake can still strand the OS key state -- one real Ctrl press clears
+        // it -- but no code path here can.)
+        {
+            static bool brake_down = false;
+            bool want_brake = false;
+            // tick > 120: same guard as the VR-state logger -- VR API calls during injection,
+            // before the runtime is up, can crash the game.
+            if (g_cfg.brake_enabled && tick > 120 && g_stick_mode.load() && !g_in_menu.load()) {
+                static UEVR_ActionHandle grip_action = nullptr;
+                if (grip_action == nullptr) {
+                    grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
+                }
+                if (grip_action != nullptr) {
+                    want_brake = API::VR::is_action_active_any_joystick(grip_action);
+                }
+            }
+            if (want_brake != brake_down) {
+                brake_down = want_brake;
+                // SCANCODE event, not a bare virtual key: device-layer keyboard readers (raw
+                // input / GameInput) key off scancodes, and a VK-only SendInput arrives with
+                // MakeCode 0 and is dropped by exactly the path a game reads.
+                INPUT in{};
+                in.type = INPUT_KEYBOARD;
+                in.ki.wScan   = (WORD)MapVirtualKeyW((UINT)g_cfg.brake_key, MAPVK_VK_TO_VSC);
+                in.ki.dwFlags = KEYEVENTF_SCANCODE | (want_brake ? 0 : KEYEVENTF_KEYUP);
+                SendInput(1, &in, sizeof(INPUT));
+                API::get()->log_info("[Halo-CampE-UEVR] BRAKE %s (grip, vk=0x%02X scan=0x%02X)",
+                                     want_brake ? "DOWN" : "UP", g_cfg.brake_key, (unsigned)in.ki.wScan);
+            }
+        }
     }
 
     // ---- WHY THE DRIVER STOPPED. Logged on every CHANGE of state, never per frame.
