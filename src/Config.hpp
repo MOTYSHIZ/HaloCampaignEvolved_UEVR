@@ -142,6 +142,16 @@ struct Config {
     float stick_on_s   = 3.0f;
     float stick_off_s  = 0.25f;
 
+    // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged to hold
+    // the game's hard-brake key. Distinct from the quick-turn handbrake, which is the game's own
+    // left-trigger hold. Grips are read from UEVR's ACTION state -- they do not exist in the
+    // XInput mapping at all (only face buttons/sticks/triggers do), so no gameplay binding
+    // changes meaning. The key is synthesized as a SCANCODE event, the form device-layer keyboard
+    // readers accept.
+    bool  brake_enabled = true;
+    // Windows virtual-key held while gripping. 0xA2 = Left Ctrl, the game's default hard brake.
+    int   brake_key     = 0xA2;
+
     // WEAPON RIG -- drives the first-person rig from the controller so the gun follows the hand.
     bool  rig_enabled  = true;
     bool  rig_loc      = true;    // drive translation as well as rotation
