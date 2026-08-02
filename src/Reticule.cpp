@@ -501,29 +501,102 @@ std::wstring wanted_widget_class() {
     return L"WBP_FirstPersonReticle";
 }
 
+// The widget we are currently hosting, and the panel we took it from.
+//
+// Tracked because BOTH can die independently of our component. The hosted widget dies whenever the
+// HUD is rebuilt, which does not require the pawn (and therefore our component) to be destroyed --
+// a checkpoint reload does exactly that. A component still bound to the dead widget renders a
+// frozen quad forever while the game's new crosshair sits back on the flat HUD.
+TrackedObject g_ret_hosted_widget;
+TrackedObject g_ret_widget_parent;
+
+// True once we have taken a widget off the HUD, so reticule_widget_release() knows there is
+// something to give back. Latches false again when it does.
+bool g_ret_widget_hosted_once = false;
+
+// Set while a re-bind is waiting on a fresh sweep, so the sweep is forced ONCE per episode rather
+// than every tick. File scope rather than a function-local static so the teardown path can clear it.
+bool g_ret_rebind_forced = false;
+
+// Drop every collected candidate and let the next tick re-sweep.
+//
+// The sweep in reticle_rescan() is throttled to 120 ticks and is a FULL object-array walk, so this
+// must be called once per event, never per tick -- forcing it every tick turns a ~4 s sweep cadence
+// into a per-frame sweep, which is the pattern that has collapsed framerate here before.
+void force_reticle_rescan() {
+    g_reticle_count = 0;
+    // Unsigned wrap is intentional and correct: rescan's gate is `tick - g_reticle_scan_tick < 120`,
+    // and subtracting the interval makes that difference >= 120 for any value of tick.
+    g_reticle_scan_tick -= 120;
+}
+
 // Prefer the CONSTRUCTED instance over the class template. The template lives under
 // <Class>.WidgetTree.FirstPersonReticle and is not what renders; the live one is under
-// /Engine/Transient. Handing the template to a WidgetComponent would host a widget nothing drives,
-// so no hit markers would ever fire.
+// /Engine/Transient. Handing the template to a WidgetComponent hosts a widget nothing drives, so no
+// hit markers would ever fire.
+//
+// THE TEMPLATE IS NEVER AN ACCEPTABLE ANSWER. This used to return it as a fallback when no transient
+// instance was found, which produced the reticule's worst failure mode. The two objects have very
+// different lifetimes: the transient instance is destroyed on every level and checkpoint load, while
+// the template belongs to the loaded HUD blueprint package and SURVIVES. So immediately after a
+// transition the stale candidate list holds a dead transient entry and a still-valid template -- and
+// the fallback bound the template every time, giving an unrecognisable reticule that nothing drives
+// while the real crosshair stayed flat on the HUD. Returning null instead simply means "not yet",
+// which the caller already handles by retrying next tick.
+//
+// The found_tick test is the other half of that fix: only candidates from the MOST RECENT sweep are
+// eligible. reticule_widget_ensure() runs every tick but the sweep runs at most every 120, so
+// without this a stale list is what gets picked from for up to ~4 seconds after every load.
 API::UObject* pick_live_reticle() {
-    API::UObject* fallback = nullptr;
     for (int i = 0; i < g_reticle_count; ++i) {
+        if (g_reticles[i].found_tick != g_reticle_scan_tick) continue;   // stale sweep -- ignore
         auto* o = g_reticles[i].obj.get();
         if (o == nullptr) continue;
         if (class_name_of(o).find(wanted_widget_class()) == std::wstring::npos) continue;
 
-        bool transient = false;
         for (API::UObject* p = o; p != nullptr; p = p->get_outer()) {
             const auto* fn = p->get_fname();
             if (fn != nullptr && fn->to_string().find(L"Transient") != std::wstring::npos) {
-                transient = true;
-                break;
+                return o;
             }
         }
-        if (transient) return o;
-        if (fallback == nullptr) fallback = o;
     }
-    return fallback;
+    return nullptr;
+}
+
+// Move a widget onto our component: take it off the HUD, clear any HUD-follow offset, hand it over.
+// Shared by the initial bind and the re-bind that follows a HUD rebuild, so the two cannot drift.
+void host_widget(API::UObject* comp, API::UObject* w) {
+    // Remember where it came from, so releasing the feature can put it back (see
+    // reticule_widget_release). Captured BEFORE RemoveFromParent, which is what clears it.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      w->call_function(L"GetParent", p);
+      g_ret_widget_parent.set(*reinterpret_cast<API::UObject**>(p)); }
+
+    // DETACH FIRST. The widget is still a child of the HUD's WidgetTree, and a widget that already
+    // has a parent will not render through a WidgetComponent -- the component hosts the right
+    // widget and nothing appears. uevrlib's equivalent has a removeFromViewport step for the same
+    // reason.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      w->call_function(L"RemoveFromParent", p); }
+
+    // RESET THE RENDER TRANSLATION. The HUD-follow path may have been driving this same widget to
+    // offsets of several hundred pixels to chase the aim across the flat HUD. Inside a draw-size
+    // render target that lands far outside the canvas, so the widget renders correctly and is
+    // simply not on its own surface. Hosting it makes that offset not merely redundant but harmful.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      auto* d = reinterpret_cast<double*>(p); d[0] = 0.0; d[1] = 0.0;
+      w->call_function(L"SetRenderTranslation", p); }
+
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      *reinterpret_cast<void**>(p) = w;
+      comp->call_function(L"SetWidget", p); }
+
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      comp->call_function(L"RequestRedraw", p); }
+
+    g_ret_hosted_widget.set(w);
+    g_ret_widget_hosted_once = true;
 }
 
 void reticule_widget_ensure(API::UObject* rig) {
@@ -656,24 +729,7 @@ void reticule_widget_ensure(API::UObject* rig) {
       auto* d = reinterpret_cast<double*>(p); d[0] = s; d[1] = s; d[2] = s;
       comp->call_function(L"SetWorldScale3D", p); }
 
-    // DETACH FIRST. The widget is still a child of the HUD's WidgetTree, and a widget that already
-    // has a parent will not render through a WidgetComponent -- the component hosts the right
-    // widget and nothing appears. uevrlib's equivalent has a removeFromViewport step for the same
-    // reason.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      w->call_function(L"RemoveFromParent", p); }
-
-    // RESET THE RENDER TRANSLATION. The HUD-follow path may have been driving this same widget to
-    // offsets of several hundred pixels to chase the aim across the flat HUD. Inside a draw-size
-    // render target that lands far outside the canvas, so the widget renders correctly and is
-    // simply not on its own surface. Hosting it makes that offset not merely redundant but harmful.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      auto* d = reinterpret_cast<double*>(p); d[0] = 0.0; d[1] = 0.0;
-      w->call_function(L"SetRenderTranslation", p); }
-
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      *reinterpret_cast<void**>(p) = w;
-      comp->call_function(L"SetWidget", p); }
+    host_widget(comp, w);
 
     // Explicit: a dynamically added component inherits tick settings from the CDO, and the redraw
     // that fills the render target happens on tick.
@@ -684,8 +740,6 @@ void reticule_widget_ensure(API::UObject* rig) {
     // the side of the view is precisely the case that gets culled.
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
       comp->call_function(L"SetTickWhenOffscreen", p); }
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      comp->call_function(L"RequestRedraw", p); }
 
     // No shadow: it is a HUD element, and a floating quad throwing a shadow onto the level reads as
     // a bug immediately. Also keeps it out of the depth/shadow passes entirely.
@@ -789,10 +843,14 @@ void reticule_widget_ensure(API::UObject* rig) {
         const uint8_t space = *(base + 1304);
         const uint8_t blend = *(base + 1428);
 
+        // FULL name, not the class name. The class name is IDENTICAL for the live instance and the
+        // non-rendering class template, so it could never distinguish the two -- which is why the
+        // template-binding bug was invisible in the log for as long as it was. The full name says
+        // which one outright: "/Engine/Transient..." is the live one.
         API::get()->log_info(
             "[Halo-CampE-UEVR] widget reticule CREATED @%p hosting %s | space=%u blend=%u "
             "curDraw=(%d,%d) rt=%p mat=%p widget=%p",
-            (void*)comp, narrow(class_name_of(w)).c_str(), (unsigned)space, (unsigned)blend,
+            (void*)comp, narrow(w->get_full_name()).c_str(), (unsigned)space, (unsigned)blend,
             cur_x, cur_y, rt_p, mat_p, wid_p);
     }
 }
@@ -948,10 +1006,44 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
             g_ret_widget_comp.reset();
             g_ret_widget_failed = false;     // allow a clean re-create against the new pawn
             g_ret_widget_finished = false;
+            g_ret_hosted_widget.reset();
+            g_ret_widget_parent.reset();
+            g_ret_rebind_forced = false;
+
+            // The candidate list is from the OLD level and must not be picked from. Its transient
+            // entry is already dead, but the class-template entry survives a transition, so leaving
+            // it in place is what let the re-create bind the template. Clearing forces the next
+            // sweep to supply a fresh list before anything can be chosen.
+            force_reticle_rescan();
         }
         return;
     }
     reticule_widget_finish();
+
+    // RE-BIND IF THE HUD WAS REBUILT UNDER US.
+    //
+    // The component outlives the widget whenever the HUD is rebuilt without the pawn being
+    // destroyed -- a checkpoint reload is exactly that. The component then holds a dead widget and
+    // renders a frozen quad forever, while the game's new crosshair sits back on the flat HUD.
+    // Cheap to detect: TrackedObject::get() is an index compare, no class-name lookup.
+    if (!g_ret_hosted_widget.empty() && g_ret_hosted_widget.get() == nullptr) {
+        // Force the sweep ONCE per episode, not per tick: it is a full object-array walk, and
+        // re-forcing it every tick would run it every frame. pick_live_reticle() returns null until
+        // that sweep lands (it only accepts candidates from the latest one), so this simply retries.
+        if (!g_ret_rebind_forced) {
+            g_ret_rebind_forced = true;
+            force_reticle_rescan();
+            API::get()->log_info("[Halo-CampE-UEVR] widget reticule: hosted widget died "
+                                 "(HUD rebuilt) -- re-binding");
+        }
+        if (auto* fresh = pick_live_reticle()) {
+            host_widget(comp, fresh);
+            g_ret_widget_finished = false;   // new widget, new render target: re-run the finish pass
+            g_ret_rebind_forced = false;
+            API::get()->log_info("[Halo-CampE-UEVR] widget reticule: re-bound to %s",
+                                 narrow(fresh->get_full_name()).c_str());
+        }
+    }
 
     // Live gain, verified against the component each tick (see apply_widget_tint): the write only
     // happens when the value has actually drifted, so the steady path is a property read.
@@ -1001,6 +1093,47 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
       const float sc = g_cfg.aim_widget_scale * g_ret_scale_mul.load();
       auto* d = reinterpret_cast<double*>(p); d[0] = sc; d[1] = sc; d[2] = sc;
       comp->call_function(L"SetWorldScale3D", p); }
+}
+
+// GIVE THE CROSSHAIR BACK when the feature is switched off.
+//
+// Hosting the widget calls RemoveFromParent on it, which takes the game's crosshair OUT of the HUD.
+// Without this, setting aimwidget=0 live left the player with no crosshair at all -- the widget was
+// off the HUD and our quad had stopped being positioned. A live tunable has to be reversible.
+//
+// Deliberately NOT wired into the teardown path (pawn/level destruction). There the widget is
+// usually being destroyed anyway, and re-parenting during a level transition means engine calls at
+// the single most fragile moment in this title's lifecycle -- the one that has already produced
+// crashes here. This runs only on an explicit, user-initiated toggle, where nothing else is in
+// flight. Everything is re-validated through the object array first; any dead handle skips.
+void reticule_widget_release() {
+    // Self-latching: this is called every tick from the disabled branch, and doing nothing when
+    // nothing was ever hosted keeps that path to a single bool test. Set in host_widget().
+    if (!g_ret_widget_hosted_once) return;
+    g_ret_widget_hosted_once = false;
+
+    auto* comp = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    auto* w    = g_ret_hosted_widget.get();
+    auto* par  = g_ret_widget_parent.get();
+
+    if (comp != nullptr) {
+        { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};   // SetWidget(nullptr)
+          comp->call_function(L"SetWidget", p); }
+        { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+          comp->call_function(L"SetVisibility", p); }   // false
+        { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
+          comp->call_function(L"SetHiddenInGame", p); }
+    }
+    if (w != nullptr && par != nullptr) {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<void**>(p) = w;
+        par->call_function(L"AddChild", p);
+        API::get()->log_info("[Halo-CampE-UEVR] widget reticule RELEASED -- crosshair returned to %s",
+                             narrow(class_name_of(par)).c_str());
+    }
+
+    g_ret_hosted_widget.reset();
+    g_ret_widget_parent.reset();
 }
 
 bool reticule_force_visible(Vec3* out_pos, int* out_have) {
