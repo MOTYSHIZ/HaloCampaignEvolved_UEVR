@@ -234,8 +234,8 @@ struct Config {
     // Separate distance while seated: the reticule sits at a fixed distance along the aim ray
     // rather than on a traced hit, and too short a distance parks it inside the vehicle's own
     // bodywork. Its APPARENT size does not change with this (see g_ret_scale_mul), so it is tuned
-    // purely for depth and occlusion -- 11 m by in-headset judgement. 0 = use aim_reticule_dist.
-    float aim_reticule_dist_veh = 1100.0f;   // cm (11 m)
+    // purely for depth and occlusion -- 22 m by in-headset judgement. 0 = use aim_reticule_dist.
+    float aim_reticule_dist_veh = 2200.0f;   // cm (22 m)
     float aim_reticule_cm   = 12.0f;     // borrowed-prop size at that distance
 
     // Where the reticule VISUAL comes from. NOTE: the shipping visual is neither of these -- it is
