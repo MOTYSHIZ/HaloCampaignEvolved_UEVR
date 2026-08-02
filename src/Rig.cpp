@@ -123,6 +123,10 @@ bool rig_component_alive() {
     return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C") != nullptr;
 }
 
+API::UObject* rig_tracked_component() {
+    return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C");
+}
+
 API::UObject* resolve_rig() {
     // ---- FAST PATH. The sweep below is a full object-array walk with a class-name string built
     // per object, and it ran unconditionally every ~2 s even with a perfectly good rig already
