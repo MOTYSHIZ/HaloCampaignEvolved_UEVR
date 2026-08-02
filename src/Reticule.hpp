@@ -67,6 +67,11 @@ void reticule_mesh_move(const Vec3& p);
 void reticule_widget_ensure(uevr::API::UObject* rig);
 void reticule_widget_move(const Vec3& target, const Vec3& origin);
 
+// Hand the game's crosshair back to the HUD and park our quad. Call when aimwidget goes 0 -- hosting
+// removes the widget from the HUD, so without this the toggle is one-way and leaves the player with
+// no crosshair. Safe and cheap to call when nothing is bound (every handle is re-validated first).
+void reticule_widget_release();
+
 // The widget class the config asks us to host.
 std::wstring wanted_widget_class();
 

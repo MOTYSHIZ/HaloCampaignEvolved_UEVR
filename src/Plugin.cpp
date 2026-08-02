@@ -2699,6 +2699,11 @@ void update() {
                                     if (g_cfg.aim_widget) {
                                         reticule_widget_ensure(rig);
                                         reticule_widget_move(target, origin);
+                                    } else {
+                                        // Turning the feature off must give the crosshair back --
+                                        // hosting it removed it from the HUD. Self-latching inside,
+                                        // so the steady off state costs one bool test.
+                                        reticule_widget_release();
                                     }
 
                                     // Plain sphere. Kept as the fallback that is known to render.
@@ -2861,6 +2866,8 @@ void update() {
             if (g_cfg.aim_widget) {
                 reticule_widget_ensure(pawn_root);
                 reticule_widget_move(target, origin);
+            } else {
+                reticule_widget_release();   // see the on-foot branch above
             }
             if (g_cfg.aim_mesh) reticule_mesh_ensure(pawn_root);
             reticule_mesh_move(target);
