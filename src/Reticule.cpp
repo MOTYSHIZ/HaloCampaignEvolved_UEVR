@@ -198,6 +198,7 @@ TrackedObject g_ret_mesh;
 // Ray origin, published so the mesh reticule can face the viewer the same way the widget does.
 Vec3 g_ret_origin{0.0f, 0.0f, 0.0f};
 std::atomic<bool> g_have_ret_origin{false};
+std::atomic<float> g_ret_scale_mul{1.0f};
 TrackedObject g_ret_mesh_mid;
 // Parent path the current MID was built from; a config change triggers a rebind.
 std::string   g_applied_mesh_parent;
@@ -909,7 +910,8 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
     // Scale re-applied every tick so aimwidgetscale is live-tunable: it is otherwise only set at
     // construction, and FinishAddComponent overwrites it.
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      const float sc = g_cfg.aim_widget_scale;
+      // Distance-compensated, same as the mesh ring above.
+      const float sc = g_cfg.aim_widget_scale * g_ret_scale_mul.load();
       auto* d = reinterpret_cast<double*>(p); d[0] = sc; d[1] = sc; d[2] = sc;
       comp->call_function(L"SetWorldScale3D", p); }
 }
@@ -953,7 +955,9 @@ void reticule_mesh_move(const Vec3& p) {
     // creation, and resizing the ring would cost a relaunch per attempt.
     {
         alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
-        const float sc = g_cfg.aim_mesh_scale;
+        // Scaled by distance (see g_ret_scale_mul) so the ring keeps the same apparent size
+        // wherever it is placed.
+        const float sc = g_cfg.aim_mesh_scale * g_ret_scale_mul.load();
         auto* d = reinterpret_cast<double*>(q); d[0] = sc; d[1] = sc; d[2] = sc;
         mesh->call_function(L"SetWorldScale3D", q);
     }

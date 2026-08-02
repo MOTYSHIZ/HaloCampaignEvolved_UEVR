@@ -36,6 +36,13 @@ extern uint32_t      g_reticle_scan_tick;
 extern Vec3 g_ret_origin;
 extern std::atomic<bool> g_have_ret_origin;
 
+// APPARENT-SIZE COMPENSATION. Both reticules are placed at a fixed WORLD scale, so their on-screen
+// size is inversely proportional to how far away they are put. The seated reticule sits much
+// further out than the on-foot one (a close ring would be inside your own vehicle), which shrank it
+// to a speck -- it was being drawn correctly and simply could not be seen. Callers set this to
+// (actual distance / the distance the scale was tuned at) and the size holds steady.
+extern std::atomic<float> g_ret_scale_mul;
+
 // The hosted widget component, exposed because a debug command in Plugin.cpp inspects it.
 extern TrackedObject g_ret_widget_comp;
 
