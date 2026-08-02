@@ -339,6 +339,16 @@ writing **CutsceneDetectionPlugin**, which ships in this profile's `plugins\` fo
 cutscene comfort (disabling decoupled pitch, switching to a 2D view and damping camera shake while a
 cutscene plays). That plugin is his work, not ours.
 
+He is also the reason this mod's crosshair has colour at all. The world-space crosshair rendered
+near-black for a long time, and the diagnosis that fixed it is his: an unlit widget's output is
+still multiplied by the scene's **pre-exposure** before tonemapping, so an authored colour lands
+close to black in a bright scene. Nothing about the code that writes that colour hints at it. Once
+the mechanism was named the fix followed quickly, and the shipping crosshair here is a direct
+result. His own remedy — Unreal's exposure-compensating `EyeAdaptationInverse` widget material,
+delivered as an asset pak — is the more principled one; it could not be made to work in this
+configuration, so this mod compensates with a plain gain instead (`aimwidgetgain`). That is a
+limitation on our side, not a defect in his approach.
+
 **Special thanks to [praydog](https://github.com/praydog/UEVR)** — for UEVR itself, which every one
 of these projects stands on, for the nonstandard 5.5.4 fix that had this game rendering in VR within
 days of its release, and for the plugin SDK this mod is written against. Hail to the king.
@@ -357,6 +367,12 @@ days of its release, and for the plugin SDK this mod is written against. Hail to
 
 Techniques taken directly from these projects, and where they ended up:
 
+- **[HaloCampaignEvolved-UEVR](https://github.com/elliotttate/HaloCampaignEvolved-UEVR)**
+  (elliotttate) — a **separate, independently developed** Halo: Campaign Evolved UEVR project,
+  running in parallel with this one. Studied with his permission. Its identification of
+  pre-exposure as the cause of the dark world-space crosshair is what made this mod's coloured
+  crosshair possible; see the Credits section above. Two projects, two sets of trade-offs — worth
+  looking at directly rather than assuming this one supersedes it.
 - **[OblivionVR](https://github.com/Pande4360/OblivionVR)** (Pande4360) — the widget-component
   construction sequence from `Profile/scripts/VRHud.lua`: deferred creation, with the material and
   blend mode set *before* registration. That sequence is what makes hosting the game's own crosshair
