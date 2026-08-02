@@ -124,6 +124,32 @@ again — see [Known issues](#known-issues). That's an annoyance; wrong button m
 The mod ships with a working calibration out of the box — try it as-is first. If the weapon doesn't
 sit right in your hand, or shots don't land where you're pointing, see **Custom calibration** below.
 
+## Controls in vehicles and turrets
+
+Halo aims its vehicle camera at whatever you're aiming at, so hand-aim would drag the whole camera
+around with your hand. **For now, getting into any vehicle seat or mounted turret switches the mod
+to classic gamepad controls**, and motion aim steps aside until you get out. Your head still looks
+around freely, and motion aim comes back on its own — calibration intact — the moment you're back
+on foot.
+
+| Input | Action |
+|---|---|
+| Right stick | Aim and swing the camera (the game's own vehicle look) |
+| Left stick | Drive — throttle and steering |
+| **Either grip** | Hard brake |
+| Right A | Hard brake (the game's own binding — grip does the same thing) |
+| Left trigger (hold) | Handbrake — the sharp, quick turn |
+| Right trigger | Fire |
+| Head | Free look, as always |
+
+Motion aim, snap turn and the VR-specific button remaps all stand down while you're seated, so
+every other button does exactly what the game's normal gamepad layout does.
+
+The switch is automatic, and it also applies during cutscenes — the mod works it out from the game
+taking your first-person weapon away. If you ever find a seat it misses, set `stickforce=1` in
+`halo_vr.cfg` to force these controls on and `0` to go back to automatic; that file is read while
+you play, so it takes effect without restarting.
+
 ## Configuration
 
 Everything lives in `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr.cfg`, re-read live. The
@@ -141,6 +167,10 @@ important knobs:
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
 | `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step |
+| `stickmode` | 1 | Switch to gamepad controls in vehicles, turrets and cutscenes (see [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets)) |
+| `stickforce` | 0 | `1` forces those controls on, `2` never uses them, `0` decides automatically |
+| `stickon` / `stickoff` | 0.75 / 0.05 | Seconds before switching in and out |
+| `brake` / `brakemode` | 1 / 3 | Grip hard brake, and how it's sent (`3` presses A) |
 | `vrinactivity` | 100 | Raises UEVR's motion-controls inactivity timeout to its maximum |
 
 The full key list with comments is in the shipped `halo_vr.cfg`.
