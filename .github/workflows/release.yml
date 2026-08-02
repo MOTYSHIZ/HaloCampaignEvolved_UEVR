@@ -68,6 +68,12 @@ jobs:
             build/HaloCampaignEvolved.zip
             build/HaloCampaignEvolved.zip.sha256
           generate_release_notes: true
+          # DRAFT. Pushing a tag builds and uploads, but does not publish -- the release waits in
+          # the Releases page until a human presses Publish. Without this the action defaults to a
+          # live public release the instant a tag lands, which makes an accidental or premature tag
+          # push irreversible in the way that matters: people can already have downloaded it.
+          # Publishing is a deliberate, separate act.
+          draft: true
           # append_body, NOT body: this adds the hash to whatever notes are already on the release
           # instead of replacing them. Hand-written release notes survive a re-run of the same tag.
           append_body: true
