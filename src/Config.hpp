@@ -135,11 +135,12 @@ struct Config {
     // 0 = auto-detect; 1 = always stick mode; 2 = never. 1/2 bypass the detector outright -- the
     // A/B lever, and the manual fallback if the detector misses on some vehicle. Live-reloaded.
     int   stick_force  = 0;
-    // Debounce, seconds. Enter is the slower edge: a weapon swap kills the weapon-actor route for
-    // up to a couple of seconds until the next resolve, and flapping the camera mode mid-fight is
-    // worse than a late vehicle transition. Exit is quick -- the route coming back IS the resolve
-    // succeeding, which is already debounce enough.
-    float stick_on_s   = 3.0f;
+    // Debounce, seconds. Enter used to need 3 s because a weapon swap also kills the route for up
+    // to the resolve cadence; the death-edge resolve BURST (see the detector) re-finds a swapped
+    // weapon within a couple hundred ms, so anything still dead after ~1 s is genuinely a seat.
+    // Exit is quick by design, and the dismount watcher makes the route revive within a tick or
+    // two of the weapon re-attaching.
+    float stick_on_s   = 1.0f;
     float stick_off_s  = 0.25f;
 
     // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged to hold

@@ -253,6 +253,12 @@ std::atomic<bool> g_stick_mode{false};
 // Tracked, not raw: pawns here are pooled shells. Game thread only.
 TrackedObject g_stick_pawn_base;
 
+// Ticks below this value resolve the rig on a FAST cadence (every 8 ticks instead of 60). Set by
+// the route-death burst and the dismount watcher so stick-mode transitions are event-driven
+// instead of waiting out the 2 s resolve poll -- the cost is a handful of extra sweeps per
+// boarding/swap/dismount EVENT, never a standing rate increase. Game thread only.
+uint32_t g_rig_fast_until = 0;
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -1418,6 +1424,39 @@ void update() {
             const bool gameplay    = (pc0 != nullptr) && !frontend;
             const bool route_alive = fp_weapon_route_alive();
 
+            // ROUTE-DEATH BURST: the enter debounce only exists to tell a SEAT from a weapon
+            // SWAP, and a swap's new actor is findable within a couple hundred ms -- but only if
+            // someone looks. Resolving immediately (and fast for ~1.2 s) collapses that ambiguity
+            // window, which is what lets stick_on_s default to 1 s instead of 3.
+            static bool prev_route = true;
+            if (prev_route && !route_alive) {
+                g_rig_fast_until   = tick + 40;
+                g_rig_resolve_tick = 0;      // resolve on this very tick's rig block
+            }
+            prev_route = route_alive;
+
+            // DISMOUNT WATCHER: the rig component survives a ride (R1-measured), and the new
+            // weapon actor re-attaches to it the moment the game gives the weapon back. Its
+            // AttachChildren count growing is therefore the "input is yours again" edge, for the
+            // price of one guarded memory read per tick -- and it triggers a single immediate
+            // resolve instead of waiting out the poll, so exit lands in ~0.3 s.
+            static int32_t prev_children = -1;
+            if (g_stick_mode.load()) {
+                int32_t n = -1;
+                if (auto* rigc = rig_tracked_component()) {
+                    struct FRawArray { void* data; int32_t num; int32_t max; };
+                    auto* arr = rigc->get_property_data<FRawArray>(L"AttachChildren");
+                    if (arr != nullptr && !IsBadReadPtr(arr, sizeof(FRawArray))) n = arr->num;
+                }
+                if (n >= 0 && prev_children >= 0 && n > prev_children) {
+                    g_rig_fast_until   = tick + 16;
+                    g_rig_resolve_tick = 0;
+                }
+                prev_children = n;
+            } else {
+                prev_children = -1;
+            }
+
             auto* pawn = API::get()->get_local_pawn(0);
             auto* base = g_stick_pawn_base.get_checked(L"Pawn");
             if (route_alive && pawn != nullptr && base != pawn) {
@@ -1953,7 +1992,7 @@ void update() {
         // Re-resolve on a timer ALWAYS, not only when we hold nothing. A pointer to a recycled
         // component never becomes null -- it keeps accepting writes -- so "resolve once, cache
         // until null" can pin the driver to residue with no symptom other than nothing moving.
-        if ((tick - g_rig_resolve_tick.load()) >= 60) {
+        if ((tick - g_rig_resolve_tick.load()) >= ((tick < g_rig_fast_until) ? 8u : 60u)) {
             g_rig_resolve_tick = tick;
             API::UObject* found = nullptr;
             { PerfScope _perf(PERF_RIG); found = resolve_rig(); }

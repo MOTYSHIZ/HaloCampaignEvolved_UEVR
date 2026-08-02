@@ -81,6 +81,10 @@ bool fp_weapon_route_alive();
 // does to it is exactly recon question R1, which this answers with one log line.
 bool rig_component_alive();
 
+// The tracked rig component itself, or nullptr when dead -- for cheap per-tick probes (the
+// stick-mode dismount watcher) that need the component without triggering a resolve.
+uevr::API::UObject* rig_tracked_component();
+
 // Write the rig's RELATIVE transform. Never the world transform -- see the note at the top.
 bool rig_set_rotation(uevr::API::UObject* rig, double pitch, double yaw, double roll);
 bool rig_set_location(uevr::API::UObject* rig, double x, double y, double z);
