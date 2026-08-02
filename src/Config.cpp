@@ -220,6 +220,8 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "stickon")       == 0) g_cfg.stick_on_s      = clampf((float)v, 0.1f, 30.0f);
         else if (_stricmp(key, "stickoff")      == 0) g_cfg.stick_off_s     = clampf((float)v, 0.03f, 30.0f);
         else if (_stricmp(key, "brake")         == 0) g_cfg.brake_enabled   = (v != 0.0);
+        else if (_stricmp(key, "brakemode")     == 0) g_cfg.brake_mode      = (int)v;
+        else if (_stricmp(key, "brakemask")     == 0) g_cfg.brake_mask      = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "brakekey")      == 0) g_cfg.brake_key       = (int)strtol(val, nullptr, 0);
 }
 

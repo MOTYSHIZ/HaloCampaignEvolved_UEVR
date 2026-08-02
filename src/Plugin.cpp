@@ -259,6 +259,16 @@ TrackedObject g_stick_pawn_base;
 // boarding/swap/dismount EVENT, never a standing rate increase. Game thread only.
 uint32_t g_rig_fast_until = 0;
 
+// This tick's weapon-route liveness, published by the detector. Snap/smooth turn gates on it so
+// turning stands down the INSTANT the weapon vanishes at boarding, without waiting out the stick
+// debounce -- entering a vehicle used to bank several accidental snap turns in that window. A
+// weapon swap loses turning for ~0.3 s, which is imperceptible. Game thread only.
+bool g_route_alive_now = true;
+
+// True while the grip brake is held AND the delivery is pad-side (brake_mode 2/3). Written by the
+// game thread, consumed in the XInput hook.
+std::atomic<bool> g_brake_pad{false};
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -1434,6 +1444,7 @@ void update() {
                 g_rig_resolve_tick = 0;      // resolve on this very tick's rig block
             }
             prev_route = route_alive;
+            g_route_alive_now = route_alive;   // turning gates on this (see the TURNING block)
 
             // DISMOUNT WATCHER: the rig component survives a ride (R1-measured), and the new
             // weapon actor re-attaches to it the moment the game gives the weapon back. Its
@@ -1536,18 +1547,23 @@ void update() {
                     want_brake = API::VR::is_action_active_any_joystick(grip_action);
                 }
             }
+            // Pad-side delivery is the default: field testing showed synthesized keyboard never
+            // reaches this game's driving input (see Config.hpp). The hook does the actual write.
+            g_brake_pad = want_brake && (g_cfg.brake_mode == 2 || g_cfg.brake_mode == 3);
+
             if (want_brake != brake_down) {
                 brake_down = want_brake;
-                // SCANCODE event, not a bare virtual key: device-layer keyboard readers (raw
-                // input / GameInput) key off scancodes, and a VK-only SendInput arrives with
-                // MakeCode 0 and is dropped by exactly the path a game reads.
-                INPUT in{};
-                in.type = INPUT_KEYBOARD;
-                in.ki.wScan   = (WORD)MapVirtualKeyW((UINT)g_cfg.brake_key, MAPVK_VK_TO_VSC);
-                in.ki.dwFlags = KEYEVENTF_SCANCODE | (want_brake ? 0 : KEYEVENTF_KEYUP);
-                SendInput(1, &in, sizeof(INPUT));
-                API::get()->log_info("[Halo-CampE-UEVR] BRAKE %s (grip, vk=0x%02X scan=0x%02X)",
-                                     want_brake ? "DOWN" : "UP", g_cfg.brake_key, (unsigned)in.ki.wScan);
+                if (g_cfg.brake_mode == 1) {
+                    // Keyboard lane, kept for reference: a SCANCODE event, the form raw-input
+                    // readers accept. Proven NOT to reach this game's driving input.
+                    INPUT in{};
+                    in.type = INPUT_KEYBOARD;
+                    in.ki.wScan   = (WORD)MapVirtualKeyW((UINT)g_cfg.brake_key, MAPVK_VK_TO_VSC);
+                    in.ki.dwFlags = KEYEVENTF_SCANCODE | (want_brake ? 0 : KEYEVENTF_KEYUP);
+                    SendInput(1, &in, sizeof(INPUT));
+                }
+                API::get()->log_info("[Halo-CampE-UEVR] BRAKE %s (grip, mode=%d)",
+                                     want_brake ? "DOWN" : "UP", g_cfg.brake_mode);
             }
         }
     }
@@ -2741,8 +2757,10 @@ void update() {
     // Consumes the player's raw right-stick X (sampled in the XInput hook before the aim value
     // replaced it). Adjusts the locked view yaw, so the world turns while aim stays on the gun.
     // Stands down in stick mode: the right stick IS the game's look input there, and consuming it
-    // for snap turn would rotate the player twice.
-    if (g_cfg.turn_mode != 0 && !g_stick_mode.load()) {
+    // for snap turn would rotate the player twice. Also stands down the instant the weapon route
+    // dies (g_route_alive_now) -- boarding a vehicle otherwise banks accidental snaps during the
+    // enter debounce, because the player is already using the stick as a vehicle camera.
+    if (g_cfg.turn_mode != 0 && !g_stick_mode.load() && g_route_alive_now) {
         const float sx = g_raw_stick_x.load();
         const bool past_dz = std::fabs(sx) > g_cfg.turn_dz;
 
@@ -3175,6 +3193,20 @@ public:
                 // state must bump it.
                 state->dwPacketNumber++;
                 g_move_applied.fetch_add(1);
+            }
+        }
+
+        // ---- VEHICLE HARD BRAKE, pad-side delivery. Stick mode has already released the left
+        // stick to the game (movement rotation and d-pad shift stand down there), so writing it
+        // here is uncontested. Mode 2 = full stick-back, the pad's native brake input; mode 3 = a
+        // button mask the user bound to hard brake in the game's own controller settings.
+        if (g_brake_pad.load()) {
+            if (g_cfg.brake_mode == 2) {
+                state->Gamepad.sThumbLY = -32768;
+                state->dwPacketNumber++;
+            } else if (g_cfg.brake_mode == 3 && g_cfg.brake_mask != 0) {
+                state->Gamepad.wButtons |= (WORD)g_cfg.brake_mask;
+                state->dwPacketNumber++;
             }
         }
 
