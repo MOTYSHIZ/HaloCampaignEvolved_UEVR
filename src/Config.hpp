@@ -86,6 +86,17 @@ struct Config {
     // Head-origin has a real drawback: moving your HEAD while the gun is still changes your aim
     // -- head/aim coupling, in miniature.
     int   aim_origin   = 1;
+    // WHICH HAND AIMS. false = right (default), true = left.
+    //
+    // The aim maths is hand-agnostic -- it turns a controller pose into angles -- so this only
+    // changes which tracked device is sampled. What is NOT symmetric is CALIBRATION: grip roll/yaw
+    // and the X offset are mirrored between hands, so each hand gets its own calibration file and
+    // the left one seeds itself by mirroring the right (see g_calib_path / mirror_calib_for_left).
+    //
+    // NOT mirrored, and cannot be: the game's first-person arms and weapons are authored
+    // right-handed. Left-handed aim puts the weapon in your left hand still looking like a
+    // right-handed weapon. A plugin cannot mirror a skeletal mesh.
+    bool  aim_left_hand = false;
     float yaw_sign     = 1.0f;
     float pitch_sign   = 1.0f;
     bool  fake_pad     = true;    // report a connected pad even if none is enumerated
@@ -137,11 +148,11 @@ struct Config {
     int   stick_force  = 0;
     // Debounce, seconds. Enter used to need 3 s because a weapon swap also kills the route for up
     // to the resolve cadence; the death-edge resolve BURST (see the detector) re-finds a swapped
-    // weapon within a couple hundred ms, so anything still dead after ~1 s is genuinely a seat.
-    // Exit is quick by design, and the dismount watcher makes the route revive within a tick or
-    // two of the weapon re-attaching.
-    float stick_on_s   = 1.0f;
-    float stick_off_s  = 0.25f;
+    // weapon within a couple hundred ms, so a sub-second debounce is safe. Exit is near-instant:
+    // the dismount watcher revives the route within a tick or two of the weapon re-attaching, and
+    // the debounce is just a two-tick confirm. Both user-tuned in the field 2026-08-01.
+    float stick_on_s   = 0.75f;
+    float stick_off_s  = 0.05f;
 
     // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged. Distinct
     // from the quick-turn handbrake, which is the game's own left-trigger hold. Grips are read
@@ -153,15 +164,16 @@ struct Config {
     // did nothing -- gameplay reads the device layer, which does not surface injected keyboard,
     // exactly like the aim finding. The pad path through our own XInput hook is the proven lane,
     // so that is the default now:
-    //   brake_mode 2 = LEFT STICK FULL BACK while gripping (the pad's native brake/reverse input;
-    //                  zero configuration) -- DEFAULT
-    //   brake_mode 3 = OR a pad button mask (brake_mask) into the state while gripping; use when
-    //                  the game's controller settings let hard brake be bound to a button
+    //   brake_mode 3 = OR a pad button mask (brake_mask) into the state while gripping. DEFAULT:
+    //                  mask 0x1000 = A, which IS this game's vehicle hard brake (field-confirmed
+    //                  2026-08-01 -- on foot A is jump, but the brake only fires in stick mode)
+    //   brake_mode 2 = LEFT STICK FULL BACK while gripping -- delivery-proven, but this game
+    //                  reads it as brake-then-REVERSE, not the hard brake
     //   brake_mode 1 = the keyboard attempt (kept for reference / other titles)
     //   brake_mode 0 = off (same as brake=0)
     bool  brake_enabled = true;
-    int   brake_mode    = 2;
-    int   brake_mask    = 0;      // XInput mask for mode 3, e.g. 0x0002 = DPAD_DOWN
+    int   brake_mode    = 3;
+    int   brake_mask    = 0x1000;   // XInput A -- this game's vehicle hard brake
     // Windows virtual-key held while gripping in mode 1. 0xA2 = Left Ctrl.
     int   brake_key     = 0xA2;
 
@@ -717,6 +729,11 @@ struct Config {
 extern Config g_cfg;
 extern char     g_cfg_path[MAX_PATH];
 extern char     g_calib_path[MAX_PATH];
+extern char     g_calib_path_right[MAX_PATH];
+// Result of select_calib_for_hand(). Returned rather than logged because this file is kept free
+// of UEVR API calls (see the header comment) -- the caller does the reporting.
+enum { CALIB_HAND_RIGHT = 0, CALIB_HAND_LEFT_LOADED = 1, CALIB_HAND_LEFT_SEEDED = 2 };
+int select_calib_for_hand();
 extern uint32_t g_cfg_check_tick;
 extern bool     g_pivot_from_calib;
 
