@@ -1658,10 +1658,18 @@ void update() {
         g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return;
     }
 
-    const auto ridx = API::VR::get_right_controller_index();
+    // THE aim source. Everything downstream -- the control law, the rig, the reticule -- flows from
+    // this one index, which is why handedness is a single decision here rather than a sweep through
+    // the file. The maths is hand-agnostic: it turns a pose into angles.
+    const auto ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                          : API::VR::get_right_controller_index();
     if (ridx < 0) {
         static uint32_t last = 0;
-        if (tick - last > 300) { last = tick; API::get()->log_info("[Halo-CampE-UEVR] IDLE: no right controller index"); }
+        if (tick - last > 300) {
+            last = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] IDLE: no %s controller index",
+                                 g_cfg.aim_left_hand ? "left" : "right");
+        }
         g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return;
     }
 
@@ -2971,7 +2979,32 @@ public:
             strcpy_s(g_cfg_path, MAX_PATH, "halo_vr.cfg");
             strcpy_s(g_calib_path, MAX_PATH, "halo_vr_calib.cfg");
         }
+        strcpy_s(g_calib_path_right, MAX_PATH, g_calib_path);
+
         load_config();   // writes a commented default file if none exists
+
+        // Calibration is per-hand, and it must be resolved AFTER load_config -- aimhand lives in
+        // halo_vr.cfg, so the correct file is not known until that has been read.
+        //
+        // Each hand keeps its own file so switching handedness cannot destroy the other hand's
+        // tuning. If the left file does not exist yet, it is seeded by MIRRORING the right rather
+        // than starting from zero: grip yaw/roll and the lateral offset flip sign between hands,
+        // and a mirrored start is much closer to correct than a cold one.
+        switch (select_calib_for_hand()) {
+        case CALIB_HAND_LEFT_LOADED:
+            API::get()->log_info("[Halo-CampE-UEVR] LEFT-HANDED aim: calibration from %s",
+                                 g_calib_path);
+            break;
+        case CALIB_HAND_LEFT_SEEDED:
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] LEFT-HANDED aim: no left calibration yet -- seeded %s by "
+                "MIRRORING the right hand (grip yaw/roll, off X, pivot X, aim yaw negated). "
+                "Re-run the End / Page Down calibrations for a proper left-hand fit.",
+                g_calib_path);
+            break;
+        default:
+            break;   // right-handed: nothing to report, this is the normal path
+        }
 
         // Version first, on its own line: this is what a bug report needs to be actionable, and it
         // must survive even if the settings line below changes shape.

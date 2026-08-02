@@ -157,6 +157,7 @@ important knobs:
 
 | Key | Default | Meaning |
 |---|---|---|
+| `aimhand` | right | Which hand aims — `right` or `left` (see [Left-handed aim](#left-handed-aim)) |
 | `aimrate` | 1 | Aim control at render rate (0 = engine-tick rate) |
 | `ffgain` | 1.0 | Velocity feedforward strength; raise if fast sweeps lag, lower if they overshoot |
 | `dgain` | 0.15 | Damping against overshoot/rubber-banding |
@@ -176,6 +177,25 @@ important knobs:
 | `vrinactivity` | 100 | Raises UEVR's motion-controls inactivity timeout to its maximum |
 
 The full key list with comments is in the shipped `halo_vr.cfg`.
+
+## Left-handed aim
+
+Set `aimhand=left` in `halo_vr.cfg`. The aim, weapon rig and reticule all follow your left
+controller instead of your right.
+
+Two things to know:
+
+- **Each hand keeps its own calibration.** Switching handedness never overwrites the other hand's
+  tuning. The first time you select left, it is seeded by mirroring your right-hand calibration,
+  which gets you close — but re-run both calibrations (see [Custom calibration](#custom-calibration))
+  for a proper left-hand fit.
+- **The weapon model stays right-handed.** Halo's first-person arms and weapons are authored for a
+  right hand, and a mod cannot mirror a skeletal mesh. The gun will be held in your left hand but
+  still *look* like a right-handed weapon — magazine and ejection port on the usual side.
+
+The control layout is unchanged: movement stays on the left stick and turning on the right. If you
+would prefer those swapped for left-handed play, say so — it is a small addition, but it is a
+preference rather than an obvious default.
 
 ## Custom calibration
 

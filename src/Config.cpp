@@ -256,6 +256,11 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "viewlock")  == 0) g_cfg.view_lock  = (v != 0.0);
         else if (_stricmp(key, "locksign")  == 0) g_cfg.lock_sign  = (v < 0.0) ? -1.0f : 1.0f;
         else if (_stricmp(key, "aimorigin") == 0) g_cfg.aim_origin = (v != 0.0) ? 1 : 0;
+        // aimhand=left|right, also accepting 1/0 so it behaves like every other key here.
+        else if (_stricmp(key, "aimhand")  == 0) {
+            g_cfg.aim_left_hand = (_stricmp(val, "left") == 0) || (_stricmp(val, "l") == 0) ||
+                                  (val[0] >= '1' && val[0] <= '9');
+        }
         else if (_stricmp(key, "turnmode")  == 0) g_cfg.turn_mode  = (int)v;
         else if (_stricmp(key, "snapdeg")   == 0) g_cfg.snap_deg   = clampf((float)v, 5.0f, 90.0f);
         else if (_stricmp(key, "smoothdps") == 0) g_cfg.smooth_dps = clampf((float)v, 10.0f, 360.0f);
@@ -330,6 +335,10 @@ bool parse_config_file(const char* path) {
 // Delete it to go back to hand-tuned values.
 char g_calib_path[MAX_PATH] = {0};
 
+// The right-hand file, kept separately so the left hand can be SEEDED from it. Set at startup
+// before handedness is resolved.
+char g_calib_path_right[MAX_PATH] = {0};
+
 // Set once a pivot has been MEASURED from two calibration samples. From then on the socket guess
 // is switched off -- otherwise the next rig acquisition would overwrite a measured value with an
 // estimated one, which would look like the calibration silently degrading.
@@ -338,6 +347,53 @@ bool g_pivot_from_calib = false;
 void load_config() {
     if (!parse_config_file(g_cfg_path)) { write_default_config(); return; }
     parse_config_file(g_calib_path);
+}
+
+// Point g_calib_path at the file for the configured hand, and load it.
+//
+// Called once at startup, after load_config, because `aimhand` lives in halo_vr.cfg and so is not
+// known until that has been parsed.
+//
+// The right hand keeps the original filename, so existing installs are untouched and a user who
+// never goes left-handed sees no change at all. The left hand gets `_left`, so the two calibrations
+// coexist and switching back and forth never destroys either.
+//
+// SEEDING: if the left file does not exist, the right-hand values are MIRRORED into it rather than
+// left at defaults. Grip yaw and roll, and the lateral (X) offset, flip sign between hands; pitch,
+// forward/up offsets and the aim-ray offset do not. That gets a left-handed player close enough to
+// judge, instead of starting from a cold zero that reads as "the mod is broken".
+int select_calib_for_hand() {
+    if (!g_cfg.aim_left_hand) {
+        // Right hand: g_calib_path already points at the original file, loaded by load_config.
+        return CALIB_HAND_RIGHT;
+    }
+
+    char left[MAX_PATH] = {0};
+    const char* dot = strrchr(g_calib_path_right, '.');
+    if (dot != nullptr) {
+        const size_t stem = (size_t)(dot - g_calib_path_right);
+        if (stem < MAX_PATH - 8) {
+            memcpy(left, g_calib_path_right, stem);
+            left[stem] = 0;
+            strcat_s(left, MAX_PATH, "_left");
+            strcat_s(left, MAX_PATH, dot);
+        }
+    }
+    if (left[0] == 0) return CALIB_HAND_RIGHT;   // unexpected path shape: stay on the right file
+
+    strcpy_s(g_calib_path, MAX_PATH, left);
+
+    if (parse_config_file(g_calib_path)) return CALIB_HAND_LEFT_LOADED;
+
+    // No left-hand calibration yet. g_cfg currently holds the RIGHT-hand values (load_config just
+    // applied them), so mirror them in place and persist, giving the left hand a sane start.
+    g_cfg.grip_yaw  = -g_cfg.grip_yaw;
+    g_cfg.grip_roll = -g_cfg.grip_roll;
+    g_cfg.off_x     = -g_cfg.off_x;
+    g_cfg.piv_x     = -g_cfg.piv_x;
+    g_cfg.aim_off_yaw = -g_cfg.aim_off_yaw;
+    write_calib_file();
+    return CALIB_HAND_LEFT_SEEDED;
 }
 
 // Persist a calibration result. Written whole every time, so the newest calibration always wins.

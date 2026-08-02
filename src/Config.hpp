@@ -86,6 +86,17 @@ struct Config {
     // Head-origin has a real drawback: moving your HEAD while the gun is still changes your aim
     // -- head/aim coupling, in miniature.
     int   aim_origin   = 1;
+    // WHICH HAND AIMS. false = right (default), true = left.
+    //
+    // The aim maths is hand-agnostic -- it turns a controller pose into angles -- so this only
+    // changes which tracked device is sampled. What is NOT symmetric is CALIBRATION: grip roll/yaw
+    // and the X offset are mirrored between hands, so each hand gets its own calibration file and
+    // the left one seeds itself by mirroring the right (see g_calib_path / mirror_calib_for_left).
+    //
+    // NOT mirrored, and cannot be: the game's first-person arms and weapons are authored
+    // right-handed. Left-handed aim puts the weapon in your left hand still looking like a
+    // right-handed weapon. A plugin cannot mirror a skeletal mesh.
+    bool  aim_left_hand = false;
     float yaw_sign     = 1.0f;
     float pitch_sign   = 1.0f;
     bool  fake_pad     = true;    // report a connected pad even if none is enumerated
@@ -730,6 +741,11 @@ struct Config {
 extern Config g_cfg;
 extern char     g_cfg_path[MAX_PATH];
 extern char     g_calib_path[MAX_PATH];
+extern char     g_calib_path_right[MAX_PATH];
+// Result of select_calib_for_hand(). Returned rather than logged because this file is kept free
+// of UEVR API calls (see the header comment) -- the caller does the reporting.
+enum { CALIB_HAND_RIGHT = 0, CALIB_HAND_LEFT_LOADED = 1, CALIB_HAND_LEFT_SEEDED = 2 };
+int select_calib_for_hand();
 extern uint32_t g_cfg_check_tick;
 extern bool     g_pivot_from_calib;
 
