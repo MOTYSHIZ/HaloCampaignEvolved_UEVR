@@ -214,6 +214,12 @@ std::atomic<float> g_ff_rate_yaw{0.0f}, g_ff_rate_pitch{0.0f};
 // Filtered measurement of how fast the aim is ACTUALLY moving; only the damping term uses it.
 std::atomic<float> g_aim_rate_yaw{0.0f}, g_aim_rate_pitch{0.0f};
 
+// The rendered view's world POSITION, captured in the stereo callback. The vehicle reticule needs
+// a ray origin, and its on-foot source (the rig's camera parent, reached through the first-person
+// weapon) does not exist while seated.
+std::atomic<float> g_view_pos_x{0.0f}, g_view_pos_y{0.0f}, g_view_pos_z{0.0f};
+std::atomic<bool>  g_have_view_pos{false};
+
 std::atomic<float> g_render_view_yaw{0.0f};
 // Pitch of the same finished view. Only the yaw was published before, because movement is the only
 // consumer that needs a heading -- the reticle needs both axes or it tracks left/right and ignores
@@ -1408,7 +1414,11 @@ void update() {
         // menu_poll is one subsystem call, so it runs unconditionally. Only the reticle scan
         // (which sweeps the whole object array) waits for a rig.
         menu_poll(tick);
-        if (!no_rig) reticle_rescan(tick);
+        // Gated on gameplay, NOT on the rig. The scan finds the HUD's reticle widgets, and it used
+        // to wait for a first-person weapon -- so spawning straight into a vehicle (no weapon, ever)
+        // meant the widgets were never found and the seated reticule had nothing to host. Same
+        // stale proxy as the menu-state bug above, same fix.
+        if (!frontend) reticle_rescan(tick);
         material_hunt(tick);
         run_mat_dump();
         texture_param_hunt(tick);
@@ -2768,6 +2778,57 @@ void update() {
         }
     }
 
+    // ------------------------------------------------------------------ VEHICLE RETICULE
+    // The world-space reticule, kept alive while seated and driven by the VEHICLE'S aim.
+    //
+    // On foot the reticule is placed inside the rig block above, because everything it needs comes
+    // through the first-person weapon: the owning actor (the rig component's outer) and the ray
+    // origin (the rig's camera parent). A vehicle has no first-person weapon, so that whole path is
+    // skipped and the reticule simply vanished -- which is what this restores.
+    //
+    // The aim it tracks is deliberately NOT the controller. In stick mode the hand drives nothing;
+    // ControlRotation IS where the game is aiming, and the vehicle's guns follow it, so the ray is
+    // built from ControlRotation and the ray origin is the rendered view position published by the
+    // stereo callback. Both survive a seat; neither needs the rig.
+    if (g_stick_mode.load() && g_cfg.aim_reticule && g_have_view_pos.load() && !g_in_menu.load()) {
+        // A component must belong to an actor, and ensure() derives that actor from its argument's
+        // OUTER -- so this passes a component owned by the pawn, not the pawn itself. The pawn is
+        // the same actor the on-foot reticule is outered to, so nothing is orphaned or duplicated
+        // when the player dismounts.
+        auto* pawn = API::get()->get_local_pawn(0);
+        auto* pawn_root = follow_object(reinterpret_cast<API::UObject*>(pawn), L"RootComponent");
+
+        if (pawn_root != nullptr) {
+            const Vec3 origin{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+
+            // UE forward from the aim rotator, exactly as the on-foot path builds it.
+            const float cp = std::cos((float)aim_pitch * DEG2RAD);
+            const Vec3 fwd{cp * std::cos((float)aim_yaw * DEG2RAD),
+                           cp * std::sin((float)aim_yaw * DEG2RAD),
+                           std::sin((float)aim_pitch * DEG2RAD)};
+            const float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
+                          ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
+            const Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
+
+            g_ret_origin = origin;
+            g_have_ret_origin = true;
+
+            if (g_cfg.aim_widget) {
+                reticule_widget_ensure(pawn_root);
+                reticule_widget_move(target, origin);
+            }
+            if (g_cfg.aim_mesh) reticule_mesh_ensure(pawn_root);
+            reticule_mesh_move(target);
+
+            static uint32_t last_rep = 0;
+            if (tick - last_rep >= 600) {
+                last_rep = tick;
+                API::get()->log_info("[Halo-CampE-UEVR] vehicle reticule: aim=(%.1f,%.1f) origin=(%.0f,%.0f,%.0f) dist=%.0f",
+                                     (float)aim_pitch, (float)aim_yaw, origin.x, origin.y, origin.z, d);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ TURNING
     // Consumes the player's raw right-stick X (sampled in the XInput hook before the aim value
     // replaced it). Adjusts the locked view yaw, so the world turns while aim stays on the gun.
@@ -2875,8 +2936,25 @@ public:
     // is_double: the header states the pointer must be interpreted per this flag, and this game
     // is double-precision (LWC). Treating a double rotator as floats would corrupt the view.
     void on_pre_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int index, float,
-                                             UEVR_Vector3f*, UEVR_Rotatorf* rotation,
+                                             UEVR_Vector3f* position, UEVR_Rotatorf* rotation,
                                              bool is_double) override {
+        // ---- THE VIEW POSITION, published for the vehicle reticule.
+        //
+        // On foot the reticule takes its ray origin from the rig's attach parent (the camera
+        // component), reached THROUGH the first-person weapon. In a vehicle there is no
+        // first-person weapon, so that route is gone -- and this callback is the one place the
+        // camera's world position is handed to us regardless. Same discipline as the rotation
+        // below: read, publish, no reflection on the render thread.
+        if (position != nullptr) {
+            if (is_double) {
+                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
+                g_view_pos_x = (float)p->x; g_view_pos_y = (float)p->y; g_view_pos_z = (float)p->z;
+            } else {
+                g_view_pos_x = position->x; g_view_pos_y = position->y; g_view_pos_z = position->z;
+            }
+            g_have_view_pos = true;
+        }
+
         // ---- RENDER-RATE RIG RE-APPLY.
         //
         // The tick publishes the desired WORLD rotation; here we recompute the RELATIVE rotation

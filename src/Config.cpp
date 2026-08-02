@@ -278,6 +278,7 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "pivdraw")   == 0) g_cfg.piv_draw    = clampf((float)v, 0.0f, 50.0f);
         else if (_stricmp(key, "aimreticule")     == 0) g_cfg.aim_reticule      = (v != 0.0);
         else if (_stricmp(key, "aimreticuledist") == 0) g_cfg.aim_reticule_dist = clampf((float)v, 100.0f, 10000.0f);
+        else if (_stricmp(key, "aimreticuledistveh") == 0) g_cfg.aim_reticule_dist_veh = clampf((float)v, 0.0f, 20000.0f);
         else if (_stricmp(key, "aimreticulecm")   == 0) g_cfg.aim_reticule_cm   = clampf((float)v, 1.0f, 200.0f);
         else if (_stricmp(key, "aimreticulelua")  == 0) g_cfg.aim_reticule_lua  = (v != 0.0);
         else if (_stricmp(key, "aimreticulecube") == 0) g_cfg.aim_reticule_cube = (v != 0.0);
