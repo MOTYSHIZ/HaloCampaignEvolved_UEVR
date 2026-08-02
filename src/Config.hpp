@@ -143,14 +143,26 @@ struct Config {
     float stick_on_s   = 1.0f;
     float stick_off_s  = 0.25f;
 
-    // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged to hold
-    // the game's hard-brake key. Distinct from the quick-turn handbrake, which is the game's own
-    // left-trigger hold. Grips are read from UEVR's ACTION state -- they do not exist in the
-    // XInput mapping at all (only face buttons/sticks/triggers do), so no gameplay binding
-    // changes meaning. The key is synthesized as a SCANCODE event, the form device-layer keyboard
-    // readers accept.
+    // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged. Distinct
+    // from the quick-turn handbrake, which is the game's own left-trigger hold. Grips are read
+    // from UEVR's ACTION state -- they do not exist in the XInput mapping at all, so no gameplay
+    // binding changes meaning.
+    //
+    // DELIVERY, field-tested 2026-08-01: synthesized KEYBOARD does not reach this game's driving
+    // input. Grip detection fired on every squeeze (80 BRAKE edges logged) and the scancode Ctrl
+    // did nothing -- gameplay reads the device layer, which does not surface injected keyboard,
+    // exactly like the aim finding. The pad path through our own XInput hook is the proven lane,
+    // so that is the default now:
+    //   brake_mode 2 = LEFT STICK FULL BACK while gripping (the pad's native brake/reverse input;
+    //                  zero configuration) -- DEFAULT
+    //   brake_mode 3 = OR a pad button mask (brake_mask) into the state while gripping; use when
+    //                  the game's controller settings let hard brake be bound to a button
+    //   brake_mode 1 = the keyboard attempt (kept for reference / other titles)
+    //   brake_mode 0 = off (same as brake=0)
     bool  brake_enabled = true;
-    // Windows virtual-key held while gripping. 0xA2 = Left Ctrl, the game's default hard brake.
+    int   brake_mode    = 2;
+    int   brake_mask    = 0;      // XInput mask for mode 3, e.g. 0x0002 = DPAD_DOWN
+    // Windows virtual-key held while gripping in mode 1. 0xA2 = Left Ctrl.
     int   brake_key     = 0xA2;
 
     // WEAPON RIG -- drives the first-person rig from the controller so the gun follows the hand.
