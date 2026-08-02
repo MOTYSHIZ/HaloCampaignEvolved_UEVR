@@ -43,6 +43,18 @@ extern std::atomic<bool> g_have_ret_origin;
 // (actual distance / the distance the scale was tuned at) and the size holds steady.
 extern std::atomic<float> g_ret_scale_mul;
 
+// Re-assert visibility on both reticule components, and report the mesh's LIVE world position.
+//
+// Taking a vehicle seat tears down the pawn's first-person presentation -- the same teardown stick
+// mode detects. Our components hang off that pawn, so if they are hidden along with it the
+// reticule is placed correctly every tick and still draws nothing. This forces them back on and
+// hands back what the component itself says about its position, because on this title a
+// successful call is not evidence the object moved.
+//
+// `out_have` receives a bitmask: 1 = mesh component live, 2 = widget component live.
+// Returns true when out_pos was filled from the mesh's own getter.
+bool reticule_force_visible(Vec3* out_pos, int* out_have);
+
 // The hosted widget component, exposed because a debug command in Plugin.cpp inspects it.
 extern TrackedObject g_ret_widget_comp;
 

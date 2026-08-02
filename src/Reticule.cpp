@@ -916,6 +916,30 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
       comp->call_function(L"SetWorldScale3D", p); }
 }
 
+bool reticule_force_visible(Vec3* out_pos, int* out_have) {
+    auto* mesh = g_ret_mesh.get_checked(L"StaticMeshComponent");
+    auto* wid  = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    if (out_have != nullptr) *out_have = (mesh != nullptr ? 1 : 0) | (wid != nullptr ? 2 : 0);
+
+    uevr::API::UObject* comps[2] = { mesh, wid };
+    for (auto* c : comps) {
+        if (c == nullptr) continue;
+        // Both setters take (bool, bool bPropagateToChildren); the zeroed buffer supplies the
+        // second argument as false, which is what we want -- neither component has children.
+        { alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+          q[0] = 1; c->call_function(L"SetVisibility", q); }
+        { alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+          q[0] = 0; c->call_function(L"SetHiddenInGame", q); }
+    }
+
+    if (mesh == nullptr || out_pos == nullptr) return false;
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    mesh->call_function(L"K2_GetComponentLocation", params);
+    auto* v = reinterpret_cast<double*>(params);
+    *out_pos = Vec3{(float)v[0], (float)v[1], (float)v[2]};
+    return true;
+}
+
 void reticule_mesh_move(const Vec3& p) {
     // Validated through the object array, never by dereferencing the cached pointer: the component
     // is outered to the pawn, which is destroyed on death and area transitions.

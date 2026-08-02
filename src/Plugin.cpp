@@ -2832,11 +2832,38 @@ void update() {
             if (g_cfg.aim_mesh) reticule_mesh_ensure(pawn_root);
             reticule_mesh_move(target);
 
+            // ---- FORCE VISIBLE WHILE SEATED, and prove where it landed.
+            //
+            // The reticule's components hang off the PAWN, and taking a seat tears down that pawn's
+            // whole first-person presentation -- the weapon actor is destroyed, which is the very
+            // signal stick mode detects. If the pawn (or our component with it) is hidden by that
+            // teardown, the reticule is placed perfectly every tick and draws nothing, which is
+            // exactly the reported symptom: huge and obvious on foot, absent in every seat.
+            //
+            // Re-asserted every tick rather than on the transition: whatever hides it may do so
+            // repeatedly (seat changes, camera-mode flips), and these are two cheap setters.
+            // Component-level visibility is not sufficient on its own if the OWNING ACTOR is
+            // hidden -- bHidden suppresses every primitive under it regardless -- so the actor's
+            // flag is read back below to say which of the two is happening.
+            Vec3 actual{0.0f, 0.0f, 0.0f};
+            int have = 0;
+            const bool got = reticule_force_visible(&actual, &have);
+
             static uint32_t last_rep = 0;
-            if (tick - last_rep >= 600) {
+            if (tick - last_rep >= 300) {
                 last_rep = tick;
-                API::get()->log_info("[Halo-CampE-UEVR] vehicle reticule: aim=(%.1f,%.1f) origin=(%.0f,%.0f,%.0f) dist=%.0f",
-                                     (float)aim_pitch, (float)aim_yaw, origin.x, origin.y, origin.z, d);
+                const float err = got ? std::sqrt((actual.x - target.x) * (actual.x - target.x) +
+                                                  (actual.y - target.y) * (actual.y - target.y) +
+                                                  (actual.z - target.z) * (actual.z - target.z))
+                                      : -1.0f;
+                int pawn_hidden = -1;
+                if (auto* pw = reinterpret_cast<API::UObject*>(pawn)) {
+                    if (auto* h = pw->get_property_data<bool>(L"bHidden")) pawn_hidden = *h ? 1 : 0;
+                }
+                API::get()->log_info("[Halo-CampE-UEVR] vehicle reticule: aim=(%.1f,%.1f) dist=%.0f "
+                                     "have=%d placeErr=%.0fcm pawnHidden=%d scale=%.2f",
+                                     (float)aim_pitch, (float)aim_yaw, d, have, err, pawn_hidden,
+                                     g_ret_scale_mul.load() * g_cfg.aim_mesh_scale);
             }
         }
     }
