@@ -106,7 +106,7 @@
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.1.5"
+#define HALO_VR_VERSION "0.1.6"
 
 using namespace uevr;
 
