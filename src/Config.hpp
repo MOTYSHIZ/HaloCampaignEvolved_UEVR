@@ -236,6 +236,13 @@ struct Config {
     // bodywork. Its APPARENT size does not change with this (see g_ret_scale_mul), so it is tuned
     // purely for depth and occlusion -- 22 m by in-headset judgement. 0 = use aim_reticule_dist.
     float aim_reticule_dist_veh = 2200.0f;   // cm (22 m)
+    // SEATED SIZE, as a fraction of the on-foot size. Distance compensation alone would render the
+    // seated reticule at exactly the on-foot apparent size, but the right size is not the same in
+    // both places: a vehicle wants a finer ring (more speed, more clutter, longer shots) than
+    // infantry does. Kept as a RATIO rather than its own absolute scale so that retuning
+    // aim_mesh_scale/aim_widget_scale still moves both together, and only the difference between
+    // them lives here. 0.5 = half the on-foot apparent size, by in-headset judgement.
+    float aim_reticule_scale_veh = 0.5f;
     float aim_reticule_cm   = 12.0f;     // borrowed-prop size at that distance
 
     // Where the reticule VISUAL comes from. NOTE: the shipping visual is neither of these -- it is

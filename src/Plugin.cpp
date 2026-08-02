@@ -2818,12 +2818,16 @@ void update() {
             g_ret_origin = origin;
             g_have_ret_origin = true;
 
-            // Hold the APPARENT size steady. Both reticules are drawn at a fixed world scale, so
-            // pushing them from the on-foot distance out to the seated one shrank them by exactly
-            // that ratio -- at 30 m against a 5 m tuning the ring is a sixth the size on screen,
-            // which reads as "the reticle is gone" rather than "the reticle is small".
+            // Hold the APPARENT size steady, then apply the seated size ratio on top.
+            //
+            // Both reticules are drawn at a fixed world scale, so pushing them from the on-foot
+            // distance out to the seated one shrank them by exactly that ratio -- at 30 m against a
+            // 5 m tuning the ring is a sixth the size on screen, which reads as "the reticle is
+            // gone" rather than "the reticle is small". `d / ref` cancels that, leaving the seated
+            // reticule at on-foot apparent size; aim_reticule_scale_veh is then the deliberate
+            // difference between the two, so infantry sizing is never disturbed by vehicle tuning.
             const float ref = (g_cfg.aim_reticule_dist > 1.0f) ? g_cfg.aim_reticule_dist : 500.0f;
-            g_ret_scale_mul = d / ref;
+            g_ret_scale_mul = (d / ref) * g_cfg.aim_reticule_scale_veh;
 
             if (g_cfg.aim_widget) {
                 reticule_widget_ensure(pawn_root);
