@@ -249,9 +249,6 @@ re-downloaded.
   first-person rig the mod moves, so when your hands go where you point them, the shield FX stay
   where the game originally put them. Most visible when the overshield is active.
 - **Right-hand aiming only.** There's no left-handed mode yet.
-- **Vehicles are strongly motion-sickness inducing.** Both the camera and the aim are currently
-  driven by the right controller, so looking around and aiming can't be separated while driving.
-  Treat vehicle sections with caution; this needs a dedicated vehicle control scheme.
 - **Aim reticle jitter during fast movement** *(work in progress)*. The mod steers the game's flat
   aim very quickly to follow your hand, and the overshoot/damping tuning isn't finished. Swinging
   fast can make the reticle wobble before it settles. `ffgain` and `dgain` let you tune this
@@ -279,7 +276,6 @@ re-downloaded.
   it. Worst when you rely on audio to locate something off-screen. No workaround beyond stick-turning
   toward what you're listening for; a proper fix means moving the game's audio listener onto the
   headset pose, which the mod doesn't currently touch.
-- The reticule ring appears a few seconds after a mission loads (its material streams in late).
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
