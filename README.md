@@ -256,11 +256,6 @@ re-downloaded.
   3. **Loss of session focus on OpenXR** — the SteamVR dashboard, an overlay app, or a remote-desktop
      connection stops controller poses updating at the runtime level. Give the game focus and press
      something to recover. Though this doesn't always appear to work. Any feedback on reliable fixes are welcome.
-- **Changing your real-world stance breaks tracking.** Standing up if you started seated, or sitting
-  down if you started standing, throws the weapon and the aim off — the mod's reference is tied to
-  where your play space was when it started, and moving your head to a different height invalidates
-  it. **Reset your play area / recentre** and it comes back. Pick a stance before you inject and stay
-  in it; if you want to switch, expect to recentre afterwards.
 - **Buttons mapped wrong?** You're on the OpenVR runtime. See [Runtime](#runtime-use-openxr) for the
   one-line fix.
 - **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A
@@ -290,21 +285,6 @@ re-downloaded.
   meantime but use the right stick until you're armed; the unarmed section is short. A later
   release will separate the two checks so the mod can tell "no weapon" from "not on foot".
 - **Right-hand aiming only.** There's no left-handed mode yet.
-- **Aim reticle jitter during fast movement** *(work in progress)*. The mod steers the game's flat
-  aim very quickly to follow your hand, and the overshoot/damping tuning isn't finished. Swinging
-  fast can make the reticle wobble before it settles. `ffgain` and `dgain` let you tune this
-  yourself in the meantime.
-- **The hosted crosshair and hit marker render dark**, and the game's own reticle reads as black —
-  still being investigated. The game draws its UI into an offscreen target whose colour no material
-  this game ships can reproduce on a world surface. In the meantime the mod adds its own **light
-  blue ring** at the true aim point, which is the reticle you should actually use. The game's
-  crosshair still tracks aim, animates, and changes per weapon; it just reads dark against bright
-  scenery. Adjust the ring with `aimmeshcr/cg/cb` and `aimmeshscale`, or hide the flat crosshair
-  entirely with `hudhide=1`.
-- **The aim ring can be occluded by geometry.** It's drawn at a fixed distance (`aimreticuledist`,
-  500 cm by default), so when you aim at something closer than that the ring sits *inside* the
-  surface and disappears. Lowering `aimreticuledist` helps in tight spaces. The planned fix is to
-  trace for the first surface along the aim ray and pull the ring in to meet it.
 - **UI waypoints and objective markers are misplaced**, and drift with your right-hand aim rather
   than staying pinned to the world. They're positioned against the game's flat view, which the mod
   now steers with your controller — so the marker follows your hand instead of the objective.
@@ -324,9 +304,6 @@ re-downloaded.
   rendering is UEVR's own hook, which this mod never touches.
 - Mid-mission injection is unreliable — expect rendering glitches or a hang. Always inject at the
   main menu.
-- Aim feel is tuned against the game's default **controller look sensitivity** — the mod steers aim
-  by synthesizing stick input, so that setting scales the whole loop. It measures the real turn rate
-  and adapts to other values, but give it a few seconds of turning before judging.
 
 More in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
