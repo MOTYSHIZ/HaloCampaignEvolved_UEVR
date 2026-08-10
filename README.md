@@ -169,11 +169,14 @@ important knobs:
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
 | `aimwidgetgain` | 256 | Brightness of the hosted crosshair. Unlit UI is scaled down by the scene's exposure, so it needs a large multiplier; lower it if the crosshair blooms |
 | `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
+| `shell` | 1 | Keep the shield/overshield glow on your hands. `0` leaves it where the game puts it |
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step |
 | `stickmode` | 1 | Switch to gamepad controls in vehicles, turrets and cutscenes (see [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets)) |
 | `stickforce` | 0 | `1` forces those controls on, `2` never uses them, `0` decides automatically |
 | `stickon` / `stickoff` | 0.75 / 0.05 | Seconds before switching in and out |
 | `brake` / `brakemode` | 1 / 3 | Grip hard brake, and how it's sent (`3` presses A) |
+| `cutscene2d` | 0 | Optional: watch cutscenes on UEVR's flat 2D screen (`1`) or with eye separation collapsed (`2`) instead of doubled stereo. Off by default while it's being verified — see [Known issues](#known-issues). If the flat view ever fails to switch back after a scene, squeeze a grip to force normal VR back |
+| `cuthint` | 1 | In-VR hint panel shown when `cutscene2d=1`: if the screen doesn't display, open the VR system menu and watch on the desktop view |
 | `vrinactivity` | 100 | Raises UEVR's motion-controls inactivity timeout to its maximum |
 
 The full key list with comments is in the shipped `halo_vr.cfg`.
@@ -262,14 +265,30 @@ re-downloaded.
   one-line fix.
 - **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A
   controller binding is coming.
-- **Cutscenes display oddly** — the picture doesn't resolve correctly in stereo. Closing one eye
-  makes them watchable until this is fixed.
+- **Cutscenes display doubled.** They're pre-rendered movies composited outside the game's 3D
+  render, so they don't resolve in stereo; closing one eye makes them watchable. A proper in-VR
+  cinema screen for them is being worked on.
+  - There's an **optional, off-by-default** workaround: `cutscene2d=1` switches to UEVR's flat 2D
+    screen for the duration of a scene (`2` collapses eye separation instead). It's off because
+    it's still being verified after a bug where the view could flip repeatedly when a cutscene
+    ended — that's fixed, and there's now a safety breaker that shuts the feature off for the
+    session if it ever detects rapid flipping, but it hasn't been signed off in a headset yet.
+    **If you enable it and see the view flicker rapidly, set it back to 0 and please send us the
+    log.**
+  - One more caveat for `cutscene2d=1`: over **SteamVR's OpenXR runtime the flat screen may not
+    display in the headset** (a SteamVR compositing limitation — the picture is submitted, and
+    even shows behind the dashboard). If that happens, **open your VR system menu and watch on
+    the desktop view**; a hint panel in VR says so, and `cuthint=0` hides it.
 - **No zoom yet.** Pressing left trigger will hardly do anything for you. This is something that I intend to target relatively soon.
-- **Your arms are in a T-pose at the very start**, before you pick up your first weapon. It corrects
-  itself once you're armed.
-- **The shield and overshield effects don't follow your arms.** They're driven separately from the
-  first-person rig the mod moves, so when your hands go where you point them, the shield FX stay
-  where the game originally put them. Most visible when the overshield is active.
+- **Before you pick up your first weapon, the motion controls stand down.** Your arms sit in a
+  T-pose, motion aim doesn't drive the game's aim, and snap/smooth turning stops responding — so
+  that opening stretch plays as flat gamepad controls, with the right stick doing the looking.
+  Everything corrects itself the moment a weapon is in your hands. The cause is that the mod finds
+  the first-person arms rig *through* the equipped weapon, and it reads that same absence as "not
+  in normal first-person control" — the check that deliberately hands the view back to the game in
+  vehicles and cutscenes. Standing unarmed on foot looks identical to it. Nothing to do in the
+  meantime but use the right stick until you're armed; the unarmed section is short. A later
+  release will separate the two checks so the mod can tell "no weapon" from "not on foot".
 - **Right-hand aiming only.** There's no left-handed mode yet.
 - **Vehicles are strongly motion-sickness inducing.** Both the camera and the aim are currently
   driven by the right controller, so looking around and aiming can't be separated while driving.
@@ -336,8 +355,9 @@ split by feature to make that easier.
 **Special thanks to [elliotttate](https://github.com/elliotttate)** — for hosting the Flat2VR
 community, without which none of this work would have found the people who made it possible, and for
 writing **CutsceneDetectionPlugin**, which ships in this profile's `plugins\` folder and handles
-cutscene comfort (disabling decoupled pitch, switching to a 2D view and damping camera shake while a
-cutscene plays). That plugin is his work, not ours.
+cutscene comfort (disabling decoupled pitch and camera offsets around cutscene camera cuts). That
+plugin is his work, not ours — and this mod's own cutscene handling (the flattened cutscene view,
+`cutscene2d`) follows the approach his plugin pioneered.
 
 He is also the reason this mod's crosshair has colour at all. The world-space crosshair rendered
 near-black for a long time, and the diagnosis that fixed it is his: an unlit widget's output is

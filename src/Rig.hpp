@@ -50,6 +50,18 @@ extern std::atomic<float> g_rigw_x, g_rigw_y, g_rigw_z, g_rigw_w;
 extern std::atomic<bool>  g_rigw_valid;
 extern std::atomic<float> g_rigw_parent_yaw;
 
+// The rig's WORLD-space offset from its parent, published by the tick so the render side can
+// re-derive RelativeLocation against the LIVE parent -- exactly as it already does for rotation.
+//
+// Without this, only rotation is corrected per frame. The location stays as the tick computed it,
+// conj(parent_at_tick) * off_world, so between ticks the weapon's world position becomes
+// R_parent_now * conj(R_parent_tick) * off_world: the offset vector swung by however far the parent
+// turned. That is a pure lever -- harmless when the parent crawls, violent when it does not. With
+// direct aim assignment the parent tracks the hand exactly, RIGRENDER measured 82 deg of parent
+// motion between ticks, and through a ~57 cm controller offset that is most of a metre of swing.
+extern std::atomic<float> g_rigw_off_x, g_rigw_off_y, g_rigw_off_z;
+extern std::atomic<bool>  g_rigw_off_valid;
+
 // ---- debug markers ---------------------------------------------------------------------------
 // A "borrowed" marker is an existing world actor repurposed as a visible dot, because UE strips
 // DrawDebugSphere from shipping builds.
@@ -85,10 +97,47 @@ bool rig_component_alive();
 // stick-mode dismount watcher) that need the component without triggering a resolve.
 uevr::API::UObject* rig_tracked_component();
 
+// The FP weapon ACTOR the rig was last reached through, or nullptr. For the reticule trace: the gun
+// is a separate actor, so ignoring the pawn does not cover it.
+uevr::API::UObject* fp_weapon_actor();
+
+// ---- first-person shield shell ---------------------------------------------------------------
+// BPC_FP_TranslucentSkeletalMesh_C: the translucent energy skin that lights up when shields flare
+// or break and when the overshield is active. A SIBLING of the arms rig, running its own instance
+// of the same first-person anim blueprint -- so it is posed identically to the arms but transformed
+// independently, and our relative-transform write to the arms never moves it. Driving it with the
+// IDENTICAL transform is what keeps the shield on the hands.
+//
+// resolve_shield_shell() walks the PAWN's component list (O(components)), never the object array.
+// Pass the arms rig's attach parent for the sibling fallback; nullptr is fine.
+uevr::API::UObject* resolve_shield_shell(uevr::API::UObject* rig_parent);
+
+// The tracked shell, or nullptr if never acquired / its array slot was recycled. O(1), but it
+// class-name-checks the slot, which builds a string -- fine per tick, NOT per render frame.
+uevr::API::UObject* shield_shell();
+
+// Render-thread mirror of the above: a bare validated pointer, published by the tick and consumed
+// by the stereo callback, exactly as g_rig_component is. Exists because the shell has to be
+// re-applied at RENDER rate as well -- writing the arms per frame and the shell only per tick
+// (~32 Hz) leaves the shield trailing the hands while you turn and snapping back when you stop.
+extern std::atomic<void*> g_shell_component;
+
+// Adopt a freshly resolved shell (no-op if unchanged). One O(n) slot lookup per acquisition.
+void note_resolved_shell(uevr::API::UObject* shell);
+
+// Drop the handle -- level transition, or the feature being switched off.
+void forget_shield_shell();
+
 // Write the rig's RELATIVE transform. Never the world transform -- see the note at the top.
 bool rig_set_rotation(uevr::API::UObject* rig, double pitch, double yaw, double roll);
 bool rig_set_location(uevr::API::UObject* rig, double x, double y, double z);
 bool rig_set_scale(uevr::API::UObject* rig, double s);
+
+// World-space equivalents. See the note in Rig.cpp: the relative ROTATION write does not take on
+// this game's first-person mesh, so rigmode 3 drives the world transform instead of composing a
+// relative one against a parent whose result the engine then discards.
+bool rig_set_world_rotation(uevr::API::UObject* rig, double pitch, double yaw, double roll);
+bool rig_set_world_location(uevr::API::UObject* rig, double x, double y, double z);
 
 bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
 

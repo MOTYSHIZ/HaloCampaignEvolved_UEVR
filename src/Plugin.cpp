@@ -81,6 +81,7 @@
 #include <cstring>
 #include <cstdlib>
 
+#include <chrono>
 #include "uevr/Plugin.hpp"
 
 // Pure maths (quaternions, rotators, the calibration solve). Free of plugin state by design --
@@ -99,14 +100,23 @@
 
 // Aim reticule: our own mesh reticule, plus one hosting the game's own reticle widget.
 #include "Reticule.hpp"
+#include "CutsceneHint.hpp"
 
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
+#include "AimTrace.hpp"
+#include "MemScan.hpp"
+#include "BlamAim.hpp"
+#include "BlamDrive.hpp"
+#include "HitTrace.hpp"
+#include "AimWatch.hpp"
+#include "AimDirect.hpp"
+#include "GameSettings.hpp"
 
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.1.5"
+#define HALO_VR_VERSION "0.2.0"
 
 using namespace uevr;
 
@@ -184,6 +194,84 @@ std::atomic<bool>  g_lock_primed{false};
 // from a RE-prime after stick mode, which must fold the difference into the turn offset instead
 // -- see the prime site for why those are different operations.
 std::atomic<bool>  g_lock_ever{false};
+
+// REMOVED: a re-prime suppressor that tried to stop the stick-mode exit fold from running across a
+// level load, first keyed on the world object and then on the pawn. Recorded because the reasoning
+// looked sound both times and was wrong both times, measurably:
+//
+//   * WORLD: Restart Mission reloads the same level, so the outermost object never changed. One log
+//     line in an entire session while the bug reproduced every time.
+//   * PAWN: fourteen stick-mode transitions, including vehicles, with zero pawn changes -- the
+//     stick-mode detector's own pawnmatch=1 says the same thing. Riding a vehicle does not
+//     re-possess on this title.
+//
+// So it never fired, and the arms-after-restart bug it was chasing turned out to be the PIVOT being
+// re-derived from an animated skeleton (see the solve, which now pins it). If a cross-level fold
+// ever needs suppressing, find a signal that demonstrably fires FIRST -- both of these were written,
+// reasoned about at length, shipped, and inert.
+
+// ---------------------------------------------------------------- THE CALIBRATION FRAME
+// The yaw a persisted calibration must be measured against, or 0 when the feature is off.
+//
+// `g_locked_view_yaw` is the constant relating ROOM yaw to the yaw we render, and it is primed ONCE
+// per session from the game camera on the first stereo frame after injection. So it encodes WHERE
+// YOU INJECTED: the menu's camera (measured 0.0, reproducible) or, if you attach mid-mission,
+// whatever direction the player happens to be facing (arbitrary). Storing the calibration MINUS
+// this and applying it PLUS the live value makes the saved numbers independent of that choice --
+// which is the whole fix. See the long note on Config::calib_relative for the derivation.
+//
+// Read through one function so the four call sites cannot drift apart: two WRITE sites (the
+// calibration solves) must subtract exactly what the two USE sites add, or the calibration is
+// silently biased by twice the term.
+// !!! THE FRAME IS A ROTATION, NOT A NUMBER YOU CAN ADD TO A ROTATOR'S YAW FIELD.
+// The first version of this added the frame to `gripyaw`. That is only equivalent to rotating the
+// frame when pitch and roll are both zero -- and the grip trim carries a ~-65 degree PITCH, so it
+// mixed the axes instead: rolling the controller pitched the arms and pitching rolled them.
+// It must be applied as a world-yaw rotation on the LEFT of the controller orientation, which is
+// exactly where q_turn already sits, so it is folded in there instead (both are pure yaws, so
+// adding those two scalars IS valid).
+//
+// TWO accessors, because use and write must disagree exactly once -- while a v1 file is being
+// upgraded:
+//   USE   applies the frame only for a file that is actually stored relative (calibver >= 2).
+//         A v1 file already has a frame baked in; adding another would double-count it.
+//   WRITE applies it whenever the feature is on, so the value the solve stores is frame-relative
+//         and can be stamped v2.
+// The round trip is what makes the upgrade seamless: you calibrate against a gun rendered with
+// frame 0 (v1), the solve stores (aligned - locked), and the next use adds locked back to render
+// the identical pose -- while a DIFFERENT injection point now gets its own locked. No transient
+// breakage, no forced re-calibration ordering.
+// Gated PER GESTURE (see Config::aim_calib_ver): the mesh trim and the aim offset are rebased by
+// different gestures, so one can be relative while the other is still absolute. Applying the frame
+// to whichever has NOT been rebased is precisely the "arms right, reticle wrong" split.
+static float calib_frame_yaw_use() {        // gripyaw   -- mesh calibration
+    return (g_cfg.calib_relative && g_cfg.calib_ver >= 2) ? g_locked_view_yaw.load() : 0.0f;
+}
+static float aim_frame_yaw_use() {          // aimoffyaw -- aim calibration
+    return (g_cfg.calib_relative && g_cfg.aim_calib_ver >= 2) ? g_locked_view_yaw.load() : 0.0f;
+}
+static float calib_frame_yaw_write() {
+    return g_cfg.calib_relative ? g_locked_view_yaw.load() : 0.0f;
+}
+
+// ---------------------------------------------------------------- THE PRIME/CAPTURE RACE
+// The rig and the aim consume the frame DIFFERENTLY, and only one of them tolerates being early:
+//   * the rig re-reads it every tick, so it self-corrects the moment the lock primes;
+//   * the aim BAKES it into g_ref_aim_yaw once, at reference capture, and never revisits it.
+// Those two run on different threads -- reference capture on the game thread, the prime in the
+// stereo callback -- and nothing ordered them. Lose the race and the aim mapping is anchored with
+// frame 0 while the stored offset was rebased against a non-zero one, so aim is wrong by exactly
+// `locked` while the arms look perfect. Field-observed: `pinned=143.2` alongside
+// `reference RESTORED ... (frame yaw 0.0)`.
+//
+// Dropping the reference makes the next armed tick re-capture against the now-known frame. A
+// re-capture is an ordinary event here (level load, respawn, recentre all do it) and the restore
+// path is offset-based, so it lands on the same mapping -- just with the right frame this time.
+// Called from the render thread, so it touches nothing but atomics.
+static void invalidate_ref_for_frame() {
+    if (!g_cfg.calib_relative) return;   // frame unused -> nothing to re-anchor, change nothing
+    g_have_ref = false;
+}
 
 // JUDDER METRIC -- measures FRAME-TO-FRAME CHANGE in the yaw we actually render:
 // |viewOut(n) - viewOut(n-1)| at render rate, excluding deliberate turning. That is the wobble a
@@ -276,6 +364,13 @@ bool g_route_alive_now = true;
 // game thread, consumed in the XInput hook.
 std::atomic<bool> g_brake_pad{false};
 
+// True while the CUTSCENE 2D SCREEN owns UEVR's VR_2DScreenMode (we set it, we restore it).
+// Distinct from the raw camera signal: engage latches on a cinematic-camera sighting during
+// stick mode and holds until the weapon returns, because the camera signal only marks a
+// cutscene's start while the weapon route spans its whole length. Game thread only; atomic for
+// consistency with its neighbours.
+std::atomic<bool> g_cut2d_engaged{false};
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -284,7 +379,6 @@ std::atomic<bool> g_calib_finish{false};
 // Raw pad-button state, published by the XInput hook and consumed on the game thread. The hook
 // deliberately does NOT edge-detect: the keyboard source is invisible from there, and detecting
 // edges on two threads against one state would race.
-std::atomic<bool> g_pad_calib_down{false};
 
 // ---------------------------------------------------------------- AIM CALIBRATION
 // The mirror of the mesh calibration, and deliberately a SEPARATE gesture: one adjusts where the
@@ -296,7 +390,28 @@ std::atomic<bool> g_pad_calib_down{false};
 // Release: the hand-to-aim reference is re-captured, binding "controller pointing here" to
 // "game aiming there" -- which is the entire content of that reference.
 std::atomic<bool> g_aimcal_held{false};
+// Controller angles sampled AT the Page Down release edge, so the aim reference binds to where the
+// hand was when the key came up rather than where it has drifted to a tick later. See the release
+// handler for why that tick matters.
+std::atomic<bool>  g_aimcal_have_snap{false};
+std::atomic<float> g_aimcal_snap_yaw{0.0f}, g_aimcal_snap_pitch{0.0f};
+
+// (No equivalent for the End pose-match bind, deliberately. One existed; it was removed after the
+// instrument showed the release edge and the solve are the same update() call, 0.00 cm apart. The
+// Page Down capture above is different because ITS consumer is genuinely deferred to a later tick.)
 std::atomic<bool> g_kill_held{false};   // Ctrl+kill_key edge state (see the kill switch below)
+std::atomic<bool> g_mode_held{false};   // Ctrl+mode_key edge state (aim-mode toggle)
+
+// HOTKEY OVERRIDES. -1 = no override, 0/1 = the value the hotkey forced.
+//
+// update() calls load_config() unconditionally every ~2 s, so a hotkey that only flips g_cfg in
+// memory is undone by the next poll. That is not hypothetical: it is what happens to the kill
+// switch today -- Ctrl+HOME disables the driver and `enabled=1` in the file turns it straight back
+// on, which is the one feature that must never quietly fail. Each override is re-applied after
+// every reload, and released the moment the FILE's own value changes, so hand-editing the config
+// still wins exactly as the kill switch's comment promises.
+std::atomic<int> g_kill_override{-1};
+std::atomic<int> g_mode_override{-1};
 std::atomic<bool> g_aimcal_start{false};
 std::atomic<bool> g_aimcal_finish{false};
 // Set on release so the NEXT reference capture measures a new offset rather than restoring the
@@ -317,8 +432,14 @@ std::atomic<float> g_last_dt{0.033f};   // engine tick delta, for smooth turn
 //
 // Stats are RESET every report window. A latching max would show the worst hitch since injection
 // forever, which cannot show whether a fix worked.
-enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_COUNT };
-const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   " };
+// PERF_TRACE is the reticule's line trace: a reflected UKismetSystemLibrary::LineTraceSingle,
+// EVERY TICK, which is the only per-tick engine call this plugin makes. It was added without being
+// measured, on the reasoning that one trace is cheap -- exactly the reasoning that produced the
+// periodic microstutter these timers exist to catch. Unlike the other four it is not gated behind a
+// tick counter, so `n` here should track the tick count and `mean` is the per-frame cost.
+enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_SHELL, PERF_TRACE, PERF_COUNT };
+const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   ",
+                                            "resolve_shell ", "reticule_trace" };
 
 struct PerfStat {
     double   max_ms = 0.0;
@@ -418,6 +539,15 @@ bool g_calib_valid = false;
 Quat g_calib_gun_world{0.0f, 0.0f, 0.0f, 1.0f};   // weapon world orientation, frozen
 Vec3 g_calib_off_world{0.0f, 0.0f, 0.0f};         // weapon world offset, frozen
 Quat g_last_gun_world{0.0f, 0.0f, 0.0f, 1.0f};    // updated every driven tick
+#if HALO_VR_DEV
+// CALIBJUMP: consecutive driven frames across a calibration release. Each quantity is differenced
+// against ITSELF on the previous frame -- see the sampling site for why the first attempt (rate
+// limited, and differencing two different coordinate spaces) measured nothing.
+int  g_calibjump_arm = 0;
+bool g_calibjump_have_prev = false;
+Vec3 g_calibjump_gun{}, g_calibjump_par{};
+float g_calibjump_rot_p = 0.0f, g_calibjump_rot_y = 0.0f;
+#endif
 Vec3 g_last_off_world{0.0f, 0.0f, 0.0f};
 
 // UE's FQuat::Rotator(), singularity handling included. Deriving pitch by taking asin() of a
@@ -619,6 +749,7 @@ void probe_render_target_pixels(API::UObject* rt) {
     // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
 #endif
 }
+
 
 // Asset loading helpers (load_asset_by_path, find_or_load_material, import_texture_file,
 // make_color_rt) moved to Reticule.cpp -- the reticule is their only caller.
@@ -991,6 +1122,44 @@ API::UObject* find_ui_manager() {
     return nullptr;
 }
 
+// ---- THE AUTHORITATIVE CUTSCENE SIGNAL
+//
+// BlamCinematicSubsystem::IsCinematicInProgress() -- the game's own cutscene state, verified
+// live on this title: true for the entire span of a pre-rendered movie, false outside it.
+// Like the UI manager above, it is a GameInstanceSubsystem: it exists from boot and UEVR's
+// reflection is safe on it. (Its LevelSequenceActor field is NOT usable -- the actor it points
+// at is transient and dies while the movie is still playing.) The camera-class heuristic in
+// the cutscene block stays as the fallback for a build where this class is missing.
+TrackedObject g_cine_subsystem;
+
+API::UObject* find_cine_subsystem() {
+    if (auto* cached = g_cine_subsystem.get_checked(L"BlamCinematicSubsystem")) {
+        return cached;
+    }
+
+    // A miss means a full object-array sweep to look again, so retry only every 128th call --
+    // on a build without the class that is one sweep per ~30 s at the 4 Hz poll, not one per
+    // poll forever.
+    static uint32_t miss_calls = 0;
+    if ((miss_calls++ & 127) != 0) return nullptr;
+
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return nullptr;
+
+    const int32_t n = arr->get_object_count();
+    for (int32_t i = 0; i < n; ++i) {
+        auto* o = arr->get_object(i);
+        if (o == nullptr) continue;
+        if (class_name_of(o).find(L"BlamCinematicSubsystem") == std::wstring::npos) continue;
+        auto* cls = o->get_class();
+        if (cls != nullptr && o == cls->get_class_default_object()) continue;
+        g_cine_subsystem.set_at(o, i);
+        API::get()->log_info("[Halo-CampE-UEVR] BlamCinematicSubsystem acquired @%p", (void*)o);
+        return o;
+    }
+    return nullptr;
+}
+
 bool is_menuish_class(const std::wstring& cn) {
     return cn.find(L"PauseMenu")  != std::wstring::npos
         || cn.find(L"PauseScreen")!= std::wstring::npos
@@ -1040,7 +1209,11 @@ void reticle_rescan(uint32_t tick) {
     // The throttle above bounds how OFTEN it runs; it never asked whether it should run at all.
     // Everything the sweep produces has exactly two consumers, and in the shipping profile both go
     // quiet seconds after a level loads:
-    //   g_reticles         -> hud_reticle_follow (returns immediately when hudfollow=0, the default)
+    //   g_reticles         -> hud_reticle_follow (returns immediately when hudfollow=0)
+    //     ⚠️ hud_follow's CODE default is true, not 0. Both shipped and live profiles set
+    //     hudfollow=0, so in practice this term is false -- but a config without that line
+    //     re-enables the sweep permanently, which is the microstutter this gate exists to stop.
+    //     The safe default is false; left as-is only because changing it is a behaviour change.
     //                      -> the widget reticule's ONE-SHOT pick, done once the component binds
     //   g_menu_candidates  -> menu_poll's FALLBACK only, dead while the UI-manager subsystem answers
     // So after the widget bound, this was rebuilding two arrays that nothing would ever look at.
@@ -1051,6 +1224,7 @@ void reticle_rescan(uint32_t tick) {
     const bool needed = g_cfg.menu_dump                              // discovery: the sweep IS the product
                      || g_cfg.hud_follow                             // moves/hides the flat reticle
                      || reticle_widget_needs_pick()                  // still choosing a widget to host
+                     || reticle_stray_check_due(tick)                // HUD rebuilt a second crosshair
                      || (g_cfg.menu_detect && !g_ui_manager_ok.load());   // candidates are the fallback
     if (!needed) return;
 
@@ -1080,6 +1254,7 @@ void reticle_rescan(uint32_t tick) {
             g_reticles[g_reticle_count].found_tick = tick;
             ++g_reticle_count;
         }
+        // (strays are collapsed after the loop, once the full list exists -- see below)
         if (is_menu && g_menu_candidate_count < 8) {
             g_menu_candidates[g_menu_candidate_count++].set_at(o, i);
         }
@@ -1130,6 +1305,11 @@ void reticle_rescan(uint32_t tick) {
             API::get()->log_info("[Halo-CampE-UEVR]   [%d] %s", i, path.c_str());
         }
     }
+
+    // Hide any of the game's flat crosshairs that are not the one we host. Placed HERE, at the end
+    // of the sweep, so it reuses the list that was just built and costs nothing of its own -- and
+    // so it sees the complete list rather than deciding "stray" from a partial scan.
+    reticle_collapse_strays();
 }
 
 // Ask the candidates whether any is actually on screen. Polled faster than the object-array scan
@@ -1345,6 +1525,119 @@ void hud_reticle_follow(float aim_pitch, float aim_yaw, uint32_t tick) {
 
 // The aim control loop (control-rotation reads, the control law, pose reading) is in MotionAimControl.cpp.
 // ---------------------------------------------------------------- the loop
+
+// ---------------------------------------------------------------- reticule ray angles
+//
+// Which angles the reticule is drawn from, plus the two things that make the smooth option safe.
+// One helper serves the on-foot and vehicle sites so they cannot drift apart.
+//
+// SOURCE (aim_reticule_src). 0 = the game's own aim: truthful, and the only on-screen readout of
+// loop error, so it stays the default and tuning runs must use it. 1 = the controller setpoint:
+// smooth, because it is intent rather than achieved angle.
+//
+// DIVERGENCE GUARD. Source 1 lies when the loop cannot keep up, and lies most confidently exactly
+// when something is broken. So the gap is measured continuously and, once it has been too large for
+// longer than a brief grace period, the reticule SNAPS back to the true aim and stays there until
+// the loop reconverges. The grace period is what stops a normal fast turn -- where lag is expected,
+// harmless and transient -- from flickering the source every time the player whips around.
+//
+// SMOOTHING. A first-order filter on the emitted angles. The jitter being hidden is high-frequency;
+// the truth worth keeping is the low-frequency mean. Filtering therefore removes the distraction
+// while a systematic offset still shows through, which is why it is applied to BOTH sources rather
+// than only to the smooth one.
+//
+// Timed with steady_clock rather than a tick counter: this may be called more than once per tick,
+// and wall-clock deltas stay correct in that case instead of double-counting.
+static void reticule_ray_angles(double aim_yaw, double aim_pitch, float* out_yaw, float* out_pitch) {
+    static bool  snapped = false;          // latched: guard currently forcing the true aim
+    static float over_s  = 0.0f;           // seconds the divergence has been over threshold
+    static float sm_yaw = 0.0f, sm_pitch = 0.0f;
+    static bool  have_sm = false;
+    static auto  last_t = std::chrono::steady_clock::now();
+
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - last_t).count();
+    last_t = now;
+    if (!(dt > 0.0f) || dt > 0.5f) dt = 0.0f;   // first call, or a hitch/level load: do not integrate
+
+    float yaw   = (float)aim_yaw;
+    float pitch = (float)aim_pitch;
+    bool  used_setpoint = false;
+
+    const bool want_setpoint = (g_cfg.aim_reticule_src == 1) && halo::g_aim_law_armed.load();
+    if (want_setpoint) {
+        const float des_yaw   = halo::g_desired_yaw.load();
+        const float des_pitch = halo::g_desired_pitch.load();
+
+        const float dy = wrap180(des_yaw   - (float)aim_yaw);
+        const float dp = wrap180(des_pitch - (float)aim_pitch);
+        const float diverge = std::sqrt(dy * dy + dp * dp);
+
+        const float on_deg  = g_cfg.aim_reticule_div_deg;
+        // Recover at half the trip threshold: a single threshold would sit the guard on the edge and
+        // flap between sources, which is more distracting than the jitter it exists to hide.
+        const float off_deg = on_deg * 0.5f;
+
+        if (!snapped) {
+            over_s = (diverge > on_deg) ? (over_s + dt) : 0.0f;
+            if (over_s >= g_cfg.aim_reticule_div_ms * 0.001f) {
+                snapped = true;
+                API::get()->log_info("[HALO-AIM] reticule: divergence %.1f deg held past %.0f ms "
+                                     "-- snapping to true aim", diverge, g_cfg.aim_reticule_div_ms);
+            }
+        } else if (diverge < off_deg) {
+            snapped = false;
+            over_s  = 0.0f;
+            API::get()->log_info("[HALO-AIM] reticule: reconverged (%.1f deg) -- setpoint again", diverge);
+        }
+
+        if (!snapped) { yaw = des_yaw; pitch = des_pitch; used_setpoint = true; }
+    } else {
+        snapped = false;
+        over_s  = 0.0f;
+    }
+
+    // Filter last, so it applies to whichever source won and a snap is eased rather than instant.
+    //
+    // MOTION-GATED. Smoothing unconditionally was wrong: it hid jitter while the hand was still,
+    // but also lagged every deliberate swing, which is the part that actually reads as sluggish.
+    // So the filter disengages as the setpoint speeds up, using the rate the control law already
+    // measures for feedforward -- full smoothing when near-still, none at all during a fast move,
+    // linear blend between so there is no perceptible switch.
+    // PER-SOURCE strength. The two sources carry different noise and want different filters: the
+    // game aim carries the control loop's residual, while the controller setpoint carries hand
+    // tremor and tracking noise -- finer and faster, so it needs only a light touch to settle.
+    // Keyed off the source actually used, not the one configured, so a guard snap is filtered as
+    // the game aim it is now showing.
+    float tau_ms = used_setpoint ? g_cfg.aim_reticule_smooth_ctrl_ms
+                                 : g_cfg.aim_reticule_smooth_ms;
+    {
+        const float slow = g_cfg.aim_reticule_smooth_slow_dps;
+        const float fast = g_cfg.aim_reticule_smooth_fast_dps;
+        if (fast > slow) {
+            const float rate = halo::g_setpoint_rate_dps.load();
+            const float t = clampf((rate - slow) / (fast - slow), 0.0f, 1.0f);
+            tau_ms *= (1.0f - t);   // -> 0 ms (raw) as the swing gets faster
+        }
+    }
+    // dt is the frame dt here: unlike the aim law's rate filters, this one advances every call.
+    // NOTE the sense of a==0 changed with the switch to time constants, and getting it backwards
+    // would be invisible in code review and obvious in a headset. It no longer means "smoothing is
+    // off, pass the value through" -- tau_ms=0 gives a==1 and does that. It now means NO TIME HAS
+    // PASSED (first call, or a stall the dt guard rejected), and the right answer there is to hold.
+    const float a = ema_alpha(tau_ms, dt);
+    if (!have_sm) {
+        sm_yaw = yaw; sm_pitch = pitch; have_sm = true;   // seed; never filter the first sample
+    } else if (a > 0.0f) {
+        // Through wrap180 so the filter never takes the long way round at the +-180 seam.
+        sm_yaw   = wrap180(sm_yaw   + a * wrap180(yaw   - sm_yaw));
+        sm_pitch = sm_pitch + a * (pitch - sm_pitch);
+    }
+
+    *out_yaw   = sm_yaw;
+    *out_pitch = sm_pitch;
+}
+
 void update() {
     g_aim_law_armed = false;
     const uint32_t tick = g_ticks.fetch_add(1);
@@ -1356,21 +1649,165 @@ void update() {
         g_cfg_check_tick = tick;
         PerfScope _perf(PERF_CFG);
         load_config();
+
+        // Re-apply hotkey overrides on top of what was just parsed (see g_kill_override). Each is
+        // released when the file's own value CHANGES, so an edit still beats a stale hotkey.
+        {
+            static int s_file_enabled = -1;
+            const int file_enabled = g_cfg.enabled ? 1 : 0;
+            if (s_file_enabled != file_enabled) { s_file_enabled = file_enabled; g_kill_override = -1; }
+            const int ov = g_kill_override.load();
+            if (ov >= 0) g_cfg.enabled = (ov != 0);
+        }
+        {
+            // Aim mode only. The rig is deliberately NOT forced here -- see the toggle itself: rig
+            // mode 3 is the fixed rig and belongs on both aim paths, so tying it to the aim mode
+            // reverted the arms to the broken write every time you switched back to stick drive.
+            static int s_file_direct = -1;
+            const int file_direct = g_cfg.aim_direct ? 1 : 0;
+            if (s_file_direct != file_direct) { s_file_direct = file_direct; g_mode_override = -1; }
+            const int ov = g_mode_override.load();
+            if (ov >= 0) g_cfg.aim_direct = (ov != 0);
+        }
+        // SEED the plant gain, ON CHANGE ONLY.
+        //
+        // On-change rather than every reload for two reasons: re-seeding on every ~2 s poll would
+        // continuously wipe out whatever adaptation had learned, and applying an unchanged tunable
+        // every tick is the habit this codebase already avoids. The first pass through here always
+        // fires (the remembered value starts impossible), which is what puts a sane gain in place
+        // before the first measurement instead of leaving feedforward dead until one arrives.
+        //
+        // Writing a NEW value deliberately RESETS the learned gain, so the startup transient can be
+        // reproduced on demand rather than only once per launch.
+        {
+            static float s_seeded = -1.0f;
+            const float seed = (g_cfg.gain_seed > 0.0f) ? g_cfg.gain_seed : REFERENCE_RATE_DPS;
+            if (seed != s_seeded) {
+                s_seeded = seed;
+                g_meas_rate = seed;
+                g_gain_logged = false;   // let the mismatch line report the re-converged value
+            }
+        }
+
+        // The PIN comes after the seed so it always wins: measrate is "hold the plant still",
+        // which is only meaningful if nothing else writes the gain afterwards.
+        if (g_cfg.meas_rate_fixed > 0.0f) g_meas_rate = g_cfg.meas_rate_fixed;
+        // Immediately after the reload, on the TICK thread: this is where the trace file actually
+        // gets written, deliberately far away from the input path that fills the buffer.
+        aim_trace_tick();
+        mem_scan_tick();
+        mem_diff_tick();
+        // The SHIPPING aim write. Separate call from blam_aim_tick() below on purpose: that one is
+        // the dev investigation and does not exist in a release build, while this one is the
+        // feature. Ordered first so it owns the address unless the diagnostics explicitly claim it.
+        blam_drive_tick();
+        blam_aim_tick();
+        aim_watch_tick();
+        aim_direct_tick();
+        game_settings_tick(g_stick_mode.load());
     }
 
     // Above every early-out below, so the numbers still arrive when the driver is disabled or
     // parked in a menu -- "it stutters at the frontend too" is a diagnosis, not a gap.
     perf_report(tick);
 
-    // ---- Calibrate button/key, edge-detected on the GAME THREAD.
-    // Both sources are polled here rather than in the XInput hook, because a keyboard key is not
-    // visible from there at all and splitting the edge detection across two threads would race.
+#if HALO_VR_DEV
+    // One-shot: name the project's collision channels so the reticule trace channel can be chosen
+    // deliberately. Runs once, late enough that the engine's config is loaded.
+    {
+        static bool dumped = false;
+        if (!dumped && tick > 200) { dumped = true; hit_trace_dump_channels(); }
+    }
+#endif
+
+    // An aim offset with no aimcalibver stamp has an INFERRED schema, and inferring wrong is a
+    // constant yaw error that is invisible until you compare where you point with where shots go --
+    // and that then gets written back to disk the next time any calibration saves. Said once.
+    {
+        static bool said = false;
+        if (!said && g_calib_stamp_ambiguous) {
+            said = true;
+            API::get()->log_info("[Halo-CampE-UEVR] CALIB: aimoffyaw/aimoffpitch loaded with no "
+                                 "aimcalibver stamp -- reading them as ABSOLUTE (schema 1), so the "
+                                 "view-lock frame is NOT applied. If aim sits off by a constant, run "
+                                 "the Page Down calibration once: it re-measures against the current "
+                                 "frame and stamps the result 2.");
+        }
+    }
+
+    // ---- HMD TRANSLATION LEASH (doctrine in Config.hpp).
+    //
+    // Slide the standing origin to absorb any head displacement past the radius. Inside it, nothing
+    // happens and roomscale is untouched; outside, the origin follows you, so the divergence between
+    // your eye and the game camera is bounded by the radius rather than by your room.
+    //
+    // On the GAME THREAD at ~32 Hz rather than per frame: the slide only runs while the player is
+    // actively pushing the boundary, and its rate is their own walking speed, so a 32 Hz correction
+    // is smooth. Doing it in the stereo callback would mean an engine call per eye per frame for a
+    // value that changes at human speed.
+    //
+    // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
+    if (g_cfg.hmd_leash) {
+        Vec3 hp{}; Quat hq{};
+        const auto hi = API::VR::get_hmd_index();
+        if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
+            const auto so = API::VR::get_standing_origin();
+            // VR room space: Y is up (the VR->UE conversion elsewhere maps VR y to UE z), so the
+            // lateral pair is X/Z and vertical is Y.
+            const float dx = hp.x - so.x, dy = hp.y - so.y, dz = hp.z - so.z;
+            const float lat = std::sqrt(dx * dx + dz * dz);
+
+            float nx = so.x, ny = so.y, nz = so.z;
+            bool moved = false;
+
+            if (lat > g_cfg.hmd_leash_lat && lat > 1e-4f) {
+                // Absorb only the EXCESS, so the player keeps the full radius of free movement
+                // rather than being dragged to the centre.
+                const float k = (lat - g_cfg.hmd_leash_lat) / lat;
+                nx += dx * k; nz += dz * k; moved = true;
+            }
+            const float adz = (dy < 0.0f) ? -dy : dy;
+            if (adz > g_cfg.hmd_leash_vert) {
+                ny += dy - ((dy > 0.0f) ? g_cfg.hmd_leash_vert : -g_cfg.hmd_leash_vert);
+                moved = true;
+            }
+
+            if (moved) {
+                const UEVR_Vector3f n{nx, ny, nz};
+                API::VR::set_standing_origin(n);
+#if HALO_VR_DEV
+                static uint32_t last = 0;
+                if (tick - last >= 60) {
+                    last = tick;
+                    API::get()->log_info("[Halo-CampE-UEVR] HMDLEASH: absorbed drift lat=%.3fm vert=%.3fm "
+                                         "(limits %.2f/%.2f) origin -> (%.3f,%.3f,%.3f)",
+                                         lat, dy, g_cfg.hmd_leash_lat, g_cfg.hmd_leash_vert, nx, ny, nz);
+                }
+#endif
+            }
+        }
+    }
+
+    // ---- Calibrate key, edge-detected on the GAME THREAD.
     // GetAsyncKeyState reads global key state, so it registers with the headset on and the game
     // focused -- which is the only way this is usable mid-session.
+    //
+    // KEYBOARD ONLY, AND DELIBERATELY SO.
+    //
+    // There was a gamepad binding here (calibbtn, default BACK/View). It has been removed, not
+    // merely defaulted off. On Touch controllers the MENU button commonly lands on BACK through
+    // UEVR, so opening the pause menu performed a full pose-match calibration and wrote the result
+    // to disk. That is not a mis-set default; it is a gesture that mutates persistent state bound
+    // to a control players press for an unrelated reason, and it produced a whole day of
+    // calibrations that "changed on their own" and A/B tests whose baseline moved under them.
+    //
+    // A keyboard key is the right shape for this: distinct, deliberate, impossible to hit while
+    // playing, and not reachable by any controller remap. The eventual home for the gesture is a
+    // UEVR Lua UI, which is deliberate by construction -- and that is another reason not to keep a
+    // hidden binding around in the meantime.
     {
-        const bool key_down = (g_cfg.calib_key != 0) &&
-                              ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0);
-        const bool held = key_down || g_pad_calib_down.load();
+        const bool held = (g_cfg.calib_key != 0) &&
+                          ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0);
         const bool was  = g_calib_held.exchange(held);
         if (held && !was) g_calib_start  = true;
         if (!held && was) g_calib_finish = true;
@@ -1378,12 +1815,37 @@ void update() {
         const bool aim_down = (g_cfg.aim_calib_key != 0) &&
                               ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0);
         const bool aim_was  = g_aimcal_held.exchange(aim_down);
+        // Publish it: blamangles drives the sim's angular control state from a sim-thread hook in
+        // BlamAim.cpp, which cannot see this file's anonymous namespace. Without this the actuator
+        // goes silent as designed but the control-record write keeps going, so the reticle never
+        // freezes and the calibration is impossible to perform.
+        halo::g_aim_calibrating.store(aim_down, std::memory_order_relaxed);
         if (aim_down && !aim_was) {
             g_aimcal_start = true;
             API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATE: aim frozen -- point your controller at the "
                                  "reticle, then release");
         }
-        if (!aim_down && aim_was) g_aimcal_finish = true;
+        if (!aim_down && aim_was) {
+            g_aimcal_finish = true;
+            // SNAPSHOT THE POSE AT THE RELEASE EDGE.
+            //
+            // The capture path re-reads the controller on the NEXT tick, so the reference is bound
+            // to wherever the hand was ~30 ms after the key came up -- and the player has already
+            // started moving by then, because releasing a key IS a hand movement. That lands as a
+            // calibration error in exactly the gesture whose whole purpose is precision.
+            //
+            // This runs in the key-polling path, which is far faster than the tick, so the sample
+            // is taken essentially at the instant of release. derive_ctrl_angles is explicitly safe
+            // here: it only touches UEVR API reads and atomics.
+            const auto cal_ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                      : API::VR::get_right_controller_index();
+            float scy = 0.0f, scp = 0.0f;
+            if (halo::derive_ctrl_angles(&scy, &scp, cal_ridx)) {
+                g_aimcal_snap_yaw   = scy;
+                g_aimcal_snap_pitch = scp;
+                g_aimcal_have_snap  = true;
+            }
+        }
 
         // ---- KILL SWITCH, reachable with the headset ON.
         // Requires a modifier so it cannot be brushed mid-fight, and fires on the PRESS edge so a
@@ -1400,10 +1862,36 @@ void update() {
             const bool kill_was  = g_kill_held.exchange(kill_down);
             if (kill_down && !kill_was) {
                 g_cfg.enabled = !g_cfg.enabled;
+                g_kill_override = g_cfg.enabled ? 1 : 0;   // or the next config poll undoes it
                 API::get()->log_info(g_cfg.enabled
                     ? "[Halo-CampE-UEVR] KILL SWITCH: driver RE-ENABLED (aim follows your controller again)"
                     : "[Halo-CampE-UEVR] KILL SWITCH: driver DISABLED -- stick neutral, game plays stock. "
                       "Press again to re-enable.");
+            }
+        }
+
+        // ---- AIM MODE TOGGLE: Ctrl+mode_key swaps aim actuation <-> direct drive. Same nav cluster
+        // as the kill and calibration keys, so all four are findable by feel in a headset.
+        //
+        // IT NO LONGER TOUCHES THE RIG. It used to force rigmode 3 with direct and 2 with actuation,
+        // which was written before we knew what the rig modes actually were: mode 3 is not the
+        // direct-drive rig, it is the FIXED rig -- the relative-rotation write mode 2 uses is
+        // measurably discarded by this game's first-person mesh, so mode 2's arms barely rotate at
+        // all. Coupling them meant switching back to stick drive silently reverted the arms to the
+        // broken path. The two settings are independent; the toggle changes one thing.
+        if (g_cfg.mode_key != 0) {
+            const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool down = ctrl && ((GetAsyncKeyState(g_cfg.mode_key) & 0x8000) != 0);
+            const bool was  = g_mode_held.exchange(down);
+            if (down && !was) {
+                const bool to_direct = !g_cfg.aim_direct;
+                g_cfg.aim_direct = to_direct;
+                g_mode_override  = to_direct ? 1 : 0;
+                API::get()->log_info(to_direct
+                    ? "[Halo-CampE-UEVR] AIM MODE: DIRECT DRIVE (aim assigned - responsive, but the sim "
+                      "still fires along its own aim; rig unchanged at rigmode %d)"
+                    : "[Halo-CampE-UEVR] AIM MODE: ACTUATION (aim steered via stick - projectiles correct; "
+                      "rig unchanged at rigmode %d)", g_cfg.rig_mode);
             }
         }
     }
@@ -1542,6 +2030,11 @@ void update() {
             else if (g_cfg.stick_force == 1)                      want = true;
 
             const bool was = g_stick_mode.exchange(want);
+            // Published every tick, not just on the edge: the blamangles write reads it from a
+            // sim-thread hook that has no other view of this file's anonymous namespace, and a
+            // publication that only happens on transitions is one missed tick away from silently
+            // leaving the write armed for a whole ride.
+            halo::g_stick_mode_active.store(want, std::memory_order_relaxed);
             if (was != want) {
                 if (want) {
                     // ENTER: neutralise the actuator now; drop the aim reference (restored from
@@ -1612,6 +2105,243 @@ void update() {
                                      want_brake ? "DOWN" : "UP", g_cfg.brake_mode);
             }
         }
+
+        // ---- CUTSCENE FLAT VIEW (doctrine in Config.hpp; evidence: docs\CUTSCENE_FINDINGS.md
+        // in the private tree). This game's cutscenes are pre-rendered movies drawn by the
+        // engine's native fullscreen movie player, outside the UObject world -- which is why
+        // they double in stereo and why no reflected media object exists to re-host. While one
+        // plays, the configured flatten mode is applied and restored when gameplay returns.
+        // All transitions are applied ON CHANGE, never per tick.
+        {
+            static uint32_t cine_seen_tick = 0;
+            static bool     cine_prev      = false;
+            static std::string cine_name;      // last sighted cinematic camera class, for the log
+
+            // The game's own answer, polled below. Held across ticks: the engage/release logic
+            // after the poll gate runs per tick.
+            static bool s_cin_active = false;  // IsCinematicInProgress(), when the subsystem answers
+            static bool s_cin_ok     = false;  // whether the subsystem is answering at all
+
+            static uint32_t cut_poll = 0;
+            if (tick - cut_poll >= 8) {        // ~4 Hz: the camera signal holds for seconds
+                cut_poll = tick;
+
+                // PRIMARY: ask the game. BlamCinematicSubsystem::IsCinematicInProgress() is
+                // authoritative for the movie's whole span (live-verified). One UFunction call
+                // per poll, same cost class as menu_poll's IsUIActiveState.
+                if (auto* cs = find_cine_subsystem()) {
+                    s_cin_ok = true;
+                    const bool now_active = call_ret_bool(cs, L"IsCinematicInProgress");
+                    if (now_active != s_cin_active) {
+                        s_cin_active = now_active;
+                        API::get()->log_info("[Halo-CampE-UEVR] IsCinematicInProgress -> %d",
+                                             (int)now_active);
+                    }
+                } else {
+                    s_cin_ok = false;
+                    s_cin_active = false;
+                }
+
+                bool cinecam = false;
+                if (pc0 != nullptr && !frontend) {
+                    auto* pco = reinterpret_cast<API::UObject*>(pc0);
+                    if (auto* pcm_p = pco->get_property_data<API::UObject*>(L"PlayerCameraManager")) {
+                        API::UObject* pcm = *pcm_p;
+                        if (pcm != nullptr && !IsBadReadPtr(pcm, sizeof(void*))) {
+                            // FTViewTarget's first member is the target actor, so the struct's
+                            // property data IS the pointer. Same read the community cutscene
+                            // plugin uses, so the layout is field-proven on this game.
+                            if (auto* vt_p = pcm->get_property_data<API::UObject*>(L"ViewTarget")) {
+                                API::UObject* vt = *vt_p;
+                                if (vt != nullptr && !IsBadReadPtr(vt, sizeof(void*))) {
+                                    // Native class, present from module load -- ONE lookup ever.
+                                    // find_uobject sweeps the whole object array, so it must not
+                                    // be retried on a poll cadence.
+                                    static API::UClass* cine_cls = nullptr;
+                                    static bool cine_cls_tried = false;
+                                    if (!cine_cls_tried) {
+                                        cine_cls_tried = true;
+                                        cine_cls = API::get()->find_uobject<API::UClass>(
+                                            L"Class /Script/CinematicCamera.CineCameraActor");
+                                        if (cine_cls == nullptr) {
+                                            API::get()->log_info(
+                                                "[Halo-CampE-UEVR] CineCameraActor class not found -- "
+                                                "cutscene 2D screen disarmed");
+                                        }
+                                    }
+                                    if (cine_cls != nullptr && vt->is_a(cine_cls)) {
+                                        cinecam = true;
+                                        cine_name = narrow(class_name_of(vt));
+                                    }
+#if HALO_VR_DEV
+                                    // Recon for a full-span cutscene signal: what the camera
+                                    // actually IS when the CineCameraActor drops away mid-scene.
+                                    static std::wstring vtn_prev;
+                                    const std::wstring vtn = class_name_of(vt);
+                                    if (g_stick_mode.load() && vtn != vtn_prev) {
+                                        vtn_prev = vtn;
+                                        API::get()->log_info("[Halo-CampE-UEVR] DEV viewtarget class -> %s",
+                                                             narrow(vtn).c_str());
+                                    }
+#endif
+                                }
+                            }
+                        }
+                    }
+                }
+                if (cinecam) cine_seen_tick = tick;
+                if (cinecam != cine_prev) {
+                    cine_prev = cinecam;
+                    API::get()->log_info("[Halo-CampE-UEVR] cutscene camera signal -> %d%s%s",
+                                         (int)cinecam, cinecam ? " " : "",
+                                         cinecam ? cine_name.c_str() : "");
+                }
+            }
+
+            // A sighting inside the last ~3 s. Bridges the gap between the camera cut and the
+            // stick-mode enter debounce, whichever lands first.
+            const bool cine_recent = (cine_seen_tick != 0) && (tick - cine_seen_tick < 96);
+
+            // Which lever ENGAGE actually pulled (1 = 2D screen, 2 = mono collapse), and what to
+            // restore. Latched at engage time -- the config may change mid-scene, and the
+            // release must undo what was done, not what the config now says.
+            static int  engaged_mode = 0;
+            static char saved_scale[32] = {};
+
+            // ---- ONE PREDICATE DRIVES BOTH EDGES.
+            //
+            // The first version asked a DIFFERENT question to engage than to release: engage
+            // OR'd the camera heuristic in, release consulted only the subsystem. At the end of
+            // a scene the subsystem says "over" while the cinematic camera was still seen moments
+            // ago and the weapon has not come back yet -- so it released, immediately re-engaged,
+            // released again, toggling VR_2DScreenMode several times a second. Every toggle
+            // reallocates the entire view target, which in a headset reads as violent stereo
+            // thrashing: field-reported 2026-08-05 leaving the Silent Cartographer opener, and
+            // visible in the logs as 126 transitions in a single session.
+            //
+            // Deriving both edges from the SAME value makes that impossible by construction. The
+            // subsystem, when it answers, is the sole authority; the camera/stick heuristic is
+            // consulted only on a build where the subsystem is missing.
+            const bool cine_signal = s_cin_ok ? s_cin_active
+                                              : (g_stick_mode.load() && cine_recent);
+
+            // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
+            // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
+            // after any transition (release never is -- being stuck flat is far better than
+            // flashing the view), and if transitions still pile up the whole feature latches OFF
+            // for the session rather than keep strobing someone's eyes.
+            static uint32_t cut_engage_block_until = 0;   // tick
+            static uint32_t flap_window_start      = 0;   // tick
+            static int      flap_count             = 0;
+            static bool     cut_flap_latched       = false;
+
+            bool want = g_cut2d_engaged.load();
+            const char* why = nullptr;
+            if (!want) {
+                // ENGAGE while a cutscene is running. Menus excluded: the frontend already
+                // resolves to a proper screen on its own.
+                if (g_cfg.cutscene_2d != 0 && !g_in_menu.load() && cine_signal
+                    && !cut_flap_latched && tick >= cut_engage_block_until) {
+                    if (g_cfg.cutscene_2d == 1) {
+                        // If the flat screen is already on, the player runs it deliberately --
+                        // nothing to own, and nothing to wrongly restore later.
+                        char cur[16]{};
+                        API::get()->param()->vr->get_mod_value("VR_2DScreenMode", cur, sizeof(cur));
+                        if (strcmp(cur, "true") != 0) { engaged_mode = 1; want = true; }
+                    } else {
+                        // MONO COLLAPSE. The saved value is the restore target, so an unreadable
+                        // or already-collapsed scale means do nothing rather than engage blind.
+                        char cur[32]{};
+                        API::get()->param()->vr->get_mod_value("VR_WorldScale", cur, sizeof(cur));
+                        if (atof(cur) > 0.02) {
+                            strncpy_s(saved_scale, sizeof(saved_scale), cur, _TRUNCATE);
+                            engaged_mode = 2;
+                            want = true;
+                        }
+                    }
+                }
+            } else {
+                // RELEASE the moment the same predicate goes false -- authoritative when the
+                // subsystem answers, weapon-return/camera-recency otherwise. The brake grip
+                // stays as the manual escape.
+                if      (g_cfg.cutscene_2d == 0) why = "config off";
+                else if (cut_flap_latched)       why = "flap guard";
+                else if (!cine_signal)           why = s_cin_ok ? "cinematic over" : "weapon returned";
+                else if (g_brake_pad.load())     why = "brake grip (escape)";
+                if (why != nullptr) want = false;
+            }
+
+            const bool was = g_cut2d_engaged.exchange(want);
+            if (was != want) {
+                // Hold off the next ENGAGE briefly (~1 s at 32 Hz), and watch for flapping: more
+                // than 6 transitions inside ~4 s is not a cutscene, it is an oscillation, and it
+                // gets shut down for the session.
+                cut_engage_block_until = tick + 32;
+                if (tick - flap_window_start > 128) { flap_window_start = tick; flap_count = 0; }
+                if (++flap_count > 6 && !cut_flap_latched) {
+                    cut_flap_latched = true;
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT LATCHED OFF -- %d "
+                                         "transitions in under 4 s. Please report this log; the "
+                                         "flat view stays off for this session (cutscene2d=0 to "
+                                         "disable permanently).", flap_count);
+                }
+            }
+            if (was != want) {
+                if (want) {
+                    if (engaged_mode == 1) {
+                        API::get()->param()->vr->set_mod_value("VR_2DScreenMode", "true");
+                        API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT ENGAGE (%s) -- "
+                                             "VR_2DScreenMode -> true", cine_name.c_str());
+                        // The hint rides the 2D screen only: in mono collapse the world stays
+                        // visible, so "if nothing shows" would be nonsense there.
+                        cutscene_hint_show();
+                    } else {
+                        API::get()->param()->vr->set_mod_value("VR_WorldScale", "0.01");
+                        API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT ENGAGE (%s) -- "
+                                             "VR_WorldScale %s -> 0.01 (mono collapse)",
+                                             cine_name.c_str(), saved_scale);
+                    }
+                } else {
+                    if (engaged_mode == 1) {
+                        API::get()->param()->vr->set_mod_value("VR_2DScreenMode", "false");
+                        API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT RELEASE (%s) -- "
+                                             "VR_2DScreenMode -> false", why != nullptr ? why : "?");
+                    } else if (engaged_mode == 2 && saved_scale[0] != '\0') {
+                        API::get()->param()->vr->set_mod_value("VR_WorldScale", saved_scale);
+                        API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT RELEASE (%s) -- "
+                                             "VR_WorldScale -> %s", why != nullptr ? why : "?",
+                                             saved_scale);
+                    }
+                    engaged_mode = 0;
+                    cutscene_hint_hide();
+                }
+            }
+
+            // A cfg flip mid-scene must also clear the hint; hide() is a cheap no-op otherwise.
+            if (!g_cfg.cut_hint) cutscene_hint_hide();
+
+            // Startup sanity, once mod values are ready (same timing as the inactivity-timer
+            // write above). A stale VR_2DScreenMode=true is unambiguous while this mod owns
+            // cutscene flattening, so it is corrected; a floor-level world scale could be a
+            // deliberate setting, so it is only called out.
+            if (tick == 300 && g_cfg.cutscene_2d != 0 && !g_cut2d_engaged.load()) {
+                char cur[32]{};
+                API::get()->param()->vr->get_mod_value("VR_2DScreenMode", cur, sizeof(cur));
+                if (strcmp(cur, "true") == 0) {
+                    API::get()->param()->vr->set_mod_value("VR_2DScreenMode", "false");
+                    API::get()->log_info("[Halo-CampE-UEVR] stale VR_2DScreenMode=true at startup "
+                                         "-> false (cutscene2d owns this switch; set cutscene2d=0 "
+                                         "to run the flat screen permanently)");
+                }
+                API::get()->param()->vr->get_mod_value("VR_WorldScale", cur, sizeof(cur));
+                const double ws = atof(cur);
+                if (ws > 0.0 && ws <= 0.011) {
+                    API::get()->log_info("[Halo-CampE-UEVR] VR_WorldScale reads %s at startup -- "
+                                         "if that is stale from a cutscene, restore your intended "
+                                         "world scale in the UEVR menu", cur);
+                }
+            }
+        }
     }
 
     // ---- WHY THE DRIVER STOPPED. Logged on every CHANGE of state, never per frame.
@@ -1658,6 +2388,13 @@ void update() {
         g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return;
     }
 
+    // A dev path that RETURNS from update() once lived here (`devreticle`), placing the reticule
+    // from the pawn transform so it could be tested with no VR runtime. It answered its question
+    // and was removed 2026-08-09. Do not reintroduce the shape: returning here skips not just the
+    // aim loop but every button remap below it, so a stale devreticle=1 in a live config took a
+    // player's motion controls away mid-session with no error and no log line. Anything that
+    // bypasses the whole driver must not be reachable from a config key.
+
     // THE aim source. Everything downstream -- the control law, the rig, the reticule -- flows from
     // this one index, which is why handedness is a single decision here rather than a sweep through
     // the file. The maths is hand-agnostic: it turns a pose into angles.
@@ -1675,7 +2412,31 @@ void update() {
 
     // AIM pose: the runtime's POINTING pose. Correct for aim direction.
     Vec3 cpos{}; Quat cq{};
-    if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) {
+    bool have_pose = get_pose(ridx, &cpos, &cq, /*use_aim=*/true);
+#if HALO_VR_DEV
+    // GRIP-POSE FALLBACK -- DEV BUILDS ONLY, and only when the aim pose is genuinely unavailable.
+    //
+    // SimVR's null driver supplies a grip pose but not the runtime's separate AIM pose, so this
+    // guard failed every time and the loop never armed: no shape(), no RIGTRACK, no t600, and
+    // settings_are_loaded() stayed false so vrsens/vrdeadzone/vraccel never applied either. That
+    // made the entire aim lane untestable without a headset on someone's face -- which is why the
+    // deadbeat setpoint sat unvalidated.
+    //
+    // Falling back to the grip pose changes WHERE the ray starts, not how the control loop behaves,
+    // so convergence and steady-state residual -- the things being measured -- stay meaningful.
+    // Never compiled into a shipping build: on real hardware the aim pose exists, and silently
+    // switching a player's aim basis would be a genuine behaviour change.
+    if (!have_pose) {
+        have_pose = get_pose(ridx, &cpos, &cq, /*use_aim=*/false);
+        static uint32_t fb_last = 0;
+        if (have_pose && tick - fb_last > 300) {
+            fb_last = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] DEV: aim pose unavailable, using GRIP pose "
+                                 "(SimVR harness path -- not a shipping behaviour)");
+        }
+    }
+#endif
+    if (!have_pose) {
         static uint32_t last = 0;
         if (tick - last > 300) { last = tick; API::get()->log_info("[Halo-CampE-UEVR] IDLE: aim pose invalid"); }
         g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return;
@@ -1724,6 +2485,9 @@ void update() {
         attach_release(old_rig, "PlayerController changed");
         g_rig_component = nullptr;
         g_rig_parent = nullptr;
+        // The shell belongs to the pawn being torn down. Dropping it here, alongside the rig, is
+        // what keeps the re-acquire honest instead of writing into a recycled slot on the new level.
+        forget_shield_shell();
         g_rig_resolve_tick = 0;   // re-resolve promptly on the new level
     }
 
@@ -1783,6 +2547,43 @@ void update() {
             const float len = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
             if (len > 1e-3f) { fwd = Vec3{t.x / len, t.y / len, t.z / len}; }
         }
+
+#if HALO_VR_DEV
+        // SIGHTLINE -- is aimorigin actually doing anything, and how far have you drifted?
+        //
+        // The two modes differ ONLY in how the ray reacts to the player TRANSLATING:
+        //   mode 1 anchors to the standing origin, a fixed room point set by the play-area reset.
+        //     Walk away from it and the ray swings by roughly atan(drift / xdist) with no rotation
+        //     on your part -- 30 cm at xdist 10 m is 1.7 deg, and it stays until you re-centre.
+        //   mode 0 anchors to the HMD, which travels with you, so the drift term cancels.
+        //
+        // `drift` is the distance from the standing origin to your head. Under mode 1 that number
+        // IS the error source, and `swing` converts it to the angle it costs. Under mode 0 both
+        // should stay flat while you walk. If they do not differ between modes, the two origins are
+        // not in the space this assumes and the whole sightline needs re-deriving, not tuning.
+        {
+            static uint32_t last = 0;
+            if (tick - last >= 60) {
+                last = tick;
+                Vec3 hp{}; Quat hq{};
+                const auto hi = API::VR::get_hmd_index();
+                const bool have_h = (hi >= 0) && get_pose(hi, &hp, &hq, /*use_aim=*/false);
+                const auto so = API::VR::get_standing_origin();
+                const float dx = have_h ? (hp.x - so.x) : 0.0f;
+                const float dy = have_h ? (hp.y - so.y) : 0.0f;
+                const float dz = have_h ? (hp.z - so.z) : 0.0f;
+                const float drift = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const float swing = (g_cfg.xdist_m > 0.01f)
+                    ? std::atan2(drift, g_cfg.xdist_m) * RAD2DEG : 0.0f;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] SIGHTLINE mode=%d origin=(%.3f,%.3f,%.3f) hmd=(%.3f,%.3f,%.3f) "
+                    "stand=(%.3f,%.3f,%.3f) drift=%.3fm swing=%.2fdeg xdist=%.1f haveH=%d",
+                    g_cfg.aim_origin, origin.x, origin.y, origin.z,
+                    have_h ? hp.x : 0.0f, have_h ? hp.y : 0.0f, have_h ? hp.z : 0.0f,
+                    so.x, so.y, so.z, drift, swing, g_cfg.xdist_m, (int)have_h);
+            }
+        }
+#endif
     }
 
     // ---- SNAP TURN, applied to the AIM mapping as well as the rig.
@@ -1792,14 +2593,49 @@ void update() {
     // same physical pointing direction means a different game direction, and the reference is
     // stale by exactly the turn. Both the rig frame AND this mapping need the correction;
     // correcting only one leaves the other breaking the same way.
-    const float ctrl_yaw   = wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG
-                                     + g_cfg.aim_turn * g_turn_offset.load());
-    const float ctrl_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
+    float ctrl_yaw   = wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG
+                               + g_cfg.aim_turn * g_turn_offset.load());
+    float ctrl_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
+
+    // TARGET SMOOTHING -- filter WHERE WE ARE ASKED TO POINT, not how fast we get there.
+    //
+    // `aim_tau_s` used to do two unrelated jobs: pace the approach AND low-pass hand tremor.
+    // aim_deadbeat removes the pacing, and with it the incidental filtering, so tremor would ride
+    // straight through into the aim. This is the intended replacement, and the reason the deadbeat
+    // comment says "smooth the TARGET rather than lowering the gain back toward tau" -- lowering the
+    // gain restores the lag deadbeat exists to remove, whereas this leaves convergence alone.
+    //
+    // Applied BEFORE the reference capture below so the reference is taken against the same
+    // (smoothed) signal the loop will chase; capturing against the raw angle would bake in a
+    // one-sample offset.
+    //
+    // 0 = off, and it ships off: SimVR has no tremor, so this cannot be validated headlessly. It is
+    // a knob for the first in-headset session, not a tuned default.
+    if (g_cfg.aim_target_smooth_ms > 0.0f) {
+        static float sm_cy = 0.0f, sm_cp = 0.0f;
+        static bool  have_sm_ctrl = false;
+        const float a = ema_alpha(g_cfg.aim_target_smooth_ms, g_last_dt.load());
+        if (!have_sm_ctrl) {
+            sm_cy = ctrl_yaw; sm_cp = ctrl_pitch; have_sm_ctrl = true;   // never filter sample one
+        } else if (a > 0.0f) {
+            // Through wrap180 so the filter never takes the long way round at the +-180 seam.
+            sm_cy = wrap180(sm_cy + a * wrap180(ctrl_yaw - sm_cy));
+            sm_cp = sm_cp + a * (ctrl_pitch - sm_cp);
+        }
+        ctrl_yaw = sm_cy; ctrl_pitch = sm_cp;
+    }
 
     // Reference capture: record the hand-to-aim offset once so enabling never snaps the view.
     // Not while stick mode holds the stack down -- a reference captured against a vehicle camera
     // is garbage, and the exit transition re-captures the moment the stack re-arms.
     if (!g_stick_mode.load() && !g_have_ref.load()) {
+        // Prefer the pose sampled AT the Page Down release edge over the one read here a tick
+        // later. Only for this capture -- consumed once, so an ordinary reference recapture (level
+        // load, respawn, stick-mode exit) still reads the controller live as it always did.
+        if (g_aimcal_have_snap.exchange(false)) {
+            ctrl_yaw   = g_aimcal_snap_yaw.load();
+            ctrl_pitch = g_aimcal_snap_pitch.load();
+        }
         g_ref_ctrl_yaw   = ctrl_yaw;
         g_ref_ctrl_pitch = ctrl_pitch;
 
@@ -1810,12 +2646,15 @@ void update() {
             // be aiming at: re-capturing binds the controller to the aim of that instant, which
             // after a level load or respawn is arbitrary -- silently discarding the calibration.
             // The loop then drives the aim onto the saved mapping.
-            g_ref_aim_yaw   = wrap180(ctrl_yaw + g_cfg.aim_off_yaw);
+            // USE SITE 1 of 2: add back the frame the offset was measured against (0 when off).
+            // Safe as a scalar add here, unlike the grip trim: ctrl_yaw and aim_off_yaw are both
+            // plain yaws in a yaw-only computation, so there is no pitch/roll to mix.
+            g_ref_aim_yaw   = wrap180(ctrl_yaw + g_cfg.aim_off_yaw + aim_frame_yaw_use());
             g_ref_aim_pitch = ctrl_pitch + g_cfg.aim_off_pitch;
             g_have_ref = true;
             g_gain_hold = true; g_gain_hold_until = tick + 90;   // let the aim settle before measuring gain
-            API::get()->log_info("[Halo-CampE-UEVR] reference RESTORED from saved calibration: offset yaw=%.1f pitch=%.1f",
-                                 g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
+            API::get()->log_info("[Halo-CampE-UEVR] reference RESTORED from saved calibration: offset yaw=%.1f pitch=%.1f (frame yaw %.1f)",
+                                 g_cfg.aim_off_yaw, g_cfg.aim_off_pitch, aim_frame_yaw_use());
         } else {
             g_ref_aim_yaw   = (float)aim_yaw;
             g_ref_aim_pitch = (float)aim_pitch;
@@ -1825,7 +2664,11 @@ void update() {
             if (measuring) {
                 // Page Down release: the offset between where the hand points and where the game
                 // aims IS the calibration. Store it, not the absolute pair.
-                g_cfg.aim_off_yaw   = wrap180((float)aim_yaw - ctrl_yaw);
+                // WRITE SITE 1 of 2: store MINUS the frame, so the saved offset does not encode
+                // where this session was injected. Must mirror use site 1 exactly.
+                g_cfg.aim_off_yaw   = wrap180((float)aim_yaw - ctrl_yaw - calib_frame_yaw_write());
+                // Stamp the AIM version only -- this gesture rebased the aim offset and nothing else.
+                if (g_cfg.calib_relative) g_cfg.aim_calib_ver = 2;
                 g_cfg.aim_off_pitch = (float)aim_pitch - ctrl_pitch;
                 g_cfg.aim_off_valid = true;
                 write_calib_file();
@@ -1848,6 +2691,26 @@ void update() {
         const float dbg_des_yaw   = g_ref_aim_yaw.load()   + wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
         const float dbg_des_pitch = g_ref_aim_pitch.load() + wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
         g_dbg_err_yaw   = wrap180(dbg_des_yaw   - (float)aim_yaw);
+#if HALO_VR_DEV
+        // AIMSTAT -- dev-only error statistics. The 600-tick report gives ~4 spot samples per
+        // 80 s window, which is far too few to compare controller settings: the first deadbeat A/B
+        // had a spread of 0.0-4.9 deg across 4 points. Accumulate EVERY tick and report the mean,
+        // so one line summarises ~40 ticks instead of sampling one of them. Both the accumulate and
+        // the report happen here on the game thread, so plain statics are safe.
+        {
+            static double  acc_sum = 0.0;
+            static uint32_t acc_n  = 0;
+            static float   acc_max = 0.0f;
+            const float ae = std::fabs(g_dbg_err_yaw.load());
+            acc_sum += ae; ++acc_n;
+            if (ae > acc_max) acc_max = ae;
+            if (g_cfg.aim_stat > 0 && acc_n >= (uint32_t)g_cfg.aim_stat) {
+                API::get()->log_info("[Halo-CampE-UEVR] AIMSTAT mean=%.3f max=%.3f n=%u",
+                                     acc_sum / (double)acc_n, acc_max, acc_n);
+                acc_sum = 0.0; acc_n = 0; acc_max = 0.0f;
+            }
+        }
+#endif
         g_dbg_err_pitch = wrap180(dbg_des_pitch - (float)aim_pitch);
         g_dbg_ctrl_yaw = ctrl_yaw; g_dbg_aim_yaw = (float)aim_yaw;
     }
@@ -1866,57 +2729,34 @@ void update() {
     }
 
     // ---- MEASURE THE ACTUAL TURN RATE and adapt the gain (see shape()).
+    //
+    // The measurement itself now lives in update_gain_measurement() so it can run on EITHER path.
+    // It used to be inline here and explicitly skipped whenever aim_rate_render was set -- which is
+    // the default -- so the measured gain stayed 0 for every normal session, and feedforward and
+    // damping, both gated on gain > 10, never ran at all.
     {
         if (g_gain_hold.load() && tick >= g_gain_hold_until.load()) g_gain_hold = false;
-        static double prev_aim = 0.0;
-        static float  prev_out = 0.0f;
-        static bool   have_prev = false;
-        const float dt = g_last_dt.load();
 
-        if (have_prev && dt > 0.001f && dt < 0.2f) {
-            const float achieved = wrap180((float)aim_yaw - (float)prev_aim) / dt;   // deg/s
-            const float applied  = std::fabs(prev_out);
-
-            // Only sample where the reading is meaningful: well past the deadzone, genuinely
-            // moving, and not saturated against something (a wall of clamped error).
-            // MAX_PLAUSIBLE_DPS rejects aim DISCONTINUITIES, not fast turning. A level load,
-            // respawn or reference re-capture teleports the aim, and a 90 degree jump across one
-            // tick reads as ~1600 deg/s -- which would drive the gain straight to its 4x clamp.
-            // Nothing the stick can do exceeds this.
-            constexpr float MAX_PLAUSIBLE_DPS = 400.0f;
-
-            // The applied deflection is sampled once per tick; on the render-rate path it
-            // changes many times within a tick, so this pairing would misestimate the plant gain
-            // and the mis-adapted gain limit-cycles the loop.
-            if (!g_cfg.aim_rate_render && applied > 0.5f && std::fabs(achieved) > 15.0f
-                && std::fabs(achieved) < MAX_PLAUSIBLE_DPS && !g_gain_hold.load()) {
-                const float rate = std::fabs(achieved) / applied;      // deg/s per unit
-                if (std::isfinite(rate) && rate > 10.0f && rate < MAX_PLAUSIBLE_DPS * 1.5f) {
-                    const float cur = g_meas_rate.load();
-                    const float smoothed = (cur <= 0.0f) ? rate : (cur + 0.05f * (rate - cur));
-                    g_meas_rate = smoothed;
-
-                    // Faster game turn rate => reach full deflection over a WIDER error band, so
-                    // the loop does not overshoot. Hence scale full_deg with the measured rate.
-                    const float want = clampf(smoothed / REFERENCE_RATE_DPS, 0.25f, 4.0f);
-                    const float g    = g_gain_scale.load();
-                    g_gain_scale = g + 0.02f * (want - g);   // slow: never moves mid-fight
-
-                    if (!g_gain_logged.load() && std::fabs(want - 1.0f) > 0.15f) {
-                        g_gain_logged = true;
-                        API::get()->log_info(
-                            "[Halo-CampE-UEVR] gain adapt: measured %.0f deg/s per unit (reference %.0f) "
-                            "-> full_deg x%.2f. Game controller sensitivity differs from the "
-                            "calibrated LookSensitivity30.", smoothed, REFERENCE_RATE_DPS, want);
-                    }
-                }
-            }
+        // TICK PATH ONLY. When the law runs at render rate the hook measures instead, pairing each
+        // aim change with the deflection actually applied across it.
+        if (!g_cfg.aim_rate_render) {
+            static GainMeasState tick_gain;
+            update_gain_measurement(tick_gain, aim_yaw, g_out_rx.load(), g_last_dt.load());
         }
 
-        prev_aim = aim_yaw;
-        prev_out = g_out_rx.load();
-        have_prev = true;
+        // Logged once, from whichever path measured it, so a sensitivity mismatch is still visible.
+        if (!g_gain_logged.load() && g_meas_rate.load() > 10.0f) {
+            const float want = clampf(g_meas_rate.load() / REFERENCE_RATE_DPS, 0.25f, 4.0f);
+            if (std::fabs(want - 1.0f) > 0.15f) {
+                g_gain_logged = true;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] gain adapt: measured %.0f deg/s per unit (reference %.0f) "
+                    "-> full_deg x%.2f. Game controller sensitivity differs from the "
+                    "calibrated LookSensitivity30.", g_meas_rate.load(), REFERENCE_RATE_DPS, want);
+            }
+        }
     }
+
 
     // ------------------------------------------------------------------ VIEW LOCK
     // Cancel, in VR space, the yaw the game has gained since the reference. Without this the
@@ -2084,29 +2924,110 @@ void update() {
                                         ? narrow(class_name_of(g_rig_parent)).c_str()
                                         : "<none - falling back to ControlRotation yaw>");
 
-                // Read the grip point off the weapon socket. Re-read per rig because a different
-                // weapon means a different grip.
-                if (g_cfg.piv_auto && !g_pivot_from_calib) {
+                // Read the grip point off the weapon socket -- ONCE, then latched.
+                //
+                // This used to re-read per rig resolve, justified as "a different weapon means a
+                // different grip". True of the geometry, wrong as a policy: the mount offset is
+                // fitted AGAINST this value, so re-reading it silently invalidates the fit. Worse,
+                // the read samples a LIVE ANIMATED skeleton, so consecutive derives of the SAME
+                // socket on the SAME weapon disagree by tens of centimetres depending on what the
+                // arms were mid-pose -- measured at 43.7 cm across one mission restart.
+                //
+                // A calibration pins it properly (see the solve, which sets pivot_from_calib). This
+                // latch is what protects a session that has not calibrated yet: one derive, then
+                // constant, so the arms cannot move because the rig happened to re-resolve.
+                static bool s_pivot_latched = false;
+                if (g_cfg.piv_auto && !g_pivot_from_calib && !s_pivot_latched) {
+                    s_pivot_latched = true;
                     log_pivot_candidates(found);
 
+                    // The socket NAME has been observed arriving empty at runtime even with no
+                    // pivsocket line in the config and nothing but the default initialiser writing
+                    // it. Cause not established. Since an empty name silently disables the pivot
+                    // term entirely -- and a zero pivot is what makes the weapon swing on a lever
+                    // when you only rotated -- fall back rather than fail closed, and say so.
+                    const char* sock = g_cfg.piv_socket;
+                    if (sock[0] == '\0') {
+                        sock = "PrimaryWeapon";
+                        API::get()->log_info("[Halo-CampE-UEVR] pivot socket name was EMPTY -- falling back to "
+                                             "'%s' (set pivsocket= explicitly to override)", sock);
+                    }
+
                     wchar_t wsock[64] = {0};
-                    MultiByteToWideChar(CP_UTF8, 0, g_cfg.piv_socket, -1, wsock, 63);
+                    MultiByteToWideChar(CP_UTF8, 0, sock, -1, wsock, 63);
 
                     Vec3 piv{};
                     if (derive_pivot(found, wsock, &piv)) {
                         g_cfg.piv_x = piv.x + g_cfg.piv_adj_x;
                         g_cfg.piv_y = piv.y + g_cfg.piv_adj_y;
                         g_cfg.piv_z = piv.z + g_cfg.piv_adj_z;
+                        // Report `sock`, not g_cfg.piv_socket: when the fallback above fires those
+                        // differ, and printing the empty one makes a WORKING lookup read as a
+                        // failed one. That log line cost a misdiagnosis already.
                         API::get()->log_info("[Halo-CampE-UEVR] pivot = socket '%s' (%.1f,%.1f,%.1f) + adj (%.1f,%.1f,%.1f) = (%.1f,%.1f,%.1f) cm",
-                                             g_cfg.piv_socket, piv.x, piv.y, piv.z,
+                                             sock, piv.x, piv.y, piv.z,
                                              g_cfg.piv_adj_x, g_cfg.piv_adj_y, g_cfg.piv_adj_z,
                                              g_cfg.piv_x, g_cfg.piv_y, g_cfg.piv_z);
                     } else {
                         API::get()->log_info("[Halo-CampE-UEVR] pivot read FAILED for socket '%s' -- keeping piv=(%.1f,%.1f,%.1f); "
                                              "set pivauto=0 and pivx/pivy/pivz to override",
-                                             g_cfg.piv_socket, g_cfg.piv_x, g_cfg.piv_y, g_cfg.piv_z);
+                                             sock, g_cfg.piv_x, g_cfg.piv_y, g_cfg.piv_z);
                     }
                 }
+            }
+
+            // SHIELD SHELL. RE-DERIVED FROM THE LIVE PAWN EVERY TIME -- never "only while we hold
+            // nothing". That gate was a real bug (mission restart, 2026-08-02): this title recycles
+            // object-array slots, and a destroyed shell's slot gets reused by a NEW object OF THE
+            // SAME CLASS, so the class-name check in shield_shell() passes on a corpse. The handle
+            // looks healthy, never re-resolves, and we drive a dead pawn's shell while the live one
+            // gets nothing -- the arms track and the shield does not. Measured windows of up to 48 s
+            // where the held shell's generation did not match the rig's.
+            //
+            // The rig above never had this bug because it re-derives THROUGH a live weapon actor
+            // every time rather than adopting by class match; this is the same discipline. Nor can
+            // the level-transition reset cover it: a mission restart reuses the PlayerController, so
+            // that signal never fires (no "PlayerController changed" line appears across a restart).
+            //
+            // Cost is O(components) on the rig's existing timer, not per tick, and note_resolved_
+            // shell() only pays its O(n) slot lookup when the pointer actually CHANGES. Timed under
+            // its own perf site so that claim is measurable with perflog=1 rather than argued.
+            if (g_cfg.shell_drive) {
+                auto* prev = shield_shell();
+                API::UObject* sh = nullptr;
+                { PerfScope _perf(PERF_SHELL); sh = resolve_shield_shell(g_rig_parent); }
+                if (sh == nullptr) {
+                    // No pawn, or the component is gone: drop the handle rather than keep writing
+                    // into whatever the slot now holds. Re-acquisition is one timer tick away.
+                    if (prev != nullptr) {
+                        forget_shield_shell();
+                        API::get()->log_info("[Halo-CampE-UEVR] shield shell lost -- will re-acquire");
+                    }
+                } else if (sh != prev) {
+                    note_resolved_shell(sh);
+                    const std::string snm = (sh->get_fname() != nullptr)
+                                          ? narrow(sh->get_fname()->to_string()) : "?";
+                    API::get()->log_info("[Halo-CampE-UEVR] shield shell acquired: %s %s%s",
+                                         narrow(class_name_of(sh)).c_str(), snm.c_str(),
+                                         prev != nullptr ? "  (REBOUND from a previous instance)" : "");
+
+                    // THE ASSUMPTION THIS FEATURE STANDS ON, stated as a check rather than a
+                    // hope: an identical RELATIVE transform only lands in the same place if
+                    // both components hang off the SAME parent. Same parent -> the shell tracks
+                    // the arms exactly. Different parent -> it will move, but to the wrong
+                    // place, and that is far more confusing to debug than not moving at all.
+                    auto* sh_par = follow_object(sh, L"AttachParent");
+                    if (sh_par == g_rig_parent) {
+                        API::get()->log_info("[Halo-CampE-UEVR]   shell parent MATCHES the rig's -- relative transforms are directly comparable");
+                    } else {
+                        API::get()->log_info("[Halo-CampE-UEVR]   WARNING: shell parent %s DIFFERS from the rig's %s -- "
+                                             "identical relative transforms will NOT co-locate; set shell=0 and re-measure",
+                                             sh_par != nullptr ? narrow(class_name_of(sh_par)).c_str() : "<none>",
+                                             g_rig_parent != nullptr ? narrow(class_name_of(g_rig_parent)).c_str() : "<none>");
+                    }
+                }
+            } else {
+                forget_shield_shell();
             }
         }
 
@@ -2123,6 +3044,25 @@ void update() {
             }
         }
 
+#if HALO_VR_DEV
+        // DEV: force a FULL view-lock re-prime (see Config::lock_reprime). Clearing g_lock_ever as
+        // well as g_lock_primed is what makes this a first-prime rather than a stick-mode re-prime:
+        // the re-prime path deliberately KEEPS the base and folds into g_turn_offset, so clearing
+        // only g_lock_primed would leave `locked` exactly where it was and test nothing.
+        {
+            static float last_reprime = 0.0f;
+            static bool  reprime_seeded = false;
+            if (!reprime_seeded) { last_reprime = g_cfg.lock_reprime; reprime_seeded = true; }
+            else if (g_cfg.lock_reprime != last_reprime) {
+                last_reprime = g_cfg.lock_reprime;
+                const float was = g_locked_view_yaw.load();
+                g_lock_ever = false; g_lock_primed = false;
+                API::get()->log_info("[Halo-CampE-UEVR] DEV lockreprime: forcing a first-prime "
+                                     "(was pinned=%.1f) -- reproduces a mid-mission injection frame", was);
+            }
+        }
+#endif
+
         // Freeze on press: snapshot what the weapon looks like RIGHT NOW, then stop driving it.
         if (g_calib_start.exchange(false)) {
             g_calib_gun_world = g_last_gun_world;
@@ -2132,7 +3072,16 @@ void update() {
         }
 
         auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
-        auto for_each_rig = [&](auto&& fn) { if (rig != nullptr) fn(rig); };
+        // The shield shell gets the IDENTICAL transform, because it is posed identically to the
+        // arms by its own instance of the same anim blueprint -- it only lacks our write. Fanning
+        // out here rather than at each call site means rotation, translation, the pivot-marker
+        // scale and the reset-to-zero all stay in lockstep by construction; there is no path that
+        // moves the arms and forgets the shell.
+        auto* shell = g_cfg.shell_drive ? shield_shell() : nullptr;
+        auto for_each_rig = [&](auto&& fn) {
+            if (rig   != nullptr) fn(rig);
+            if (shell != nullptr) fn(shell);
+        };
 
         // NOTE: the rig KEEPS BEING DRIVEN while calibrating -- it is pinned to a fixed WORLD
         // transform rather than left at a fixed RELATIVE one. See the calibration branch below.
@@ -2206,6 +3155,13 @@ void update() {
                 quat_to_rotator(ux, uy, uz, uw, &g_pitch, &g_yaw, &g_roll);
             }
 
+            // (An arm-bind release-pose SNAPSHOT lived here and has been removed. It was built on
+            // the premise that the End key-up and this solve were separated by a tick; they are not
+            // -- both run inside one update() call, and the instrument that settled it measured the
+            // difference at 0.00 cm. It never earned its place, and while it was here the grip->aim
+            // tilt below mixed a snapshot grip with a live aim, which is a way to be wrong that the
+            // live path cannot be. Do not reintroduce it without a measurement that disagrees.)
+
             // Measured grip->aim tilt, plus the manual `grip` trim on top for taste.
             const float tilt_pitch = wrap180(g_pitch - a_pitch);
             const float tilt_yaw   = wrap180(g_yaw   - a_yaw);
@@ -2225,9 +3181,16 @@ void update() {
             // pivot the moment the aim pitches. The flatten cannot be copied without its
             // world-vs-relative context.
             Quat q_parent = rotator_to_quat(0.0f, (float)aim_yaw, 0.0f);
+#if HALO_VR_DEV
+            float dbg_parent_pitch = 0.0f, dbg_parent_yaw = (float)aim_yaw;   // fallback = the model above
+            bool  dbg_parent_read  = false;
+#endif
             if (g_rig_parent != nullptr) {
                 Vec3 prot{};
                 if (call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot)) {
+#if HALO_VR_DEV
+                    dbg_parent_pitch = prot.x; dbg_parent_yaw = prot.y; dbg_parent_read = true;
+#endif
                     // ---- STALENESS INSTRUMENTATION.
                     //
                     // The rig is a CHILD of this component, and we write it a RELATIVE rotation that
@@ -2286,9 +3249,14 @@ void update() {
             // The VIEW LOCK does not need the same treatment: it is pinned to a value that only
             // changes on re-anchor, so it is a constant that calibration absorbs. The turn offset
             // is not constant, which is why only snap turning exposes the fault.
-            const Quat q_turn = rotator_to_quat(0.0f, g_cfg.rig_turn * g_turn_offset.load(), 0.0f);
+            // The calibration frame rides HERE, not in the grip trim: q_turn left-multiplies the
+            // controller orientation, so this is a true world-yaw pre-rotation. Both terms are pure
+            // yaws about the same axis, which is the one case where adding the scalars is correct.
+            const Quat q_turn = rotator_to_quat(
+                0.0f, g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use(), 0.0f);
 
             const Quat q_ctrl = quat_mul(q_turn, rotator_to_quat(g_pitch, g_yaw, g_roll));
+            // USE SITE 2 of 2: the grip trim is a yaw calibration too, and carries the same frame.
             const Quat q_grip = rotator_to_quat(g_cfg.grip_deg, g_cfg.grip_yaw, g_cfg.grip_roll);
 
 
@@ -2308,6 +3276,15 @@ void update() {
             float rig_pitch, rig_yaw, c_roll;
             if (calibrating) {
                 const Quat q_rel = quat_mul(quat_conj(q_parent), g_calib_gun_world);
+                quat_to_rotator(q_rel.x, q_rel.y, q_rel.z, q_rel.w, &rig_pitch, &rig_yaw, &c_roll);
+            } else if (g_cfg.rig_mode == 3) {
+                // DIRECT-DRIVE RIG: the weapon is simply held by the controller. Same composition
+                // as mode 2, but against the direct trim, so mode 2's fitted calibration is never
+                // consulted here and cannot drag its folded pivot in with it.
+                const Quat q_grip_dir = rotator_to_quat(g_cfg.rig_dir_grip_deg,
+                                                        g_cfg.rig_dir_grip_yaw,
+                                                        g_cfg.rig_dir_grip_roll);
+                const Quat q_rel = quat_mul(quat_conj(q_parent), quat_mul(q_ctrl, q_grip_dir));
                 quat_to_rotator(q_rel.x, q_rel.y, q_rel.z, q_rel.w, &rig_pitch, &rig_yaw, &c_roll);
             } else if (g_cfg.rig_mode == 2) {
                 // q_rel = inverse(parent) * controller * trim. The trim multiplies on the RIGHT so
@@ -2343,6 +3320,12 @@ void update() {
             // The two mechanisms MUST NOT both run: UObjectHook writes the component's world
             // transform per-eye while we would be writing its relative transform per-tick, and the
             // result is a fight whose winner depends on frame timing.
+            //
+            // KNOWN LIMITATION: the shield shell is NOT carried in this mode -- it would need its
+            // own UObjectHook attachment and a matching release, and attach_release/g_attached
+            // track exactly one object. attach_mode ships at 0, so the shell follows on the path
+            // that actually ships; anyone turning attach_mode on gets the old detached shield back
+            // and should fix it here rather than assume it works.
             if (g_cfg.attach_mode == 1) {
                 if (!g_attached) {
                     attach_apply(rig, q_grip, Vec3{g_cfg.off_x, g_cfg.off_y, g_cfg.off_z});
@@ -2361,14 +3344,127 @@ void update() {
             if (g_attached) attach_release(rig, "attachmode switched back to 0");
 
             g_dbg_rig_roll = c_roll;
-            for_each_rig([&](API::UObject* r) {
-                rig_set_rotation(r, (double)rig_pitch, (double)rig_yaw, (double)c_roll);
-            });
+            {
+                // Mode 3 writes the WORLD rotation. The relative write is measurably discarded on
+                // this mesh (Rig.cpp), and the location half is left relative because that half
+                // demonstrably does take -- fixing only what is broken.
+                const Quat q_world = quat_mul(q_parent, rotator_to_quat(rig_pitch, rig_yaw, c_roll));
+                float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+                quat_to_rotator(q_world.x, q_world.y, q_world.z, q_world.w, &wp, &wy, &wr);
+                const bool world_mode = (g_cfg.rig_mode == 3);
+                for_each_rig([&](API::UObject* r) {
+                    if (world_mode) rig_set_world_rotation(r, (double)wp, (double)wy, (double)wr);
+                    else            rig_set_rotation(r, (double)rig_pitch, (double)rig_yaw, (double)c_roll);
+                });
+            }
 
             // The weapon's ACTUAL world rotation: parent composed with what we just wrote. Derived
             // rather than assumed so it stays correct in every rig mode and while calibrating, and
             // it is what both the pivot arm and a freeze snapshot must use.
             const Quat q_gun = quat_mul(q_parent, rotator_to_quat(rig_pitch, rig_yaw, c_roll));
+
+#if HALO_VR_DEV
+            // CALIBJUMP -- CONSECUTIVE driven frames across a calibration release.
+            //
+            // The first version of this lived inside the RIGTRACK block, which is gated on
+            // `tick % 45`, so it sampled 1.5 s apart and could not see a transient at all; and it
+            // differenced the parent's WORLD location against `pose_off`, which is a clamped
+            // controller-relative offset, so the "delta" was just the world position echoed back.
+            // Both readings were worthless. This one samples every frame while armed and differences
+            // each quantity against ITSELF on the previous frame, which is the only comparison that
+            // can show a jump.
+            //
+            // Ruled out so far: the pivot lever (CALIBSOLVE delta was exactly zero) and parent
+            // motion (par_loc was static to 0.1 cm across the whole window).
+            // WINDOW MUST SPAN THE RELEASE. Arming in the release handler starts the window one
+            // frame too late -- `calibrating` has already gone false by then, so the first sample is
+            // the settled state and the transition is never seen. It is the transition that matters:
+            // everything after it measured as a hand holding still (d_gun sub-cm, d_par exactly 0),
+            // so the discontinuity is at or before the release frame. Sample during the HOLD too,
+            // thinned so a multi-second hold does not bury the log, then every frame afterwards.
+            const bool cj_hold = calibrating && ((tick % 4) == 0);
+            if (cj_hold || g_calibjump_arm > 0) {
+                if (!calibrating && g_calibjump_arm > 0) --g_calibjump_arm;
+                Vec3 gl{}, pl{};
+                const bool gl_ok = call_ret_vec3(rig, L"K2_GetComponentLocation", &gl);
+                const bool pl_ok = (g_rig_parent != nullptr)
+                    && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pl);
+                float gp = 0.0f, gy = 0.0f, gr = 0.0f;
+                quat_to_rotator(q_gun.x, q_gun.y, q_gun.z, q_gun.w, &gp, &gy, &gr);
+                if (g_calibjump_have_prev) {
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] CALIBJUMP[%d] calibrating=%d | gun_loc=(%.1f,%.1f,%.1f) "
+                        "d_gun=(%.1f,%.1f,%.1f) | par_loc=(%.1f,%.1f,%.1f) d_par=(%.1f,%.1f,%.1f) | "
+                        "gun_rot=(p%.1f,y%.1f) d_rot=(p%.1f,y%.1f) | off=(%.1f,%.1f,%.1f) ok%d%d",
+                        g_calibjump_arm, (int)calibrating,
+                        gl.x, gl.y, gl.z,
+                        gl.x - g_calibjump_gun.x, gl.y - g_calibjump_gun.y, gl.z - g_calibjump_gun.z,
+                        pl.x, pl.y, pl.z,
+                        pl.x - g_calibjump_par.x, pl.y - g_calibjump_par.y, pl.z - g_calibjump_par.z,
+                        gp, gy, gp - g_calibjump_rot_p, gy - g_calibjump_rot_y,
+                        g_cfg.off_x, g_cfg.off_y, g_cfg.off_z, (int)gl_ok, (int)pl_ok);
+                }
+                g_calibjump_gun = gl; g_calibjump_par = pl;
+                g_calibjump_rot_p = gp; g_calibjump_rot_y = gy;
+                g_calibjump_have_prev = true;
+            } else if (!calibrating && g_calibjump_arm == 0) {
+                // Only forget the baseline once the whole window is over. Clearing it on the frames
+                // the hold-thinning skips would drop have_prev between every sample, so nothing
+                // would ever have a previous frame to difference against and the hold side of the
+                // window would log nothing at all.
+                g_calibjump_have_prev = false;
+            }
+#endif
+
+#if HALO_VR_DEV
+            // RIGTRACK -- the entire hand->arms chain on one line, in order, so the term that fails
+            // to respond to head or hand motion can be READ rather than inferred. Reasoning about
+            // this statically produced two confident explanations that the logs then refuted, so
+            // every intermediate now gets printed: room-space hand, the room->game yaw applied to
+            // it, game-space hand, the parent it is made relative to, the relative value actually
+            // written, and the world rotation that composes out. Whichever column stops tracking
+            // the controller is the bug.
+            if ((tick % 45) == 0) {
+                float gp = 0.0f, gy = 0.0f, gr = 0.0f, hp = 0.0f, hy = 0.0f, hr = 0.0f;
+                quat_to_rotator(q_gun.x,  q_gun.y,  q_gun.z,  q_gun.w,  &gp, &gy, &gr);
+                quat_to_rotator(q_ctrl.x, q_ctrl.y, q_ctrl.z, q_ctrl.w, &hp, &hy, &hr);
+                const float qturn_yaw = g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use();
+
+                // MEASURED, not predicted. gun_world above is what the maths says the component
+                // should end up at; these two are what the engine reports it IS. Every wrong
+                // conclusion today came from trusting a computed intermediate over a read-back, so
+                // the comparison the harness actually needs is ctrl-vs-ACTUAL, not ctrl-vs-intent.
+                Vec3 mrot{}, mloc{}, ploc{};
+                const bool mrot_ok = call_ret_vec3(rig, L"K2_GetComponentRotation", &mrot);
+                const bool mloc_ok = call_ret_vec3(rig, L"K2_GetComponentLocation", &mloc);
+                // The PARENT's world location. With L and G both zero the rig's offset reduces to
+                // the controller's position, which is unchanged under a pure rotation -- yet the rig
+                // still moves ~30 cm. That can only come from the parent, so measure it directly
+                // rather than infer it a sixth time.
+                const bool ploc_ok = (g_rig_parent != nullptr)
+                    && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &ploc);
+
+                // (CALIBJUMP moved out of this block -- it is gated on `tick % 45`, which sampled
+                // 1.5 s apart and could never show a release transient. See the new site above.)
+
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] RIGTRACK m=%d hand_room=(p%.1f,y%.1f) qturn=%.1f hand_game=(p%.1f,y%.1f)"
+                    " parent=(p%.1f,y%.1f,read%d) wrote=(p%.1f,y%.1f) gun_pred=(p%.1f,y%.1f)"
+                    " gun_meas=(p%.1f,y%.1f,ok%d) gun_loc=(%.1f,%.1f,%.1f,ok%d)"
+                    " par_loc=(%.1f,%.1f,%.1f,ok%d)"
+                    " ctrl_pos=(%.3f,%.3f,%.3f) | aim=%.1f view=%.1f hmd=%.1f direct=%d rigmode=%d",
+                    g_cfg.dbg_mark,
+                    g_pitch, g_yaw, qturn_yaw, hp, hy,
+                    dbg_parent_pitch, dbg_parent_yaw, (int)dbg_parent_read,
+                    rig_pitch, rig_yaw, gp, gy,
+                    mrot.x, mrot.y, (int)mrot_ok,
+                    mloc.x, mloc.y, mloc.z, (int)mloc_ok,
+                    ploc.x, ploc.y, ploc.z, (int)ploc_ok,
+                    g_dbg_pos_x.load(), g_dbg_pos_y.load(), g_dbg_pos_z.load(),
+                    (float)aim_yaw, g_dbg_view_out.load(), g_dbg_hmd_yaw.load(),
+                    (int)g_cfg.aim_direct, g_cfg.rig_mode);
+            }
+#endif
             g_last_gun_world = q_gun;
 
             // Publish for the render-rate re-apply (see rig_render).
@@ -2405,6 +3501,9 @@ void update() {
                 // room. Without this, walking anywhere drags the gun to the clamp and holds it
                 // there. Subtracting the head leaves only hand-relative-to-body motion, which is
                 // the only part a held object should follow.
+                // (The position half of the removed arm-bind snapshot was here. Same story as the
+                // orientation half above, and the BINDSNAP instrument that measured it read 0.00 cm
+                // on every calibration -- the two samples were always from the same update() call.)
                 Vec3 hand = rigpos;
                 if (g_cfg.rig_body_anchor) {
                     Vec3 hpos{}; Quat hq{};
@@ -2511,9 +3610,35 @@ void update() {
                 // so with R pinned to the frozen orientation by the rotation trim above,
                 //     C = off_frozen - pose + R_frozen*G
                 if (g_calib_finish.exchange(false) && g_calib_valid) {
-                    const Quat q_grip_new = quat_mul(quat_conj(q_ctrl), g_calib_gun_world);
+                    // Strip the calibration frame as a ROTATION (see calib_frame_yaw_use). The use
+                    // path renders  gun = R_yaw(frame) * q_ctrl * q_grip,  so inverting it gives
+                    //   q_grip = conj(R_yaw(frame) * q_ctrl) * gun_world
+                    // and the stored trim is frame-independent by construction. With the feature
+                    // off this is the identity and the solve is byte-identical to before.
+                    // The DELTA, not the whole frame: q_ctrl already carries calib_frame_yaw_use()
+                    // via q_turn, so the solve strips that much for free. Only the difference is
+                    // outstanding, and it is non-zero in exactly one situation -- upgrading a v1
+                    // file, where write=locked and use=0. Subtracting the full frame there would
+                    // double-count it for every already-v2 calibration.
+                    const float frame_delta = calib_frame_yaw_write() - calib_frame_yaw_use();
+                    const Quat  q_frame_w   = rotator_to_quat(0.0f, frame_delta, 0.0f);
+                    const Quat q_grip_new = quat_mul(quat_conj(quat_mul(q_frame_w, q_ctrl)),
+                                                     g_calib_gun_world);
                     quat_to_rotator(q_grip_new.x, q_grip_new.y, q_grip_new.z, q_grip_new.w,
                                     &g_cfg.grip_deg, &g_cfg.grip_yaw, &g_cfg.grip_roll);
+
+                    // MODE 3 READS A DIFFERENT TRIM. The direct-drive rig composes against
+                    // rig_dir_grip_* (Plugin.cpp, the rig_mode==3 branch) specifically so it does
+                    // not inherit mode 2's fitted pivot -- but nothing ever wrote those, so
+                    // calibrating while in mode 3 fitted grip_* and then silently changed nothing,
+                    // leaving the arms on a zeroed trim (i.e. pitched up by the whole fitted angle).
+                    // The composition is identical in both branches, so the fit transfers exactly.
+                    g_cfg.rig_dir_grip_deg  = g_cfg.grip_deg;
+                    g_cfg.rig_dir_grip_yaw  = g_cfg.grip_yaw;
+                    g_cfg.rig_dir_grip_roll = g_cfg.grip_roll;
+                    // (The frame is stripped by the rotation above, NOT by adjusting gripyaw.)
+                    // Stamp the schema so the use path knows these values are frame-relative.
+                    if (g_cfg.calib_relative) g_cfg.calib_ver = 2;
 
                     // ONE SAMPLE IS SUFFICIENT. A held weapon is a RIGID ATTACHMENT, which has no
                     // free pivot parameter: physics fixes the rotation centre at the controller
@@ -2533,6 +3658,44 @@ void update() {
                     g_cfg.off_y = clampf(L.y, -100.0f, 100.0f);
                     g_cfg.off_z = clampf(L.z, -100.0f, 100.0f);
 
+                    // MODE 3 READS A DIFFERENT MOUNT, exactly as it reads a different grip trim --
+                    // and this is the other half of that same fix, which was missed.
+                    //
+                    // The use path takes its mount from rig_dir_off_* when rig_mode == 3, but the
+                    // solve only ever wrote off_*. So in mode 3 the POSITION half of this gesture
+                    // did nothing: rig_dir_off_* stayed at whatever it was (zero, for anyone who
+                    // never hand-edited it), the weapon was unpinned from the frozen offset on
+                    // release, and it jumped to where a zero mount puts it. The size of that jump
+                    // is the distance the hand travelled during the hold -- which is precisely the
+                    // gesture, so the calibration APPEARED to move the weapon by however much you
+                    // moved to perform it.
+                    //
+                    // Rotation was unaffected and felt correct throughout, which is what made this
+                    // hard to see: the grip half had already been fixed, the mount half had not.
+                    g_cfg.rig_dir_off_x = g_cfg.off_x;
+                    g_cfg.rig_dir_off_y = g_cfg.off_y;
+                    g_cfg.rig_dir_off_z = g_cfg.off_z;
+
+                    // PIN THE PIVOT TO THIS FIT.
+                    //
+                    // L was just solved against the G that is live RIGHT NOW. The use path applies
+                    // (pose + R_ctrl*L - R_gun*G), so the moment G changes, L is describing a
+                    // geometry that no longer exists and the arms move by |R_gun * dG|.
+                    //
+                    // And G does change, because pivauto re-reads the PrimaryWeapon socket on every
+                    // full rig resolve -- off the LIVE ANIMATED skeleton, so it samples whatever the
+                    // arms happened to be doing that frame. Measured across one mission restart:
+                    // (61.6,13.1,-23.5) -> (20.2,12.6,-37.5), a 43.7 cm swing, which is exactly the
+                    // "arms are offset after Restart Mission" report. Aim was unaffected because
+                    // nothing in the aim path consumes G, which is what made it look like a rig bug
+                    // rather than a shared one.
+                    //
+                    // So the calibration takes ownership of the pivot: freeze the value it was
+                    // fitted against and stop re-deriving. write_calib_file() persists it as
+                    // pivauto=0 plus pivx/y/z, so the pairing survives a restart too.
+                    g_pivot_from_calib = true;
+                    g_cfg.piv_auto     = false;
+
                     // Deliberately NOT touching g_have_ref. The aim loop ran normally throughout,
                     // so its hand-to-aim mapping is still valid -- re-referencing here would
                     // silently re-calibrate aim as a side effect of a mesh adjustment.
@@ -2541,6 +3704,65 @@ void update() {
                         "[Halo-CampE-UEVR] CALIBRATED: grip=%.1f gripyaw=%.1f griproll=%.1f  mount=(%.1f,%.1f,%.1f)cm controller-local",
                         g_cfg.grip_deg, g_cfg.grip_yaw, g_cfg.grip_roll,
                         g_cfg.off_x, g_cfg.off_y, g_cfg.off_z);
+
+#if HALO_VR_DEV
+                    // CALIBSOLVE -- every term of the mount solve, so it can be READ rather than
+                    // inferred. `resid` and `L` are the useful fields.
+                    //
+                    // ⚠️ THE `delta` FIELD IS TAUTOLOGICAL. IT CANNOT DETECT ANYTHING.
+                    //
+                    // It was written to compare the frozen gun rotation against the live one, on the
+                    // theory that the pivot lever multiplies any difference into centimetres of
+                    // snap. But `arm_live` is built from q_grip_new, which was solved one line
+                    // earlier as conj(q_frame * q_ctrl) * gun_world_frozen -- so q_ctrl * q_grip_new
+                    // is IDENTICALLY gun_world_frozen whenever frame_delta is 0, and delta can only
+                    // ever print (0,0,0). It did, on every run, and that zero was then cited as
+                    // evidence that the pivot was not a factor.
+                    //
+                    // It was. Not through this term -- the pivot bug was G being RE-DERIVED between
+                    // the fit and its use (43.7 cm across a mission restart, since fixed by pinning
+                    // G to the calibration). A frozen-vs-live comparison at the instant of the solve
+                    // could never have seen that; it needed the value compared across sessions.
+                    //
+                    // Kept because G/pivauto/fromcalib/resid/L are all worth reading. Do not read
+                    // `delta` as a measurement of anything.
+                    {
+                        // Gun world rotation that will apply AFTER release. Mode 3 writes
+                        // q_world = q_parent * (conj(q_parent) * q_ctrl * q_grip) = q_ctrl * q_grip,
+                        // so the parent cancels and this is the whole of it.
+                        const Vec3 arm_live = quat_rotate(quat_mul(q_ctrl, q_grip_new), G_now);
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] CALIBSOLVE: piv G=(%.1f,%.1f,%.1f) pivauto=%d fromcalib=%d | "
+                            "armG frozen=(%.1f,%.1f,%.1f) live=(%.1f,%.1f,%.1f) delta=(%.1f,%.1f,%.1f)cm | "
+                            "resid=(%.1f,%.1f,%.1f) L=(%.1f,%.1f,%.1f)",
+                            G_now.x, G_now.y, G_now.z, (int)g_cfg.piv_auto, (int)g_pivot_from_calib,
+                            arm_frozen.x, arm_frozen.y, arm_frozen.z,
+                            arm_live.x, arm_live.y, arm_live.z,
+                            arm_live.x - arm_frozen.x, arm_live.y - arm_frozen.y,
+                            arm_live.z - arm_frozen.z,
+                            resid.x, resid.y, resid.z, L.x, L.y, L.z);
+                    }
+
+                    // CALIBJUMP -- arm the post-release comparison. Records the weapon's ACTUAL world
+                    // transform across the calibrating 1 -> 0 frame, so a release discontinuity can
+                    // be read instead of argued about.
+                    //
+                    // The release IS seamless on paper -- substituting the solve into the runtime
+                    // application gives off = off_frozen exactly -- so anything visible at the
+                    // transition is in a term the algebra does not cover. That reasoning stands; the
+                    // conclusion originally drawn from it ("therefore not the pivot", from
+                    // CALIBSOLVE's delta) does not: see the warning above about that field.
+                    //
+                    // The two release-frame jumps that were real turned out to be (a) rigmode 3
+                    // reading a mount the solve never wrote, and (b) G changing between the fit and
+                    // its use. Both are fixed; this stays for the next one.
+                    //
+                    // Frames to keep sampling AFTER the release. The pre-release side is covered by
+                    // the `calibrating` branch at the sampling site, so the window spans 1 -> 0.
+                    // Deliberately NOT clearing have_prev: the last hold sample is the frame we most
+                    // need to difference the first post-release frame against.
+                    g_calibjump_arm = 12;
+#endif
                 }
 
                 // RIGID ATTACHMENT:  off = pose + R_ctrl*L - R_gun*G
@@ -2549,7 +3771,12 @@ void update() {
                 // attachment rather than a weapon sliding around on a world-aligned offset, and it
                 // puts the rotation centre at the controller origin where a held object's is.
                 // G stays 0 unless someone deliberately overrides the pivot.
-                const Vec3 mount = quat_rotate(q_ctrl, Vec3{g_cfg.off_x, g_cfg.off_y, g_cfg.off_z});
+                // Mode 3 uses its OWN mount offset. Mode 2's off_* carries a folded-in pivot, so
+                // borrowing it here would import exactly the error this mode exists to avoid.
+                const Vec3 mount_local = (g_cfg.rig_mode == 3)
+                    ? Vec3{g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z}
+                    : Vec3{g_cfg.off_x, g_cfg.off_y, g_cfg.off_z};
+                const Vec3 mount = quat_rotate(q_ctrl, mount_local);
                 const Vec3 arm   = quat_rotate(q_gun, G);
                 Vec3 off{pose_off.x + mount.x - arm.x,
                          pose_off.y + mount.y - arm.y,
@@ -2638,12 +3865,78 @@ void update() {
                                 // disables them all -- the same trap as gating on piv_cube above.
                                 // Only park_marker belongs under that condition.
                                 {
-                                    // UE forward from the aim rotator.
-                                    const float cp = std::cos((float)aim_pitch * DEG2RAD);
-                                    const Vec3 fwd{cp * std::cos((float)aim_yaw * DEG2RAD),
-                                                   cp * std::sin((float)aim_yaw * DEG2RAD),
-                                                   std::sin((float)aim_pitch * DEG2RAD)};
-                                    const float d = g_cfg.aim_reticule_dist;
+                                    // UE forward from the reticule's chosen angles -- game aim, or
+                                    // the smoothed controller setpoint. See reticule_ray_angles.
+                                    float r_yaw = 0.0f, r_pitch = 0.0f;
+                                    reticule_ray_angles(aim_yaw, aim_pitch, &r_yaw, &r_pitch);
+                                    const float cp = std::cos(r_pitch * DEG2RAD);
+                                    const Vec3 fwd{cp * std::cos(r_yaw * DEG2RAD),
+                                                   cp * std::sin(r_yaw * DEG2RAD),
+                                                   std::sin(r_pitch * DEG2RAD)};
+                                    // TRACE FIRST, fixed distance as the fallback. On a hit the
+                                    // marker lands on the surface, so it reads correctly from any
+                                    // eye position -- which is the whole point, because the eye
+                                    // moves with the player's head and the shot origin does not.
+                                    // A failed resolve keeps the previous behaviour exactly.
+                                    //
+                                    // Only the DISTANCE is decided here; the target point is built
+                                    // from it below. The traced hit is on this same ray by
+                                    // construction, so deriving the point from d rather than using
+                                    // the hit directly keeps the drawn position and the distance
+                                    // that feeds the size compensation in agreement -- they must
+                                    // not be able to disagree.
+                                    float d = g_cfg.aim_reticule_dist;
+                                    if (g_cfg.aim_reticule_trace) {
+                                        const float cap  = g_cfg.aim_reticule_max_dist;
+                                        const float tmax = g_cfg.aim_reticule_trace_max;
+                                        const Vec3 far_end{origin.x + fwd.x * tmax,
+                                                           origin.y + fwd.y * tmax,
+                                                           origin.z + fwd.z * tmax};
+                                        // Never let the trace land on the player. The pawn is one
+                                        // actor and the weapon is another, attached to the rig --
+                                        // ignoring only the pawn leaves the gun to catch the ray
+                                        // every time an animation swings it across the camera.
+                                        API::UObject* ignore[2] = {nullptr, nullptr};
+                                        int nignore = 0;
+                                        if (auto* pw = API::get()->get_local_pawn(0)) {
+                                            ignore[nignore++] = reinterpret_cast<API::UObject*>(pw);
+                                        }
+                                        if (auto* wa = fp_weapon_actor()) ignore[nignore++] = wa;
+
+                                        Vec3 hit{};
+                                        bool got = false;
+                                        {
+                                            // Inside the gate, so `n` counts real traces and `mean`
+                                            // is the cost of one -- not an average diluted by the
+                                            // frames that never traced.
+                                            PerfScope _pt(PERF_TRACE);
+                                            got = hit_trace(origin, far_end, ignore, nignore, &hit);
+                                        }
+                                        if (got) {
+                                            const float hx = hit.x - origin.x;
+                                            const float hy = hit.y - origin.y;
+                                            const float hz = hit.z - origin.z;
+                                            const float h = std::sqrt(hx * hx + hy * hy + hz * hz);
+                                            if (h > cap) {
+                                                // Beyond the cap: park at the cap EXACTLY. No
+                                                // surface offset -- there is no surface here to
+                                                // clip into, and subtracting one would just pull
+                                                // the marker off the depth we chose.
+                                                d = cap;
+                                            } else {
+                                                // Sit just in front of the wall rather than in it.
+                                                // Floored so a muzzle-contact hit cannot put the
+                                                // marker behind the eye.
+                                                d = h - g_cfg.aim_reticule_surface_off;
+                                                if (d < 20.0f) d = 20.0f;
+                                            }
+                                        } else {
+                                            // Miss (sky, or past the trace length). The cap, not
+                                            // aim_reticule_dist: panning off a wall onto sky should
+                                            // not pop the reticule between two depths.
+                                            d = cap;
+                                        }
+                                    }
                                     const Vec3 target{origin.x + fwd.x * d,
                                                       origin.y + fwd.y * d,
                                                       origin.z + fwd.z * d};
@@ -2691,10 +3984,35 @@ void update() {
                                     // constraints the borrowed-prop marker cannot meet.
                                     // The game's own crosshair, in world space -- brings the
                                     // per-weapon art and the hit marker with it.
-                                    // On foot the placement distance IS the distance the scales
-                                    // were tuned at, so no compensation -- but set it explicitly
-                                    // rather than relying on the seated path to have reset it.
-                                    g_ret_scale_mul = 1.0f;
+                                    // SCALE WITH DISTANCE. This used to be pinned to 1.0, which was
+                                    // right only while the placement distance was a constant: the
+                                    // scales were tuned at that one distance, so no compensation
+                                    // was needed. Tracing removed the constant -- the reticule now
+                                    // lands wherever the world is -- and at a fixed world size
+                                    // apparent size goes as 1/distance, so it is overwhelming
+                                    // against a near wall and invisible across a room.
+                                    //
+                                    // Proportional scaling cancels that. The floor stops the ring
+                                    // vanishing when the muzzle is against a surface. See
+                                    // aim_reticule_min_scale for how the two knobs set the anchor.
+                                    // Anchored at BOTH ends -- see aim_reticule_min_scale. The far
+                                    // anchor is the size this used to be pinned at, so the ring at
+                                    // full distance is unchanged from before tracing existed and
+                                    // only the near field is new.
+                                    {
+                                        const float ms = g_cfg.aim_reticule_min_scale;
+                                        const float xs = g_cfg.aim_reticule_max_scale;
+                                        const float md = g_cfg.aim_reticule_min_scale_dist;
+                                        const float xd = g_cfg.aim_reticule_max_dist;
+                                        float s = xs;
+                                        if (xd > md) {
+                                            float t = (d - md) / (xd - md);
+                                            if (t < 0.0f) t = 0.0f;
+                                            if (t > 1.0f) t = 1.0f;   // d is capped already; belt and braces
+                                            s = ms + (xs - ms) * t;
+                                        }
+                                        g_ret_scale_mul = s;
+                                    }
 
                                     if (g_cfg.aim_widget) {
                                         reticule_widget_ensure(rig);
@@ -2782,7 +4100,15 @@ void update() {
                 // Without this, "move my hand right" means right-of-the-parent rather than right in
                 // the world, so the gun swings differently depending on which way you are facing --
                 // half of what makes the controls feel wrong.
-                if (g_cfg.rig_mode == 2) off = quat_rotate(quat_conj(q_parent), off);
+                // Publish the WORLD-space offset BEFORE it is folded into the parent's frame, so the
+                // render path can redo that fold against the live parent. Published even when the
+                // conversion below does not apply, so the consumer never has to know the rig mode.
+                g_rigw_off_x = off.x; g_rigw_off_y = off.y; g_rigw_off_z = off.z;
+                g_rigw_off_valid = (g_cfg.rig_mode == 2 || g_cfg.rig_mode == 3);
+
+                if (g_cfg.rig_mode == 2 || g_cfg.rig_mode == 3) {
+                    off = quat_rotate(quat_conj(q_parent), off);
+                }
 
                 // rigclamp was already applied to the pose part above. What remains here is only a
                 // sanity rail so a bad solve cannot fling the weapon out of the world -- it must
@@ -2811,6 +4137,35 @@ void update() {
                             (float)rl[0], (float)rl[1], (float)rl[2]);
                     }
                 }
+
+#if HALO_VR_DEV
+                // ROTATION READ-BACK -- the counterpart the location check has always had and the
+                // rotation never did. rig_set_rotation() returns true unconditionally, so "it was
+                // written" has never been evidence that it LANDED. On a skeletal mesh it may well
+                // not: the animation system drives component rotation every frame and can overwrite
+                // a relative rotation between our write and the next read, while leaving location
+                // alone -- which presents exactly as "the arms translate but hardly rotate".
+                //
+                // Reported only when the verdict CHANGES, and it compares the residual against what
+                // was asked, so a genuinely near-zero request is not mistaken for a no-op.
+                {
+                    auto* rr_read = rig->get_property_data<double>(L"RelativeRotation");
+                    const float asked = std::fabs(rig_pitch) + std::fabs(rig_yaw) + std::fabs(c_roll);
+                    if (rr_read != nullptr && asked > 1.0f) {
+                        const float got = (float)(std::fabs(rr_read[0]) + std::fabs(rr_read[1])
+                                                  + std::fabs(rr_read[2]));
+                        const int verdict = (got > asked * 0.25f) ? 1 : 0;
+                        static int s_rot_verdict = -1;
+                        if (s_rot_verdict != verdict) {
+                            s_rot_verdict = verdict;
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] rig ROTATION %s (asked %.1f,%.1f,%.1f  read %.1f,%.1f,%.1f)",
+                                verdict ? "APPLIES" : "IS A NO-OP", rig_pitch, rig_yaw, c_roll,
+                                (float)rr_read[0], (float)rr_read[1], (float)rr_read[2]);
+                        }
+                    }
+                }
+#endif
                 }   // end: neutral valid
             }
             }   // end: attachmode 0 -- the rig-driver path
@@ -2840,11 +4195,14 @@ void update() {
         if (pawn_root != nullptr) {
             const Vec3 origin{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
 
-            // UE forward from the aim rotator, exactly as the on-foot path builds it.
-            const float cp = std::cos((float)aim_pitch * DEG2RAD);
-            const Vec3 fwd{cp * std::cos((float)aim_yaw * DEG2RAD),
-                           cp * std::sin((float)aim_yaw * DEG2RAD),
-                           std::sin((float)aim_pitch * DEG2RAD)};
+            // UE forward, exactly as the on-foot path builds it -- including the reticule's source
+            // toggle and smoothing, so the two paths cannot disagree about what the reticule means.
+            float r_yaw = 0.0f, r_pitch = 0.0f;
+            reticule_ray_angles(aim_yaw, aim_pitch, &r_yaw, &r_pitch);
+            const float cp = std::cos(r_pitch * DEG2RAD);
+            const Vec3 fwd{cp * std::cos(r_yaw * DEG2RAD),
+                           cp * std::sin(r_yaw * DEG2RAD),
+                           std::sin(r_pitch * DEG2RAD)};
             const float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
                           ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
             const Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
@@ -2966,7 +4324,40 @@ SHORT to_raw(float v) {
     if (std::fabs(v) < 1e-3f) return 0;
     float raw = std::fabs(v) * 32767.0f;
     if (raw > 32767.0f) raw = 32767.0f;
-    return (SHORT)(v < 0.0f ? -raw : raw);
+    SHORT out = (SHORT)(v < 0.0f ? -raw : raw);
+
+    // DITHER, to defeat the game's dispatch gate rather than its deadzone.
+    //
+    // The exe's input poll (exe+0x9776000) forwards an axis into UE only when it has CHANGED since
+    // the previous frame, OR when |raw| exceeds XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE (0x21F1):
+    //
+    //     cmp  word ptr [rdi+0x104], r14w   ; same as last frame?
+    //     jne  dispatch                     ; changed -> dispatch whatever the magnitude
+    //     ...  cmp eax, 21F1h / jle skip    ; unchanged AND small -> suppressed
+    //
+    // So the deadzone never blocks a MOVING stick -- it blocks a STEADY small one. That is exactly
+    // what a slow correction looks like coming out of the aim loop, and it matches the hard floor
+    // measured on the plant curve at ~0.265 deflection: below it a held value is dispatched once
+    // and then goes silent, so the aim stops.
+    //
+    // Alternating the low bit makes every frame differ from the last, so `jne dispatch` always
+    // takes, and small deflections keep being delivered. Costs at most 1/32767 of deflection --
+    // three orders of magnitude below the ~14 deg/s minimum correction it is there to remove.
+    //
+    // Default OFF: this is a behavioural hypothesis about someone else's dispatch logic, and it has
+    // not been tested in a live session yet.
+    if (g_cfg.stick_dither && out != 0) {
+        static bool s_flip = false;
+        s_flip = !s_flip;
+        if (s_flip) {
+            // Nudge AWAY from zero so the sign can never invert, and never past full scale.
+            if (out > 0 && out < 32767) ++out;
+            else if (out < 0 && out > -32767) --out;
+            else if (out > 0) --out;
+            else ++out;
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -3092,7 +4483,77 @@ public:
                     float rp = 0.0f, ry = 0.0f, rr = 0.0f;
                     quat_to_rotator(q_rel.x, q_rel.y, q_rel.z, q_rel.w, &rp, &ry, &rr);
                     if (std::isfinite(rp) && std::isfinite(ry) && std::isfinite(rr)) {
-                        rig_set_rotation(rig, (double)rp, (double)ry, (double)rr);
+                        // q_w is already the world target -- no parent composition needed, which
+                        // is the point: the relative write is discarded on this mesh.
+                        float wp = 0.0f, wy = 0.0f, wr2 = 0.0f;
+                        quat_to_rotator(q_w.x, q_w.y, q_w.z, q_w.w, &wp, &wy, &wr2);
+
+                        // LOCATION MUST BE RE-DERIVED HERE TOO, for the same reason the rotation is.
+                        // RelativeLocation is interpreted in the parent's frame, so a location
+                        // computed against the parent as it was at the tick is wrong by the parent's
+                        // rotation since -- and that error is a LEVER: it scales with how far the rig
+                        // sits from the parent origin, which is the controller's own offset (~57 cm
+                        // here). Correcting rotation per frame while leaving location on the tick is
+                        // what made rotating the controller translate the weapon.
+                        //
+                        // Resolved ONCE, above the fan-out, in whichever form this mode writes.
+                        bool have_loc = false;
+                        Vec3 loc{};
+                        if (g_rigw_off_valid.load()) {
+                            const Vec3 ow{g_rigw_off_x.load(), g_rigw_off_y.load(), g_rigw_off_z.load()};
+                            if (g_cfg.rig_mode == 3) {
+                                // WORLD location, for the same reason as the rotation above. With the
+                                // mount and pivot both zero, a static parent, and an unchanged
+                                // controller position, a relative write still moved the rig ~30 cm
+                                // under pure rotation -- measured. Nothing we compute can do that, so
+                                // the frame the engine composes RelativeLocation in is not the node we
+                                // sampled: g_rig_parent is evidently not the immediate parent. An
+                                // absolute write does not care how deep the hierarchy is.
+                                Vec3 pl{};
+                                if (call_ret_vec3(par, L"K2_GetComponentLocation", &pl)) {
+                                    loc = Vec3{pl.x + ow.x, pl.y + ow.y, pl.z + ow.z};
+                                    have_loc = std::isfinite(loc.x) && std::isfinite(loc.y)
+                                            && std::isfinite(loc.z);
+                                }
+                            } else {
+                                loc = quat_rotate(quat_conj(q_par), ow);
+                                have_loc = std::isfinite(loc.x) && std::isfinite(loc.y)
+                                        && std::isfinite(loc.z);
+                            }
+                        }
+
+                        // ONE WRITER FOR BOTH MESHES, exactly as the tick does through for_each_rig.
+                        // The shell used to get rotation here but NOT location, so once the location
+                        // half was added for the arms the shield was left a tick behind in position
+                        // only -- it tracked in rotation and lagged in translation, which reads as
+                        // "the overshield moves late". Fanning both halves out from one place makes
+                        // that class of drift structurally impossible rather than remembered.
+                        auto apply_render = [&](API::UObject* c) {
+                            if (g_cfg.rig_mode == 3) {
+                                rig_set_world_rotation(c, (double)wp, (double)wy, (double)wr2);
+                                if (have_loc) {
+                                    rig_set_world_location(c, (double)loc.x, (double)loc.y, (double)loc.z);
+                                }
+                            } else {
+                                rig_set_rotation(c, (double)rp, (double)ry, (double)rr);
+                                if (have_loc) {
+                                    rig_set_location(c, (double)loc.x, (double)loc.y, (double)loc.z);
+                                }
+                            }
+                        };
+
+                        apply_render(rig);
+
+                        // Same q_rel/loc are correct for the shell: same parent (asserted at
+                        // acquisition) and the same pose -- it is posed identically to the arms by
+                        // its own instance of the same anim blueprint, it only lacks our write.
+                        // Bare pointer by design -- see g_shell_component; validating it here would
+                        // cost an FName->string per frame on the render thread.
+                        if (g_cfg.shell_drive) {
+                            if (auto* sh = reinterpret_cast<API::UObject*>(g_shell_component.load())) {
+                                apply_render(sh);
+                            }
+                        }
 
                         // NOT a residual -- this is the error being CORRECTED. It measures how far
                         // the parent moved since the tick that produced this target, i.e. exactly
@@ -3147,10 +4608,13 @@ public:
             auto* r = reinterpret_cast<UEVR_Rotatord*>(rotation);
             g_dbg_view_in = (float)r->yaw;
             if (!g_lock_primed.load()) {
+                // Consumed HERE, not above, so the flag can only be eaten by a prime that actually
+                // happens -- reading it every render frame would race the game thread setting it.
                 if (!g_lock_ever.load()) {
                     // FIRST prime of the session: adopt the current camera yaw as the base.
                     g_locked_view_yaw = (float)r->yaw - g_turn_offset.load();
                     g_lock_ever = true;
+                    invalidate_ref_for_frame();   // see below -- the aim reference BAKES this value
                 } else {
                     // RE-PRIME after stick mode. A ride rotates the game camera by some net
                     // amount while the room stays put -- EXACTLY what a snap turn is. So the base
@@ -3177,6 +4641,7 @@ public:
                 if (!g_lock_ever.load()) {
                     g_locked_view_yaw = rotation->yaw - g_turn_offset.load();
                     g_lock_ever = true;
+                    invalidate_ref_for_frame();
                 } else {
                     g_turn_offset = wrap180(rotation->yaw - g_locked_view_yaw.load());
                 }
@@ -3226,7 +4691,24 @@ public:
         // Virtual Desktop / ViGEm bus being installed. This is what Halo-MCC-VR means by "the mod
         // owns virtual slot 0 when no physical pad is present".
         if (g_cfg.fake_pad && retval != nullptr && *retval != ERROR_SUCCESS) {
-            ZeroMemory(state, sizeof(XINPUT_STATE));
+            // DO NOT WIPE A STATE SOMETHING ELSE ALREADY FILLED IN.
+            //
+            // The unconditional ZeroMemory that used to sit here silently broke every automated
+            // menu press whenever no physical pad was enumerated: UEVR-MCP writes the buttons into
+            // `state`, this hook then zeroed them, and the game saw a connected pad with nothing
+            // pressed. Symptom was 40 consecutive gamepad-A presses failing to leave the main menu
+            // -- while the same presses worked earlier the same day, because a headset session had
+            // a Virtual Desktop / Oculus pad enumerated, which makes *retval == ERROR_SUCCESS and
+            // skips this branch entirely. That is why it looked like flaky injection rather than a
+            // bug in our own code.
+            //
+            // The zero is still wanted for its original purpose -- a disconnected pad can leave
+            // garbage in the struct -- so keep it, but only when the struct is actually neutral.
+            const auto& g = state->Gamepad;
+            const bool populated = g.wButtons != 0 || g.sThumbLX != 0 || g.sThumbLY != 0 ||
+                                   g.sThumbRX != 0 || g.sThumbRY != 0 ||
+                                   g.bLeftTrigger != 0 || g.bRightTrigger != 0;
+            if (!populated) ZeroMemory(state, sizeof(XINPUT_STATE));
             *retval = ERROR_SUCCESS;
         }
 
@@ -3368,6 +4850,46 @@ public:
                 // g_render_view_yaw is refreshed in the post-stereo callback at RENDER rate; aim
                 // moves far more slowly, so taking it at tick rate is fine.
                 float delta = g_move_rot_deg.load();
+
+                // movelive=2: take the AIM term live as well.
+                //
+                // The comment below ("aim moves far more slowly, so taking it at tick rate is
+                // fine") was true when the aim was produced by the rate actuator. With blamangles
+                // driving the sim's angular control state directly, the aim tracks the hand as
+                // fast as the head does -- so latching it at ~32 Hz while the head term is live
+                // puts up to ~30 ms of skew straight into the movement direction. Waving the
+                // controller while pushing the stick then swings where you walk.
+                //
+                // g_desired_yaw is the COMMANDED aim, not a measurement of it, so it carries
+                // neither sampling lag nor actuator settling -- and with blamangles the commanded
+                // value is what the sim is actually using.
+                // movelive=3: SAMPLE the aim term here instead of reading the published one.
+                //
+                // movelive=2 below assumes g_desired_yaw is current. It is not, on the default
+                // configuration: with aimrate=1 the aim law runs in THIS callback but further
+                // down (see the render-rate law), so the value read here is always the previous
+                // poll's setpoint paired against the current rendered view. That is a skew of one
+                // XInput poll whose ANGULAR SIZE grows with how fast the hand is turning -- which
+                // is exactly the reported symptom: rotate the controller while walking and the
+                // walk direction is perturbed, in proportion to the rotation rate, settling the
+                // moment the hand stops. It also latches on any early-out further down (aim
+                // calibration held, law disarmed, ControlRotation unreadable).
+                //
+                // desired_aim_now() is the same function the blamangles driver calls to write the
+                // sim's angular control state, so this pairs the view against the value the sim is
+                // actually being given, at one instant, with no publication in between.
+                //
+                // Costs one extra pose read per poll WHILE THE STICK IS DEFLECTED (the enclosing
+                // branch), on a path that already does one per poll for the aim law.
+                float sampled_aim = 0.0f, sampled_pitch = 0.0f;
+                const bool have_sampled = (g_cfg.move_live >= 3)
+                                       && desired_aim_now(&sampled_aim, &sampled_pitch);
+                if (have_sampled && g_have_render_yaw.load()) {
+                    delta = wrap180(g_render_view_yaw.load() - sampled_aim);
+                } else
+                if (g_cfg.move_live >= 2 && g_have_render_yaw.load() && g_aim_law_armed.load()) {
+                    delta = wrap180(g_render_view_yaw.load() - g_desired_yaw.load());
+                } else
                 if (g_cfg.move_live && g_have_render_yaw.load()) {
                     // SMOOTHED aim, live head.
                     //
@@ -3395,6 +4917,52 @@ public:
                 // state must bump it.
                 state->dwPacketNumber++;
                 g_move_applied.fetch_add(1);
+
+#if HALO_VR_DEV
+                // MOVERESID -- the movement-frame error, measured rather than felt. See the note on
+                // move_resid in Config.hpp for what the shape of this number means; the short
+                // version is that this residual IS the coupling, and delta is not.
+                //
+                // Both terms are taken here, in the same callback, on the same poll: the aim term
+                // the rotation actually used, and the sim's actual aim read straight out of
+                // ControlRotation. Anything sampled elsewhere would reintroduce the skew being
+                // measured. The hand rate is printed alongside because the discriminator between
+                // "lag" and "wrong frame" is whether the residual tracks it.
+                if (g_cfg.move_resid > 0 &&
+                    (g_move_applied.load() % (uint32_t)g_cfg.move_resid) == 0) {
+                    const float aim_used = have_sampled ? sampled_aim
+                                         : (g_cfg.move_live >= 2 ? g_desired_yaw.load()
+                                                                 : g_move_aim_smooth.load());
+                    double ap = 0.0, ay = 0.0;
+                    const bool have_actual = read_control_rotation_hook(&ap, &ay);
+
+                    // Hand rate, differentiated HERE across the logged samples rather than taken
+                    // from g_setpoint_rate_dps: that one is only written on the feedforward path,
+                    // which is gated on a measured plant gain > 10 and so can sit at 0 for a whole
+                    // session -- a rate column that silently reads zero would make a lag look like
+                    // a frame error, which is the one distinction this line exists to draw.
+                    static float prev_used = 0.0f;
+                    static std::chrono::steady_clock::time_point prev_t{};
+                    static bool  have_prev_used = false;
+                    const auto now_t = std::chrono::steady_clock::now();
+                    float rate_dps = 0.0f;
+                    if (have_prev_used) {
+                        const float rdt = std::chrono::duration<float>(now_t - prev_t).count();
+                        if (rdt > 1e-4f) rate_dps = wrap180(aim_used - prev_used) / rdt;
+                    }
+                    prev_used = aim_used; prev_t = now_t; have_prev_used = true;
+
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] MOVERESID live=%d view=%.2f aimUsed=%.2f aimActual=%.2f(ok%d)"
+                        " RESID=%.2f delta=%.2f th=%.2f stickIn=%.1f stickOut=%.1f handRate=%.0fdps",
+                        g_cfg.move_live, g_render_view_yaw.load(), aim_used,
+                        (float)ay, (int)have_actual,
+                        have_actual ? wrap180((float)ay - aim_used) : 0.0f,
+                        delta, th * RAD2DEG,
+                        std::atan2(lx, ly) * RAD2DEG, std::atan2(nx, ny) * RAD2DEG,
+                        rate_dps);
+                }
+#endif
             }
         }
 
@@ -3412,9 +4980,9 @@ public:
             }
         }
 
-        // Publish pad-button state only; the game thread owns the edge detection.
-        g_pad_calib_down = (g_cfg.calib_btn != 0) &&
-                           ((state->Gamepad.wButtons & (WORD)g_cfg.calib_btn) != 0);
+        // (A pad binding for the pose-match calibration used to be published here. Removed -- see
+        // the note at the calibration key poll for why a controller button is the wrong input for
+        // a gesture that writes persistent state.)
 
         // Aim is NOT silenced during MESH calibration -- the weapon is pinned in world space there,
         // so the aim loop can run untouched and the two stay independent.
@@ -3451,11 +5019,61 @@ public:
             // Published so the probes and the gain adaptation keep reading the live output.
             g_out_rx = law_rx; g_out_ry = law_ry;
 
+            // MEASURE THE PLANT HERE, on the path that is actually driving.
+            //
+            // This is the fix for the gain having been stuck at 0: measurement only ever ran on the
+            // tick path and was skipped outright under aim_rate_render, which is the default. The
+            // pairing is honest here in a way it could not be there -- this call knows exactly what
+            // deflection it applied, and update_gain_measurement integrates it across the interval
+            // between aim changes rather than blaming one sample for a whole tick.
+            //
+            // Uses the same aim reading the law just consumed, so measurement and control never
+            // disagree about where the aim was.
+            {
+                static GainMeasState hook_gain;
+                update_gain_measurement(hook_gain, ay, law_rx, dt);
+            }
+
             if (law_rx == 0.0f && law_ry == 0.0f) return;
             state->Gamepad.sThumbRX = to_raw(law_rx);
             state->Gamepad.sThumbRY = to_raw(law_ry);
             state->dwPacketNumber++;
             return;
+        }
+
+        // STICK MODE: give the player back the look feel their game settings no longer provide.
+        //
+        // The game is configured for the AIM LOOP -- look sensitivity high, look deadzone low --
+        // because those are the loop's authority ceiling and its minimum correction size. Here the
+        // player's own stick is driving, so those same settings read as a twitchy, drifting camera.
+        // Scale it down and re-impose the deadzone the game is no longer applying.
+        //
+        // MENUS ARE EXCLUDED: menu navigation is a discrete "did the stick pass a threshold"
+        // input, not a rate, so scaling it would just make menus harder to move through -- and a
+        // re-imposed deadzone on top of the menu's own could swallow inputs entirely.
+        //
+        // Left stick is untouched: it is drive/throttle, and the settings compensated here are the
+        // game's LOOK settings, which only apply to the right stick.
+        if (g_stick_mode.load() && !g_in_menu.load()
+            && (g_cfg.stick_scale < 1.0f || g_cfg.stick_dz > 0.0f)) {
+            float sx = (float)state->Gamepad.sThumbRX / 32767.0f;
+            float sy = (float)state->Gamepad.sThumbRY / 32767.0f;
+            const float mag = std::sqrt(sx * sx + sy * sy);
+            if (mag > 0.0001f) {
+                // Radial deadzone, then RESCALE the remainder back over the full range, so the
+                // player keeps full deflection at the rim instead of losing the top of their range.
+                float m = mag;
+                if (g_cfg.stick_dz > 0.0f) {
+                    m = (mag <= g_cfg.stick_dz) ? 0.0f
+                                                : (mag - g_cfg.stick_dz) / (1.0f - g_cfg.stick_dz);
+                }
+                m = clampf(m * g_cfg.stick_scale, 0.0f, 1.0f);
+                const float k = m / mag;   // preserves direction; magnitude carries the shaping
+                state->Gamepad.sThumbRX = to_raw(clampf(sx * k, -1.0f, 1.0f));
+                state->Gamepad.sThumbRY = to_raw(clampf(sy * k, -1.0f, 1.0f));
+                state->dwPacketNumber++;
+            }
+            return;   // stick mode never runs the aim output below
         }
 
         if (!g_driving.load()) return;

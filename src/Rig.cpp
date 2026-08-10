@@ -1,5 +1,6 @@
 #include "Rig.hpp"
 #include "Config.hpp"
+#include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
 
 #include <cstdio>
 #include <cstring>
@@ -123,6 +124,22 @@ bool rig_component_alive() {
     return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C") != nullptr;
 }
 
+// The first-person weapon ACTOR the rig was last reached through. Exposed for the reticule trace:
+// the gun is its own actor attached to the rig, so it is not covered by ignoring the pawn, and a
+// trace from the eye hits it whenever an animation swings it across the camera -- a reload puts the
+// reticule in your face. Tracked, so a recycled array slot reads as null rather than as a corpse.
+API::UObject* fp_weapon_actor() {
+    // get_CHECKED, not get(). get() only proves the array slot still holds this pointer, and actors
+    // on this title are POOLED: a slot can be reused in place, so the same pointer can be a
+    // different object with a different life. The class check is what makes a swapped or recycled
+    // weapon read as "gone" instead of as a live one, and handing a corpse to the trace's ignore
+    // list is not a thing worth finding out about from a crash dump.
+    //
+    // Every FP weapon class on this title is <something>_WeaponActor_C, so the substring covers the
+    // whole family rather than naming one gun.
+    return g_fp_weapon.get_checked(L"WeaponActor");
+}
+
 API::UObject* rig_tracked_component() {
     return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C");
 }
@@ -166,6 +183,16 @@ API::UObject* resolve_rig() {
         if (cls != nullptr && obj == cls->get_class_default_object()) continue;
 
         if (auto* par = rig_through_weapon(obj)) {
+            // A DIFFERENT weapon actor means the HUD has been rebuilt around it -- a swap, a
+            // respawn, a pickup. That rebuild makes the game a FRESH flat crosshair while we are
+            // still hosting the old widget, so both end up on screen. Nothing else re-checks for
+            // that: the hosting window is armed once when a widget is taken and has long expired
+            // by the time a weapon changes.
+            //
+            // Arming here rather than polling keeps the object-array sweep event-driven. It costs
+            // one extra sweep per weapon change, not a standing 100-125 ms poll.
+            if (g_fp_weapon.get() != obj) reticle_arm_stray_check();
+
             // Remember the ROUTE, with its array slot, so the next call can skip this sweep.
             g_fp_weapon.set_at(obj, i);
             note_resolved_rig(par);
@@ -173,6 +200,93 @@ API::UObject* resolve_rig() {
         }
     }
     return nullptr;
+}
+
+// ---------------------------------------------------------------- FP SHIELD SHELL
+// The first-person shield/overshield visual is NOT a material on the arms and NOT a mesh of its
+// own invention: it is BPC_FP_TranslucentSkeletalMesh_C, a component of the pawn that carries the
+// translucent energy skin (the pawn's FindTranslucentMeshes gathers these by tag, and
+// ShieldMaterialIndex + the base<->masked material maps are what light them up).
+//
+// It is a SIBLING of the arms rig, not a child, and it runs its OWN instance of the same
+// first-person anim blueprint (ABP_SpartansFP_NEW_C). So it is posed identically to the arms while
+// being transformed independently -- which is exactly why writing the arms' relative transform
+// leaves it behind, and why the shield appears to hang in space once the arms follow the hand.
+// Giving it the IDENTICAL transform re-marries the two.
+//
+// !!! MATCH THE EXACT CLASS NAME. NEVER A "BPC_FP_" PREFIX. The pawn also carries
+// BPC_FP_ShadowSkeletalMesh_C, which despite the matching prefix is a FULL-BODY shadow-casting
+// proxy standing on the ground -- its anim blueprint is ABP_Spartans_Common_C, the THIRD-PERSON
+// graph, and that is the tell. Driving that one from the hand pose lifts the player's entire body
+// shadow off the floor and spins it. The anim BP is the discriminator:
+//     ABP_SpartansFP_NEW_C   -> arms-shaped, co-located with the arms, safe to drive
+//     ABP_Spartans_Common_C  -> full body, belongs at the feet, must be left alone
+static constexpr const wchar_t* kShellClass = L"BPC_FP_TranslucentSkeletalMesh_C";
+
+static TrackedObject g_shell_track;
+
+// A UE TArray header -- same shape the stick-mode dismount watcher reads for AttachChildren.
+struct FRawArrayRO { void* data; int32_t num; int32_t max; };
+
+// Scan one TArray<UObject*> property for the shell. Fails closed on anything unreadable rather than
+// faulting: every hop here can be mid-teardown on this title, and a bogus component is far worse
+// than no component.
+static API::UObject* find_shell_in_array(API::UObject* owner, const wchar_t* prop) {
+    if (owner == nullptr) return nullptr;
+    auto* arr = owner->get_property_data<FRawArrayRO>(prop);
+    if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) return nullptr;
+    if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) return nullptr;
+
+    auto** elems = reinterpret_cast<API::UObject**>(arr->data);
+    if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) return nullptr;
+
+    for (int32_t i = 0; i < arr->num; ++i) {
+        auto* c = elems[i];
+        if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
+        if (class_name_of(c) == kShellClass) return c;   // EXACT, see the prefix warning above
+    }
+    return nullptr;
+}
+
+API::UObject* resolve_shield_shell(API::UObject* rig_parent) {
+    // get_local_pawn is the cheap per-frame handle -- no object-array walk. A full sweep here is
+    // exactly the pattern that has already collapsed framerate in a live session once.
+    auto* pawn = API::get()->get_local_pawn(0);
+
+    // BlueprintCreatedComponents lists the construction-script components flat, independent of how
+    // they are attached, so it is preferred over walking attachment topology we have not measured.
+    if (auto* s = find_shell_in_array(pawn, L"BlueprintCreatedComponents")) return s;
+    if (auto* s = find_shell_in_array(pawn, L"InstanceComponents"))         return s;
+    // Fallback: as a sibling of the arms, the shell hangs off the arms' own attach parent.
+    if (auto* s = find_shell_in_array(rig_parent, L"AttachChildren"))       return s;
+    return nullptr;
+}
+
+// Published for the render-rate re-apply. Kept in lockstep with g_shell_track below so the render
+// path can never outlive the validated handle: every place that invalidates one clears the other.
+std::atomic<void*> g_shell_component{nullptr};
+
+API::UObject* shield_shell() {
+    auto* s = g_shell_track.get_checked(kShellClass);
+    // A recycled slot must stop the RENDER path too, not just this one -- otherwise the stereo
+    // callback keeps writing into whatever now occupies the address.
+    if (s == nullptr) g_shell_component.store(nullptr);
+    return s;
+}
+
+void note_resolved_shell(API::UObject* shell) {
+    if (shell != nullptr && g_shell_track.ptr != shell) {
+        g_shell_track.set(shell);
+        // set() refuses a pointer it cannot find in the object array, so publish what it ACTUALLY
+        // adopted rather than the argument -- otherwise a rejected pointer would still reach the
+        // render thread.
+        g_shell_component.store(g_shell_track.ptr);
+    }
+}
+
+void forget_shield_shell() {
+    g_shell_track.reset();
+    g_shell_component.store(nullptr);
 }
 
 // Write the rig's relative rotation. Returns false if the call could not be made at all.
@@ -202,6 +316,31 @@ bool rig_set_location(API::UObject* rig, double x, double y, double z) {
     return true;
 }
 
+// WORLD-space writes. Same call convention as their relative siblings, different target frame.
+//
+// These exist because the RELATIVE rotation write does not survive on this game's first-person
+// mesh: the RelativeRotation FIELD accepts the value and reads back exactly, yet the component's
+// world rotation, read through K2_GetComponentRotation, does not move at all -- measured across a
+// 75 degree hand sweep it stayed inside 1.4 degrees. Location behaves the opposite way and does
+// follow. That asymmetry is precisely the reported symptom, the arms translating while barely
+// rotating, and no amount of getting the parent composition right can fix a write the engine
+// recomputes afterwards. Writing the world transform removes the parent from the question.
+bool rig_set_world_rotation(API::UObject* rig, double pitch, double yaw, double roll) {
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    auto* rot = reinterpret_cast<double*>(params);
+    rot[0] = pitch; rot[1] = yaw; rot[2] = roll;
+    rig->call_function(L"K2_SetWorldRotation", params);
+    return true;
+}
+
+bool rig_set_world_location(API::UObject* rig, double x, double y, double z) {
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    auto* v = reinterpret_cast<double*>(params);
+    v[0] = x; v[1] = y; v[2] = z;
+    rig->call_function(L"K2_SetWorldLocation", params);
+    return true;
+}
+
 // ---------------------------------------------------------------- UOBJECTHOOK ATTACHMENT
 // Hands the arms component to UEVR's own motion-controller attachment instead of driving its
 // relative transform ourselves. UEVR then applies it per-eye on the render path, exactly as it does
@@ -220,6 +359,8 @@ bool g_attached = false;
 // the relative rotation can be recomputed against the live parent every render frame.
 std::atomic<float> g_rigw_x{0.0f}, g_rigw_y{0.0f}, g_rigw_z{0.0f}, g_rigw_w{1.0f};
 std::atomic<bool>  g_rigw_valid{false};
+std::atomic<float> g_rigw_off_x{0.0f}, g_rigw_off_y{0.0f}, g_rigw_off_z{0.0f};
+std::atomic<bool>  g_rigw_off_valid{false};
 std::atomic<float> g_rigw_parent_yaw{0.0f};
 
 void attach_apply(API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm) {

@@ -33,6 +33,10 @@
 #include "Config.hpp"
 #include "Math.hpp"
 #include "UeObject.hpp"
+#include "AimTrace.hpp"
+#include "GameSettings.hpp"
+#include "AimDirect.hpp"
+#include "DevTools.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -57,6 +61,10 @@ std::atomic<void*>   g_aim_law_pc{nullptr};
 // Turning state rather than aim state, but derive_ctrl_angles folds it into the setpoint, and a
 // definition in Plugin.cpp could not be linked against: that file's body is an anonymous namespace.
 std::atomic<float> g_turn_offset{0.0f};
+std::atomic<float> g_desired_yaw{0.0f}, g_desired_pitch{0.0f};
+std::atomic<bool>  g_aim_calibrating{false};
+std::atomic<bool>  g_stick_mode_active{false};
+std::atomic<float> g_setpoint_rate_dps{0.0f};
 
 // ---------------------------------------------------------------- ADAPTIVE GAIN
 // The loop drives a RATE actuator whose deg/s per unit of stick is set by the GAME's controller
@@ -84,11 +92,200 @@ std::atomic<uint32_t> g_gain_hold_until{0};
 
 // REFERENCE_RATE_DPS is a constexpr in MotionAimControl.hpp -- Plugin.cpp reads it too.
 
+// Fallback ratio: full-deflection rate divided by the deg/s-per-unit the adaptive gain typically
+// measures. The adaptation samples wherever the loop happens to be driving, which on this title is
+// mostly 0.6-0.9 -- where the measured curve gives ~115-228 per unit against a 364 full-deflection
+// rate. ~2.0 is the middle of that. Used only when plant_full_dps is not set explicitly; it is a
+// rough bridge from the old scalar world, not a measurement.
+constexpr float PLANT_FULL_OVER_MEAN = 2.0f;
+
+// Signed feedforward deflection for a wanted rate, via the measured curve.
+static float ff_from_rate(float rate_dps, float plant_full_dps) {
+    if (plant_full_dps <= 1.0f) return 0.0f;
+    const float mag = std::fabs(rate_dps) / plant_full_dps;      // wanted rate as a fraction of max
+    const float d   = plant_deflection_for_rate_frac(mag);       // deflection that produces it
+    return (rate_dps < 0.0f) ? -d : d;
+}
+
+void update_gain_measurement(GainMeasState& st, double aim_yaw, float applied_now, float dt) {
+    // A pinned gain wins outright: otherwise adaptation would drift it back and the pin would only
+    // hold until the next admissible sample.
+    if (g_cfg.meas_rate_fixed > 0.0f) return;
+    if (!g_cfg.gain_adapt) return;
+
+    if (!st.have_prev) { st.prev_aim = aim_yaw; st.have_prev = true; return; }
+    if (!(dt > 0.0f) || dt > 0.2f) return;
+
+    st.acc_dt     += dt;
+    st.acc_out_dt += std::fabs(applied_now) * dt;   // integrate, so the mean below is time-weighted
+
+    // Rejects aim DISCONTINUITIES, not fast turning: a level load, respawn or reference recapture
+    // teleports the aim, and a 90 degree jump across one interval reads as ~1600 deg/s, which would
+    // drive the gain straight to its clamp.
+    constexpr float MAX_PLAUSIBLE_DPS = 400.0f;
+    constexpr float EPS_DEG = 0.005f;
+    // Time constants replacing the old per-sample 0.05 / 0.02 blends. Those were per CALL, so
+    // moving this to the render path -- which runs several times more often -- would have silently
+    // sped the adaptation up by the same factor, breaking the "slow: never moves mid-fight"
+    // guarantee the gain scale depends on. These reproduce the old behaviour at tick rate and now
+    // mean the same thing wherever this runs.
+    constexpr float GAIN_RATE_TAU_MS  = 325.0f;
+    constexpr float GAIN_SCALE_TAU_MS = 825.0f;
+
+    const float d = wrap180((float)aim_yaw - (float)st.prev_aim);
+    if (std::fabs(d) <= EPS_DEG) {
+        // Aim has not moved. Do not let the accumulators grow without bound while the player
+        // stands still, or the first movement afterwards would be divided by a huge interval.
+        if (st.acc_dt > 0.5f) { st.acc_dt = 0.0f; st.acc_out_dt = 0.0f; }
+        return;
+    }
+
+    if (st.acc_dt > 0.005f) {
+        const float achieved = d / st.acc_dt;                     // deg/s over the interval
+        const float applied  = st.acc_out_dt / st.acc_dt;         // MEAN deflection over that interval
+
+        if (applied > 0.5f && std::fabs(achieved) > 15.0f && std::fabs(achieved) < MAX_PLAUSIBLE_DPS
+            && !g_gain_hold.load()) {
+            const float rate = std::fabs(achieved) / applied;     // deg/s per unit
+            if (std::isfinite(rate) && rate > 10.0f && rate < MAX_PLAUSIBLE_DPS * 1.5f) {
+                // Blend from the SEED, never straight from the raw sample. Taking the first
+                // reading whole is what made the loop's opening gain a single interval's guess --
+                // and feedforward divides by it, so a low first sample slams the stick. Falling
+                // back to the seed here also covers the case where nothing has seeded yet.
+                const float seed = (g_cfg.gain_seed > 0.0f) ? g_cfg.gain_seed : REFERENCE_RATE_DPS;
+                const float cur  = (g_meas_rate.load() > 0.0f) ? g_meas_rate.load() : seed;
+                const float a    = ema_alpha(GAIN_RATE_TAU_MS, st.acc_dt);
+                const float smoothed = cur + a * (rate - cur);
+                g_meas_rate = smoothed;
+
+                // Faster game turn rate => reach full deflection over a WIDER error band, so the
+                // loop does not overshoot. Hence scale full_deg with the measured rate.
+                const float want = clampf(smoothed / REFERENCE_RATE_DPS, 0.25f, 4.0f);
+                const float g    = g_gain_scale.load();
+                g_gain_scale = g + ema_alpha(GAIN_SCALE_TAU_MS, st.acc_dt) * (want - g);
+            }
+        }
+    }
+
+    st.prev_aim = aim_yaw;
+    st.acc_dt = 0.0f;
+    st.acc_out_dt = 0.0f;
+}
+
 // Deadzone-compensated shaping. Exact zero at zero error (never creep); anything past the deadband
 // jumps straight to `floor` so it actually crosses the game's deadzone, then rises to max_out.
 // Same shape as Halo-MCC-VR's ToRawStick (floor 9000/32767 = 0.275 there).
-float shape(float err_deg) {
+float shape(float err_deg, float dt) {
     if (err_deg == 0.0f) return 0.0f;
+
+    // ---- RATE-BASED SHAPING (aim_tau_s > 0) --------------------------------------------------
+    // Ask for a closing RATE proportional to the error, then use the measured plant curve to find
+    // the deflection that produces it: rate = err / tau, deflection = curve^-1(rate).
+    //
+    // WHY, over the linear map below:
+    //   The linear map converts error straight to DEFLECTION, but deflection-to-rate is the plant's
+    //   own curve, whose local gain runs ~52 to ~364 deg/s per unit. So the loop's actual closing
+    //   gain -- deg/s per degree of error -- varies about 7x depending on how big the error happens
+    //   to be, and the whole thing scales again with the game's sensitivity setting. Raising
+    //   sensitivity from 30 to 90 therefore roughly tripled the loop gain without anything in the
+    //   config changing, which is exactly when the aim started springing before it settled.
+    //
+    //   Going through rate removes both dependencies. tau is a time constant in SECONDS: the aim
+    //   closes ~63% of the remaining error in that time, at any sensitivity, for any error size.
+    //   Overshoot comes from demanding a closing rate the loop cannot stop in time, and tau is
+    //   precisely the knob that bounds it.
+    //
+    // The curve also encodes the plant's dead region (~0.26), so `floor` is not applied here -- the
+    // inverse already returns a deflection the game will act on, or zero.
+    if (g_cfg.aim_tau_s > 0.0f) {
+        const float plant_full = (g_cfg.plant_full_dps > 0.0f)
+                               ? g_cfg.plant_full_dps
+                               : (g_meas_rate.load() * PLANT_FULL_OVER_MEAN);
+        if (plant_full > 1.0f) {
+            // WHAT CLOSING RATE DO WE WANT FOR THIS MUCH ERROR?
+            //
+            // tau alone gives rate = err/tau: an EXPONENTIAL approach. Rate falls in proportion to
+            // the remaining error, so the aim leaves fast and arrives asymptotically -- felt as
+            // "moves over quickly, then slows before it gets there, then crawls". At 30 deg it asks
+            // for 250 deg/s; by 10 deg only 83; by 3 deg just 25.
+            //
+            // aim_decel gives rate = sqrt(2*a*err): CONSTANT DECELERATION, the profile that brakes
+            // at a fixed rate and therefore arrives in finite time instead of approaching forever.
+            // At the same errors it asks 346 / 200 / 110 -- far more speed held far later, then a
+            // hard stop. This is the continuous form of "different speed for small, mid and large
+            // movements", with one parameter instead of three hand-placed thresholds.
+            //
+            // `a` cannot be raised without limit: the loop only learns its own rate a frame late,
+            // so a profile that brakes harder than it can react to overshoots. That is a measurable
+            // ceiling, not a matter of taste -- see the sweep-stop tuning.
+            //
+            // aim_deadbeat gives rate = err/dt: ask for the rate that closes ALL of the remaining
+            // error in ONE tick. tau and decel both PACE the approach; deadbeat simply arrives.
+            //
+            // Why this is the right setpoint here, and not merely a faster tau:
+            //   The plant was measured memoryless on 2026-08-06 (1 s vs 3 s ratio 2.974 against a
+            //   predicted 3.000; 0.25 s ratio 1.030, the excess being ~0.7 of one 90 Hz tick of
+            //   fixed injection overhead). A memoryless plant is exactly the condition under which
+            //   curve^-1 means anything, so demanding a one-tick rate is legitimate rather than
+            //   wishful.
+            //
+            //   It also fixes the deadzone stall at its root instead of papering over it. tau=0.12
+            //   demands err/0.12; at 1.7 deg that is 14 deg/s, whose deflection sits at or under
+            //   the 0.2652 hardware deadzone -- the documented "arrives quickly, then crawls the
+            //   last bit". dt=1/90 demands err/0.0111, about 10.8x more, so the same 14 deg/s wall
+            //   is not reached until roughly 0.16 deg of error. The `floor` below then almost never
+            //   fires, which is the point: floor was a workaround for asking too little.
+            //
+            //   Saturation is fine and expected. One tick at the measured full rate is about 4 deg,
+            //   so anything larger simply pins the stick and behaves as bang-bang -- correct for
+            //   big errors, exact for small ones.
+            //
+            // The value IS the safety factor (0.85 = close 85% of the error per tick). Deadbeat has
+            // no damping of its own, so a curve that overestimates gain would overshoot and chatter;
+            // asking for slightly less than everything keeps margin and is still ~9x faster than
+            // tau. 1.0 is true deadbeat.
+            //
+            // NOTE what this gives up: tau was doing TWO jobs -- pacing the approach AND low-pass
+            // filtering hand tremor. Deadbeat removes both. If the aim reads jittery, the fix is to
+            // smooth the TARGET, not to slow the approach back down.
+            const float aerr = std::fabs(err_deg);
+            float want_dps;
+            if (g_cfg.aim_deadbeat > 0.0f) {
+                // A hitch makes dt large, which asks for LESS -- safe. Only a zero/absurd dt needs
+                // guarding, or the demand goes infinite.
+                const float safe_dt = (dt > 0.002f && dt < 0.2f) ? dt : (1.0f / 90.0f);
+                want_dps = (aerr / safe_dt) * g_cfg.aim_deadbeat;
+            } else if (g_cfg.aim_decel > 0.0f) {
+                want_dps = std::sqrt(2.0f * g_cfg.aim_decel * aerr);
+            } else {
+                want_dps = aerr / g_cfg.aim_tau_s;
+            }
+            float mag = plant_deflection_for_rate_frac(want_dps / plant_full);
+
+            // FLOOR, and the comment that used to sit here was wrong.
+            //
+            // It claimed the curve encodes the dead region so `floor` was unnecessary. But the
+            // curve's low end RETURNS deflections inside that dead region -- below about 1.7 deg of
+            // error the demanded rate is under ~14 deg/s, whose deflection is 0.26-0.28, at or
+            // under the hardware deadzone (XINPUT right-thumb = 0.2652). The game then ignores the
+            // stick entirely and the aim STALLS just short of the target, creeping in on whatever
+            // fraction squeaks past. Felt exactly as "arrives quickly, then crawls the last bit".
+            //
+            // Outside the deadband the loop has already decided it wants to move, so the smallest
+            // thing it may ask for is a deflection the game will actually act on. This is what the
+            // legacy map meant by "jumps straight to floor", and dropping it was a regression.
+            if (mag > 0.0f && mag < g_cfg.floor) mag = g_cfg.floor;
+
+            if (mag > g_cfg.max_out) mag = g_cfg.max_out;
+            return err_deg < 0.0f ? -mag : mag;
+        }
+        // No plant estimate yet (gain not measured, nothing pinned): fall through to the linear
+        // map rather than driving on a divide-by-nothing.
+    }
+
+    // ---- LEGACY LINEAR MAP -------------------------------------------------------------------
+    // Error maps straight onto deflection between floor and max_out, saturating at `full` degrees.
+    // Kept so the two can be compared directly, and as the fallback above.
     const float full = g_cfg.full_deg * (g_cfg.gain_adapt ? g_gain_scale.load() : 1.0f);
     float v = std::fabs(err_deg) / (full > 0.1f ? full : 0.1f);
     if (v > 1.0f) v = 1.0f;
@@ -114,14 +311,41 @@ float shape(float err_deg) {
 // calibrated aim pose, the sightline through xdist (so hand TRANSLATION moves aim, not just
 // rotation), and the snap-turn offset. Everything it touches is either a UEVR API read (internally
 // locked) or an atomic, so it is callable from the XInput hook as well as the tick.
-bool derive_ctrl_angles(float* out_yaw, float* out_pitch) {
-    const int32_t ridx = g_aim_law_ridx.load();
+bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override) {
+    const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
     if (ridx < 0) return false;
 
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
     Vec3 fwd = quat_forward(cq);
+
+    // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -----------------------------------------------------
+    //
+    // WHY ROLL MOVES AIM AT ALL. The direction above comes from the OpenXR AIM pose, which is
+    // rigidly attached to the controller with its axis tilted well off the handle. You roll about
+    // your WRIST, i.e. about the handle, so the aim vector sweeps a CONE about that axis: for a
+    // tilt a and a roll t, forward moves by 2*asin(sin a * sin(t/2)). At a ~35 deg a 90 deg roll
+    // displaces it by ~48 deg. Nothing is broken; the axis is simply the wrong one to roll about.
+    //
+    // It is then AMPLIFIED ASYMMETRICALLY by the yaw extraction: yaw is atan2(fwd.x, -fwd.z), so
+    // as the cone carries the vector toward steeper pitch the horizontal projection shrinks and the
+    // same displacement becomes a much larger yaw. One roll direction climbs toward level, the
+    // other toward the pole -- which is why rolling left and right do not cost the same.
+    //
+    // THE FIX. Take the direction from the GRIP pose instead. The grip's forward IS the handle
+    // axis, so rolling about it leaves the vector exactly invariant -- roll stops reaching aim at
+    // all. The constant difference between "where the handle points" and "where you feel you are
+    // pointing" is a fixed offset, which the Page Down calibration already exists to absorb, so no
+    // hand-tuned tilt constant is needed: switch this on and recalibrate once.
+    if (g_cfg.aim_src == 1) {
+        Vec3 gpos{}; Quat gq{};
+        if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
+            fwd = quat_forward(gq);
+            // Position still comes from the aim pose: the sightline mixes this with cpos, and the
+            // grip POSITION is a different point. Only the DIRECTION is being replaced.
+        }
+    }
 
     Vec3 origin{};
     bool have_origin = false;
@@ -146,6 +370,59 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch) {
 
     *out_yaw   = wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
     *out_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
+
+#if HALO_VR_DEV
+    // AIMROLL -- measure the roll->aim coupling instead of arguing about it.
+    //
+    // Hold the controller pointing at one spot and roll the wrist left, then right. Read `roll`
+    // against `aimYaw`/`gripYaw`:
+    //   aimYaw moves a lot with roll, gripYaw does not  -> the cone; aimsrc=1 removes it
+    //   BOTH move                                       -> the coupling is upstream of the source
+    //                                                      choice and aimsrc=1 will not help
+    //   |dYaw per degree of roll| differs left vs right -> the atan2 amplification, and `pitch`
+    //                                                      will show which side is steeper
+    if (g_cfg.aim_roll_log > 0) {
+        static std::atomic<uint32_t> n{0};
+        if ((n.fetch_add(1, std::memory_order_relaxed) % (uint32_t)g_cfg.aim_roll_log) == 0) {
+            Vec3 gpos{}; Quat gq{};
+            const bool have_grip = get_pose(ridx, &gpos, &gq, /*use_aim=*/false);
+            const Vec3 afwd = quat_forward(cq);
+            const Vec3 gfwd = have_grip ? quat_forward(gq) : Vec3{0.0f, 0.0f, 0.0f};
+            // Controller roll about its own handle axis, in UE convention.
+            float gp = 0.0f, gy = 0.0f, gr = 0.0f;
+            if (have_grip) {
+                quat_to_rotator(-gq.z, gq.x, gq.y, -gq.w, &gp, &gy, &gr);
+            }
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] AIMROLL src=%d roll=%.1f | aim=(y%.2f,p%.2f) grip=(y%.2f,p%.2f) "
+                "| out=(y%.2f,p%.2f) sightline_dyaw=%.2f haveGrip=%d",
+                g_cfg.aim_src, gr,
+                std::atan2(afwd.x, -afwd.z) * RAD2DEG,
+                std::asin(clampf(afwd.y, -1.0f, 1.0f)) * RAD2DEG,
+                have_grip ? std::atan2(gfwd.x, -gfwd.z) * RAD2DEG : 0.0f,
+                have_grip ? std::asin(clampf(gfwd.y, -1.0f, 1.0f)) * RAD2DEG : 0.0f,
+                *out_yaw, *out_pitch,
+                wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG
+                        - std::atan2(afwd.x, -afwd.z) * RAD2DEG),
+                (int)have_grip);
+        }
+    }
+#endif
+    return true;
+}
+
+// The aim setpoint, sampled now. See the header for why a consumer would want this instead of
+// g_desired_yaw. The body is deliberately identical to the setpoint arithmetic in
+// aim_control_law() below -- the hand's rotation since calibration, added to the aim captured at
+// calibration -- and BlamAim's controller_desired_aim() forwards here so the sim driver and every
+// consumer of the setpoint share one definition rather than three copies that can drift apart.
+bool desired_aim_now(float* out_yaw, float* out_pitch) {
+    const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                             : API::VR::get_right_controller_index();
+    float cy = 0.0f, cp = 0.0f;
+    if (!derive_ctrl_angles(&cy, &cp, ridx)) return false;
+    *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
+    *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
     return true;
 }
 
@@ -165,11 +442,25 @@ bool read_control_rotation_hook(double* out_pitch, double* out_yaw) {
 }
 
 
+#if HALO_VR_DEV
+static unsigned g_direct_log_tick = 0;   // dev-only: paces the DIRECT diagnostic line
+#endif
+
 void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                      double aim_yaw, double aim_pitch, float dt,
                      float* out_rx, float* out_ry) {
-    const float desired_yaw   = g_ref_aim_yaw.load()   + wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
-    const float desired_pitch = g_ref_aim_pitch.load() + wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
+    // The hand's rotation SINCE CALIBRATION, kept as its own term because the direct-write path
+    // needs to be able to mirror it independently of the reference it is added to.
+    const float dctrl_yaw   = wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
+    const float dctrl_pitch = wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
+
+    const float desired_yaw   = g_ref_aim_yaw.load()   + dctrl_yaw;
+    const float desired_pitch = g_ref_aim_pitch.load() + dctrl_pitch;
+
+    // Published for the reticule (see the header). Set before the deadband and shaping so it is the
+    // raw setpoint, not something the actuator has already filtered.
+    g_desired_yaw   = desired_yaw;
+    g_desired_pitch = desired_pitch;
 
     float err_yaw   = wrap180(desired_yaw   - (float)aim_yaw);
     float err_pitch = wrap180(desired_pitch - (float)aim_pitch);
@@ -200,6 +491,9 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
         } else if (dt > 0.0f && dt < 0.2f && mr > 10.0f) {
             constexpr float MAX_PLAUSIBLE_DPS = 400.0f;   // rejects teleports (loads, recaptures)
             constexpr float EPS_DEG = 0.005f;             // below this the angle has not changed
+            // Time constant for the stale-rate decay below. 105 ms reproduces the old 0.9-per-call
+            // factor at 90 fps, and now means the same thing at every frame rate.
+            constexpr float RATE_DECAY_TAU_MS = 105.0f;
 
             st.acc_dt_des += dt;
             st.acc_dt_aim += dt;
@@ -212,9 +506,14 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                 const float tr_yaw   = d_des_yaw   / st.acc_dt_des;
                 const float tr_pitch = d_des_pitch / st.acc_dt_des;
                 if (std::fabs(tr_yaw) < MAX_PLAUSIBLE_DPS && std::fabs(tr_pitch) < MAX_PLAUSIBLE_DPS) {
-                    const float a = g_cfg.ff_smooth;
+                    // dt is the ACCUMULATED span, not the frame dt: this filter only steps on a
+                    // change boundary, so that span is how long it has actually been standing still.
+                    const float a = ema_alpha(g_cfg.ff_smooth_ms, st.acc_dt_des);
                     st.ff_rate_yaw   += a * (tr_yaw   - st.ff_rate_yaw);
                     st.ff_rate_pitch += a * (tr_pitch - st.ff_rate_pitch);
+                    // Published for the reticule's motion-gated smoothing (see the header).
+                    g_setpoint_rate_dps = std::sqrt(st.ff_rate_yaw * st.ff_rate_yaw +
+                                                    st.ff_rate_pitch * st.ff_rate_pitch);
                 }
                 st.prev_des_yaw = desired_yaw; st.prev_des_pitch = desired_pitch;
                 st.acc_dt_des = 0.0f;
@@ -230,7 +529,7 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                 if (std::fabs(ar_yaw) < MAX_PLAUSIBLE_DPS && std::fabs(ar_pitch) < MAX_PLAUSIBLE_DPS) {
                     // Filtered harder than the feedforward input: damping differentiates readout
                     // noise, feedforward must stay fast.
-                    const float b = g_cfg.d_smooth;
+                    const float b = ema_alpha(g_cfg.d_smooth_ms, st.acc_dt_aim);
                     st.aim_rate_yaw   += b * (ar_yaw   - st.aim_rate_yaw);
                     st.aim_rate_pitch += b * (ar_pitch - st.aim_rate_pitch);
                 }
@@ -239,9 +538,12 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
             }
 
             // Both rates decay toward zero if their source stops changing for a while, so a
-            // stationary target cannot keep stale feedforward alive.
-            if (st.acc_dt_des > 0.15f) { st.ff_rate_yaw *= 0.9f; st.ff_rate_pitch *= 0.9f; }
-            if (st.acc_dt_aim > 0.15f) { st.aim_rate_yaw *= 0.9f; st.aim_rate_pitch *= 0.9f; }
+            // stationary target cannot keep stale feedforward alive. Per unit TIME, not per call:
+            // as a per-call factor this bled away three times faster at 90 fps than at 30, so how
+            // long a stale rate survived depended on the frame rate.
+            const float keep = 1.0f - ema_alpha(RATE_DECAY_TAU_MS, dt);
+            if (st.acc_dt_des > 0.15f) { st.ff_rate_yaw *= keep; st.ff_rate_pitch *= keep; }
+            if (st.acc_dt_aim > 0.15f) { st.aim_rate_yaw *= keep; st.aim_rate_pitch *= keep; }
 
             if (g_cfg.ff_gain > 0.0f) {
                 float yaw_ff_scale = 1.0f;
@@ -250,10 +552,29 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                     yaw_ff_scale = std::fabs(std::cos((float)aim_pitch * DEG2RAD));
                     if (yaw_ff_scale < 0.35f) yaw_ff_scale = 0.35f;
                 }
-                ff_yaw   = clampf(st.ff_rate_yaw   / mr, -1.0f, 1.0f) * g_cfg.ff_gain * yaw_ff_scale;
-                ff_pitch = clampf(st.ff_rate_pitch / mr, -1.0f, 1.0f) * g_cfg.ff_gain;
+                // INVERT THE MEASURED CURVE rather than divide by a single gain.
+                //
+                // rate / mr treats the plant as linear. It is not: the local gain runs ~52 to ~364
+                // deg/s per unit across the stick, so one scalar over-drives at low deflection and
+                // under-drives at high, and no value of it is right in more than one place. Asking
+                // the measured curve "what deflection gives this rate?" is the question feedforward
+                // was always trying to answer.
+                //
+                // plant_full is the full-deflection rate for the CURRENT sensitivity. The curve is
+                // stored as fractions of that, so this one table serves any sensitivity -- provided
+                // sensitivity is a pure multiplier on rate, which is measured at one setting and
+                // still unproven (docs\PlantCurve.md).
+                const float plant_full = (g_cfg.plant_full_dps > 0.0f)
+                                       ? g_cfg.plant_full_dps
+                                       : (mr * PLANT_FULL_OVER_MEAN);
+                ff_yaw   = ff_from_rate(st.ff_rate_yaw,   plant_full) * g_cfg.ff_gain * yaw_ff_scale;
+                ff_pitch = ff_from_rate(st.ff_rate_pitch, plant_full) * g_cfg.ff_gain;
             }
             if (g_cfg.d_gain > 0.0f) {
+                // Damping stays on the LINEAR scalar deliberately. It opposes a rate ERROR, which is
+                // a small correction around the operating point rather than a deflection that has to
+                // produce a specific absolute rate -- so the local slope is the right model and the
+                // curve inverse would be the wrong tool.
                 damp_yaw   = -clampf((st.aim_rate_yaw   - st.ff_rate_yaw)   / mr, -1.0f, 1.0f) * g_cfg.d_gain;
                 damp_pitch = -clampf((st.aim_rate_pitch - st.ff_rate_pitch) / mr, -1.0f, 1.0f) * g_cfg.d_gain;
             }
@@ -261,10 +582,101 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     }
 
     // SIGN: +stick.x increases yaw on this game.
-    *out_rx = clampf((shape(err_yaw) + ff_yaw + damp_yaw) * g_cfg.yaw_sign, -1.0f, 1.0f);
+    //
+    // g_invert_cancel_* CANCELS the game's own look inversion. Motion aim must never be inverted --
+    // your hand points where it points, and there is no sense in which "up is down" when the gun IS
+    // the input. Rather than change the game's setting (which would have to be written on every
+    // mode transition, and could be left flipped by a crash), we simply negate the value we are
+    // about to synthesise, so the game's inversion turns it back the right way round.
+    //
+    // These are 1.0 in stick mode, so a player who inverts deliberately for vehicles keeps exactly
+    // the feel they configured -- their own stick passes through untouched.
+    float raw_yaw   = shape(err_yaw,   dt) + ff_yaw   + damp_yaw;
+    float raw_pitch = shape(err_pitch, dt) + ff_pitch + damp_pitch;
+
+    // FLOOR THE SUM, not just shape()'s contribution.
+    //
+    // The game ignores any deflection under the hardware deadzone (XInput right thumb, 0.2652), so
+    // there is no such thing as a small correction: the plant does nothing, or it does at least
+    // ~14 deg/s. shape() already jumps to `floor` for that reason -- but DAMPING then subtracts
+    // from it. Near a target the setpoint is still while the aim is moving, so damping opposes that
+    // motion and drags the sum under the threshold.
+    //
+    // The result is not gentle braking, it is a STUTTER: output drops below the deadzone, the aim
+    // stops dead, damping decays to nothing because there is no longer any rate to oppose, the sum
+    // climbs back over `floor`, the aim jerks, and damping bites again. Measured at 0.243 mean
+    // deflection with 100% of samples under the deadzone across the last 2 degrees -- which is
+    // exactly the "slows down, then crawls the last bit" that prompted this.
+    //
+    // Outside the deadband the honest choice is between `floor` and zero, because the plant offers
+    // nothing in between. Asking for floor, in the direction of the error, is the one that closes
+    // it. The deadband still parks the loop below dead_deg, and floor moves only ~0.15 deg per
+    // frame, so this cannot run away.
+    if (!st.parked_yaw && err_yaw != 0.0f && std::fabs(raw_yaw) < g_cfg.floor) {
+        raw_yaw = (err_yaw > 0.0f) ? g_cfg.floor : -g_cfg.floor;
+    }
+    if (g_cfg.drive_pitch && !st.parked_pitch && err_pitch != 0.0f
+        && std::fabs(raw_pitch) < g_cfg.floor) {
+        raw_pitch = (err_pitch > 0.0f) ? g_cfg.floor : -g_cfg.floor;
+    }
+
+    // DIRECT ASSIGNMENT, when it is enabled and the rotator has been located.
+    //
+    // Everything above -- shaping, floor, deadband, feedforward, damping -- exists to steer a rate
+    // actuator toward `desired`. If the aim can simply BE `desired`, none of it is needed, so the
+    // stick is left neutral and the value is written straight in.
+    //
+    // Deliberately placed here, after the setpoint is computed, rather than replacing the law
+    // wholesale: `desired_yaw`/`desired_pitch` already carry the aim reference, the calibration
+    // offsets, and the accumulated snap-turn, and duplicating that derivation for a second code
+    // path is how the two would drift apart.
+    //
+    // Falls through to the stick output if the rotator is not resolved (still locating, or a level
+    // load invalidated it), so a failed locate degrades to the loop instead of to no aim at all.
+    // The sign knobs exist because the steered loop and a direct write are NOT interchangeable in
+    // the way the maths says they should be. The loop converges aim -> desired, so assigning
+    // `desired` ought to land in exactly the same place -- yet the first live test came back
+    // "responsive, but inverted on both axes". Rather than guess at which frame is flipped and burn
+    // a build per guess (launches are unreliable), the mapping is a live tunable: +1 reproduces the
+    // steered setpoint exactly, -1 mirrors the hand's motion about the calibration reference.
+    if (g_cfg.aim_direct && aim_direct_ready()) {
+        const double want_yaw   = (double)(g_ref_aim_yaw.load() + g_cfg.aim_direct_sign_x * dctrl_yaw);
+        const double want_pitch = g_cfg.drive_pitch
+            ? (double)(g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch)
+            : aim_pitch;
+        if (aim_direct_set(want_pitch, want_yaw)) {
+            *out_rx = 0.0f;
+            *out_ry = 0.0f;
+            // Traced from INSIDE the direct path. The old code returned above the sample call, so a
+            // direct-mode trace recorded nothing at all and every measurement run came back empty.
+            // `des` is what was actually written, so the trace measures the real setpoint.
+            aim_trace_sample(dt, (float)want_yaw, (float)want_pitch, aim_yaw, aim_pitch,
+                             0.0f, 0.0f, st.ff_rate_yaw);
+#if HALO_VR_DEV
+            if ((g_direct_log_tick++ % 600) == 0) {
+                API::get()->log_info("[Halo-CampE-UEVR] DIRECT: hand d=(%.2f,%.2f) want=(%.2f,%.2f) "
+                                     "aim=(%.2f,%.2f) steered_desired=(%.2f,%.2f) sign=(%.0f,%.0f)",
+                                     dctrl_yaw, dctrl_pitch, want_yaw, want_pitch,
+                                     aim_yaw, aim_pitch, desired_yaw, desired_pitch,
+                                     g_cfg.aim_direct_sign_x, g_cfg.aim_direct_sign_y);
+            }
+#endif
+            return;
+        }
+    }
+
+    *out_rx = clampf(raw_yaw * g_cfg.yaw_sign * g_invert_cancel_x, -1.0f, 1.0f);
     *out_ry = g_cfg.drive_pitch
-        ? clampf((shape(err_pitch) + ff_pitch + damp_pitch) * g_cfg.pitch_sign, -1.0f, 1.0f)
+        ? clampf(raw_pitch * g_cfg.pitch_sign * g_invert_cancel_y, -1.0f, 1.0f)
         : 0.0f;
+
+    // Sampled HERE, at the bottom of the law, because this is the only point where the setpoint,
+    // the achieved aim and the emitted stick are all final and belong to the same instant.
+    // Sampling anywhere else would correlate values from different iterations, which is exactly
+    // the kind of error that makes a measured result worse than no measurement at all.
+    // No-op in a release build (see AimTrace.hpp).
+    aim_trace_sample(dt, desired_yaw, desired_pitch, aim_yaw, aim_pitch,
+                     *out_rx, *out_ry, st.ff_rate_yaw);
 }
 
 bool read_control_rotation(double* out_pitch, double* out_yaw, void** out_pc) {

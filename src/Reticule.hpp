@@ -58,6 +58,11 @@ bool reticule_force_visible(Vec3* out_pos, int* out_have);
 // The hosted widget component, exposed because a debug command in Plugin.cpp inspects it.
 extern TrackedObject g_ret_widget_comp;
 
+// True when the material the component is ACTUALLY rendering with cancels scene exposure itself, so
+// the gain must be 1.0 rather than aimwidgetgain. Exposed here so the brightness instrument in
+// Plugin.cpp can report it alongside everything else in the chain.
+extern bool g_ret_widget_exposure_compensated;
+
 // ---- mesh reticule ---------------------------------------------------------------------------
 // ensure() creates on demand and latches on failure; move() repositions. Safe to call every tick.
 void reticule_mesh_ensure(uevr::API::UObject* rig);
@@ -82,5 +87,12 @@ std::wstring wanted_widget_class();
 // after the component binds (or latches failed) this goes false and stays false, unless the binding
 // is dropped, in which case it goes true again and the scan resumes on its own.
 bool reticle_widget_needs_pick();
+
+// STRAY NATIVE CROSSHAIRS. Hosting removes the game's crosshair from its parent; it does not stop
+// the HUD building another one, which a mission transition does. These let the existing scan clean
+// that up without becoming a standing poll -- see the block above their definitions in Reticule.cpp.
+void reticle_arm_stray_check();              // one-shot window, armed when a widget is hosted
+bool reticle_stray_check_due(uint32_t tick); // is that window open?
+void reticle_collapse_strays();              // hide every scanned reticle that is not ours
 
 } // namespace halo

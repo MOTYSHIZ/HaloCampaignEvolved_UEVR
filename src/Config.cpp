@@ -8,6 +8,23 @@
 namespace halo {
 Config g_cfg{};
 
+// Every smoothing setting used to be a fraction of the gap closed PER CALL, which is not a filter
+// setting so much as a filter setting entangled with the frame rate -- the same number smoothed
+// about three times harder at 30 fps than at 90. They are time constants now (see ema_alpha), but
+// old config files still in the wild carry the fractions, so those keys are still accepted and
+// converted here rather than being ignored into a silent default.
+//
+// The conversion needs the frame rate the old value was tuned at, which nothing recorded. 90 Hz is
+// the assumption: it is what this game runs at in the headset it was tuned in. A file tuned at a
+// very different rate converts to a time constant that FEELS the same as it did there -- which is
+// the point -- but is not what its author would pick today. Move such a file to the *ms keys.
+static constexpr float LEGACY_REF_HZ = 90.0f;
+static float alpha_to_tau_ms(float alpha) {
+    alpha = clampf(alpha, 0.0f, 1.0f);
+    if (alpha >= 0.999f) return 0.0f;   // "take the new value whole" in the old scheme
+    return clampf(-1000.0f / (LEGACY_REF_HZ * std::log(1.0f - alpha)), 0.0f, 500.0f);
+}
+
 
 // ---------------------------------------------------------------- live config
 // KILL SWITCH FIRST, tuning second. There is no plugin on_message callback in this API version,
@@ -87,7 +104,31 @@ void write_default_config() {
 
 // Second half of the key table. Split out because MSVC hits "blocks nested too deeply"
 // (C1061) on one long else-if chain, and this table keeps growing.
+// BLAM diagnostic/override keys, in their own function with early returns.
+// MSVC C1061 (blocks nested too deeply) has now bitten this file TWICE: one long else-if chain
+// overflows, and merely moving keys to a second chain just moves the overflow. Returning early
+// flattens the nesting instead of relocating it -- put new blam keys here.
+static bool parse_blam_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "blampitch")   == 0) { g_cfg.blam_pitch_off = (float)v; return true; }
+    if (_stricmp(key, "blamdump")    == 0) { g_cfg.blam_dump      = (int)v; return true; }
+    if (_stricmp(key, "blamobj")     == 0) { g_cfg.blam_obj       = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "blamobjlen")   == 0) { g_cfg.blam_obj_len   = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "blamfind")      == 0) { g_cfg.blam_find      = (int)v; return true; }
+    if (_stricmp(key, "blamscan")      == 0) { g_cfg.blam_scan      = (int)v; return true; }
+    if (_stricmp(key, "blamscan2")     == 0) { g_cfg.blam_scan2     = (int)v; return true; }
+    if (_stricmp(key, "blamscan3")     == 0) { g_cfg.blam_scan3     = (int)v; return true; }
+    if (_stricmp(key, "blamnode")      == 0) { g_cfg.blam_node      = (int)v; return true; }
+    if (_stricmp(key, "blamangles")    == 0) { g_cfg.blam_angles    = (int)v; return true; }
+    if (_stricmp(key, "blamanglesysign") == 0) { g_cfg.blam_angles_ysign = (int)v; return true; }
+    if (_stricmp(key, "vraccel")       == 0) { g_cfg.vr_accel       = (int)v; return true; }
+    if (_stricmp(key, "aimdeadbeat")   == 0) { g_cfg.aim_deadbeat   = (float)v; return true; }
+    if (_stricmp(key, "aimstat")       == 0) { g_cfg.aim_stat       = (int)v; return true; }
+    if (_stricmp(key, "aimtargetsmoothms") == 0) { g_cfg.aim_target_smooth_ms = (float)v; return true; }
+    return false;
+}
+
 void parse_config_key_2(const char* key, const char* val, double v) {
+        if (parse_blam_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);
         else if (_stricmp(key, "huddump")    == 0) g_cfg.hud_dump      = (v != 0.0);
@@ -203,7 +244,13 @@ void parse_config_key_2(const char* key, const char* val, double v) {
                 g_cfg.aim_widget_class[--n] = 0;
             }
         }
-        else if (_stricmp(key, "aimwidgettint")  == 0) g_cfg.aim_widget_tint  = clampf((float)v, 0.0f, 64.0f);
+        // Ceiling raised 64 -> 1024 on 2026-08-09 to match aimwidgetgain. The two multiply, and the
+        // scene term they fight varies by roughly 64x between a bright exterior and shade -- so the
+        // BRIGHT end is where headroom runs out, and tuning had reached the old ceiling with the
+        // beach still reading dark. A clamp that low also failed silently: values above it were
+        // reduced with no log line, so raising the number appeared to do nothing and sent the
+        // investigation looking for a phantom multiplier.
+        else if (_stricmp(key, "aimwidgettint")  == 0) g_cfg.aim_widget_tint  = clampf((float)v, 0.0f, 1024.0f);
         else if (_stricmp(key, "aimwidgetalpha") == 0) g_cfg.aim_widget_alpha = clampf((float)v, 0.0f, 1.0f);
         else if (_stricmp(key, "aimwidgetgain")  == 0) g_cfg.aim_widget_gain  = clampf((float)v, 0.0f, 1024.0f);
         // base 0 so masks can be written readably as 0x0040
@@ -215,7 +262,38 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "mapbtnlog")   == 0) g_cfg.map_btn_log    = (v != 0.0);
         else if (_stricmp(key, "mapto")         == 0) g_cfg.map_to          = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "perflog")       == 0) g_cfg.perf_log        = (v != 0.0);
+        else if (_stricmp(key, "aimtrace")      == 0) g_cfg.aim_trace       = (v != 0.0);
+        else if (_stricmp(key, "memscan")       == 0) g_cfg.mem_scan        = (v != 0.0);
+        else if (_stricmp(key, "aimwatch")      == 0) g_cfg.aim_watch       = (v != 0.0);
+        else if (_stricmp(key, "aimwatchaddr")  == 0) g_cfg.aim_watch_addr  = (uint64_t)strtoull(val, nullptr, 0);
+        else if (_stricmp(key, "memscanvals")   == 0) strncpy_s(g_cfg.mem_scan_vals, val, _TRUNCATE);
+        else if (_stricmp(key, "measrate")      == 0) g_cfg.meas_rate_fixed = clampf((float)v, 0.0f, 1000.0f);
+        else if (_stricmp(key, "gainseed")      == 0) g_cfg.gain_seed       = clampf((float)v, 0.0f, 1000.0f);
+        else if (_stricmp(key, "stickscale")    == 0) g_cfg.stick_scale     = clampf((float)v, 0.05f, 1.0f);
+        else if (_stricmp(key, "stickdz")       == 0) g_cfg.stick_dz        = clampf((float)v, 0.0f, 0.5f);
+        else if (_stricmp(key, "plantfulldps")  == 0) g_cfg.plant_full_dps  = clampf((float)v, 0.0f, 2000.0f);
+        else if (_stricmp(key, "aimtau")        == 0) g_cfg.aim_tau_s       = clampf((float)v, 0.0f, 2.0f);
+        else if (_stricmp(key, "aimdecel")      == 0) g_cfg.aim_decel       = clampf((float)v, 0.0f, 20000.0f);
+        else if (_stricmp(key, "aimdirect")     == 0) g_cfg.aim_direct      = (v != 0.0);
+        else if (_stricmp(key, "dirgrip")     == 0) g_cfg.rig_dir_grip_deg  = clampf((float)v, -180.0f, 180.0f);
+        else if (_stricmp(key, "dirgripyaw")  == 0) g_cfg.rig_dir_grip_yaw  = clampf((float)v, -180.0f, 180.0f);
+        else if (_stricmp(key, "dirgriproll") == 0) g_cfg.rig_dir_grip_roll = clampf((float)v, -180.0f, 180.0f);
+        else if (_stricmp(key, "diroffx")     == 0) g_cfg.rig_dir_off_x     = clampf((float)v, -100.0f, 100.0f);
+        else if (_stricmp(key, "diroffy")     == 0) g_cfg.rig_dir_off_y     = clampf((float)v, -100.0f, 100.0f);
+        else if (_stricmp(key, "diroffz")     == 0) g_cfg.rig_dir_off_z     = clampf((float)v, -100.0f, 100.0f);
+        else if (_stricmp(key, "memscanmax")  == 0) g_cfg.mem_scan_max   = (int)v;
+        else if (_stricmp(key, "memdiff")     == 0) g_cfg.mem_diff       = (int)v;
+        else if (_stricmp(key, "blamaim")     == 0) g_cfg.blam_aim       = (int)v;
+        else if (_stricmp(key, "blamyaw")     == 0) g_cfg.blam_yaw_off   = (float)v;
+        else if (_stricmp(key, "stickdither") == 0) g_cfg.stick_dither    = (v != 0.0);
+        else if (_stricmp(key, "aimquat")      == 0) g_cfg.aim_quat        = (v != 0.0);
+        else if (_stricmp(key, "aimquatsrc")   == 0) g_cfg.aim_quat_src    = (v != 0.0);
+        else if (_stricmp(key, "aimdirectsignx") == 0) g_cfg.aim_direct_sign_x = (v < 0.0) ? -1.0f : 1.0f;
+        else if (_stricmp(key, "aimdirectsigny") == 0) g_cfg.aim_direct_sign_y = (v < 0.0) ? -1.0f : 1.0f;
+        else if (_stricmp(key, "vrsens")        == 0) g_cfg.vr_sens         = (int)clampf((float)v, 0.0f, 20.0f);
+        else if (_stricmp(key, "vrdeadzone")    == 0) g_cfg.vr_deadzone     = clampf((float)v, -1.0f, 100.0f);
         else if (_stricmp(key, "rigfast")       == 0) g_cfg.rig_fast        = (v != 0.0);
+        else if (_stricmp(key, "shell")         == 0) g_cfg.shell_drive     = (v != 0.0);
         else if (_stricmp(key, "stickmode")     == 0) g_cfg.stick_mode      = (v != 0.0);
         else if (_stricmp(key, "stickforce")    == 0) g_cfg.stick_force     = (int)v;
         else if (_stricmp(key, "stickon")       == 0) g_cfg.stick_on_s      = clampf((float)v, 0.1f, 30.0f);
@@ -224,6 +302,11 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "brakemode")     == 0) g_cfg.brake_mode      = (int)v;
         else if (_stricmp(key, "brakemask")     == 0) g_cfg.brake_mask      = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "brakekey")      == 0) g_cfg.brake_key       = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "cutscene2d")    == 0) g_cfg.cutscene_2d     = (int)v;
+        else if (_stricmp(key, "cuthint")       == 0) g_cfg.cut_hint        = (v != 0.0);
+        else if (_stricmp(key, "cuthintdist")   == 0) g_cfg.cut_hint_dist   = clampf((float)v, 0.5f, 5.0f);
+        else if (_stricmp(key, "cuthintdrop")   == 0) g_cfg.cut_hint_drop   = clampf((float)v, -2.0f, 2.0f);
+        else if (_stricmp(key, "cuthintw")      == 0) g_cfg.cut_hint_w      = clampf((float)v, 0.3f, 3.0f);
 }
 
 bool parse_config_file(const char* path) {
@@ -248,8 +331,10 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "dead")    == 0) g_cfg.dead_deg    = clampf((float)v, 0.0f, 45.0f);
         else if (_stricmp(key, "ffgain")  == 0) g_cfg.ff_gain     = clampf((float)v, 0.0f, 2.0f);
         else if (_stricmp(key, "dgain")   == 0) g_cfg.d_gain      = clampf((float)v, 0.0f, 1.0f);
-        else if (_stricmp(key, "ffsmooth")== 0) g_cfg.ff_smooth   = clampf((float)v, 0.0f, 1.0f);
-        else if (_stricmp(key, "dsmooth") == 0) g_cfg.d_smooth    = clampf((float)v, 0.02f, 1.0f);
+        else if (_stricmp(key, "ffsmoothms") == 0) g_cfg.ff_smooth_ms = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "dsmoothms")  == 0) g_cfg.d_smooth_ms  = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "ffsmooth")== 0) g_cfg.ff_smooth_ms = alpha_to_tau_ms((float)v);
+        else if (_stricmp(key, "dsmooth") == 0) g_cfg.d_smooth_ms  = alpha_to_tau_ms((float)v);
         else if (_stricmp(key, "deadhyst")== 0) g_cfg.dead_hyst   = clampf((float)v, 0.0f, 1.0f);
         else if (_stricmp(key, "ffpitchcomp") == 0) g_cfg.ff_pitch_comp = (v != 0.0);
         else if (_stricmp(key, "xdist")     == 0) g_cfg.xdist_m    = clampf((float)v, 1.0f, 100.0f);
@@ -283,6 +368,33 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "pivviz")    == 0) g_cfg.piv_viz     = (v != 0.0);
         else if (_stricmp(key, "pivdraw")   == 0) g_cfg.piv_draw    = clampf((float)v, 0.0f, 50.0f);
         else if (_stricmp(key, "aimreticule")     == 0) g_cfg.aim_reticule      = (v != 0.0);
+        else if (_stricmp(key, "aimreticulesrc") == 0) g_cfg.aim_reticule_src = (int)v;
+        else if (_stricmp(key, "aimhidenative") == 0) g_cfg.aim_hide_native = (v != 0.0);
+        else if (_stricmp(key, "aimsrc")       == 0) g_cfg.aim_src         = (int)v;
+        else if (_stricmp(key, "aimrolllog")   == 0) g_cfg.aim_roll_log    = (int)v;
+        else if (_stricmp(key, "aimreticuletrace") == 0) g_cfg.aim_reticule_trace = (v != 0.0);
+        else if (_stricmp(key, "aimreticuletracemax") == 0)
+            g_cfg.aim_reticule_trace_max = clampf((float)v, 100.0f, 100000.0f);
+        else if (_stricmp(key, "aimreticuletracechannel") == 0)
+            g_cfg.aim_reticule_trace_channel = (int)v;
+        else if (_stricmp(key, "aimreticulemaxdist") == 0)
+            g_cfg.aim_reticule_max_dist = clampf((float)v, 50.0f, 100000.0f);
+        else if (_stricmp(key, "aimreticuleminscale") == 0)
+            g_cfg.aim_reticule_min_scale = clampf((float)v, 0.001f, 10.0f);
+        else if (_stricmp(key, "aimreticulemaxscale") == 0)
+            g_cfg.aim_reticule_max_scale = clampf((float)v, 0.001f, 20.0f);
+        else if (_stricmp(key, "aimreticuleminscaledist") == 0)
+            g_cfg.aim_reticule_min_scale_dist = clampf((float)v, 1.0f, 10000.0f);
+        else if (_stricmp(key, "aimreticulesurfaceoff") == 0)
+            g_cfg.aim_reticule_surface_off = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "aimreticuledivdeg") == 0) g_cfg.aim_reticule_div_deg = clampf((float)v, 0.5f, 90.0f);
+        else if (_stricmp(key, "aimreticuledivms") == 0) g_cfg.aim_reticule_div_ms = clampf((float)v, 0.0f, 5000.0f);
+        else if (_stricmp(key, "aimreticulesmoothslow") == 0) g_cfg.aim_reticule_smooth_slow_dps = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "aimreticulesmoothfast") == 0) g_cfg.aim_reticule_smooth_fast_dps = clampf((float)v, 1.0f, 1000.0f);
+        else if (_stricmp(key, "aimreticulesmoothctrlms") == 0) g_cfg.aim_reticule_smooth_ctrl_ms = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "aimreticulesmoothms") == 0) g_cfg.aim_reticule_smooth_ms = clampf((float)v, 0.0f, 500.0f);
+        else if (_stricmp(key, "aimreticulesmoothctrl") == 0) g_cfg.aim_reticule_smooth_ctrl_ms = alpha_to_tau_ms((float)v);
+        else if (_stricmp(key, "aimreticulesmooth") == 0) g_cfg.aim_reticule_smooth_ms = alpha_to_tau_ms((float)v);
         else if (_stricmp(key, "aimreticuledist") == 0) g_cfg.aim_reticule_dist = clampf((float)v, 100.0f, 10000.0f);
         else if (_stricmp(key, "aimreticuledistveh") == 0) g_cfg.aim_reticule_dist_veh = clampf((float)v, 0.0f, 20000.0f);
         else if (_stricmp(key, "aimreticulescaleveh") == 0) g_cfg.aim_reticule_scale_veh = clampf((float)v, 0.05f, 5.0f);
@@ -303,13 +415,22 @@ bool parse_config_file(const char* path) {
             }
         }
         else if (_stricmp(key, "recenter")  == 0) g_cfg.recenter    = (float)v;
+        else if (_stricmp(key, "lockreprime") == 0) g_cfg.lock_reprime = (float)v;
         // base 0 so the mask can be written as 0x0020 (readable) or 32 (not).
-        else if (_stricmp(key, "calibbtn")  == 0) g_cfg.calib_btn   = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "calibkey")  == 0) g_cfg.calib_key   = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "aimcalibkey") == 0) g_cfg.aim_calib_key = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "blamctllog")  == 0) g_cfg.blam_ctl_log  = (int)v;
+        else if (_stricmp(key, "hmdleash")     == 0) g_cfg.hmd_leash      = (v != 0.0);
+        else if (_stricmp(key, "hmdleashlat")  == 0) g_cfg.hmd_leash_lat  = clampf((float)v, 0.0f, 5.0f);
+        else if (_stricmp(key, "hmdleashvert") == 0) g_cfg.hmd_leash_vert = clampf((float)v, 0.0f, 5.0f);
+        else if (_stricmp(key, "modekey")   == 0) g_cfg.mode_key    = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "dbgmark")   == 0) g_cfg.dbg_mark    = (int)v;
     else if (_stricmp(key, "killkey")    == 0) g_cfg.kill_key    = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "aimoffyaw")   == 0) { g_cfg.aim_off_yaw   = (float)v; g_cfg.aim_off_valid = true; }
         else if (_stricmp(key, "aimoffpitch") == 0) { g_cfg.aim_off_pitch = (float)v; g_cfg.aim_off_valid = true; }
+        else if (_stricmp(key, "calibrelative") == 0) g_cfg.calib_relative = (v != 0.0);
+        else if (_stricmp(key, "calibver")      == 0) g_cfg.calib_ver      = (int)v;
+        else if (_stricmp(key, "aimcalibver")   == 0) g_cfg.aim_calib_ver  = (int)v;
         else if (_stricmp(key, "rigmode")   == 0) g_cfg.rig_mode    = (int)v;
         else if (_stricmp(key, "riganchor") == 0) g_cfg.rig_body_anchor = (v != 0.0);
         else if (_stricmp(key, "rigviewyaw") == 0) g_cfg.rig_view_yaw  = clampf((float)v, -1.0f, 1.0f);
@@ -318,8 +439,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimturn")   == 0) g_cfg.aim_turn     = clampf((float)v, -1.0f, 1.0f);
         else if (_stricmp(key, "moverot")   == 0) g_cfg.move_rot     = clampf((float)v, -1.0f, 1.0f);
         else if (_stricmp(key, "movesrc")   == 0) g_cfg.move_src     = (int)v;
-        else if (_stricmp(key, "movelive")  == 0) g_cfg.move_live    = (v != 0.0);
+        else if (_stricmp(key, "movelive")  == 0) g_cfg.move_live    = (int)v;
         else if (_stricmp(key, "movesmooth") == 0) g_cfg.move_smooth = clampf((float)v, 0.0f, 1.0f);
+        else if (_stricmp(key, "moveresid") == 0) g_cfg.move_resid   = (int)v;
         else if (_stricmp(key, "requirehmd") == 0) g_cfg.require_hmd  = (v != 0.0);
         else if (_stricmp(key, "attachmode") == 0) g_cfg.attach_mode  = (int)v;
         else if (_stricmp(key, "rigrender")  == 0) g_cfg.rig_render   = (v != 0.0);
@@ -344,9 +466,26 @@ char g_calib_path_right[MAX_PATH] = {0};
 // estimated one, which would look like the calibration silently degrading.
 bool g_pivot_from_calib = false;
 
+// TRUE when an aim offset is loaded with no explicit aimcalibver stamp, so its schema is a guess.
+// See load_config() below; the tick reports it once.
+bool g_calib_stamp_ambiguous = false;
+
 void load_config() {
+    // Reset the schema stamps before parsing so "absent" genuinely means absent. Without this they
+    // are sticky across the ~2 s reload: once a file that HAD a stamp is edited to remove it, or a
+    // calibration file is deleted so only the unstamped halo_vr.cfg fallbacks remain, the old value
+    // would persist in memory and keep certifying data it no longer describes.
+    g_cfg.calib_ver     = 1;
+    g_cfg.aim_calib_ver = 1;
+
     if (!parse_config_file(g_cfg_path)) { write_default_config(); return; }
     parse_config_file(g_calib_path);
+
+    // An offset with no version stamp is AMBIGUOUS, and guessing wrong is a constant, invisible yaw
+    // error that then gets written back to disk. Raised here, reported by the tick -- this file has
+    // no UEVR API dependency and is worth keeping that way.
+    g_calib_stamp_ambiguous =
+        g_cfg.aim_off_valid && g_cfg.aim_calib_ver < 2 && g_cfg.calib_relative;
 }
 
 // Point g_calib_path at the file for the configured hand, and load it.
@@ -404,17 +543,34 @@ void write_calib_file() {
         "# halo_vr - CALIBRATION RESULT. Written by the pose-match calibration; applied\r\n"
         "# AFTER halo_vr.cfg, so these override the values in that file.\r\n"
         "# Delete this file to fall back to your hand-tuned settings.\r\n"
+        "#\r\n"
+        "# calibver: 1 (or absent) = yaw values are ABSOLUTE; 2 = measured relative to the view-lock\r\n"
+        "# yaw, so the calibration no longer encodes where you injected. See `calibrelative`.\r\n"
+        "calibver=%d\r\n"
         "grip=%.3f\r\ngripyaw=%.3f\r\ngriproll=%.3f\r\n"
+        "# Same fit for the direct-drive rig (rigmode=3), which composes against its OWN trim and\r\n"
+        "# its OWN mount -- BOTH, not just the rotation. Persisting the grip and leaving the mount\r\n"
+        "# behind is how a correct fit still failed to survive a restart in mode 3.\r\n"
+        "dirgrip=%.3f\r\ndirgripyaw=%.3f\r\ndirgriproll=%.3f\r\n"
+        "diroffx=%.3f\r\ndiroffy=%.3f\r\ndiroffz=%.3f\r\n"
         "offx=%.3f\r\noffy=%.3f\r\noffz=%.3f\r\n",
+        // The TRACKED version, not `calib_relative ? 2 : 1`. Deriving it from the feature flag
+        // certifies values the gesture never actually rebased -- which is how an untouched
+        // absolute aimoffyaw got stamped v2 by a mesh calibration.
+        g_cfg.calib_ver,
         g_cfg.grip_deg, g_cfg.grip_yaw, g_cfg.grip_roll,
+        g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll,
+        g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z,
         g_cfg.off_x, g_cfg.off_y, g_cfg.off_z);
 
     if (g_cfg.aim_off_valid) {
         fprintf(f,
             "# Hand-to-aim mapping from the Page Down calibration. Stored as an OFFSET so it\r\n"
             "# survives level loads and respawns, which reset the absolute reference.\r\n"
-            "aimoffyaw=%.3f\r\naimoffpitch=%.3f\r\n",
-            g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
+            "# aimcalibver is SEPARATE from calibver: this offset is only frame-relative once the\r\n"
+            "# aim calibration itself has been re-run, whatever the mesh calibration did.\r\n"
+            "aimcalibver=%d\r\naimoffyaw=%.3f\r\naimoffpitch=%.3f\r\n",
+            g_cfg.aim_calib_ver, g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
     }
 
     if (g_pivot_from_calib) {

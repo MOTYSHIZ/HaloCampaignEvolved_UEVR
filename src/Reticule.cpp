@@ -501,6 +501,43 @@ std::wstring wanted_widget_class() {
     return L"WBP_FirstPersonReticle";
 }
 
+// A CONSTRUCTED widget, as opposed to the class ARCHETYPE that lives inside the loaded blueprint
+// package under <Class>.WidgetTree.<Name>. Live instances are outered somewhere under
+// /Engine/Transient; the archetype never is.
+//
+// Both consumers of the reticle sweep need this test, for opposite reasons: pick_live_reticle()
+// must never BIND the archetype (it renders nothing), and reticle_collapse_strays() must never
+// TOUCH it (see there -- that one is destructive and it has already cost a session).
+bool is_live_widget_instance(API::UObject* o) {
+    for (API::UObject* p = o; p != nullptr; p = p->get_outer()) {
+        const auto* fn = p->get_fname();
+        if (fn != nullptr && fn->to_string().find(L"Transient") != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+// ---- STRAY NATIVE RETICLES
+//
+// Hosting hides the game's crosshair by REMOVING IT FROM ITS PARENT, which is not the same as
+// hiding the crosshair CLASS. Rebuild the HUD -- finishing a mission and loading the next one does
+// exactly that -- and the game builds a fresh crosshair on the flat HUD while we are still hosting
+// the old one. Both are then on screen: ours in the world, theirs pasted over the view.
+//
+// So the flat one is collapsed EXPLICITLY, which also makes the behaviour survive whatever the HUD
+// does next rather than depending on our removal having been the only copy.
+uint32_t g_ret_stray_until = 0;
+
+void reticle_arm_stray_check() { g_ret_stray_until = 0xFFFFFFFFu; }   // resolved on the next scan
+
+bool reticle_stray_check_due(uint32_t tick) {
+    if (g_ret_stray_until == 0) return false;
+    // First call after arming: open a short window measured from NOW, so the scan's own 120-tick
+    // throttle gets a chance to fire inside it.
+    if (g_ret_stray_until == 0xFFFFFFFFu) g_ret_stray_until = tick + 400;   // ~12 s
+    if (tick >= g_ret_stray_until) { g_ret_stray_until = 0; return false; }
+    return true;
+}
+
 // The widget we are currently hosting, and the panel we took it from.
 //
 // Tracked because BOTH can die independently of our component. The hosted widget dies whenever the
@@ -509,6 +546,67 @@ std::wstring wanted_widget_class() {
 // frozen quad forever while the game's new crosshair sits back on the flat HUD.
 TrackedObject g_ret_hosted_widget;
 TrackedObject g_ret_widget_parent;
+
+// Collapse every scanned reticle widget that is not the one we host. ESlateVisibility::Collapsed
+// is 1. Called from the end of the scan, so it costs nothing of its own -- it reuses the list the
+// sweep just built rather than looking again.
+void reticle_collapse_strays() {
+    if (!g_cfg.aim_hide_native) return;
+    auto* mine = g_ret_hosted_widget.get();
+
+    // FAIL CLOSED WHEN OUR OWN WIDGET CANNOT BE IDENTIFIED.
+    //
+    // The widget we host IS one of the game's crosshairs -- taken off the HUD, not a copy -- so the
+    // sweep finds it like any other, and this identity check is the only thing keeping it visible.
+    // If the tracked handle cannot resolve (recycled slot, mid-rebuild) then `mine` is null, every
+    // match looks like a stray, and we would collapse our own world-space reticule.
+    //
+    // So: while the widget reticule is in use, no identifiable hosted widget means no collapsing at
+    // all. With aim_widget off there is nothing of ours among them and every match is genuinely
+    // the game's.
+    if (g_cfg.aim_widget && mine == nullptr) return;
+
+    for (int i = 0; i < g_reticle_count; ++i) {
+        auto* w = g_reticles[i].obj.get();
+        if (w == nullptr || w == mine) continue;
+
+        // LIVE INSTANCES ONLY -- NEVER THE CLASS ARCHETYPE.
+        //
+        // The sweep collects both, and the archetype is not a stray crosshair: it is the template
+        // every future HUD is duplicated from. Removing it from its parent does not hide anything
+        // that is on screen; it deletes the crosshair from WBP_HUD_Main_C for the rest of the
+        // process, so the next HUD the game builds has no reticle at all -- no flat one for the
+        // player and nothing for us to host. Because the archetype belongs to the loaded package
+        // it also never dies on its own, so this loop found it and "removed" it once per scan.
+        //
+        // Measured 2026-08-09: four removals at 15:50:59-15:51:13 against the same address, the
+        // archetype gone from the sweep by 15:52:55, and the level load at 15:57:40 produced a HUD
+        // with every other child present and no FirstPersonReticle. Diagnosed as eye adaptation
+        // and as a hosting failure before the log made the sequence plain.
+        if (!is_live_widget_instance(w)) continue;
+
+        // REMOVE IT, do not merely hide it.
+        //
+        // The first version set Visibility=Collapsed and lost: the HUD re-asserts visibility on its
+        // own schedule, so the same two widgets were re-collapsed every scan and were visible again
+        // in between. Removing from the parent is the lever that actually works -- it is what
+        // hosting does to the widget we take, and that one has never come back.
+        //
+        // Visibility is still set first, so a widget whose removal fails for any reason is at least
+        // hidden for the moment rather than left fully visible.
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            p[0] = 1;   // ESlateVisibility::Collapsed
+            w->call_function(L"SetVisibility", p);
+        }
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            w->call_function(L"RemoveFromParent", p);
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] reticule: removed a stray native crosshair @%p "
+                             "(the HUD rebuilt one behind us)", (void*)w);
+    }
+}
 
 // True once we have taken a widget off the HUD, so reticule_widget_release() knows there is
 // something to give back. Latches false again when it does.
@@ -554,18 +652,20 @@ API::UObject* pick_live_reticle() {
         if (o == nullptr) continue;
         if (class_name_of(o).find(wanted_widget_class()) == std::wstring::npos) continue;
 
-        for (API::UObject* p = o; p != nullptr; p = p->get_outer()) {
-            const auto* fn = p->get_fname();
-            if (fn != nullptr && fn->to_string().find(L"Transient") != std::wstring::npos) {
-                return o;
-            }
-        }
+        if (is_live_widget_instance(o)) return o;
     }
     return nullptr;
 }
 
 // Move a widget onto our component: take it off the HUD, clear any HUD-follow offset, hand it over.
 // Shared by the initial bind and the re-bind that follows a HUD rebuild, so the two cannot drift.
+//
+// NOTE this is the HOSTING path, which takes the game's widget off the HUD -- and that is what
+// zeroes its colour (measured 2026-08-09: hosted renders a solid BLACK crosshair with correct alpha,
+// the same widget un-hosted renders bright cyan). The crosshair is drawn by a MaterialInstanceDynamic
+// the HUD drives every frame; off the HUD nothing drives it. A "mirror" path that left the game's
+// widget on the HUD and drew a second instance of the same class was tried on 2026-08-09 and did
+// not work; the colour is fixed instead by aimwidgetgain/aimwidgettint in the profile.
 void host_widget(API::UObject* comp, API::UObject* w) {
     // Remember where it came from, so releasing the feature can put it back (see
     // reticule_widget_release). Captured BEFORE RemoveFromParent, which is what clears it.
@@ -597,6 +697,12 @@ void host_widget(API::UObject* comp, API::UObject* w) {
 
     g_ret_hosted_widget.set(w);
     g_ret_widget_hosted_once = true;
+
+    // A HUD rebuild can produce the new crosshair AFTER we have already picked, so one more sweep
+    // shortly from now catches the straggler. Deliberately a ONE-SHOT window and not a standing
+    // poll: that sweep costs 100-125 ms on the game thread, and running it periodically is the
+    // periodic microstutter this codebase already had to remove once.
+    reticle_arm_stray_check();
 }
 
 void reticule_widget_ensure(API::UObject* rig) {
@@ -686,7 +792,7 @@ void reticule_widget_ensure(API::UObject* rig) {
     //
     // CREDIT: elliotttate's HaloCampaignEvolved-UEVR identified the pre-exposure mechanism, the
     // EyeAdaptationInverse antidote, and ships the LogicMod pak (used with permission).
-    auto* mic = find_or_load_material(
+    API::UObject* mic = find_or_load_material(
         "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
         "WidgetVRPassThrough_Translucent_OneSided");
     if (mic == nullptr) {
@@ -701,10 +807,11 @@ void reticule_widget_ensure(API::UObject* rig) {
         comp->call_function(L"SetMaterial", p);
         g_ret_widget_exposure_compensated =
             mic->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos;
-        API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %s",
-                             g_ret_widget_exposure_compensated
-                                 ? "VREditor exposure-compensated (LogicMod) -- tint gain 1.0"
-                                 : "stock Widget3DPassThrough -- compensating with aimwidgetgain");
+        // Log the material actually applied, not a guess about which branch we took -- reading
+        // "stock Widget3DPassThrough" under an override that had plainly loaded cost real time.
+        API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %S (gain %s)",
+                             mic->get_full_name().c_str(),
+                             g_ret_widget_exposure_compensated ? "forced 1.0" : "aimwidgetgain");
     }
 
     // Space FIRST: setting the widget before the space can build the render target for the wrong
@@ -861,6 +968,114 @@ bool g_ret_widget_finished = false;
 
 // EMISSIVE GAIN -- why the hosted crosshair needs one.
 //
+// Bind the component's live render target into its material's SlateUI parameter, and report whether
+// the material it is actually rendering with cancels pre-exposure by itself.
+//
+// WHY THIS IS NOT AUTOMATIC. UWidgetComponent binds SlateUI in UpdateMaterialInstanceParameters --
+// but only onto the material instance IT built, at the moments IT expects. We replace the material
+// after construction, on a component added dynamically to a pawn the game never expected to carry
+// one, and SetDrawSize can reallocate both the target and the instance underneath us. The binding
+// is therefore free to end up pointing at a stale target or at nothing at all.
+//
+// An unbound SlateUI is NOT a cosmetic problem. Sampling it faults inside the translucency pass:
+// measured 2026-08-02, EXCEPTION_ACCESS_VIOLATION reading a small offset in
+// ParallelDraw -> RenderTranslucency, within 6-13 s of the material being applied, 4/4 runs across
+// three different materials. Every one of those runs had the material swapped and SlateUI never
+// bound. That is why the exposure-compensated material "could not be shipped" -- it was never the
+// material's fault.
+//
+// Writes only on mismatch, so the steady state costs two reads and no engine writes.
+//
+// CREDIT: elliotttate's HaloCampaignEvolved-UEVR diagnosed this and repairs it the same way --
+// including the parent-chain walk below, which is authoritative where a name check on the material
+// we ASKED for is not: the component may be rendering something else entirely.
+bool bind_widget_slate_ui(API::UObject* comp) {
+    if (comp == nullptr) return false;
+
+    API::UObject* rt = nullptr;
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      comp->call_function(L"GetRenderTarget", p);
+      rt = *reinterpret_cast<API::UObject**>(p); }
+    if (rt == nullptr) return false;          // allocated lazily on the first tick
+
+    API::UObject* mi = nullptr;
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      comp->call_function(L"GetMaterialInstance", p);
+      mi = *reinterpret_cast<API::UObject**>(p); }
+    if (mi == nullptr) return false;
+
+    // Walk up the instance chain to whatever base material is really in play.
+    bool compensated = false;
+    {
+        API::UObject* m = mi;
+        for (int depth = 0; m != nullptr && depth < 8; ++depth) {
+            if (m->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos) {
+                compensated = true;
+                break;
+            }
+            auto* parent = m->get_property_data<API::UObject*>(L"Parent");
+            m = (parent == nullptr) ? nullptr : *parent;
+        }
+    }
+    if (compensated != g_ret_widget_exposure_compensated) {
+        g_ret_widget_exposure_compensated = compensated;
+        API::get()->log_info("[Halo-CampE-UEVR] widget reticule material chain: %s",
+                             compensated ? "exposure-compensated (EyeAdaptationInverse) -- gain forced 1.0"
+                                         : "stock pass -- compensating with aimwidgetgain");
+    }
+
+    // Already pointing at this target? Then there is nothing to do.
+    API::UObject* current = nullptr;
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      API::FName param = make_fname(L"SlateUI");
+      memcpy(p, &param, sizeof(int32_t) * 2);
+      mi->call_function(L"K2_GetTextureParameterValue", p);
+      current = *reinterpret_cast<API::UObject**>(p + 8); }
+    // One-shot proof that this ran at all. Without it a silent early-out and a correct binding are
+    // indistinguishable in the log, and "the fix did nothing" and "the fix had nothing to do" are
+    // very different answers.
+    // Read TintColorAndOpacity back off the MID, not off the component.
+    //
+    // These are NOT the same value. We set the COMPONENT property and verify that, but the shader
+    // samples the MID's parameter, and they only agree if UpdateMaterialInstanceParameters actually
+    // propagated. The render target provably contains Halo's cyan (measured 2026-08-09:
+    // R80 G191 B210 A246), so SlateUI.rgb is not the zero in SlateUI.rgb * TintColorAndOpacity --
+    // which leaves the tint on the MID as the candidate. A zero here multiplies correct colour to
+    // black and is immune to both gain and exposure, which is every symptom we have.
+    {
+        static uint32_t t = 0;
+        if ((t++ % 32) == 0) {
+            float mid_tint[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+            auto* getv = mi->get_class()->find_function(L"K2_GetVectorParameterValue");
+            if (getv != nullptr) {
+                alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+                API::FName pn = make_fname(L"TintColorAndOpacity");
+                memcpy(q, &pn, sizeof(int32_t) * 2);
+                mi->process_event(getv, q);
+                memcpy(mid_tint, q + 8, sizeof(mid_tint));
+            }
+            auto* comp_tint = comp->get_property_data<float>(L"TintColorAndOpacity");
+            API::get()->log_info("[Halo-CampE-UEVR] TINT COMPARE  component=(%.2f %.2f %.2f %.2f)  "
+                                 "MID=(%.2f %.2f %.2f %.2f)  mid=%p rt=%p SlateUI=%s",
+                                 comp_tint ? comp_tint[0] : -1.0f, comp_tint ? comp_tint[1] : -1.0f,
+                                 comp_tint ? comp_tint[2] : -1.0f, comp_tint ? comp_tint[3] : -1.0f,
+                                 mid_tint[0], mid_tint[1], mid_tint[2], mid_tint[3],
+                                 (void*)mi, (void*)rt, current == rt ? "bound" : "STALE");
+        }
+    }
+    if (current == rt) return true;
+
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      API::FName param = make_fname(L"SlateUI");
+      memcpy(p, &param, sizeof(int32_t) * 2);
+      *reinterpret_cast<void**>(p + 8) = rt;
+      mi->call_function(L"SetTextureParameterValue", p); }
+
+    API::get()->log_info("[Halo-CampE-UEVR] widget reticule: SlateUI re-bound (mid=%p rt=%p, was %p)",
+                         (void*)mi, (void*)rt, (void*)current);
+    return true;
+}
+
 // `TintColorAndOpacity` is a straight multiplier on the widget's colour. The stock Widget3D pass is
 // unlit but its output is still multiplied by the scene's PRE-EXPOSURE before the filmic tonemapper,
 // so in a bright scene Halo's authored cyan lands near black. Multiplying the tint back up cancels
@@ -980,6 +1195,11 @@ void reticule_widget_finish() {
         comp->call_function(L"SetBackgroundColor", p);
     }
 
+    // Bind the render target into whatever material is on the component NOW -- which may be the MID
+    // the block above just created, or the exposure-compensated MIC set at creation. Must run before
+    // the tint: it is what decides whether the gain is 1.0 or aimwidgetgain.
+    bind_widget_slate_ui(comp);
+
     // Tint is applied here rather than at creation for the same reason as everything else in this
     // function: the component is only fully built after it has ticked once.
     apply_widget_tint(comp, /*force=*/true);
@@ -1065,6 +1285,12 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
         if ((redraw_tick++ % 6) == 0) {
             alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
             comp->call_function(L"RequestRedraw", p);
+
+            // Same cadence, same reason: SetDrawSize and the component's own material updates can
+            // replace the render target or the material instance at any point, and a material left
+            // sampling the old one crashes the translucency pass rather than merely looking wrong.
+            // Reads two properties and writes only when they have actually diverged.
+            bind_widget_slate_ui(comp);
         }
     }
 

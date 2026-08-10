@@ -30,6 +30,20 @@ Copy-Item (Join-Path $repo 'profile\*') $stage -Recurse -Force
 Remove-Item (Join-Path $stage 'plugins\.gitkeep') -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $repo 'build\halo_vr.dll') (Join-Path $stage 'plugins\') -Force
 
+# SHIPPING MANIFEST. The copy above takes profile\ wholesale, so a file that exists on the author's
+# disk but was never committed is simply absent in a CI checkout -- the zip builds fine and ships
+# broken. The plugin degrades quietly in exactly that case (a missing cutscene_hint.png just turns
+# the hint off), so nothing downstream would report it either. Assert the payload instead: CI fails
+# here, before a release exists, rather than a user finding out.
+$required = @('config.txt', 'halo_vr.cfg', 'cvars_data.txt', 'user_script.txt',
+              'reticle_ring.png', 'cutscene_hint.png',
+              'plugins\halo_vr.dll', 'plugins\CutsceneDetectionPlugin.dll')
+$missing = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
+if ($missing.Count -gt 0) {
+    throw ("Release payload incomplete -- missing: {0}`n" -f ($missing -join ', ')) +
+          "If the file exists locally, it is probably UNTRACKED: commit it, or CI ships without it."
+}
+
 $zip = Join-Path $repo 'build\HaloCampaignEvolved.zip'
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
