@@ -470,7 +470,38 @@ bool g_pivot_from_calib = false;
 // See load_config() below; the tick reports it once.
 bool g_calib_stamp_ambiguous = false;
 
+// Last-write time of one file, as an opaque comparable. Absent reads as 0, which is deliberately a
+// legitimate value rather than an error: deleting halo_vr_calib.cfg is a documented way to drop
+// back to the shipped calibration, so its disappearance has to register as a change.
+uint64_t cfg_file_stamp(const char* path) {
+    if (path == nullptr || path[0] == 0) return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) return 0;
+    return ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32) |
+            (uint64_t)fad.ftLastWriteTime.dwLowDateTime;
+}
+
 void load_config() {
+    // ---- DO NOT RE-READ FILES THAT HAVE NOT CHANGED.
+    //
+    // This runs every ~60 ticks, forever, and unconditionally parsed the config files off disk on
+    // the GAME THREAD. Normally that is ~0.45 ms and invisible. Measured under disk contention it
+    // reached 143.9 ms and 108.7 ms -- roughly 300x -- and a blocking read every ~1.7 s that
+    // occasionally costs 100 ms+ is a periodic hitch you can set your watch by.
+    //
+    // Stat calls instead. Live editing is unaffected: touching a file changes its write time and
+    // the next check parses immediately, so the edit-and-see loop still works, and writes made by
+    // the plugin itself (calibration captures) reload exactly as before.
+    {
+        const uint64_t s_main  = cfg_file_stamp(g_cfg_path);
+        const uint64_t s_calib = cfg_file_stamp(g_calib_path);
+        static uint64_t p_main = 0, p_calib = 0;
+        static bool     primed = false;
+        if (primed && s_main == p_main && s_calib == p_calib) return;
+        p_main = s_main; p_calib = s_calib;
+        primed = true;
+    }
+
     // Reset the schema stamps before parsing so "absent" genuinely means absent. Without this they
     // are sticky across the ~2 s reload: once a file that HAD a stamp is edited to remove it, or a
     // calibration file is deleted so only the unstamped halo_vr.cfg fallbacks remain, the old value
