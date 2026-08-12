@@ -42,6 +42,14 @@ std::atomic<float> g_ctrl_travel_max{0.0f};
 std::atomic<float> g_dbg_rig_x{0.0f}, g_dbg_rig_y{0.0f}, g_dbg_rig_z{0.0f}, g_dbg_rig_roll{0.0f};
 std::atomic<bool>  g_rig_wrote_once{false};
 std::atomic<float> g_rig_survive_drift{0.0f};   // how far our write had moved by the NEXT tick
+std::atomic<float> g_dbg_wpn_dx{0.0f}, g_dbg_wpn_dy{0.0f}, g_dbg_wpn_dz{0.0f};
+std::atomic<bool>  g_dbg_wpn_ok{false};
+std::atomic<int>   g_dbg_parent_changes{0};
+std::atomic<float> g_dbg_sock_x{0.0f}, g_dbg_sock_y{0.0f}, g_dbg_sock_z{0.0f};
+std::atomic<float> g_dbg_sock_p{0.0f}, g_dbg_sock_yw{0.0f}, g_dbg_sock_r{0.0f};
+std::atomic<bool>  g_dbg_sock_ok{false};
+std::atomic<float> g_dbg_Lact_x{0.0f}, g_dbg_Lact_y{0.0f}, g_dbg_Lact_z{0.0f};
+std::atomic<bool>  g_dbg_Lact_ok{false};
 // Raw controller position, logged to expose pose jumps: 1.8 m of "travel" is a teleport, not a hand.
 std::atomic<float> g_dbg_pos_x{0.0f}, g_dbg_pos_y{0.0f}, g_dbg_pos_z{0.0f};
 
@@ -142,6 +150,12 @@ API::UObject* fp_weapon_actor() {
     return g_fp_weapon.get_checked(L"WeaponActor");
 }
 
+API::UObject* fp_weapon_root() {
+    // Same walk resolve_rig() uses in reverse (weapon -> RootComponent -> AttachParent == rig),
+    // stopping one step earlier. get_checked, not get: actors on this title are pooled.
+    return follow_object(fp_weapon_actor(), L"RootComponent");
+}
+
 API::UObject* rig_tracked_component() {
     return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C");
 }
@@ -171,10 +185,11 @@ API::UObject* resolve_rig() {
     auto* arr = API::get()->get_uobject_array();
     if (arr == nullptr) return nullptr;
 
-    // The fast path above is O(1) and covers steady play. This is the fallback, and during a LEVEL
-    // LOAD it is what runs: there is no weapon actor to derive from yet, so every attempt falls
-    // through here. Measured at 65-78 ms a sweep, 12-14 sweeps per 600-tick window -- 406 ms and
-    // 443 ms of game-thread stall in two consecutive windows. After memoising: 21.4 ms.
+    // The fast path above is O(1) and handles steady play. This is the fallback, and during a
+    // LEVEL LOAD it is what runs: there is no weapon actor to derive from yet, so every attempt
+    // falls through here. Measured at 65-78 ms a sweep, 12-14 sweeps per 600-tick window --
+    // 406 ms and 443 ms of game-thread stall in two consecutive windows, the largest single
+    // contributor to load-time hitching.
     std::unordered_map<const void*, std::wstring> name_of_class;
 
     const int32_t n = arr->get_object_count();
@@ -185,7 +200,7 @@ API::UObject* resolve_rig() {
         // Candidate = a first-person weapon actor, e.g. BP_FP_Magnum_WeaponActor_C.
         // MEMOISED ON THE CLASS. This walks the entire UObject array building a class-name string
         // per object, and objects outnumber classes by orders of magnitude -- the same few names
-        // were rebuilt tens of thousands of times per sweep.
+        // were being rebuilt tens of thousands of times per sweep.
         auto* ocls = obj->get_class();
         if (ocls == nullptr) continue;
         auto memo = name_of_class.find(ocls);
@@ -378,8 +393,18 @@ std::atomic<float> g_rigw_off_x{0.0f}, g_rigw_off_y{0.0f}, g_rigw_off_z{0.0f};
 std::atomic<bool>  g_rigw_off_valid{false};
 std::atomic<float> g_rigw_parent_yaw{0.0f};
 
+// WHAT is currently attached. g_attached alone was enough while the arms mesh was the only
+// possible target; attaching the WEAPON instead makes the target change on every swap and every
+// respawn, and releasing the wrong object leaves a live attachment nobody owns.
+API::UObject* g_attach_obj = nullptr;
+
 void attach_apply(API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm) {
     if (rig == nullptr) return;
+    // Target changed under us -- drop the old one first, or it stays pinned to the controller
+    // forever with no reference left to release it by.
+    if (g_attached && g_attach_obj != nullptr && g_attach_obj != rig) {
+        API::UObjectHook::remove_motion_controller_state(g_attach_obj);
+    }
     auto* st = API::UObjectHook::get_or_add_motion_controller_state(rig);
     if (st == nullptr) return;
 
@@ -389,12 +414,17 @@ void attach_apply(API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm
     st->set_location_offset(&v);
     st->set_hand(1);   // MotionControllerStateBase::Hand::RIGHT
     st->set_permanent(g_cfg.attach_permanent);
+    g_attach_obj = rig;
     g_attached = true;
 }
 
 void attach_release(API::UObject* rig, const char* why) {
     if (!g_attached) return;
-    if (rig != nullptr) API::UObjectHook::remove_motion_controller_state(rig);
+    // The RECORDED target wins over the argument: callers pass the rig because that used to be the
+    // only thing attachable, and in weapon mode that is not what is attached.
+    auto* obj = (g_attach_obj != nullptr) ? g_attach_obj : rig;
+    if (obj != nullptr) API::UObjectHook::remove_motion_controller_state(obj);
+    g_attach_obj = nullptr;
     g_attached = false;
     API::get()->log_info("[Halo-CampE-UEVR] UObjectHook attachment released (%s)", why);
 }

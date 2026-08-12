@@ -1,5 +1,7 @@
 #include "Config.hpp"
 #include "Math.hpp"
+// wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
+#include "WeaponCalib.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -36,6 +38,7 @@ static float alpha_to_tau_ms(float alpha) {
 // It doubles as live tuning: floor/full/max/dead/xdist can be changed without a rebuild.
 char g_cfg_path[MAX_PATH] = {0};
 uint32_t g_cfg_check_tick = 0;
+uint32_t g_cfg_load_gen   = 0;
 
 void write_default_config() {
     FILE* f = nullptr;
@@ -127,8 +130,105 @@ static bool parse_blam_key(const char* key, const char* val, double v) {
     return false;
 }
 
+// Melee-by-swing keys. Split into their own function for the same reason parse_config_key_2
+// exists at all: MSVC's else-if chains in this file are already at the size where adding to them
+// starts costing compile time for no readability.
+// wpnoff=<match>,<dx>,<dy>,<dz>,<dgrip>,<dyaw>,<droll>
+//
+// One line per weapon, repeatable. Parsed positionally with everything after the match optional,
+// so a line that only nudges X is "wpnoff=Pistol,1.5" rather than six trailing zeroes.
+static bool parse_weapon_offset(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.wpn_count >= kMaxWeaponAdjust) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+
+    // Trim trailing whitespace, including the CR this CRLF file leaves on every value.
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    char* ctx = nullptr;
+    char* tok = strtok_s(buf, ",", &ctx);
+    if (tok == nullptr || tok[0] == 0) return true;
+
+    WeaponAdjust w{};
+    strncpy_s(w.match, sizeof(w.match), tok, _TRUNCATE);
+
+    float* fields[] = { &w.d_x, &w.d_y, &w.d_z, &w.d_grip, &w.d_grip_yaw, &w.d_grip_roll };
+    for (int i = 0; i < 6; ++i) {
+        tok = strtok_s(nullptr, ",", &ctx);
+        if (tok == nullptr) break;
+        *fields[i] = (float)atof(tok);
+    }
+
+    g_cfg.wpn[g_cfg.wpn_count++] = w;
+    return true;
+}
+
+static bool parse_melee_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
+    if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleeext")       == 0) { g_cfg.melee_ext      = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleereach")     == 0) { g_cfg.melee_reach    = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleemaxspeed")  == 0) { g_cfg.melee_max_speed = clampf((float)v, 1.0f, 100.0f); return true; }
+    if (_stricmp(key, "meleemaxreach")  == 0) { g_cfg.melee_max_reach = clampf((float)v, 0.3f, 5.0f); return true; }
+    if (_stricmp(key, "meleefwd")       == 0) { g_cfg.melee_fwd      = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "meleetau")       == 0) { g_cfg.melee_tau_ms   = clampf((float)v, 0.0f, 200.0f); return true; }
+    if (_stricmp(key, "meleecooldown")  == 0) { g_cfg.melee_cooldown_ms = (int)clampf((float)v, 0.0f, 5000.0f); return true; }
+    if (_stricmp(key, "meleehold")      == 0) { g_cfg.melee_hold_ms  = (int)clampf((float)v, 8.0f, 1000.0f); return true; }
+    // base 0 so the mask can be written 0x0080 (readable) or 128 (not), as elsewhere in this file.
+    if (_stricmp(key, "meleemask")      == 0) { g_cfg.melee_mask     = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "meleelog")       == 0) { g_cfg.melee_log      = (v != 0.0); return true; }
+    if (_stricmp(key, "bonedump")       == 0) { g_cfg.bone_dump      = (v != 0.0); return true; }
+    if (_stricmp(key, "armhide")        == 0) { g_cfg.arm_hide       = (v != 0.0); return true; }
+    if (_stricmp(key, "armhideall")     == 0) { g_cfg.arm_hide_all   = (v != 0.0); return true; }
+    if (_stricmp(key, "wpncalibkey")   == 0) { g_cfg.wpn_calib_key   = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "wpnoffsets")    == 0) { g_cfg.wpn_offsets     = (v != 0.0); return true; }
+    if (_stricmp(key, "wpnlog")        == 0) { g_cfg.wpn_log         = (v != 0.0); return true; }
+    if (_stricmp(key, "wpnoff")        == 0) { return parse_weapon_offset(val); }
+    if (_stricmp(key, "armkeeppose")   == 0) { g_cfg.arm_keep_pose   = (v != 0.0); return true; }
+    if (_stricmp(key, "armhidemode")    == 0) { g_cfg.arm_hide_mode  = (int)v; return true; }
+    if (_stricmp(key, "armhidebone")    == 0) {
+        strncpy_s(g_cfg.arm_hide_bone, sizeof(g_cfg.arm_hide_bone), val, _TRUNCATE);
+        return true;
+    }
+    if (_stricmp(key, "reloadvr")       == 0) { g_cfg.reload_vr        = (v != 0.0); return true; }
+    // base 0 so masks can be written 0x4000 (readable) or 16384 (not), as elsewhere in this file.
+    if (_stricmp(key, "reloadmask")     == 0) { g_cfg.reload_mask      = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "reloadgrip")     == 0) { g_cfg.reload_grip_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "reloadbeltdrop") == 0) { g_cfg.reload_belt_drop = clampf((float)v, 0.0f, 1.5f); return true; }
+    if (_stricmp(key, "reloadbeltrad")  == 0) { g_cfg.reload_belt_radius = clampf((float)v, 0.05f, 1.5f); return true; }
+    if (_stricmp(key, "reloadjoin")     == 0) { g_cfg.reload_join_dist = clampf((float)v, 0.05f, 1.0f); return true; }
+    if (_stricmp(key, "reloadnofire")   == 0) { g_cfg.reload_suppress_fire = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadcancel")   == 0) { g_cfg.reload_cancel    = (v != 0.0); return true; }
+    if (_stricmp(key, "grenadefrom")   == 0) { g_cfg.grenade_from    = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "grenadeaction") == 0) { g_cfg.grenade_action  = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "gripexclusive") == 0) { g_cfg.grip_exclusive   = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadhold")     == 0) { g_cfg.reload_hold_ms   = (int)clampf((float)v, 60.0f, 2000.0f); return true; }
+    if (_stricmp(key, "reloadlog")      == 0) { g_cfg.reload_log       = (v != 0.0); return true; }
+    if (_stricmp(key, "handsvr")        == 0) { g_cfg.hands_vr         = (v != 0.0); return true; }
+    if (_stricmp(key, "handscale")      == 0) { g_cfg.hand_scale       = clampf((float)v, 0.001f, 5.0f); return true; }
+    if (_stricmp(key, "handoffx")       == 0) { g_cfg.hand_off_x       = (float)v; return true; }
+    if (_stricmp(key, "handoffy")       == 0) { g_cfg.hand_off_y       = (float)v; return true; }
+    if (_stricmp(key, "handoffz")       == 0) { g_cfg.hand_off_z       = (float)v; return true; }
+    if (_stricmp(key, "handshowaim")    == 0) { g_cfg.hand_show_aim    = (v != 0.0); return true; }
+    if (_stricmp(key, "handmesh")       == 0) {
+        strncpy_s(g_cfg.hand_mesh_path, sizeof(g_cfg.hand_mesh_path), val, _TRUNCATE); return true;
+    }
+    if (_stricmp(key, "magshow")        == 0) { g_cfg.mag_show         = (v != 0.0); return true; }
+    if (_stricmp(key, "magscale")       == 0) { g_cfg.mag_scale        = clampf((float)v, 0.001f, 5.0f); return true; }
+    if (_stricmp(key, "magoffx")        == 0) { g_cfg.mag_off_x        = (float)v; return true; }
+    if (_stricmp(key, "magoffy")        == 0) { g_cfg.mag_off_y        = (float)v; return true; }
+    if (_stricmp(key, "magoffz")        == 0) { g_cfg.mag_off_z        = (float)v; return true; }
+    if (_stricmp(key, "magmesh")        == 0) {
+        strncpy_s(g_cfg.mag_mesh_path, sizeof(g_cfg.mag_mesh_path), val, _TRUNCATE); return true;
+    }
+    return false;
+}
+
 void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_blam_key(key, val, v)) return;
+        if (parse_melee_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);
         else if (_stricmp(key, "huddump")    == 0) g_cfg.hud_dump      = (v != 0.0);
@@ -365,6 +465,13 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "pivy")      == 0) g_cfg.piv_y       = clampf((float)v, -300.0f, 300.0f);
         else if (_stricmp(key, "pivz")      == 0) g_cfg.piv_z       = clampf((float)v, -300.0f, 300.0f);
         else if (_stricmp(key, "pivauto")   == 0) g_cfg.piv_auto    = (v != 0.0);
+    else if (_stricmp(key, "wpndiag")   == 0) g_cfg.wpn_diag    = (v != 0.0);
+    else if (_stricmp(key, "wpnroll")   == 0) g_cfg.wpn_roll    = (v != 0.0);
+    else if (_stricmp(key, "calibroll") == 0) g_cfg.calib_roll  = (v != 0.0);
+    else if (_stricmp(key, "rollstatic")== 0) g_cfg.roll_static = clampf((float)v, -999.0f, 180.0f);
+    else if (_stricmp(key, "handsdiag") == 0) g_cfg.hands_diag  = (v != 0.0);
+    else if (_stricmp(key, "rigsockrot")== 0) g_cfg.rig_sock_rot= (v != 0.0);
+    else if (_stricmp(key, "rigsocket") == 0) g_cfg.rig_socket  = (v != 0.0);
         else if (_stricmp(key, "pivviz")    == 0) g_cfg.piv_viz     = (v != 0.0);
         else if (_stricmp(key, "pivdraw")   == 0) g_cfg.piv_draw    = clampf((float)v, 0.0f, 50.0f);
         else if (_stricmp(key, "aimreticule")     == 0) g_cfg.aim_reticule      = (v != 0.0);
@@ -471,8 +578,8 @@ bool g_pivot_from_calib = false;
 bool g_calib_stamp_ambiguous = false;
 
 // Last-write time of one file, as an opaque comparable. Absent reads as 0, which is deliberately a
-// legitimate value rather than an error: deleting halo_vr_calib.cfg is a documented way to drop
-// back to the shipped calibration, so its disappearance has to register as a change.
+// legitimate value rather than an error: deleting halo_vr_calib.cfg is a documented way to drop back
+// to the shipped calibration, so its disappearance has to register as a change.
 uint64_t cfg_file_stamp(const char* path) {
     if (path == nullptr || path[0] == 0) return 0;
     WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -484,21 +591,24 @@ uint64_t cfg_file_stamp(const char* path) {
 void load_config() {
     // ---- DO NOT RE-READ FILES THAT HAVE NOT CHANGED.
     //
-    // This runs every ~60 ticks, forever, and unconditionally parsed the config files off disk on
-    // the GAME THREAD. Normally that is ~0.45 ms and invisible. Measured under disk contention it
-    // reached 143.9 ms and 108.7 ms -- roughly 300x -- and a blocking read every ~1.7 s that
-    // occasionally costs 100 ms+ is a periodic hitch you can set your watch by.
+    // This runs every ~60 ticks, forever, and unconditionally parsed three files off disk on the
+    // GAME THREAD. Normally that is ~0.45 ms and invisible. Measured under disk contention it hit
+    // 143.9 ms and 108.7 ms -- roughly 300x -- and a blocking read every ~1.7 s that occasionally
+    // costs 100 ms+ is a periodic hitch you can set your watch by. It was the largest single
+    // contributor to TICK (all) in two of three measured windows.
     //
-    // Stat calls instead. Live editing is unaffected: touching a file changes its write time and
-    // the next check parses immediately, so the edit-and-see loop still works, and writes made by
-    // the plugin itself (calibration captures) reload exactly as before.
+    // Three stat calls instead. Live editing still works: touching any file changes its write time
+    // and the next check parses immediately, so the ~2 s edit-and-see loop is unaffected. Writes
+    // made by the plugin itself (calibration captures) change the stamp too, so they reload exactly
+    // as before.
     {
         const uint64_t s_main  = cfg_file_stamp(g_cfg_path);
         const uint64_t s_calib = cfg_file_stamp(g_calib_path);
-        static uint64_t p_main = 0, p_calib = 0;
+        const uint64_t s_wpn   = cfg_file_stamp(g_wpn_calib_path);
+        static uint64_t p_main = 0, p_calib = 0, p_wpn = 0;
         static bool     primed = false;
-        if (primed && s_main == p_main && s_calib == p_calib) return;
-        p_main = s_main; p_calib = s_calib;
+        if (primed && s_main == p_main && s_calib == p_calib && s_wpn == p_wpn) return;
+        p_main = s_main; p_calib = s_calib; p_wpn = s_wpn;
         primed = true;
     }
 
@@ -509,14 +619,26 @@ void load_config() {
     g_cfg.calib_ver     = 1;
     g_cfg.aim_calib_ver = 1;
 
+    // Repeatable keys are cleared HERE, by the orchestrator, not inside parse_config_file. wpnoff
+    // APPENDS, and there are now several files feeding one table -- resetting per parse would have
+    // the weapons file wipe the hand-written entries from halo_vr.cfg. Clearing once, before any
+    // of them, is also what stops the table gaining a duplicate set every ~2 s reload.
+    g_cfg.wpn_count = 0;
+
     if (!parse_config_file(g_cfg_path)) { write_default_config(); return; }
     parse_config_file(g_calib_path);
+    // Captured per-weapon deltas, after the hand-written ones so a capture for a weapon that also
+    // has a manual entry replaces it in the matcher rather than sitting behind it.
+    wpn_calib_load();
 
     // An offset with no version stamp is AMBIGUOUS, and guessing wrong is a constant, invisible yaw
     // error that then gets written back to disk. Raised here, reported by the tick -- this file has
     // no UEVR API dependency and is worth keeping that way.
     g_calib_stamp_ambiguous =
         g_cfg.aim_off_valid && g_cfg.aim_calib_ver < 2 && g_cfg.calib_relative;
+
+    // Only here, past every early return: g_cfg now holds the values that are actually on disk.
+    ++g_cfg_load_gen;
 }
 
 // Point g_calib_path at the file for the configured hand, and load it.
@@ -570,6 +692,23 @@ int select_calib_for_hand() {
 void write_calib_file() {
     FILE* f = nullptr;
     if (fopen_s(&f, g_calib_path, "wb") != 0 || f == nullptr) return;
+
+    // PERSIST THE BASE, NOT THE ADJUSTED VALUES.
+    //
+    // When per-weapon offsets are active, g_cfg.grip_* and off_* carry the delta for whatever is
+    // currently in hand. Writing those here would fold one weapon's adjustment permanently into
+    // the global calibration that every OTHER weapon depends on -- and this function is also
+    // called by the AIM calibration (Page Down), which has nothing to do with the mesh fit and
+    // would silently bake it in.
+    //
+    // wpn_base_* is what the config supplied before any delta, republished by WeaponOffset on
+    // every capture, so it is the correct thing to round-trip.
+    const float w_grip  = g_cfg.wpn_offsets ? g_cfg.wpn_base_grip      : g_cfg.grip_deg;
+    const float w_gyaw  = g_cfg.wpn_offsets ? g_cfg.wpn_base_grip_yaw  : g_cfg.grip_yaw;
+    const float w_groll = g_cfg.wpn_offsets ? g_cfg.wpn_base_grip_roll : g_cfg.grip_roll;
+    const float w_ox    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_x     : g_cfg.off_x;
+    const float w_oy    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_y     : g_cfg.off_y;
+    const float w_oz    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_z     : g_cfg.off_z;
     fprintf(f,
         "# halo_vr - CALIBRATION RESULT. Written by the pose-match calibration; applied\r\n"
         "# AFTER halo_vr.cfg, so these override the values in that file.\r\n"
@@ -589,10 +728,10 @@ void write_calib_file() {
         // certifies values the gesture never actually rebased -- which is how an untouched
         // absolute aimoffyaw got stamped v2 by a mesh calibration.
         g_cfg.calib_ver,
-        g_cfg.grip_deg, g_cfg.grip_yaw, g_cfg.grip_roll,
+        w_grip, w_gyaw, w_groll,
         g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll,
         g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z,
-        g_cfg.off_x, g_cfg.off_y, g_cfg.off_z);
+        w_ox, w_oy, w_oz);
 
     if (g_cfg.aim_off_valid) {
         fprintf(f,

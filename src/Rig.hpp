@@ -40,6 +40,36 @@ extern std::atomic<float> g_ctrl_travel_max;
 extern std::atomic<float> g_dbg_rig_x, g_dbg_rig_y, g_dbg_rig_z, g_dbg_rig_roll;
 extern std::atomic<bool>  g_rig_wrote_once;
 extern std::atomic<float> g_rig_survive_drift;
+
+// WEAPON-TO-RIG SEPARATION, the one measurement that tells the two post-death hypotheses apart.
+//
+// The weapon is a separate ACTOR socketed onto the rig mesh, so where it ends up is
+//     weapon_world = rig_component_world + socket_offset(animated pose)
+// Our placement only controls the first term. Logging the DIFFERENCE therefore splits the cases:
+// if it holds steady across a respawn the rig is being placed correctly and the socket moved
+// under us; if it jumps, the placement itself is wrong. Every other number in the rig log varies
+// with hand position, which is why none of them could answer this.
+extern std::atomic<float> g_dbg_wpn_dx, g_dbg_wpn_dy, g_dbg_wpn_dz;
+extern std::atomic<bool>  g_dbg_wpn_ok;
+// Bumped whenever the component RelativeLocation is composed against a different parent than last
+// tick. A new parent silently reinterprets every offset we write.
+extern std::atomic<int>   g_dbg_parent_changes;
+
+// The socket expressed in the MESH's own frame: position and rotation. Both are fixed properties
+// of the skeleton, so unlike the world-space separation they should not vary as you aim -- which
+// makes them the right things to compare across a respawn. The world separation says THAT the
+// geometry changed; these say WHICH part of it did.
+extern std::atomic<float> g_dbg_sock_x, g_dbg_sock_y, g_dbg_sock_z;
+extern std::atomic<float> g_dbg_sock_p, g_dbg_sock_yw, g_dbg_sock_r;
+extern std::atomic<bool>  g_dbg_sock_ok;
+
+// WHERE THE GUN ACTUALLY ENDED UP, in controller-local cm -- ground truth for "is the weapon where
+// the calibration says it is". Built from two LIVE engine reads (the weapon actor and the rig's
+// parent) plus the controller pose; it consumes none of the values we wrote, so it cannot come out
+// right by construction the way a check against our own output would.
+// Compare with off_x/off_y/off_z: equal means correct, and the difference IS the placement error.
+extern std::atomic<float> g_dbg_Lact_x, g_dbg_Lact_y, g_dbg_Lact_z;
+extern std::atomic<bool>  g_dbg_Lact_ok;
 extern std::atomic<float> g_dbg_pos_x, g_dbg_pos_y, g_dbg_pos_z;
 extern std::atomic<void*> g_rig_component;
 extern uevr::API::UObject* g_rig_parent;
@@ -100,6 +130,10 @@ uevr::API::UObject* rig_tracked_component();
 // The FP weapon ACTOR the rig was last reached through, or nullptr. For the reticule trace: the gun
 // is a separate actor, so ignoring the pawn does not cover it.
 uevr::API::UObject* fp_weapon_actor();
+
+// The weapon's own root component -- the thing to pin when attaching the GUN rather than the arms.
+// Null whenever no weapon is in hand, which the caller must treat as "release, do not fall back".
+uevr::API::UObject* fp_weapon_root();
 
 // ---- first-person shield shell ---------------------------------------------------------------
 // BPC_FP_TranslucentSkeletalMesh_C: the translucent energy skin that lights up when shields flare
