@@ -31,6 +31,8 @@
 
 #include "DevTools.hpp"
 
+#include <cstdint>
+
 namespace halo {
 
 #if HALO_VR_DEV
@@ -46,10 +48,28 @@ void mem_scan_tick();
 // guess lands in 0..1 where mesh and animation data saturate the search.
 void mem_diff_tick();
 
+// TLS-GRAPH WALK (the navpoint hunt's anchor search). Walks the pointer graph reachable from the
+// sim's TLS block (published by BlamDrive) two levels deep, scanning each pointed-to region for an
+// adjacent float pair near (wu_x, wu_y) -- the objective's position in Blam world units. A hit's
+// CHAIN (block+0xA -> +0xB -> offset) is a stable structural path, which is the whole point: heap
+// scans found the value in relocating buffers; this finds it via a root that survives relocation.
+// Off-thread, read-only, bounded. One shot per call.
+void nav_tls_scan(float wu_x, float wu_y);
+
+// MANAGER-ROOTED GRAPH WALK (the DataInterfaces path). Given the navpoints manager pointer --
+// a STABLE root, reached from the widget tree the same way navworld resolves it -- walks the
+// pointer graph breadth-first to a bounded depth, RPM-copying every read, scanning each visited
+// block for the (x,y) world-unit pair. On a hit it logs the FULL OFFSET CHAIN from the manager
+// (manager +0xA -> +0xB -> ... -> +0xN), which is exactly the stable per-tick resolution path
+// the markers need -- no reflection, no relocation, no aim. root=0 no-ops.
+void nav_graph_scan(uintptr_t manager_root, float wu_x, float wu_y);
+
 #else
 
 inline void mem_scan_tick() {}
 inline void mem_diff_tick() {}
+inline void nav_tls_scan(float, float) {}
+inline void nav_graph_scan(uintptr_t, float, float) {}
 
 #endif
 

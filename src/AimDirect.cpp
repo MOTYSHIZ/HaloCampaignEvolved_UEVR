@@ -3,6 +3,7 @@
 #include "AimDirect.hpp"
 #include "Config.hpp"
 #include "MotionAimControl.hpp"
+#include "addrcascade/AddressCascade.hpp"
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -26,16 +27,16 @@ uintptr_t g_self_lo = 0, g_self_hi = 0;
 
 void init_self_range() {
     if (g_self_lo != 0) return;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery((void*)&init_self_range, &mbi, sizeof(mbi)) == 0) return;
-    const auto base = (uintptr_t)mbi.AllocationBase;
-    if (base == 0) return;
-    auto* dos = (IMAGE_DOS_HEADER*)base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-    auto* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-    g_self_lo = base;
-    g_self_hi = base + nt->OptionalHeader.SizeOfImage;
+    // Was a hand-rolled VirtualQuery + DOS/NT walk; the header validation it lacked (it dereferenced
+    // e_lfanew before checking anything was readable) now comes free from the shared helper.
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)&init_self_range, &self) || self == nullptr) return;
+    addrcascade::ModuleRange r{};
+    if (!addrcascade::module_range((void*)self, &r)) return;
+    g_self_lo = r.base;
+    g_self_hi = r.end;
 }
 
 Stage                  g_stage = Stage::Idle;
@@ -215,12 +216,61 @@ bool plausible_rotator(uintptr_t p) {
 // x64 ABI rax comes back pointing at the caller's stack scratch, which read (0.000, 0.000) and
 // passed every structural test while being neither authoritative nor safe to write.
 bool rotator_matches_aim(uintptr_t p, double pitch, double yaw) {
+#if HALO_VR_DEV
+    // FAULT INJECTION (blamfault 0x100): reject every candidate, so the locate can never succeed.
+    // Drives the stage machine round its retry loop until MAX_ATTEMPTS and proves the give-up path
+    // -- which otherwise only runs on a build where the search genuinely cannot work.
+    if (g_cfg.blam_fault & 0x100) return false;
+#endif
     if (!plausible_rotator(p)) return false;
     const double* r = (const double*)p;
     double dy = r[1] - yaw;
     while (dy > 180.0)  dy -= 360.0;
     while (dy < -180.0) dy += 360.0;
     return std::fabs(r[0] - pitch) < 5.0 && std::fabs(dy) < 5.0;
+}
+
+// Evidence intake for the stage machine, funnelled through one place so a fault can starve it.
+//
+// FAULT INJECTION (blamfault 0x400): report that nothing was ever caught. Every stage then has to
+// run its ~24 s clock out and take the TIMEOUT branch.
+//
+// This is a genuinely different path from 0x100, which is why both exist. 0x100 lets a candidate be
+// found and then rejects it, so the stage exits through "bad candidate, burn an attempt" -- fast,
+// and it never touches the timeout code. Only starvation exercises the branch that handles "the
+// writer never ran at all", which is what a build with a moved watchpoint actually looks like.
+uintptr_t caught_src() {
+#if HALO_VR_DEV
+    if (g_cfg.blam_fault & 0x400) return 0;
+#endif
+    return g_caught_src.load();
+}
+
+uintptr_t caught_rcx() {
+#if HALO_VR_DEV
+    if (g_cfg.blam_fault & 0x400) return 0;
+#endif
+    return g_caught_rcx.load();
+}
+
+uintptr_t caught_rax() {
+#if HALO_VR_DEV
+    if (g_cfg.blam_fault & 0x400) return 0;
+#endif
+    return g_caught_rax.load();
+}
+
+// The timeout branches were silent, which made them unobservable and therefore untestable -- the
+// same failure as the deliberately-silent re-resolve in BlamDrive. Dev-only: a stage timing out is
+// rare and always worth seeing, so this is not gated on the fault bit.
+void note_stage_timeout(const char* stage) {
+#if HALO_VR_DEV
+    API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: stage %s TIMED OUT after ~%d s with no write "
+                         "caught (aim moved %.3f deg in the window) -- restarting the search",
+                         stage, STAGE_TICKS * 2, g_stage_motion);
+#else
+    (void)stage;
+#endif
 }
 
 } // namespace
@@ -305,7 +355,13 @@ void aim_direct_tick() {
         // FAST RE-ARM. Tried before the motion gate below, so it can confirm while the player is
         // still -- the slow path cannot even start until they move.
         if (g_hint_valid) {
-            const uintptr_t cand = (uintptr_t)pc + g_hint_target_off;
+            uintptr_t cand = (uintptr_t)pc + g_hint_target_off;
+#if HALO_VR_DEV
+            // FAULT INJECTION (blamfault 0x080): a hint that no longer points at the rotator. This
+            // is the case the validation exists for -- the offset held within one run and then did
+            // not -- and it must fall through to the watch rather than write to a stale address.
+            if (g_cfg.blam_fault & 0x080) cand += 0x2000;
+#endif
             if (plausible_rotator(cand) && rotator_matches_aim(cand, p, y)) {
                 if (g_hint_stage == 0) {
                     g_hint_stage   = 1;
@@ -356,12 +412,13 @@ void aim_direct_tick() {
         }
         // Watch the YAW specifically. Watching the whole rotator would also trap the pitch store and
         // make it ambiguous which instruction we caught.
-        begin_watch((uintptr_t)pc + CONTROL_ROTATION_OFFSET + sizeof(double));
+        begin_watch((uintptr_t)pc + g_control_rotation_offset.load(std::memory_order_relaxed)
+                    + sizeof(double));
         g_stage = Stage::WatchControlRotation;
         break;
     }
     case Stage::WatchControlRotation: {
-        const uintptr_t src = g_caught_src.load();
+        const uintptr_t src = caught_src();
         if (src != 0) {
             end_watch();
             // src is L1 -- a mirror, not the target. Its own writer holds the real one.
@@ -369,6 +426,7 @@ void aim_direct_tick() {
             g_stage = Stage::WatchL1;
         } else if (++g_stage_ticks > STAGE_TICKS) {
             end_watch();
+            note_stage_timeout("WatchControlRotation");
             // Only a window that DID see movement is evidence of anything. A quiet window means the
             // player stood still, so it must not burn an attempt.
             if (g_stage_motion >= MOTION_DEG) ++g_attempts;
@@ -377,7 +435,7 @@ void aim_direct_tick() {
         break;
     }
     case Stage::WatchL1: {
-        const uintptr_t src = g_caught_src.load();
+        const uintptr_t src = caught_src();
         if (src != 0) {
             end_watch();
             // The level-2 writer copies from [rbx+0x20], not [rbx]: `mov eax,0x20;
@@ -406,13 +464,14 @@ void aim_direct_tick() {
             }
         } else if (++g_stage_ticks > STAGE_TICKS) {
             end_watch();
+            note_stage_timeout("WatchL1");
             if (g_stage_motion >= MOTION_DEG) ++g_attempts;
             g_stage = Stage::Idle;
         }
         break;
     }
     case Stage::WatchQuatSrc: {
-        const uintptr_t rcx = g_caught_rcx.load();
+        const uintptr_t rcx = caught_rcx();
         if (rcx != 0) {
             end_watch();
             const uintptr_t cand = rcx + 0x10;
@@ -448,7 +507,7 @@ void aim_direct_tick() {
     }
     case Stage::WatchL2: {
         // rax, not rbx: the game reads its source through rax and stores through rbx+0x20.
-        const uintptr_t src = g_caught_rax.load();
+        const uintptr_t src = caught_rax();
         if (src != 0) {
             end_watch();
             if (rotator_matches_aim(src, p, y)) {
@@ -462,10 +521,19 @@ void aim_direct_tick() {
                     g_hint_miss_logged = false;
                 }
                 const double* r = (const double*)src;
+                // The OFFSET is logged alongside the address because it is the only half that means
+                // anything outside this process: the absolute address is heap and dies with the
+                // session, whereas pc+off is comparable between runs and between machines. Whether
+                // it is stable across RUNS is currently unknown -- the fast re-arm above assumes it
+                // only within one run -- and printing it is what makes that answerable from logs
+                // instead of assumed. Same reasoning as logging an RVA rather than a VA.
                 API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT ready: AUTHORITATIVE rotator at 0x%llX "
-                                     "(pitch %.3f yaw %.3f) - the store the game reads, so the write "
-                                     "should survive firing and the periodic resync",
-                                     (unsigned long long)src, r[0], r[1]);
+                                     "(pc+0x%llX) (pitch %.3f yaw %.3f) - the store the game reads, so "
+                                     "the write should survive firing and the periodic resync",
+                                     (unsigned long long)src,
+                                     (unsigned long long)(g_known_pc != nullptr
+                                         ? (uintptr_t)(src - (uintptr_t)g_known_pc) : 0),
+                                     r[0], r[1]);
             } else if (g_l2 != 0 && rotator_matches_aim(g_l2, p, y)) {
                 // FALL BACK TO L2, and say exactly what that costs. rax was a stack temporary --
                 // the getter returns FRotator by value, so it hands back caller scratch, not the
@@ -474,6 +542,24 @@ void aim_direct_tick() {
                 // strictly better than writing into somebody else's stack.
                 g_target = g_l2;
                 g_stage = Stage::Ready;
+
+                // LEARN THE HINT HERE TOO. Measured 2026-08-15: this fallback is the path this
+                // build actually takes -- rax is a stack temporary here every time -- and it was
+                // the ONLY Ready branch that did not record g_hint_target_off. So the FAST RE-ARM
+                // above could never engage: the optimisation existed but was unreachable on the
+                // live path, and every PlayerController change paid the full multi-stage watch
+                // again (~40 s, and it cannot even start until the player moves).
+                //
+                // Safe because the hint is a HINT: on re-arm it is accepted only after matching the
+                // real aim both before and after the aim has moved, so a wrong or unstable offset
+                // is rejected in two ticks and falls through to the watch exactly as it does today.
+                if (g_known_pc != nullptr) {
+                    g_hint_target_off  = (ptrdiff_t)(g_l2 - (uintptr_t)g_known_pc);
+                    g_hint_valid       = true;
+                    g_hint_stage       = 0;
+                    g_hint_miss_logged = false;
+                }
+
                 // The quaternion the Euler is derived FROM sits 0x20 below L2. Accepted only if it
                 // reads as a unit quaternion, so a layout change fails closed to Euler-only rather
                 // than scribbling four doubles over whatever moved in.
@@ -490,10 +576,17 @@ void aim_direct_tick() {
                     quat_ok = finite && std::fabs(n - 1.0) < 0.01;
                     if (quat_ok) g_quat = qcand;
                 }
-                API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: L2 at 0x%llX driving, quaternion cache "
-                                     "%s at 0x%llX (rax 0x%llX was a stack temporary - by-value FRotator "
-                                     "return, not the store)",
-                                     (unsigned long long)g_l2, quat_ok ? "OK" : "NOT FOUND",
+                // pc+0x... is logged for the same reason as on the authoritative branch: the heap
+                // address dies with the session, the OFFSET is the half that can be compared
+                // between runs -- which is how "is this offset stable across runs?" becomes a
+                // question answerable from two logs instead of an assumption.
+                API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: L2 at 0x%llX (pc+0x%llX) driving, "
+                                     "quaternion cache %s at 0x%llX (rax 0x%llX was a stack temporary "
+                                     "- by-value FRotator return, not the store)",
+                                     (unsigned long long)g_l2,
+                                     (unsigned long long)(g_known_pc != nullptr
+                                         ? (uintptr_t)(g_l2 - (uintptr_t)g_known_pc) : 0),
+                                     quat_ok ? "OK" : "NOT FOUND",
                                      (unsigned long long)qcand, (unsigned long long)src);
 
                 // STAGE 4: the cache is refreshed from [obj+0x1D0] by a change-guarded sync
@@ -515,6 +608,7 @@ void aim_direct_tick() {
             }
         } else if (++g_stage_ticks > STAGE_TICKS) {
             end_watch();
+            note_stage_timeout("WatchL2");
             if (g_stage_motion >= MOTION_DEG) ++g_attempts;
             g_stage = Stage::Idle;
         }

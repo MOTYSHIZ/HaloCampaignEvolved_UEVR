@@ -37,15 +37,51 @@
 
 #include "DevTools.hpp"
 
+#include <atomic>
+#include <cstdint>
+
+#include <cstdint>   // uintptr_t / uint32_t in the sim_tls_index signature below
+
 namespace halo {
 
 // Install/remove the sim-thread hook and keep it in step with config. Call once per frame from the
 // game thread. Cheap: a flag compare once the hook is up.
 void blam_drive_tick();
 
-// The write. SIM THREAD ONLY -- it resolves through gs:[0x58] and finds nothing anywhere else.
-// Stands down during aim calibration and in stick mode; see the body for why each matters.
+// The sim's TLS block, published when the control record resolves (gs:[0x58] only means anything
+// ON the sim thread, but the block it yields is ordinary heap memory readable from anywhere).
+// Consumed by the TLS-graph walker in MemScan.cpp -- the navpoint hunt's anchor search walks the
+// structures reachable from this root, the same family the control table itself lives in.
+extern std::atomic<uintptr_t> g_sim_tls_block;
+
+// A loaded module's `_tls_index`, read from its own PE TLS directory (IMAGE_TLS_DIRECTORY's
+// AddressOfIndex, which the loader has already relocated). EXACT on any build of any variant of the
+// binary: nothing to record, nothing to re-derive after a patch, no signature to maintain.
+//
+// Shared rather than copied. BlamAim.cpp hooks the same function on the same module and needs the
+// same number, and its own note is explicit about not wanting a third copy of a definition -- and a
+// stale RVA there would be worse than useless: that file is dev-only, so it would fail in a way no
+// player could ever reproduce, sending an investigation after a phantom.
+//
+// out_rva reports where the index actually landed, so two logs from different builds are directly
+// comparable -- which is how a build difference gets noticed at all.
+bool sim_tls_index(uintptr_t module_base, uint32_t* out_index, uintptr_t* out_rva);
+
+// The write, TIER 1. Called from the sim-thread hook: it resolves through gs:[0x58], which only
+// answers on that thread. Stands down during aim calibration and in stick mode; see the body.
 void drive_control_angles();
+
+// The write, TIER 2 -- GAME THREAD, and only when tier 1 cannot happen at all.
+//
+// Same gates, same arithmetic, different RESOLVER: it finds the sim's TLS block by walking the
+// process's threads and reading each TEB, so it needs no hook and no code address. That matters
+// because the getter RVA is the last build-fragile constant here, and on a build where it is stale
+// the hook installs, never fires, and nothing is ever written -- silently.
+//
+// Call ONLY from blam_drive_tick(), and only after the watchdog has established the hook is dead.
+// It opens a toolhelp snapshot while the record is unresolved, which is fine at frame rate and
+// ruinous at the 2600 Hz the hook runs at.
+void blam_drive_offthread_write();
 
 // HOOK OWNERSHIP (dev builds only -- in a release build this file always owns the address).
 //

@@ -275,7 +275,8 @@ void aim_watch_tick() {
         }
         // Yaw specifically: rot[1]. Watching the whole rotator would also trap the pitch write and
         // muddy which instruction we are looking at.
-        addr = (uintptr_t)pc + CONTROL_ROTATION_OFFSET + sizeof(double);
+        addr = (uintptr_t)pc + g_control_rotation_offset.load(std::memory_order_relaxed)
+             + sizeof(double);
     }
     g_watch_addr = addr;
     for (int i = 0; i < MAX_HITS; ++i) g_hits[i] = 0;

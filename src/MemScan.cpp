@@ -4,15 +4,18 @@
 
 #if HALO_VR_DEV
 
+#include "BlamDrive.hpp"   // g_sim_tls_block, the TLS-graph walk's root
 #include "Config.hpp"
 #include "uevr/API.hpp"
 
 #include <Windows.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 using namespace uevr;
@@ -135,6 +138,44 @@ void scan_worker(std::vector<float> want) {
                     }
                     API::get()->log_info("[Halo-CampE-UEVR] MEMSCAN hit @ 0x%llX  ctx[-6..+8]: %s",
                                          (unsigned long long)hitAddr, ctx);
+
+                    // FORENSICS, first 8 hits only (a saturated scan must not flood the log).
+                    // The float context above identifies the RECORD; these identify the
+                    // CONTAINER -- which is the actual quarry once a record is known to
+                    // relocate: the allocation base says which arena it lives in and the
+                    // hit's offset within it constrains the container header's position,
+                    // while the raw qwords expose handles and pointers that float prints
+                    // mangle (the navpoint hunt's records decode as 0x64-tagged Blam datum
+                    // handles, invisible in the %.4g view).
+                    if (hits < 8) {
+                        API::get()->log_info("[Halo-CampE-UEVR] MEMSCAN forensic: alloc=0x%llX "
+                                             "region=0x%llX size=0x%llX type=0x%lX prot=0x%lX "
+                                             "hit=alloc+0x%llX",
+                                             (unsigned long long)(uintptr_t)mbi.AllocationBase,
+                                             (unsigned long long)(uintptr_t)mbi.BaseAddress,
+                                             (unsigned long long)mbi.RegionSize,
+                                             mbi.Type, mbi.Protect,
+                                             (unsigned long long)(hitAddr - (uintptr_t)mbi.AllocationBase));
+                        const size_t hit_b  = i * sizeof(float);
+                        const size_t win_lo = ((hit_b >= 0x40) ? hit_b - 0x40 : 0) & ~7ull;
+                        const size_t win_hi = ((hit_b + 0x80) < got) ? (hit_b + 0x80) : got;
+                        char qline[240]; int qoff = 0; int emitted = 0;
+                        int64_t line_rel = 0;
+                        for (size_t b = win_lo; b + 8 <= win_hi; b += 8) {
+                            if (emitted == 0) line_rel = (int64_t)b - (int64_t)hit_b;
+                            qoff += sprintf_s(qline + qoff, sizeof(qline) - qoff, "%016llX ",
+                                              (unsigned long long)*reinterpret_cast<const uint64_t*>(buf.data() + b));
+                            if (++emitted == 8) {
+                                API::get()->log_info("[Halo-CampE-UEVR] MEMSCAN q[hit%+lld]: %s",
+                                                     (long long)line_rel, qline);
+                                qoff = 0; emitted = 0; qline[0] = 0;
+                            }
+                        }
+                        if (emitted > 0) {
+                            API::get()->log_info("[Halo-CampE-UEVR] MEMSCAN q[hit%+lld]: %s",
+                                                 (long long)line_rel, qline);
+                        }
+                    }
                     // Was a hard-coded 64 here too, independently of the loop cap: past 64 hits it
                     // bailed out of every region after its FIRST match, so a "1537 hit" result was
                     // really 64 real hits plus one-per-region sampling. Same constant, same lie.
@@ -323,6 +364,267 @@ static void diff_narrow_worker(bool want_changed) {
                              "memdiff=3 again)");
     }
     g_diffing = false;
+}
+
+// ---- TLS-GRAPH WALK (see MemScan.hpp) ----------------------------------------------------------
+
+namespace {
+
+std::atomic<bool> g_tls_walking{false};
+
+bool tls_ptr_plausible(uint64_t v) {
+    return v > 0x10000 && v < 0x7FFFFFFFFFFFull && (v & 7) == 0;
+}
+
+// EVERY read in this walker goes through ReadProcessMemory into a local buffer -- NEVER a direct
+// dereference. v1 dereferenced with IsBadReadPtr guards and the session CRASHED ~10 s after the
+// walk: IsBadReadPtr races frees and, worse, CONSUMES stack guard pages, which detonates the
+// victim thread's next stack growth long after the walker finished. RPM cannot do either.
+bool rpm(uintptr_t src, void* dst, size_t bytes, size_t* got) {
+    SIZE_T g = 0;
+    const BOOL ok = ReadProcessMemory(GetCurrentProcess(), (const void*)src, dst, bytes, &g);
+    *got = (size_t)g;
+    return ok && g > 0;
+}
+
+// Scan up to `bytes` at `base` (RPM-copied) for an adjacent float pair near (x,y). Returns the
+// first offset or -1. Absolute tolerance in world units: 0.2 wu ~ 60 cm, generous enough for a
+// player standing "at" the objective, tight enough to reject coincidences at map scale.
+int64_t tls_scan_region(uintptr_t base, size_t bytes, float x, float y) {
+    static thread_local std::vector<uint8_t> buf;
+    if (buf.size() < bytes) buf.resize(bytes);
+    size_t got = 0;
+    if (!rpm(base, buf.data(), bytes, &got) || got < sizeof(float) * 2) return -1;
+    const float* f = reinterpret_cast<const float*>(buf.data());
+    const size_t n = got / sizeof(float);
+    for (size_t i = 0; i + 1 < n; ++i) {
+        if (std::fabs(f[i] - x) <= 0.2f && std::fabs(f[i + 1] - y) <= 0.2f) {
+            return (int64_t)(i * sizeof(float));
+        }
+    }
+    return -1;
+}
+
+void tls_walk_worker(uintptr_t block, float x, float y) {
+    // STRUCTURED walk, not blind: the aim hunt already mapped this graph. block+0x20 -> sim
+    // context; context+0x50 -> object table, entries at table + idx*24 with the object pointer
+    // at +0x10 (the exact chain the projectile-direction getter uses, BlamAim.cpp). v1's blind
+    // 2-level walk finished clean with 0 hits, so the pair is NOT in shallow ad-hoc structures
+    // -- but a Blam OBJECT standing at the objective (nav flag, target vehicle) would carry it
+    // in its record, and its TABLE INDEX + HANDLE are the stable reference the markers need.
+    API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v2: block 0x%llX, hunting (%.3f, %.3f) wu "
+                         "in the OBJECT TABLE", (unsigned long long)block, x, y);
+    size_t got = 0;
+    uintptr_t ctx = 0, table = 0;
+    if (!rpm(block + 0x20, &ctx, 8, &got) || ctx == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v2: no sim context at block+0x20");
+        g_tls_walking = false;
+        return;
+    }
+    if (!rpm(ctx + 0x50, &table, 8, &got) || table == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v2: no object table at ctx+0x50");
+        g_tls_walking = false;
+        return;
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v2: ctx=0x%llX table=0x%llX -- walking 2048 slots",
+                         (unsigned long long)ctx, (unsigned long long)table);
+
+    // REPRESENTATION SWEEP. v2 (wu-float32 only, first 0x200) found 0 hits across 89 objects --
+    // but the PLAYER is one of those objects and we stand at (x,y), so a zero means object
+    // records simply do not hold position as a wu-float32 pair. So scan each object's first
+    // 0x400 for the pair in FOUR representations at once; the player is guaranteed to match in
+    // whichever the records actually use, revealing the format AND the offset. Cm values are
+    // reconstructed from the wu inputs (x,y were cm/304.8 upstream).
+    const float  wu_x = x,          wu_y = y;
+    const float  cm_x = x * 304.8f, cm_y = y * 304.8f;
+    const double cmd_x = (double)cm_x, cmd_y = (double)cm_y;
+    const double wud_x = (double)x,    wud_y = (double)y;
+    static thread_local std::vector<uint8_t> rec;
+    if (rec.size() < 0x400) rec.resize(0x400);
+
+    int live = 0, hits = 0;
+    for (int idx = 0; idx < 2048 && hits < 12; ++idx) {
+        uintptr_t obj = 0;
+        if (!rpm(table + (uintptr_t)idx * 24 + 0x10, &obj, 8, &got)) break;
+        if (!tls_ptr_plausible(obj)) continue;
+        ++live;
+        size_t rgot = 0;
+        if (!rpm(obj, rec.data(), 0x400, &rgot) || rgot < 32) continue;
+        const size_t nf = rgot / 4, nd = rgot / 8;
+        const float*  ff = reinterpret_cast<const float*>(rec.data());
+        const double* dd = reinterpret_cast<const double*>(rec.data());
+        // TOLERANCE ~5 m (wu 1.64 = 5 m / 3.048, cm 500). The player can only get ~2 m from this
+        // objective (field-reported); 5 m gives that a safety margin without approaching object
+        // spacing (hundreds of wu), so false matches stay unlikely. The player object still
+        // matches its OWN coords well inside this, so format detection is unaffected -- the
+        // window only matters for surfacing a DISTINCT objective-object standing a few m away.
+        int64_t off = -1; const char* rep = nullptr;
+        for (size_t i = 0; i + 1 < nf && off < 0; ++i) {
+            if (std::fabs(ff[i] - wu_x) <= 1.64f && std::fabs(ff[i+1] - wu_y) <= 1.64f) {
+                off = (int64_t)(i*4); rep = "wu-f32";
+            } else if (std::fabs(ff[i] - cm_x) <= 500.0f && std::fabs(ff[i+1] - cm_y) <= 500.0f) {
+                off = (int64_t)(i*4); rep = "cm-f32";
+            }
+        }
+        for (size_t i = 0; i + 1 < nd && off < 0; ++i) {
+            if (std::fabs(dd[i] - wud_x) <= 1.64 && std::fabs(dd[i+1] - wud_y) <= 1.64) {
+                off = (int64_t)(i*8); rep = "wu-f64";
+            } else if (std::fabs(dd[i] - cmd_x) <= 500.0 && std::fabs(dd[i+1] - cmd_y) <= 500.0) {
+                off = (int64_t)(i*8); rep = "cm-f64";
+            }
+        }
+        if (off >= 0) {
+            uint64_t head[2] = {}; size_t g2 = 0; rpm(obj, head, sizeof(head), &g2);
+            API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v3 HIT idx=%d @0x%llX +0x%llX %s | "
+                                 "head %016llX %016llX", idx, (unsigned long long)obj,
+                                 (unsigned long long)off, rep,
+                                 (unsigned long long)head[0], (unsigned long long)head[1]);
+            ++hits;
+        }
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] TLSNAV v3 done: %d hit(s) across %d live objects "
+                         "(4 representations)", hits, live);
+    g_tls_walking = false;
+}
+
+}  // namespace
+
+// ---- MANAGER-ROOTED GRAPH WALK (see MemScan.hpp) -----------------------------------------------
+
+namespace {
+
+std::atomic<bool> g_graph_walking{false};
+
+struct GraphNode {
+    uintptr_t addr;
+    int       depth;
+    int       parent;      // index into the visit list, -1 for the root
+    int32_t   from_off;    // offset within the parent that pointed here
+};
+
+void graph_walk_worker(uintptr_t root, float x, float y) {
+    // The whole point of this walker vs the TLS one: the ROOT IS STABLE (a UE object reached
+    // through the widget tree), so a hit's offset chain is a RESOLUTION PATH, not a one-session
+    // address. Depth 4 with a hard node budget -- enough for manager -> interface -> provider ->
+    // list -> record, which is the shape the live inspection showed.
+    // ⚠️ THE BUDGET IS AN ENQUEUE LIMIT, NOT A PROCESSING LIMIT. v1 put `nodes.size() <
+    // MAX_NODES` in the LOOP CONDITION, so the walk TERMINATED the instant the queue filled --
+    // it scanned a few dozen blocks in 6 ms and reported "0 hits over 4000 nodes", which reads
+    // exactly like a clean negative and is not one. Processing now runs to the end of the queue;
+    // only enqueueing stops at the cap.
+    constexpr int    MAX_DEPTH = 4;
+    constexpr size_t MAX_NODES = 40000;
+    constexpr size_t BLOCK     = 0x600;   // bytes scanned/enumerated per node
+    constexpr double TIME_BUDGET_S = 20.0;
+
+    API::get()->log_info("[Halo-CampE-UEVR] NAVGRAPH: walking from manager 0x%llX for (%.3f, %.3f) wu",
+                         (unsigned long long)root, x, y);
+
+    std::vector<GraphNode> nodes;
+    std::unordered_set<uintptr_t> seen;   // O(1) dedup: a linear scan is O(n^2) at this scale
+    nodes.reserve(MAX_NODES);
+    seen.reserve(MAX_NODES);
+    nodes.push_back({root, 0, -1, 0});
+    seen.insert(root);
+
+    std::vector<uint8_t> buf(BLOCK);
+    int hits = 0;
+    size_t scanned = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    for (size_t n = 0; n < nodes.size() && hits < 6; ++n) {
+        if ((n & 0xFF) == 0) {
+            const double el = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (el > TIME_BUDGET_S) {
+                API::get()->log_info("[Halo-CampE-UEVR] NAVGRAPH: time budget reached at node %zu", n);
+                break;
+            }
+        }
+        ++scanned;
+        const GraphNode cur = nodes[n];
+        size_t got = 0;
+        if (!rpm(cur.addr, buf.data(), BLOCK, &got) || got < 16) continue;
+
+        // 1) Does THIS block hold the pair? Both float widths, 5 m tolerance.
+        {
+            const float* ff = reinterpret_cast<const float*>(buf.data());
+            const double* dd = reinterpret_cast<const double*>(buf.data());
+            int64_t off = -1; const char* rep = nullptr;
+            for (size_t i = 0; i + 1 < got / 4 && off < 0; ++i) {
+                if (std::fabs(ff[i] - x) <= 1.64f && std::fabs(ff[i+1] - y) <= 1.64f) {
+                    off = (int64_t)(i * 4); rep = "wu-f32";
+                } else if (std::fabs(ff[i] - x * 304.8f) <= 500.0f
+                        && std::fabs(ff[i+1] - y * 304.8f) <= 500.0f) {
+                    off = (int64_t)(i * 4); rep = "cm-f32";
+                }
+            }
+            for (size_t i = 0; i + 1 < got / 8 && off < 0; ++i) {
+                if (std::fabs(dd[i] - (double)x) <= 1.64 && std::fabs(dd[i+1] - (double)y) <= 1.64) {
+                    off = (int64_t)(i * 8); rep = "wu-f64";
+                } else if (std::fabs(dd[i] - (double)x * 304.8) <= 500.0
+                        && std::fabs(dd[i+1] - (double)y * 304.8) <= 500.0) {
+                    off = (int64_t)(i * 8); rep = "cm-f64";
+                }
+            }
+            if (off >= 0) {
+                // Reconstruct the chain: root +o1 -> +o2 -> ... -> +off
+                char chain[256]; int co = 0;
+                int stack[MAX_DEPTH + 1]; int sn = 0;
+                for (int p = (int)n; p > 0 && sn <= MAX_DEPTH; p = nodes[p].parent) stack[sn++] = p;
+                co += sprintf_s(chain + co, sizeof(chain) - co, "manager");
+                for (int s = sn - 1; s >= 0; --s) {
+                    co += sprintf_s(chain + co, sizeof(chain) - co, " +0x%X ->",
+                                    (unsigned)nodes[stack[s]].from_off);
+                }
+                co += sprintf_s(chain + co, sizeof(chain) - co, " +0x%llX",
+                                (unsigned long long)off);
+                API::get()->log_info("[Halo-CampE-UEVR] NAVGRAPH HIT (%s) depth=%d @0x%llX: %s",
+                                     rep, cur.depth, (unsigned long long)cur.addr, chain);
+                ++hits;
+            }
+        }
+
+        // 2) Enqueue this block's pointers for the next level.
+        if (cur.depth >= MAX_DEPTH) continue;
+        for (size_t o = 0; o + 8 <= got && nodes.size() < MAX_NODES; o += 8) {
+            const uint64_t p = *reinterpret_cast<const uint64_t*>(buf.data() + o);
+            if (!tls_ptr_plausible(p)) continue;
+            if (!seen.insert((uintptr_t)p).second) continue;   // already queued
+            nodes.push_back({(uintptr_t)p, cur.depth + 1, (int)n, (int32_t)o});
+        }
+    }
+
+    // Report SCANNED vs QUEUED separately: they diverge whenever the cap binds, and conflating
+    // them is what made the v1 bug look like a result.
+    API::get()->log_info("[Halo-CampE-UEVR] NAVGRAPH done: %d hit(s) -- scanned %zu of %zu queued "
+                         "nodes (depth<=%d, cap %s)",
+                         hits, scanned, nodes.size(), MAX_DEPTH,
+                         nodes.size() >= MAX_NODES ? "BOUND (graph larger than budget)" : "not reached");
+    g_graph_walking = false;
+}
+
+}  // namespace
+
+void nav_graph_scan(uintptr_t manager_root, float wu_x, float wu_y) {
+    if (manager_root == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] NAVGRAPH: no navpoints manager resolved "
+                             "(navworld must have found the widget tree first)");
+        return;
+    }
+    if (g_graph_walking.exchange(true)) return;
+    std::thread(graph_walk_worker, manager_root, wu_x, wu_y).detach();
+}
+
+void nav_tls_scan(float wu_x, float wu_y) {
+    const uintptr_t block = g_sim_tls_block.load(std::memory_order_relaxed);
+    if (block == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] TLSNAV: sim TLS block not published yet "
+                             "(blamangles must have resolved at least once)");
+        return;
+    }
+    if (g_tls_walking.exchange(true)) return;
+    std::thread(tls_walk_worker, block, wu_x, wu_y).detach();
 }
 
 void mem_scan_tick() {
