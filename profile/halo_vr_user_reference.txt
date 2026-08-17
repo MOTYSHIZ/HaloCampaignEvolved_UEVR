@@ -1,0 +1,182 @@
+# ==================================== FULL SETTINGS CATALOG =====================================
+# Every player-facing setting, with its built-in default as the value.
+#
+# THIS FILE IS NOT READ BY THE MOD. It is the reference, refreshed by every update.
+# To change a setting: COPY its line into halo_vr_user.cfg (next to this file), remove
+# the leading #, and set your value there. halo_vr_user.cfg is read live (~2 s), updates
+# never touch it, and deleting it resets everything to the defaults listed here.
+# Easier still: the in-game menu (UEVR overlay > Script UI) edits the same settings with
+# sliders and dropdowns -- key and button values are stored as codes in the file, but the
+# menu shows them by name.
+#
+# Layout note (the in-game menu renders this file): the comment block right under each section
+# banner, up to the first empty '#' line, is that section's summary; the comment block above
+# each key is that key's own clarification.
+# ================================================================================================
+
+# ===================================== CONTROL PREFERENCES ======================================
+# How you turn and what the buttons do. Button names are standard gamepad names (like an Xbox
+# pad). Keyboard shortcuts only work while the game window is focused.
+#
+# ---- Turning (aiming never turns you; the right stick does).
+# 1 = snap turning (discrete steps -- most comfortable), 2 = smooth turning, 0 = off.
+#turnmode=1
+# Degrees per snap.
+#snapdeg=45
+# Smooth-turn speed, degrees per second.
+#smoothdps=90
+# How far the stick must move before a turn registers.
+#turndz=0.30
+
+# ---- Button remaps.
+# Hold right stick UP: the left stick becomes the d-pad (grenades / weapon switching).
+#mapdpadshift=1
+# How far the left stick must move to count as a d-pad press.
+#mapdpaddz=0.50
+# How far the right stick must move for its gestures (high, so turning never triggers them).
+#maprstickdz=0.65
+# Pushing the right stick DOWN presses this button. Default: B, which is crouch.
+#maprstickdown=0x2000
+# Rebind one button to another: pressing `mapfrom` sends `mapto` instead. Default: the crouch
+# button now does equipment (LB), since crouch moved onto the right stick above.
+#mapfrom=0x2000
+#mapto=0x0100
+
+# ---- Menus. In menus, this button acts as Back (the remaps above pause automatically while
+# a menu is open).
+#mapmenuback=0x4000
+
+# ---- Keyboard shortcuts. (The in-game Calibration panel does the same without a keyboard.)
+# Hold to calibrate how the weapon sits in your hand; release to save. Default: End.
+#calibkey=0x23
+# Hold to calibrate where shots go; release to save. Default: Page Down.
+#aimcalibkey=0x22
+
+# (Aim behaviour itself is the tested core of the mod, not a preference -- its tuning lives in
+# halo_vr_dev.cfg.)
+
+# ==================================== COMFORT -- VIEW & HEAD ====================================
+# Your view stays put while you aim (only the gun moves), and head turning is always 1:1 --
+# that is what keeps this comfortable.
+#
+# THE LEASH keeps you and the game's camera together: the camera cannot follow your body, so
+# moving past the radius makes the world gently follow you, which keeps your aim honest.
+# Radii are cm of free 1:1 movement, sideways / vertically; 0 = follow immediately (default).
+# Try 30 for a small free-movement bubble. hmdleash=0 removes the leash entirely: full free
+# movement, but the further you get from where the game thinks you are, the more the game's
+# own flat crosshair lies -- keep the mod's reticule on.
+#hmdleash=1
+#hmdleashlat=0
+#hmdleashvert=0
+
+# ==================================== RETICULE (world-space) ====================================
+# The mod draws the game's own crosshair out in the world, exactly where your shots will land
+# -- hit marker included.
+#
+# 1 = show the mod's reticule.
+#aimreticule=1
+
+# Place the reticule ON the surface you are aiming at (default) -- that keeps it accurate no
+# matter where your head is. 0 = float at a fixed distance instead.
+#aimreticuletrace=1
+# Never draw it further away than this (cm) -- past that it holds this distance, still on
+# target.
+#aimreticulemaxdist=600
+# Lift it this far (cm) off walls so it does not sink into them.
+#aimreticulesurfaceoff=50
+
+# ---- Size. The reticule scales with distance so it always looks the same size, and it fades
+# out closer than minscaledist so it cannot fill your view at point blank.
+#aimreticuleminscale=0
+#aimreticuleminscaledist=70
+#aimreticulemaxscale=1.0
+
+# ---- Distances, cm. Where it floats when nothing is hit:
+#aimreticuledist=500
+# In vehicles: pushed further out to clear the vehicle. 0 = same as on foot.
+#aimreticuledistveh=2200
+# Reticule size in vehicles, as a fraction of the on-foot size.
+#aimreticulescaleveh=0.5
+
+# ---- Steadiness (visual only -- never changes where shots land). Milliseconds of smoothing:
+# higher = calmer but laggier, 0 = raw. Raise the second one a little if the reticule shimmers
+# while you hold still.
+#aimreticulesmoothms=0
+#aimreticulesmoothctrlms=8
+
+# ================================== CROSSHAIR BRIGHTNESS & HUD ==================================
+# The crosshair the mod hosts at the aim point -- the game's own art, hit marker included.
+#
+# Show the hosted crosshair.
+#aimwidget=1
+# Crosshair size.
+#aimwidgetscale=0.24
+# Brightness. Gain and tint MULTIPLY, fighting the game's auto-exposure (which dims interface
+# art along with the scenery); both stop at 1024. Raise if the crosshair is hard to see
+# outdoors; lower if it glows too hot in the dark.
+#aimwidgetgain=5
+#aimwidgettint=1024
+# Hide the game's original flat crosshair (the one stuck to the screen).
+#hudhide=0
+
+# ==================================== OPTIONAL RING RETICULE ====================================
+# An extra ring marker at the aim point. Off by default -- the crosshair above does the job --
+# but some players prefer a ring.
+#
+# 1 = show the ring.
+#aimmesh=0
+# Ring size.
+#aimmeshscale=0.14
+# Ring colour: red, green, blue (0-1 each).
+#aimmeshcr=0.20
+#aimmeshcg=0.60
+#aimmeshcb=1.0
+# Use your own ring image: path to a PNG (white art on transparency). An example ships as
+# reticle_ring.png in this folder.
+#aimtexfile=
+
+# ===================================== WEAPON SCOPE (zoom) ======================================
+# Squeeze the left trigger to zoom: a magnifying lens appears on your aim line, showing exactly
+# where the shot will go.
+#
+# 1 = the scope is available (and the trigger no longer triggers Halo's flat zoom on foot).
+#scope=1
+# Magnification. The default suits the default lens size (for reference, Halo's own zoom was
+# 2x on the magnum and 2x/8x on the sniper -- a small VR lens wants much more).
+#scopezoom=16
+# Image sharpness, pixels. Higher is sharper and costs more GPU.
+#scoperes=1024
+# Update the lens image every Nth frame. Raise to 2-4 if the scope costs performance.
+#scopediv=1
+# Lens shape: 1 = round, 0 = square (square shows the most image).
+#scopeshape=1
+# The hold-to-place key. Default: Delete.
+#scopecalibkey=0x2E
+# Lens position relative to your hand, cm: how far forward, then size, right and up. The
+# defaults are a headset-fitted placement. EASIEST WAY TO PLACE IT YOURSELF: hold Delete in a
+# mission -- the lens freezes, move your hand until the lens sits where you want it on the gun,
+# release, done (saved with your calibration).
+#scopedist=63.57
+#scopesize=11.84
+#scoperight=12.92
+#scopeup=-0.32
+# Brighten the lens image if it reads darker than the world.
+#scopebright=1
+# If the IMAGE in the lens is sideways or upside down, nudge this by 90 or 180.
+#scopecamroll=-90
+# 1 = the image tilts with your gun, like a real optic. 0 = it stays level with the world.
+#scopecamlock=0
+# How far the trigger must be squeezed to toggle the scope.
+#scopethresh=0.55
+
+# ===================================== SUPPORT DIAGNOSTICS ======================================
+# Leave these at their defaults unless troubleshooting asks for them.
+#
+# Records how long the mod's background work takes, into log.txt. Turn on for a stutter
+# report, play a minute or two, turn back off.
+#perflog=0
+# 0 switches weapon tracking to a slower legacy path -- only for comparison when asked.
+#rigfast=1
+# Logs which gamepad button each controller press lands on -- useful when reporting remap
+# issues.
+#mapbtnlog=0

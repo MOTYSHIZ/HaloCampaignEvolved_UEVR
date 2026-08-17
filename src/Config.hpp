@@ -1,8 +1,22 @@
 // Live configuration and calibration persistence.
 //
-// Everything that touches the two files next to the UEVR profile lives here:
-//   halo_vr.cfg    - user tunables, re-read every ~2 s. Holds the KILL SWITCH (enabled=0).
-//   halo_vr_calib.cfg - written by the in-game calibrations; applied AFTER halo_vr.cfg so it wins.
+// THE DEFAULTS LIVE IN THIS STRUCT. Since 2026-08-11 no shipped file sets settings values: the
+// compiled defaults below ARE the shipped configuration, so every field's default must equal
+// what is meant to ship (release rule in CLAUDE.md). The files carry only overrides and
+// calibration DATA. Read order every ~2 s (later wins; the parser is file-agnostic):
+//   halo_vr.cfg      - SHIPPED CALIBRATION DATA ONLY (the Quest Touch fit + its schema stamps).
+//                      Overwritten by every release. The stamps must stay file-borne -- see the
+//                      calib_ver notes below for why they cannot move into compiled defaults.
+//   halo_vr_user.cfg - the USER'S file, created on first run as a short pointer template. Never
+//                      shipped, so it survives updates; deleting it reverts to the compiled
+//                      defaults. The catalog of available keys is the shipped
+//                      halo_vr_user_reference.txt (documentation only, never parsed) -- users
+//                      copy lines across, so their file cannot go stale.
+//   halo_vr_dev.cfg  - dev/troubleshooting catalog, SHIPPED all-commented (packaging asserts it
+//                      is inert). Beats the user file on purpose: an uncommented key is a
+//                      deliberate, temporary experiment; updates overwrite it.
+//   halo_vr_calib.cfg - written by the in-game calibrations; applied LAST so it wins. Never
+//                      shipped; survives updates.
 //
 // g_cfg is read from nearly every system in the plugin, so this header is the one most others
 // include. Keep it free of UEVR API calls: the paths are filled in by the plugin at startup.
@@ -11,6 +25,7 @@
 
 #include <Windows.h>
 #include <cstdint>
+#include <atomic>
 
 namespace halo {
 // ---------------------------------------------------------------- tunables
@@ -26,7 +41,7 @@ struct Config {
     // ~137 deg/s -- so the top of the range is where large corrections actually get closed;
     // capping it leaves the loop slew-limited on big movements only.
     float max_out      = 1.0f;
-    float dead_deg     = 1.0f;    // angular deadband so it parks instead of hunting
+    float dead_deg     = 0.5f;    // angular deadband so it parks instead of hunting
 
     // ---- FEEDFORWARD + DAMPING ------------------------------------------------------------
     // A pure proportional loop against a RATE actuator has two unavoidable symptoms: tracking a
@@ -41,10 +56,11 @@ struct Config {
     //
     // Scaled by the MEASURED plant gain, not a constant, so it stays right across sensitivity
     // settings -- the same measurement the adaptive gain already maintains.
-    float ff_gain      = 1.0f;    // 0 disables (pure-P behaviour)
+    float ff_gain      = 0.0f;    // 0 = off, the shipped state (direct-drive aim needs none);
+                                  // raise toward 1.0-1.2 to re-enable for the steered fallback
     // Damps whatever the plant's own lag still overshoots by, opposing rate error rather than
     // position error so it does not fight the feedforward.
-    float d_gain       = 0.15f;
+    float d_gain       = 0.40f;
     // The target rate is a difference of two noisy angles; unsmoothed it is jittery enough to buzz
     // the stick. Time constant in ms (see ema_alpha) -- LOWER is more responsive, higher calmer.
     float ff_smooth_ms = 16.0f;
@@ -72,7 +88,14 @@ struct Config {
     //
     // Once moving, keep moving until the error falls well INSIDE the band. Standard Schmitt trigger.
     float dead_hyst    = 0.5f;    // re-park threshold as a fraction of dead_deg; 1.0 = no hysteresis
-    float xdist_m      = 10.0f;   // sightline length (m); UEVR uses a flat 1000 units
+    // Sightline length. STORED in metres (VR pose space); the `xdist` CONFIG KEY IS CENTIMETRES,
+    // so the shipped value is 1000, not 10.
+    float xdist_m      = 10.0f;
+    // Set when ANY distance key arrived as a pre-2026-08-12 METRES value and was scaled up (see
+    // cm_to_m in Config.cpp). The key name is a string literal, so there is no lifetime question.
+    // Reported once by the tick, because this file deliberately makes no UEVR API calls.
+    const char* legacy_units_key = nullptr;
+    float       legacy_units_val = 0.0f;
 
     // AIM SIGHTLINE ORIGIN. Aim is the ray from this origin THROUGH the point the gun points at,
     // so BOTH controller translation and rotation feed the result -- sliding the gun sideways with
@@ -86,6 +109,32 @@ struct Config {
     // Head-origin has a real drawback: moving your HEAD while the gun is still changes your aim
     // -- head/aim coupling, in miniature.
     int   aim_origin   = 1;
+
+    // ---- AIM CONVERGENCE (6DoF) --------------------------------------------------------------
+    // Aim at the point the sightline TRACE hits, instead of at an assumed range. Full derivation in
+    // AimConverge.hpp; the short version is that a shot leaving the game camera and a sightline
+    // leaving your eye are parallel but DISPLACED, so a commanded direction alone can only be
+    // correct at one range -- xdist's -- and is wrong everywhere else by the eye-to-camera offset.
+    // Measuring the range instead makes the shot land on what the reticule is over, at any range.
+    //
+    // Costs nothing when the head is leashed: the offset is then ~0 and the correction declines to
+    // act at all (aim_converge_min_cm). This exists FOR hmdleash=0, where the offset is unbounded.
+    // Needs aimreticuletrace, which supplies the measured range.
+    bool  aim_converge = true;
+    // Smoothing on the measured range. The correction goes as 1/range, so a depth discontinuity --
+    // sweeping off a near crate onto a far wall -- is a step change in aim. This turns the step into
+    // a short glide. Too long reads as aim lagging the hand when you change targets; too short and
+    // the sweep pops.
+    float aim_converge_tau_ms = 120.0f;
+    // Eye-to-camera divergence, in cm, below which the correction does not engage AT ALL. Keeps the
+    // leashed default numerically identical rather than merely nearly so.
+    float aim_converge_min_cm = 3.0f;
+    // Sanity rail on the correction, degrees. Anything past this is a bad range or a bad offset, not
+    // geometry -- and a confidently wrong large correction is a weapon that fires sideways.
+    float aim_converge_max_deg = 30.0f;
+    // AIMCONV diagnostic: log the offset, the range and the resulting bend every N ticks. 0 = off.
+    // Dev builds only.
+    int   aim_conv_log = 0;
 
     // WHICH POSE THE AIM DIRECTION COMES FROM.
     //   0 = the OpenXR AIM pose (default, and what every calibration to date was made against).
@@ -149,9 +198,27 @@ struct Config {
     // where you are shot from. Physically ducking only ever moved the camera, never the player, so
     // what is lost is a decoupled view that was lying to you about your own position anyway.
     // Judged in-headset; raise it if you want the lean back.
+    //
+    // TURNING IT OFF (hmdleash=0) is a supported comfort option, for players who find any resistance
+    // to head translation nauseating -- and it is genuinely off, which it was not before 2026-08-12:
+    // UEVR's own VR_RoomscaleMovement is a zero-radius lateral leash and defaults ON, so the setting
+    // has to take that over too (it does; see the LEASH block in Plugin.cpp).
+    //
+    // What an unleashed head changes, both handled rather than documented-around:
+    //   * The STANDING ORIGIN stops being a body reference. Anything that treated it as "where the
+    //     player is" is reading a stale point -- the arm rig (riganchor) and the aim sightline
+    //     (aim_origin) both did. Neither breaks now, but new code must not assume it either.
+    //   * Eye-to-camera divergence is unbounded, so the shot origin and your eye can be metres
+    //     apart. This is why the reticule TRACES: a marker on the surface reads correctly from any
+    //     eye position, where a fixed-distance one does not.
+    //
+    // ⚠️ ALL DISTANCES IN THIS FILE'S CONFIG KEYS ARE CENTIMETRES, matching Unreal. The FIELDS below
+    // are stored in metres because every consumer works in VR pose space; the conversion happens once
+    // at parse. A metres/cm mismatch here already cost a test -- hmdleashlat=50 was entered meaning
+    // 50 cm, was obeyed as 50 METRES, and the setting looked broken while working perfectly.
     bool  hmd_leash      = true;
-    float hmd_leash_lat  = 0.0f;    // metres, horizontal -- 0 = fully negated
-    float hmd_leash_vert = 0.0f;    // metres, vertical   -- 0 = fully negated
+    float hmd_leash_lat  = 0.0f;    // stored m; CONFIG KEY IS CM. 0 = fully negated
+    float hmd_leash_vert = 0.0f;    // stored m; CONFIG KEY IS CM. 0 = fully negated
     // WHICH HAND AIMS. false = right (default), true = left.
     //
     // The aim maths is hand-agnostic -- it turns a controller pose into angles -- so this only
@@ -188,9 +255,9 @@ struct Config {
     //   turn_mode 2 = SMOOTH (continuous, deg/sec)
     //   turn_mode 0 = off
     int   turn_mode    = 1;
-    float snap_deg     = 30.0f;   // per flick
+    float snap_deg     = 45.0f;   // per flick
     float smooth_dps   = 90.0f;   // degrees per second at full deflection
-    float turn_dz      = 0.5f;    // stick deflection required to register
+    float turn_dz      = 0.30f;   // stick deflection required to register
 
     // STICK MODE. In vehicle seats the game binds the chase camera to the aim vector, so motion
     // aim swings the whole camera with the hand -- and the view lock half-fights it (yaw pinned
@@ -219,6 +286,48 @@ struct Config {
     // the debounce is just a two-tick confirm. Both user-tuned in the field 2026-08-01.
     float stick_on_s   = 0.75f;
     float stick_off_s  = 0.05f;
+    // ON FOOT WITH NO WEAPON -- the exception the detector above needs.
+    //
+    // "No first-person weapon" is four different situations wearing one costume: a vehicle seat, a
+    // cutscene, death, and STANDING ON YOUR FEET HOLDING NOTHING. Only the first three want the
+    // game's camera back. The campaign opens unarmed, so without this the first minutes of the game
+    // play as flat gamepad -- motion aim and snap turn dead -- which is exactly where new players
+    // got stuck and concluded the mod was broken.
+    //
+    // With this on, stick mode is SUPPRESSED while the game says it is presenting first person
+    // (BlamPawn's own CurrentBlamCameraPerspective, learned rather than assumed -- see
+    // fp_presentation_state in Rig.cpp) and the arms rig is live on the local pawn. Every term
+    // fails closed: an unreadable perspective, or no rig, leaves the pre-existing weapon-route
+    // behaviour exactly as it was.
+    //
+    // Set to 0 to restore the old behaviour outright -- the A/B lever if a vehicle or a scripted
+    // sequence turns out to read as first person and keeps motion aim engaged where it should not.
+    bool  stick_onfoot = true;
+
+    // HIDE THE ARMS WHILE UNARMED.
+    //
+    // The game poses the empty first-person arms in a T-POSE -- it never expects you to look at
+    // them, because on a flat screen holding nothing means the viewmodel is simply absent. In VR
+    // they are right there, and once the rig follows your hand (which it now does while unarmed)
+    // a T-pose swings around with it. Hiding them is strictly better than showing that.
+    //
+    // This is a STOPGAP with a known end date: it exists because there is no player arm IK yet. The
+    // moment real hands are driven from the controllers this should become "show the VR hands",
+    // not "show nothing" -- the reason to hide is the T-pose, not a preference for empty air.
+    //
+    // Scoped to the same on-foot-unarmed state the stick-mode exception uses, NOT to "no weapon":
+    // that keeps it away from vehicles and cutscenes, where the game owns first-person presentation
+    // and hiding things it chose to draw would be a regression rather than a fix.
+    bool  hide_arms    = true;
+
+    // ---- ARMS / WEAPON VISIBILITY PREFERENCES. Purely visual; aim and shots are unaffected.
+    // show_arms=0 hides the first-person arms (and the shield shell with them) at all times --
+    // the attached weapon is re-shown after the propagated hide, so "just the floating gun" is
+    // exactly what you get. show_weapon=0 hides the weapon actor as well, via
+    // SetActorHiddenInGame -- an independent flag from the bVisible tree, so the two
+    // preferences compose instead of undoing each other.
+    bool  show_arms   = true;
+    bool  show_weapon = true;
 
     // ---- VEHICLE HARD BRAKE. Hold EITHER controller grip while stick mode is engaged. Distinct
     // from the quick-turn handbrake, which is the game's own left-trigger hold. Grips are read
@@ -287,9 +396,9 @@ struct Config {
     // openvr_api.dll, or any init failure just means no hint. On runtimes where the screen
     // works, the hint sits harmlessly below it (set cuthint=0 if you'd rather not see it).
     bool  cut_hint      = true;
-    float cut_hint_dist = 1.8f;   // metres ahead of the standing origin
-    float cut_hint_drop = 0.75f;  // metres below eye level
-    float cut_hint_w    = 1.1f;   // overlay width, metres
+    float cut_hint_dist = 1.8f;   // stored m; CONFIG KEY IS CM (180) -- ahead of the standing origin
+    float cut_hint_drop = 0.75f;  // stored m; CONFIG KEY IS CM (75) -- below eye level
+    float cut_hint_w    = 1.1f;   // stored m; CONFIG KEY IS CM (110) -- overlay width
 
     // WEAPON RIG -- drives the first-person rig from the controller so the gun follows the hand.
     bool  rig_enabled  = true;
@@ -323,7 +432,12 @@ struct Config {
     // the weapon's attach point; `Wrist_R` is the arm socket nearer the hand. Both exist on this
     // rig, they are centimetres apart, and which one feels right is a question about the art, not
     // one this code can answer -- so it is a dial, and both are logged on acquisition.
-    char  piv_socket[64] = "PrimaryWeapon";
+    // ⚠️ EMPTY ON PURPOSE -- the real default ("PrimaryWeapon") lives at the consumer in
+    // Plugin.cpp's pivot derivation, which already fell back on empty. That fallback existed
+    // because this field was OBSERVED arriving empty with "cause not established" -- the cause
+    // is now established: MSVC's constant-initialization of the global g_cfg drops char-array
+    // string defaults (see nav_class below for the measurement).
+    char  piv_socket[64] = "";
 
     // Manual nudge ADDED to the auto-read pivot, cm, component-local. Lets the socket stay
     // auto-detected per weapon while still correcting a constant bias.
@@ -362,7 +476,7 @@ struct Config {
     //
     // It also remains the reference distance the SEATED path scales against (see the seated
     // reticule block in Plugin.cpp), so changing it moves the vehicle reticule's size.
-    float aim_reticule_dist = 1000.0f;   // cm along the ray (10 m)
+    float aim_reticule_dist = 500.0f;   // cm along the ray (5 m)
 
     // TRACE the reticule onto the surface instead of parking it at aim_reticule_dist.
     //
@@ -372,10 +486,10 @@ struct Config {
     // marker sits on the surface, so it is correct from any eye position at any range, and
     // aim_reticule_dist stops mattering except as the fallback when nothing is hit.
     //
-    // DEFAULT OFF, and honestly so: this calls a reflected engine function once per tick with a
-    // hand-built parameter block, and while every offset is resolved from reflection rather than
-    // assumed, it has not run in a live session yet. Measure it with perflog before trusting it.
-    bool  aim_reticule_trace = false;
+    // DEFAULT ON -- the shipping behaviour, proven in live sessions since 2026-08. It calls a
+    // reflected engine function once per tick with a hand-built parameter block; every offset is
+    // resolved from reflection rather than assumed, and perflog covers it if a cost is suspected.
+    bool  aim_reticule_trace = true;
     // Max trace length in cm -- how far to look for a surface at all. Past this it is a miss.
     float aim_reticule_trace_max = 15000.0f;   // 150 m
 
@@ -389,7 +503,7 @@ struct Config {
     //       like this very likely has a weapon/projectile channel, which would be the truthful one.
     // No value is right a priori and the mapping is per-project, so this is a live knob rather than
     // a guess baked into the code.
-    int   aim_reticule_trace_channel = 0;
+    int   aim_reticule_trace_channel = 1;   // Camera -- the shipping choice (see above)
 
     // CAP on how far the reticule is ever DRAWN, in cm. A marker on a hillside 80 m away is
     // technically correct and practically useless: it is small, it is washed out against the
@@ -402,7 +516,7 @@ struct Config {
     //
     // A miss uses the cap too, rather than aim_reticule_dist -- otherwise panning from a distant
     // wall onto open sky pops the reticule between two depths for no reason the player can see.
-    float aim_reticule_max_dist = 1000.0f;   // 10 m
+    float aim_reticule_max_dist = 600.0f;   // 6 m, tuned in-headset
 
     // ---- DISTANCE SCALING (on foot) -----------------------------------------------------------
     // With tracing on, the reticule's distance is whatever the world is, from a wall at arm's reach
@@ -422,15 +536,17 @@ struct Config {
     // The floor exists because a ring that keeps shrinking vanishes when you press the muzzle into
     // a wall; the ceiling is the old, known-good size.
     // aim_mesh_scale / aim_widget_scale still set the base size this multiplies.
-    float aim_reticule_min_scale      = 0.1f;
-    float aim_reticule_min_scale_dist = 10.0f;   // cm
+    // min_scale 0.001 = effectively fade out entirely inside min_scale_dist (the parser's floor;
+    // the old shipped cfg wrote 0 and the parse clamped it here, so this IS the shipped value).
+    float aim_reticule_min_scale      = 0.001f;
+    float aim_reticule_min_scale_dist = 70.0f;   // cm
     float aim_reticule_max_scale      = 1.0f;    // at aim_reticule_max_dist
 
     // Pull the reticule this many cm back along the ray from the surface it hit, so it sits just in
     // FRONT of the wall instead of intersecting it. Applied only when actually drawing at a hit:
     // if the surface is past aim_reticule_max_dist the marker parks at the cap exactly, not at
     // (cap - offset), because there is nothing there to clip into.
-    float aim_reticule_surface_off = 10.0f;   // cm
+    float aim_reticule_surface_off = 50.0f;   // cm
 
     // Collapse any of the game's own flat crosshairs that are not the one we host. Hosting removes
     // a widget from its parent, which is not the same as stopping the HUD building another -- and a
@@ -454,23 +570,23 @@ struct Config {
     //   div_deg 8: comfortably above the transient lag of a normal fast turn (the deadband alone is
     //     0.5 deg, and settling overshoot was measured in single digits), so ordinary play never
     //     trips it, while a loop that has actually stopped tracking diverges without bound.
-    //   div_ms 500: "a moment" -- comfortably longer than a whip turn, whose error resolves within
+    //   div_ms 600: "a moment" -- comfortably longer than a whip turn, whose error resolves within
     //     the loop's ~250 ms settle, so ordinary play never trips the guard; still short enough that
     //     a dead loop is caught before the player has fired more than a shot or two at the wrong
     //     place.
     float aim_reticule_div_deg = 8.0f;
-    float aim_reticule_div_ms  = 500.0f;
+    float aim_reticule_div_ms  = 600.0f;
 
     // First-order filter on the emitted reticule angles, as a TIME CONSTANT in ms (see ema_alpha).
     // 0 = off (raw). LOWER is snappier, higher is calmer -- the opposite sense to the old per-call
     // fraction this replaced, which is worth knowing if you are carrying tuning across.
-    float aim_reticule_smooth_ms = 26.0f;
+    float aim_reticule_smooth_ms = 0.0f;   // raw: with direct-drive aim there is no residual to hide
 
     // Same filter, but for the CONTROLLER-sourced path (src=1). Separate because that path is
     // already responsive and only needs the small, fast jitter of hand tremor and tracking noise
     // taken off -- not the heavier filtering the loop's residual calls for. Also motion-gated, so a
     // deliberate swing is never filtered.
-    float aim_reticule_smooth_ctrl_ms = 12.0f;
+    float aim_reticule_smooth_ctrl_ms = 8.0f;
 
     // MOTION GATE for the filter above. Smoothing exists to hide jitter, and jitter only matters
     // when the hand is near-still; during a fast swing the filter buys nothing and costs visible
@@ -506,7 +622,7 @@ struct Config {
     //                     uevrlib to be installed; with nothing listening this is a harmless no-op.
     //   aimreticulecube = the borrowed level prop. Diagnostic only: it removes set dressing from
     //                     the map and looks like a misplaced object. Default OFF.
-    bool  aim_reticule_lua  = true;
+    bool  aim_reticule_lua  = false;   // no consumer ships; formatting the event is pure waste
     bool  aim_reticule_cube = false;
 
     // Bump this number (any change) to re-capture the neutral where your hand is RIGHT NOW.
@@ -682,7 +798,10 @@ struct Config {
     //
     // Prerequisite (verified): SetRenderTranslation on this widget MOVES IT ON SCREEN. That
     // matters because on this title a property read-back alone proves nothing.
-    bool  hud_follow   = true;
+    //
+    // OFF: superseded by the world-space reticule (aim_widget / aim_mesh), which has no angular
+    // ceiling. Kept as a fallback lane.
+    bool  hud_follow   = false;
 
     // Pixels per unit of tan(angle): px = hud_k * tan(offset). Equivalent to (canvasWidth/2) /
     // tan(hFOV/2), but neither of those is knowable from here -- the UMG canvas size and the FOV
@@ -706,6 +825,244 @@ struct Config {
     bool  hud_project    = true;
     float hud_trim_yaw   = 0.0f;
     float hud_trim_pitch = 0.0f;
+
+    // ---- VIEW-CONSUMER FIXES (docs\CAMERA_CONSUMERS_FINDINGS.md) ---------------------------
+    // Aim steers the game camera; the view lock cancels that for the EYES only. The audio
+    // listener and the screen-space navpoint projection still read the game camera, so both are
+    // wrong by the aim-vs-view delta on foot -- and RIGHT in stick mode, where the lock stands
+    // down. Both fixes therefore engage only while the lock is actively cancelling, and RELEASE
+    // (one-shot) on stick mode, frontend, kill switch, or the key going to 0.
+
+    // Drive the audio listener to the rendered view via SetAudioListenerOverride (reflection).
+    // SETTLED 2026-08-12: resolves and applies on this build, but does NOT move what Wwise
+    // hears -- panning kept tracking the controller with it engaged (ear test). Kept because it
+    // is harmless and may cover UE-side (non-Wwise) sounds; the real lane is audio_comp below.
+    // ON as of 2026-08-16: this pair is the TESTED combination -- every session in which
+    // positional audio was confirmed working in-headset ran with BOTH set. audio_fix alone was
+    // measured NOT to move Wwise's spatialisation (audio_comp below is what does), so this one
+    // is believed inert here; it ships on regardless because deviating from the configuration
+    // that was actually validated is how "worked in testing" becomes "broken for players".
+    bool  audio_fix   = true;
+
+    // Drive the game's OWN listener -- the HaloAudioListenerComponent on BP_BlamCameraManager_C
+    // (found by the audiodump survey) -- to the rendered view, world-write per tick, authored
+    // relative transform restored on release. This is the lane the ear test points at.
+    // ON as of 2026-08-16 -- THE positional-audio fix, player-confirmed in headset (controller
+    // held still, head turning: panning follows the head). Releases cleanly in stick mode and
+    // restores the listener's authored transform, so the failure mode is "audio as shipped".
+    bool  audio_comp  = true;
+
+    // Shift the navpoint container widget(s) by where the rendered view's forward lands in the
+    // game's own projection -- first-order: exact at view centre, degrades off-centre, and
+    // off-screen edge-clamped markers will still misbehave. The exact fix (feeding the
+    // projection the rendered rotation at the source) is a recon item, not a tunable.
+    bool  nav_fix     = false;
+
+    // Correction source: 1 = project a view-forward probe through the game's own
+    // ProjectWorldToScreen (no constant to calibrate; same lane as hudproject above); 0 = the
+    // navk*tan(delta) fallback, which needs navk dialled in by observation.
+    bool  nav_project = true;
+
+    // Apply the shift at RENDER RATE from the stereo callback (yaw-only), with the tick probe
+    // demoted to calibrating the pixels-per-tan constant. The tick-rate writer lagged the
+    // per-frame delta and read as jitter (player-tested 2026-08-12); this is the fix. 0 = the
+    // old tick-rate direct write, kept for A/B.
+    bool  nav_render  = true;
+
+    // WORLD-SPACE NAVPOINTS -- the lane with no angular ceiling (the flat quad spans only
+    // ±20.7°×±12°, so no screen-space math can put a marker on an enemy 30° off-centre). One
+    // mesh marker per live navpoint, placed along the true world direction recovered by
+    // inverting the game's own projection. Supersedes the nav_fix shift while on (the flat
+    // layer stays game-native). See the nav_world_tick banner in Plugin.cpp.
+    // ON as of 2026-08-16 -- world-space waypoints ship enabled. Player-confirmed end to end:
+    // markers sit at the objective's TRUE world position (read from the game's own navpoint
+    // map, aim nowhere in the maths), wear the game's per-type art at per-kind sizes, draw
+    // close enough to survive geometry, track smoothly, and hide the flat layer while they are
+    // up. Every failure path hides the markers and restores the game's own HUD, so the worst
+    // case is stock behaviour rather than a wrong waypoint.
+    bool  nav_world       = true;
+    float nav_world_dist  = 1500.0f;   // legacy fixed distance (lanes 0/1 only; lane 2 clamps)
+
+    // ---- LANE 2 PLACEMENT: clamp + occlusion pull-in (the reticule's doctrine, applied to
+    // waypoints). The objective's TRUE position is known now, but drawing the marker AT it is
+    // not what a waypoint wants: a 300 m objective renders as a speck, and anything between
+    // you and it hides the marker completely -- and a waypoint you cannot see through terrain
+    // is not doing its job.
+    //
+    // So the marker is drawn along the true direction at min(true distance, nav_world_max),
+    // and if the trace finds geometry nearer than that, it is pulled in front of the surface
+    // by nav_world_surf. Angular size is held constant, so the player cannot tell where along
+    // the ray it actually sits -- only the direction, which is exact.
+    // 400 cm, not 2000. A single trace ray pulls the marker in front of what THAT RAY hits, but
+    // the marker is a quad with width and the world is not: a warthog beside the ray, a rock lip
+    // under it, terrain at the quad's edge all still occlude (field-reported: "doesn't block
+    // properly on a good amount of things"). Drawing CLOSE is what makes occlusion a non-problem
+    // -- at 4 m only geometry within 4 m can hide it, and constant angular size means the player
+    // cannot tell the difference. The trace then handles just the wall-in-your-face case.
+    float nav_world_max   = 400.0f;    // furthest the marker is ever drawn, cm
+    bool  nav_world_trace = true;      // pull in front of intervening geometry
+    // Stand-off from a traced surface: the LARGER of this and 20% of the hit distance. A fixed
+    // 60 cm is not enough at short range, where the quad's own corners reach past it.
+    float nav_world_surf  = 60.0f;
+    // 0.5 -- PLAYER-TUNED IN HEADSET (2026-08-16), superseding the 0.35 that superseded the
+    // original 0.12 (which made a ~0.7-degree dot and read as "no markers at all"). This is the
+    // base; the per-kind multipliers below scale off it.
+    float nav_world_scale = 0.5f;      // marker scale at 10 m, distance-normalised
+    // WHITE, i.e. no tint of our own -- only the exposure gain. The hosted art is the GAME'S
+    // navpoint icon and it already carries meaning in its colour (objective / hostile / ally);
+    // a gold tint multiplied that to green in the field and threw the semantics away. These
+    // remain as a knob for anyone who wants a deliberately different colour.
+    float nav_world_cr    = 1.0f;
+    float nav_world_cg    = 1.0f;
+    float nav_world_cb    = 1.0f;
+    int   nav_world_log   = 0;         // dev: per-marker inversion samples (2 = one-shot deep dump)
+
+    // The widget class each marker hosts. Empty = the consumer's default
+    // (WBP_NavpointObjective_C). The objective widget is authored for a HUD canvas -- it lays
+    // out an icon PLUS a distance/label block, so hosted standalone it frames badly (field:
+    // "still see the same text, cropping incorrect"). Live-tunable so the alternatives in
+    // /Game/UI/Hud/Navpoints/ can be A/B'd without a rebuild; the resolved desired size is
+    // logged at creation so the framing is measurable rather than guessed.
+    //   candidates: WBP_NavpointWidgetPlayer_C, WBP_TrackedTargetNavpoint_C,
+    //               WBP_NavpointWidgetBase_C, WBP_NavpointDestination_C
+    char  nav_world_class[96] = "";
+    // Draw size in pixels for the hosted quad; 0 = the consumer's default (128).
+    // NOTE: sizing from the widget's own desired size does NOT work -- a widget that never
+    // enters a viewport never lays out and reports (0,0) (measured 2026-08-16).
+    float nav_world_draw  = 0.0f;
+
+    // Re-derive each marker's transform in the STEREO CALLBACK from the current eye, instead of
+    // leaving the tick's transform in place for the intervening frames. At a 4 m draw distance
+    // the direction moves enough between 32 Hz ticks to read as jitter while walking. 0 restores
+    // tick-rate placement, for A/B.
+    bool  nav_world_render = true;
+
+    // Hide the game's FLAT navpoint layer while world markers are actually being placed. Two
+    // sets of waypoints for the same objectives is confusing, and the flat ones are the pair
+    // that is wrong in VR. Tied to markers actually existing, so any failure of the world lane
+    // restores the game's own markers rather than leaving the player with none.
+    bool  nav_hide_flat    = true;
+
+    // PER-KIND SIZE, as a multiplier of nav_world_scale. Kind is classified from the navpoint's
+    // own widget class name (objective / enemy / item), so these follow the game's own typing
+    // rather than anything we invent. Field-chosen values: an objective should read from across
+    // the level; a last-known-enemy mark is situational; a floor weapon should not compete with
+    // either. Anything unclassified keeps the base scale.
+    // ALL FOUR PLAYER-TUNED IN HEADSET (2026-08-16) and canonical as of that session.
+    float nav_size_obj     = 0.8f;
+    // 0.17, not the 0.5 I guessed: a partner marker wants to be findable, not prominent -- it
+    // is context, and at 0.5 it competed with the objective. Measured preference now, and the
+    // one my reasoning ("navigational, so bigger than enemy") got badly wrong.
+    float nav_size_ally    = 0.17f;
+    float nav_size_enemy   = 0.25f;   // 0.3 read slightly large in headset; trimmed 2026-08-16
+    float nav_size_item    = 0.2f;
+    // Anything the classifier does not recognise. NOT 1.0: an unknown navpoint drawing larger
+    // than every classified one is the wrong failure -- default it to the objective size and let
+    // the log's [kind=other] tell us a class name we should be classifying.
+    float nav_size_other   = 0.8f;
+
+    // PER-CLASS SIZE OVERRIDE, "ClassNameSubstring:mult" comma-separated. Beats the kind
+    // defaults above. Exists because the kind buckets are a GUESS at this game's taxonomy and
+    // one was already wrong in the field (WBP_NavpointDestination_C filed as an objective at
+    // x0.8 when it reads as an enemy mark) -- this addresses a class directly instead of
+    // arguing about which bucket it belongs in. Live, like everything else.
+    //   e.g. navsizeclass=WBP_NavpointDestination_C:0.3,Recon:0.4
+    char  nav_size_class[192] = "";
+
+    // Draw the marker this many cm SHORT of the thing it marks -- the reticule's surface offset,
+    // applied to the objective. Only bites when the objective is nearer than nav_world_max.
+    // 50 cm: PLAYER-TUNED IN HEADSET (2026-08-16). Enough that a marker on a close objective
+    // floats in front of it rather than inside it.
+    float nav_world_back   = 50.0f;
+
+    // WHICH image child to host when a navpoint layout carries more than one (an on-screen icon
+    // AND an off-screen arrow, say). 0 = the first found. The creation log prints how many were
+    // found, so a wrong-looking icon is a one-line config change rather than a rebuild.
+    int   nav_world_img    = 0;
+
+    // Host only the navpoint widget's IMAGE child (the icon) rather than the whole HUD layout,
+    // which carries a distance/label block and frames as cropped text on a square quad.
+    // 0 hosts the whole widget, for comparison.
+    bool  nav_world_icon  = true;
+
+    // Marker position source.
+    //   2 (DEFAULT) = the OBJECTIVE'S TRUE WORLD POSITION, via the manager chain
+    //       (NavpointInstances element -> +0x20/+0x28 -> FVector3f). Settled and live-verified
+    //       2026-08-16: constant while the player moves, ~1.5 m from where the player stood at
+    //       an objective they cannot approach closer than ~2 m. Aim is nowhere in the maths.
+    //   1 = the map's SCREEN positions inverted through the measured projection (aim-poisoned;
+    //       kept only for A/B).
+    //   0 = the widget-tree screen-inversion fallback (also aim-poisoned).
+    int   nav_world_src    = 2;
+    // Map element stride, bytes. Raw-iterated (MapProperty's element type is unreachable from
+    // the plugin API); every slot is validated, so a wrong stride skips rather than corrupts.
+    // 0x78 was measured from the anatomy dumps (screen-pos signature at absolute 0x50 and 0xC8).
+    int   nav_world_stride = 0x78;
+
+    // DEV: the waypoint-position hunt (see nav_scan_tick). 1/2/3 = scan for the CURRENT view
+    // position under a unit hypothesis (cm / Blam wu / m); 0 between steps re-arms the scanner.
+    int   nav_scan         = 0;
+
+    // Include the pitch term. Separately switchable because UEVR's DecoupledPitchUIAdjust
+    // already moves the whole UI quad for pitch -- if the two double-count, markers overshoot
+    // vertically and this is the knob that isolates it.
+    bool  nav_pitch   = true;
+
+    // Fallback pixels-per-tan constant (same meaning as hud_k) and the shift clamp.
+    float nav_k       = 1000.0f;
+    float nav_max     = 2000.0f;
+
+    // Class-name substring the widget scan collects as the navpoint layer. A guess from the pak
+    // inventory (/Game/UI/Hud/Navpoints/WBP_Navpoints) until a live session confirms; if the
+    // scan logs "0 resolved", menudump the live widget names and correct this, not the code.
+    //
+    // ⚠️ EMPTY ON PURPOSE -- the real default lives at the consumer (the widget scan falls back
+    // to "WBP_Navpoints" when this is empty), the aim_widget_class pattern. A string-literal
+    // initializer here DOES NOT SHIP: MSVC's constant-initialization of the global g_cfg drops
+    // char-array string defaults while keeping numeric ones (measured 2026-08-12 -- a host
+    // printing the global saw '', the same struct on the stack saw the literal). piv_socket and
+    // aim_mesh_path above have the same latent problem.
+    char  nav_class[64] = "";
+
+    // THE CULLING FIX (settled live 2026-08-12): re-apply
+    // `Blam.Synchronization.Relevancy.OutOfViewCullDistance culldist` per level. The distance
+    // term ALONE fixes aim-keyed body culling with no side effects; its visibility sibling is
+    // deliberately untouched (zeroing it froze ambient animation and the FP arms -- it wakes as
+    // well as culls). Default off until the perf soak; the cvar's stock value is unreadable on
+    // this build, so cullfix=0 only stops re-applying and a restart restores stock.
+    // SHIPPED ON (2026-08-15, user decision): aim-keyed body-culling is a shipped-game defect
+    // in VR (actors vanish when the hand points away) and the distance override is the only
+    // lever that cures it -- the head-keyed relevancy terms were REFUTED in testing (cullhead
+    // below). 40000 cm (400 m) was chosen as the shipping value: far enough to cure the
+    // observed culling, bounded enough to limit the perf cost of never distance-culling
+    // out-of-view actors. Release notes must carry this (behaviour change, tunable via
+    // cullfix/culldist). The wake side (creatures freezing when aimed away) is NOT fixed by
+    // this and continues post-release -- the whole named cvar surface was exhausted without
+    // effect (EffectThrottling.Enabled, DisableAnimationOnNoMotion, Throttling.Enabled).
+    bool  cull_fix    = true;
+    float cull_dist   = 40000.0f;
+
+    // REFUTED 2026-08-15, kept for the record: the UE-side relevancy terms (ByUEVisibility,
+    // CheckUELastRenderedTime) are registered cvars and the writes land, but restart-disciplined
+    // in-headset testing showed they govern NEITHER the cull (bodies still culled with
+    // cull_head alone from boot, baseline repro verified first) NOR the wake (birds aim-keyed
+    // in both directions, proven by the displacement method). Do not re-enable expecting either
+    // effect; the key stays only so a future build with different semantics can be probed
+    // without a code change.
+    bool  cull_head   = false;
+
+    // DEV: one-shot navpoint/CHUD recon dump (edge-triggered on value change) -- the waypoint
+    // lever-1 design input. Parsed always, acts only in HALO_VR_DEV builds.
+    int   nav_dump    = 0;
+
+    // DEV: one-shot Ak/Audio/Listener/Wwise object survey (edge-triggered on value change).
+    // Parsed always, acts only in HALO_VR_DEV builds.
+    int   audio_dump  = 0;
+
+    // DEV: on-change console-command harness, devexec1..devexec4 -- the rig for testing whether
+    // the Blam relevancy cvars accept writes (the culling hunt). Executed only in HALO_VR_DEV
+    // builds; there is no un-exec, clearing a key just stops it being re-applied.
+    char  dev_exec[4][192] = {};
 
     // ---- MENU INPUT ----------------------------------------------------------------------
     // Moving crouch to right-stick-down has a consequence that only shows up in menus: XInput B is
@@ -737,7 +1094,10 @@ struct Config {
     //
     // Unlike the HUD widget, this has no angular ceiling: the flat HUD quad spans only +/-20.7 deg
     // horizontally and +/-12.0 deg vertically, while aim offsets can reach 27 deg.
-    bool  aim_draw      = true;
+    //
+    // OFF: UE compiles DrawDebug* out of shipping builds, so on this game the call succeeds and
+    // draws nothing. The mesh + widget reticule below is the one that renders.
+    bool  aim_draw      = false;
     float aim_draw_r    = 5.0f;     // cm at the reticule's distance
     int   aim_draw_seg  = 16;
     // Must exceed the ~31 ms engine-tick interval or the sphere strobes; a little longer is
@@ -754,8 +1114,11 @@ struct Config {
     // This builds our OWN StaticMeshComponent via the plugin API's add_component_by_class, so it
     // borrows nothing from the level (the objection to the borrowed-prop marker) and lives in C++
     // where failures are loggable, unlike the Lua VM.
-    bool  aim_mesh      = true;
-    float aim_mesh_scale = 0.06f;   // Engine sphere is 100 cm radius, so this is ~6 cm
+    // OFF in the shipping configuration: the hosted-widget crosshair (aim_widget) with its
+    // gain/tint lift carries the reticule on its own, and the ring reads as clutter on top of
+    // it. Kept one switch away for players who prefer a geometric marker.
+    bool  aim_mesh      = false;
+    float aim_mesh_scale = 0.14f;
     // Unlit pass-through: an unlit material keeps the reticule readable against dark geometry, and
     // is what uevrlib uses for the same purpose.
     bool  aim_mesh_unlit = true;
@@ -763,6 +1126,15 @@ struct Config {
     // can be tinted. Engine materials are exhausted: BasicShapeMaterial has no colour parameter and
     // this build ships only a handful of others, none tintable.
     bool  mat_hunt      = false;
+    // One-shot census of the LIVE shield primitives (Elite shield meshes, cover/portable shields).
+    // The scope shows them as unshaded outlines and the leading explanation is that their look is
+    // produced in POST -- which the engine forces off for every scene-colour capture. That stays a
+    // theory until the primitives are read: bRenderCustomDepth set means a post-process pass keyed
+    // on custom depth/stencil is drawing them, which would confirm it outright, and the material's
+    // domain/blend mode says whether a capture-only stand-in could ever look right. Also reads the
+    // two scene-capture visibility flags, because bHiddenInSceneCapture being set on shields would
+    // be a far simpler explanation than any of this and has never been checked.
+    bool  shield_census = false;
     // TEST MODE: park the mesh reticule on the VIEW axis instead of the aim axis, so it sits dead
     // centre of the frame no matter where the aim points. Purely for automated measurement: a
     // quad that has drifted out of frame produces all-zero readings, indistinguishable from a
@@ -802,6 +1174,12 @@ struct Config {
     // Mesh asset for the reticule. Empty = pick automatically. A TORUS is wanted so the centre is
     // see-through and the ring does not hide what you are shooting -- but /Engine/BasicShapes ships
     // only Cube/Cone/Cylinder/Plane/Sphere, so the asset has to be found rather than assumed.
+    //
+    // ⚠️ EMPTY ON PURPOSE -- the intended default (the game's SM_Torus_ThinDense_01) leads the
+    // candidate list at the consumer in Reticule.cpp instead. A string literal here DOES NOT
+    // SHIP: MSVC's constant-initialization of the global g_cfg drops char-array string defaults
+    // (see nav_class below for the measurement) -- which means the shipped reticule had silently
+    // been falling back to the engine torus the whole time this literal sat here.
     char  aim_mesh_path[192] = "";
 
     // Raise UEVR's motion-controls inactivity timer at startup. Below its expiry UEVR declares the
@@ -831,7 +1209,7 @@ struct Config {
     // it is cooked (widget components build their own MID from it), and it renders on a primitive.
     // With SlateUI unset it renders BLACK -- not a broken material, but the material faithfully
     // sampling an unset texture. It must be given a real texture.
-    bool  aim_tex       = false;                    // use the textured-quad reticule
+    bool  aim_tex       = true;                     // use the textured-quad reticule
     char  aim_tex_path[192] = "";                   // Texture2D object path; empty = probe candidates
     // Image FILE to load as the reticule texture (PNG with alpha), via
     // UKismetRenderingLibrary::ImportFileAsTexture2D. Takes precedence over aimtexpath. This is the
@@ -844,11 +1222,12 @@ struct Config {
     // Which Widget3DPassThrough variant to build the MID from: masked | translucent | opaque.
     // Opaque ignores alpha entirely, which makes it the cleanest COLOUR test: if opaque shows the
     // tint and the others stay black, the blend path is what eats the colour.
-    char  aim_mesh_parent[192] = "masked";   // holds either a keyword or a full object path
-    float aim_tex_rot_p = 0.0f, aim_tex_rot_y = 0.0f, aim_tex_rot_r = 0.0f;
+    char  aim_mesh_parent[192] =             // holds either a keyword or a full object path
+        "/Game/FX/Meshes/Debug/Materials/MI_Arrow.MI_Arrow";
+    float aim_tex_rot_p = -90.0f, aim_tex_rot_y = 0.0f, aim_tex_rot_r = 0.0f;   // torus axis faces the viewer
     // Halo's own reticle blue, and the hit-marker red. Both live-tunable so they can be matched by
     // eye against the flat HUD rather than guessed from a screenshot.
-    float aim_mesh_cr = 0.35f, aim_mesh_cg = 0.80f, aim_mesh_cb = 1.00f;
+    float aim_mesh_cr = 0.20f, aim_mesh_cg = 0.60f, aim_mesh_cb = 1.00f;
 
     // ---- HIDE THE FLAT CROSSHAIR ----------------------------------------------------------
     // NOT via UI.HudState.EngineHidingCrosshair. Those states are set BY the engine and only read by
@@ -872,7 +1251,7 @@ struct Config {
     // the cost of having to face the widget at the view ourselves each tick.
     bool  aim_widget      = true;
     float aim_widget_draw = 256.0f;   // UMG draw size, square
-    float aim_widget_scale = 0.12f;   // world scale of that quad
+    float aim_widget_scale = 0.24f;   // world scale of that quad
     // If the crosshair renders mirrored or edge-on, the widget plane's facing convention is the
     // suspect; flip adds 180 deg of yaw.
     bool  aim_widget_flip = false;
@@ -886,18 +1265,22 @@ struct Config {
     // relying on BlendMode. UWidgetComponent picks its material from BlendMode AT CONSTRUCTION and
     // offers no way to rebuild afterwards, so overriding the material outright is the only route
     // that does not depend on winning a race with the constructor.
-    bool  aim_widget_mat  = true;
+    //
+    // OFF in the shipping configuration: the stock pass-through material plus aim_widget_gain /
+    // aim_widget_tint is what renders today; the MID swap is the fallback lane.
+    bool  aim_widget_mat  = false;
 
     // DIAGNOSTIC. Paints the widget quad's background opaque red. One run then distinguishes the
     // three remaining possibilities, which no amount of further reasoning can separate:
     //   red square + crosshair -> fixed
     //   red square, no crosshair -> the quad renders; the WIDGET CONTENT is not reaching the target
     //   nothing at all -> the quad itself is not rendering (transform, scale or material)
-    bool  aim_widget_bg   = true;
+    bool  aim_widget_bg   = false;   // diagnostic -- must never default on
 
     // Control test: host a NEWLY CREATED reticle instead of the HUD's live one. Loses the hit
     // marker, so it is a diagnostic only -- it isolates re-parenting from the component setup.
-    bool  aim_widget_fresh = true;
+    // OFF = host the HUD's live reticle, hit marker included, which is the shipping behaviour.
+    bool  aim_widget_fresh = false;
 
     // DIAGNOSTIC: host a DIFFERENT widget class by name substring. Separates two very different
     // causes of the black reticule that no amount of component tuning can tell apart:
@@ -912,7 +1295,9 @@ struct Config {
     // the semi-transparent pixels a thin antialiased crosshair is mostly made of -- a plausible
     // cause of it reading as black. Tint multiplies the sampled colour, so values above 1 can lift
     // it back without touching the widget itself.
-    float aim_widget_tint  = 1.0f;   // applied to R,G,B
+    // Shipped at the 1024 ceiling: gain and tint MULTIPLY, and this pair (tint 1024, gain 5) is
+    // the in-headset compromise between bright-beach readability and blowing out in shade.
+    float aim_widget_tint  = 1024.0f;   // applied to R,G,B
     float aim_widget_alpha = 1.0f;
     // EMISSIVE GAIN for the hosted crosshair. The stock Widget3D pass is unlit but its output is
     // still multiplied by the scene's PRE-EXPOSURE before tonemapping, so Halo's authored cyan
@@ -920,7 +1305,7 @@ struct Config {
     // back up. Live-tunable: raise if the crosshair still reads dark outdoors, lower if it blows
     // out or looks washed. Forced to 1.0 automatically when the exposure-compensated VREditor
     // material is in use (that one preserves authored colour at unit tint).
-    float aim_widget_gain  = 4.0f;
+    float aim_widget_gain  = 5.0f;
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
     float rig_clamp    = 0.0f;
@@ -942,16 +1327,26 @@ struct Config {
     //   1 = ABSOLUTE    -- roll and translation work, but the parent is ALSO rotated by the aim,
     //                      so the orientation is counted twice and the mesh drifts away from the
     //                      aim ray -- bullets stop following the barrel.
-    //   2 = PARENT-RELATIVE (default) -- inverse(parent) * controller. Correct composition like
+    //   2 = PARENT-RELATIVE -- inverse(parent) * controller. Correct composition like
     //                      mode 0, full roll and translation like mode 1.
-    int   rig_mode     = 2;
+    //   3 = DIRECT DRIVE (default) -- the weapon held rigidly by the controller, with the pivot
+    //                      MEASURED rather than folded into the mount. See the DIRECT-DRIVE RIG
+    //                      block below; pairs with aim_direct, and Ctrl+PageUp swaps both.
+    int   rig_mode     = 3;
 
     // Anchor hand TRANSLATION to the body rather than to a fixed point in the room.
     //
     // With a fixed neutral, the measured offset is the hand's distance from wherever it happened to
     // be at reference capture -- so walking across the room drags the gun to the clamp and holds it
-    // there. Subtracting the head position first leaves only hand-relative-to-body motion, which
+    // there. Subtracting a body reference first leaves only hand-relative-to-body motion, which
     // is what a held object should follow.
+    //
+    // THE BODY REFERENCE IS THE STANDING ORIGIN, NOT THE LIVE HEAD -- this is UEVR's own model for
+    // controller attachments and the head term genuinely cancels out of it (derivation at the use
+    // site in Plugin.cpp, from UObjectHook.cpp:1963-2054). Subtracting the live HMD is equivalent
+    // ONLY while the standing origin sits on your head, i.e. while a leash is holding it there,
+    // which is why the old head-relative form looked right until hmdleash=0 separated the two and
+    // left the arms parked at the pawn.
     bool  rig_body_anchor = true;
 
     // Sign of the room->game view-yaw correction:  1 = apply, -1 = apply negated, 0 = off.
@@ -981,8 +1376,9 @@ struct Config {
     // from the rendered view -- so without correction, stick-forward follows the AIM instead of
     // the player (movement direction depends on aim direction). The correction is the angle
     // between the two, applied to the stick vector before the game sees it.
-    // 1 = apply, -1 = negated, 0 = off.
-    float move_rot     = 1.0f;
+    // 1 = apply, -1 = negated, 0 = off. -1 is what measures correct on this title (in-headset
+    // A/B), hence the default.
+    float move_rot     = -1.0f;
 
     // Which view-yaw source feeds the movement frame:
     //   0 = UEVR's post-stereo rotation (unconfirmed whether it carries the head term)
@@ -1000,7 +1396,9 @@ struct Config {
     // against the previous poll's setpoint, an error that grows with hand rotation RATE. 3 has no
     // publication between the two terms and calls the same function the blamangles driver writes
     // the sim from. Kept as a separate rung so 2-vs-3 is a live A/B, not a rebuild.
-    int   move_live    = 1;
+    // Default 3 = the sampled rung, which is what shipped (older configs said 4; every test is
+    // >=, so 3 and 4 are the same behaviour).
+    int   move_live    = 3;
 
     // MOVERESID (dev builds only): log the movement-frame residual every N applications, 0 = off.
     //
@@ -1021,7 +1419,9 @@ struct Config {
     // Per-tick smoothing factor for the aim term in the movement frame (0 = off/instant, 1 = no
     // damping). At ~32 Hz, 0.25 settles in roughly a tenth of a second: enough to swallow the aim
     // actuator's slew and overshoot without movement feeling like it lags a deliberate turn.
-    float move_smooth  = 0.25f;
+    // Default 0: with movelive=3 the view and aim terms are sampled in the same call, so there is
+    // no inter-source lag left to damp and smoothing only adds walk-direction latency.
+    float move_smooth  = 0.0f;
 
     // Require is_hmd_active() before driving. Keep 1 for real use; 0 is for headless runs under
     // a null/simulated SteamVR driver, which reports the HMD inactive regardless.
@@ -1068,18 +1468,17 @@ struct Config {
     // behaviour as UEVR's "Right Thumbrest + Left Joystick", but on a deliberate input rather than
     // one a resting thumb triggers by accident.
     bool  map_dpad_shift  = true;
-    int   map_rstick_down = 0x0040;   // right stick DOWN  -> LTHUMB (crouch on this game's pad map)
+    int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it
     float map_dpad_dz     = 0.50f;    // left-stick deflection needed to count as a d-pad direction
 
     // Rebind a button to a different one. `mapfrom` is suppressed and `mapto` sent instead.
-    // BOTH DEFAULT TO 0 (disabled) UNTIL THE MAPPING IS MEASURED: how a headset's controllers
-    // land on XInput masks is not guessable (on Quest, XInput "X" is the RIGHT controller's B
-    // button -- reload), so a guessed mask silently unbinds a combat action. Set `mapbtnlog=1`,
-    // press each button, and read the measured masks out of the log before assigning anything
-    // here.
-    int   map_from        = 0;
-    int   map_to          = 0;
+    // Defaults are the MEASURED Quest mapping (never guess masks -- on Quest, XInput "X" is the
+    // RIGHT controller's B button, so a wrong mask silently unbinds a combat action; measure
+    // with `mapbtnlog=1` first): the physical crouch button (0x2000, vacated by the right-stick-
+    // down crouch above) becomes LB = equipment. 0/0 disables the rebind.
+    int   map_from        = 0x2000;
+    int   map_to          = 0x0100;
 
     // Log every XInput button-mask change, so the Quest->XInput mapping can be READ rather than
     // assumed. Off by default; it is noisy.
@@ -1215,6 +1614,60 @@ struct Config {
     // as "the mod feels bad".
     int   blam_angles = 1;
 
+    // FAULT INJECTION for the aim cascades -- a BITMASK. DEV BUILDS ONLY: every effect site is
+    // #if HALO_VR_DEV, so a release build ignores this entirely and it cannot reach a player.
+    //
+    // Both cascades exist so that a build whose addresses have moved still works. Every tier below
+    // the first therefore executes ONLY when something is broken, which makes them exactly the code
+    // that rots unnoticed -- the failure this whole lane was opened for. These bits force each
+    // branch to run on a HEALTHY machine so it can be proven rather than hoped for.
+    //
+    //   0x001  hook installs but is NEVER CALLED   -> watchdog fires, tier 2 (TEB scan) takes over.
+    //                                                 Tier 1 stays silent, so any result is
+    //                                                 unambiguously tier 2's doing.
+    //   0x002  getter signature finds NOTHING      -> falls back to the recorded RVA
+    //   0x004  getter signature finds TWO matches  -> ambiguous, must refuse and fall back
+    //   0x008  _tls_index lands at a DIFFERENT rva -> BUILD DIFFERS warning (does not disable)
+    //   0x010  scan result != recorded RVA         -> "getter MOVED" (checks the REPORT; the real
+    //                                                 address is still hooked, so this is safe)
+    //   0x020  TLS directory read FAILS            -> hard stop, aim write disabled loudly
+    //   0x040  announce every periodic re-resolve  -> makes a deliberately silent timer observable
+    //   0x080  corrupt AimDirect's cached hint     -> "cached offset did not validate", falls
+    //                                                 through to the full watch
+    //   0x100  AimDirect locate always fails       -> exercises the MAX_ATTEMPTS give-up
+    //   0x200  freeze the layout guard's candidate -> what a MOVED STRUCT OFFSET looks like: the
+    //                                                 watched field stops tracking the aim, so the
+    //                                                 guard must refuse to arm the sim write
+    //   0x400  starve AimDirect of evidence        -> no candidate ever validates AND no motion is
+    //                                                 credited, so each stage must TIME OUT rather
+    //                                                 than fail fast. Exercises the ~24 s per-stage
+    //                                                 timeout branches, which 0x100 does not: that
+    //                                                 one advances the attempt count by REJECTING
+    //                                                 candidates, a different path.
+    //
+    // Install-time bits (0x002..0x020) can be re-tested without rebooting: toggling `blamangles`
+    // 1 -> 0 -> 1 unregisters the hook and re-runs the entire install path.
+    //
+    // Pair 0x001 with blamangles=3 to test tier 2's WRITE without controllers -- that path stores a
+    // fixed (1.50, 0.30) before desired_aim_now() is consulted, so it needs no poses.
+    int   blam_fault = 0;
+
+    // LAYOUT GUARD for the control record's struct offsets. 1 = on (default), 0 = off.
+    //
+    // SHIPS ENABLED, and unlike the fault mask this one is in every build. The address cascade
+    // protects the CODE address; nothing in it checks that yaw is still at +0x94. A field that moved
+    // four bytes passes the signature check, the record resolve, IsBadWritePtr, and a read-back of
+    // our own write -- and we would then stamp aim into whatever now lives there, every frame.
+    //
+    // So the write is held off until the record's yaw has been observed tracking the game's own aim
+    // (about 25 degrees of look-around while neither of our drivers is writing). Costs a short
+    // unarmed window at the start of a level; the local view is unaffected because aimdirect owns
+    // that independently.
+    //
+    // Set 0 if the guard ever misjudges a build -- it is the A/B for its own behaviour, and it is
+    // the one switch that turns a false positive from "no sim aim" back into "sim aim as before".
+    int   blam_layout = 1;
+
     // BLAMCTL REPORT rate, in writes between log lines. 0 = off. DEV BUILDS ONLY -- the field is
     // parsed in a release build but nothing reads it, because the report lives behind HALO_VR_DEV.
     //
@@ -1286,8 +1739,8 @@ struct Config {
     //
     // 363.6 was measured at LookSensitivity90 / deadzone 0 / acceleration min. A different
     // sensitivity wants its own value -- run Scripts\AimTune\Measure-PlantCurve.ps1 and take the
-    // rate at deflection 1.0. Left at 0 the loop estimates it from the adaptive gain, which is
-    // serviceable but coarse.
+    // rate at deflection 1.0. The measured value is the default; set 0 to fall back to estimating
+    // it live from the adaptive gain, which is serviceable but coarse.
     // DEADBEAT setpoint. 0 = off (aim_decel / aim_tau_s pace the approach as before).
     // >0 = ON, and the value is the per-tick SAFETY FACTOR: 0.85 closes 85% of the remaining error
     // every tick, 1.0 is true deadbeat. Justified only because the plant measured MEMORYLESS
@@ -1307,7 +1760,7 @@ struct Config {
     // target latency, NOT convergence speed, which is the trade tau got wrong.
     float aim_target_smooth_ms = 0.0f;
 
-    float plant_full_dps = 0.0f;
+    float plant_full_dps = 363.6f;
 
     // AIM TIME CONSTANT, seconds. 0 = use the legacy linear error-to-deflection map.
     //
@@ -1485,10 +1938,204 @@ struct Config {
     // Live-switchable so it can be A/B'd in the headset without a rebuild, and so it is a kill
     // switch if the shell ever turns out to be wrong for a given pawn.
     bool  shell_drive     = true;
+
+    // ---- WEAPON SCOPE ------------------------------------------------------------------------
+    // Left trigger toggles a magnified view on a floating pane; Halo's native zoom stays
+    // suppressed (it hides the viewmodel and bends the aim plant -- see Scope.hpp). All of these
+    // are live-tunable; the capture only runs while the pane is visible.
+    bool  scope_enabled = true;    // master. Also eats LT on foot so Blam never sees it.
+    // How the pane is mounted:
+    //   1 = RELATIVE to the rig (default). scopedist/right/up are literally the pane's offset
+    //       from the controller -- forward / right / up in rig space -- and the facing trims are
+    //       a relative rotation. The two are independent, so a rotation cannot move the pane.
+    //   0 = the original aim-ray world placement, anchored once. Kept as the escape hatch: it
+    //       positions against the RAY rather than the hand, which is a different (and, if a rig's
+    //       local axes are unusual, possibly more predictable) mental model.
+    int   scope_mount   = 1;
+    // Pane shape: 0 = square (Engine Plane), 1 = round lens (Engine Cylinder squashed flat, the
+    // uevrlib ocular-lens trick). Round is the scope look; square shows the most image per pixel.
+    // Live: changing it rebuilds the pane component.
+    int   scope_shape   = 1;
+    // SCOPE PLACEMENT CALIBRATION. Hold this key: the pane freezes where it is in the world, so
+    // you can move your weapon hand around it until the pane sits where you want it relative to
+    // the gun; release captures that offset. Same shape as the End pose-match, and it removes the
+    // part that is genuinely hard to hand-tune -- the facing.
+    // 0x2E = DELETE. Chosen over HOME because Ctrl+HOME is the kill switch: a stray Ctrl there
+    // would stand the aim driver down mid-calibration.
+    int   scope_calib_key = 0x2E;
+    // True once a scope calibration has been captured, so the calib file only carries a scope
+    // block when the gesture actually produced one (same rule as aim_off_valid).
+    bool  scope_calib_valid = false;
+    float scope_zoom    = 16.0f;    // magnification; pane lens = scope_base_fov / this.
+                                    // 16 is the canonical in-headset fit for the default lens
+                                    // size -- effectiveness scales with the pane, so this sits
+                                    // far above Halo's flat-screen 2x/8x on purpose.
+    int   scope_rt_size = 1024;     // render-target edge in px; rebuilt live on change
+    int   scope_div     = 1;       // capture every Nth tick (~32 Hz / N) -- the perf valve
+    float scope_dist    = 63.57f;   // pane distance along the aim ray, cm (headset-fitted)
+    // Where the CAPTURE CAMERA sits along the ray, cm from the origin. It must be FURTHER out
+    // than the pane (scope_dist) or it looks straight at the back of the pane and captures a
+    // black surface -- the first headset pass hit exactly that. The pane is additionally marked
+    // hidden-in-scene-capture in code, so this is the comfort margin, not the only guard.
+    // Cost of pushing it out: the view origin leaves the collision-safe camera origin, so very
+    // close cover can be seen "through" -- keep the margin modest.
+    float scope_cam_dist = 90.0f;
+    float scope_size    = 11.84f;   // pane width, cm (the Engine Plane is 100 cm across)
+    float scope_right   = 12.92f;    // pane offset right of the ray, cm
+    float scope_up      = -0.32f;   // pane offset above the ray, cm (keeps the reticule visible)
+    float scope_bright  = 1.0f;    // pane tint multiplier (tonemap compensation headroom)
+    // Pane facing trims, deg. rot_p = -90 turns the Plane's +Z face toward the viewer (same
+    // convention as aimtexrotp). These move the PANE GEOMETRY only -- the first headset pass
+    // confirmed the pane transform is already right, so they ship neutral. The sideways-image
+    // fix lives in scope_cam_roll below, at the content layer where the defect is.
+    // FITTED IN A HEADSET (2026-08-13), round lens. The earlier -90/0/0 pointed the disc's FRONT
+    // face away from the player: the visible side was its back, so the image was mirrored and
+    // "moved opposite to my aim". +90 with a 180 roll turns the front face to the eye.
+    // PLACEMENT BELOW IS A REAL DELETE-KEY CALIBRATION captured in headset 2026-08-16 and
+    // promoted to canonical: mount=1 rig-relative dist/right/up plus these facing trims.
+    // They are a matched SET -- a calibration is one fit, so changing one value alone
+    // (as the old neutral 90/0/180 trims invited) puts the pane back out of alignment.
+    float scope_rot_p   = 79.72f;
+    float scope_rot_y   = 173.83f;
+    float scope_rot_r   = 176.68f;
+    // CONTENT rotation: roll of the capture camera about the aim ray, deg. The first headset
+    // pass (and the sim screenshots, in hindsight) showed the pane displaying its texture
+    // rotated 90 deg clockwise while the pane itself sat correctly -- so the counter-rotation
+    // must be applied to what gets WRITTEN, not to the pane: rolling the capture keeps the RT
+    // upright for ANY consumer, and a future non-square pane cannot inherit a sideways spin
+    // the way a pane-yaw "fix" would have forced. If a setup still reads rotated, flip the
+    // sign (or +/-180) live -- ~2 s reload.
+    float scope_cam_roll = -90.0f;   // headset-fitted 2026-08-13, round lens
+    // ROLL LOCK. 1 = the captured image rolls WITH the lens, as a real scope does: cant the
+    // weapon and the picture stays square in the tube instead of spinning inside it. Measured as
+    // a DELTA from the pane's roll when it was placed, so scope_cam_roll keeps meaning exactly
+    // what it did and an existing trim survives this change.
+    // It also decouples calibration from wrist roll: calibrating with the weapon slightly canted
+    // used to bake that cant into the image, because the image was pinned to the WORLD while the
+    // lens was pinned to the hand.
+    // 0 = the old world-pinned image, kept as an escape hatch.
+    // OFF as of 2026-08-16 (player decision): the roll lock "is not behaving right" in headset,
+    // so it ships disabled and the image stays world-pinned as it did before the feature. Set 1
+    // to re-enable. NOTE the value is a FLAG, 0 or 1 -- a live config was found carrying -53,
+    // which reads as simply "on" and was almost certainly meant for scopecamroll (an angle).
+    int   scope_cam_lock = 0;
+    // Fixed exposure for the capture, applied whenever a POST-PROCESSED source is selected
+    // (scope_capture_src 8 or 9). Those sources are what carry bloom -- and therefore the shield
+    // shimmer and tracer glow -- but they also enable the capture's own auto-exposure, which
+    // measured in-headset as the pane fading to solid black. 0 disables the pin (auto-exposure
+    // back on) for anyone who wants to see that behaviour.
+    float scope_exposure = 1.0f;
+    // Force an anti-aliasing method on the CAPTURE only. -1 = leave the game's choice alone
+    // (default). 0 None, 1 FXAA, 2 TAA, 3 MSAA, 4 TSR. Exists to test whether the black output
+    // from post-processed capture sources is a temporal-upscaler interaction; a non-temporal
+    // method is the probe. Applied on change, alongside the capture source.
+    int   scope_aa = -1;
+    float scope_thresh  = 0.55f;   // LT deflection that fires the toggle (release at half)
+
+    // Research knobs (catalogued in halo_vr_dev.cfg, not shipped in halo_vr.cfg):
+    float scope_base_fov    = 70.0f; // pane lens at 1x, deg horizontal
+    int   scope_capture_src = 0;     // ESceneCaptureSource byte; 0 = SCS_SceneColorHDR (linear,
+                                     // exposure-free -- pairs with the HDR RT + emissive lens;
+                                     // 2 = FinalColorLDR was measured orders-of-magnitude dark
+                                     // here, the capture's own eye adaptation never converging)
+    bool  scope_eat_lt      = true;  // 0 = pass LT through to Blam as well (native-zoom research)
+    // Where the CAPTURE CAMERA gets its motion from, once attached to the rig:
+    //   0 = re-anchor to the live aim ray every tick (default). The image looks exactly down the
+    //       shot line, so the in-pane reticle stays truthful; any residual aim-signal jitter is
+    //       visible inside the pane, magnified by the lens.
+    //   1 = anchor once and stay rigid, exactly like the pane. Smoothest possible image (pure
+    //       controller motion), at the cost of the image drifting off the true shot line as the
+    //       aim-vs-rig delta changes.
+    // The PANE is rigid in both modes; this only decides what the pane is showing.
+    int   scope_cam_track   = 0;
+    bool  scope_dev_ray     = false; // [dev build] synthesize the scope ray from the rendered view
+                                     // -- SimVR-only verification; the null driver never validates
+                                     // the controller aim pose, which parks the real ray source
+    bool  scope_force       = false; // hold the pane ON without any trigger input. Harness/support
+                                     // diagnostic: under SimVR no input path can reach the LT
+                                     // hook at all, and this is the config-file automation channel
+    int   scope_cap_mode    = 0;     // 0 = manual CaptureScene every scopediv ticks (the perf
+                                     // valve); 1 = bCaptureEveryFrame while the pane is shown
+                                     // (render-rate captures -- costlier, diagnosis + smoothness A/B)
+    // ---- [dev build] TEST OBJECT: does a TRANSLUCENT primitive reach the capture at all? ------
+    // The scope is missing shields, cover shields, tracers and the ocean. Every explanation for
+    // that is a guess until a primitive whose blend mode WE choose is put in front of the capture
+    // camera and looked for in the pane. This spawns exactly that -- a cube parented to the
+    // capture, so it is always dead ahead of it -- and the mode picks the material family:
+    //   0 = off
+    //   1 = Widget3DPassThrough_TRANSLUCENT (authored BLEND_Translucent)
+    //   2 = Widget3DPassThrough_OPAQUE      (the CONTROL for 1: same family, opaque)
+    //   3 = EmissiveMeshMaterial at BLEND_Additive -- its AUTHORED mode (verified in the engine
+    //       asset). Additive is in the translucency family and is what plasma/shield/tracer
+    //       effects use, so it probes the actual question more directly than plain translucent.
+    //   4 = EmissiveMeshMaterial forced BLEND_Opaque (the CONTROL for 3 -- the pane's own recipe)
+    // MEASURED: forcing a blend mode at runtime does NOT recompile shaders. Writing
+    // BLEND_Translucent onto EmissiveMeshMaterial (authored ADDITIVE) put the cube in the
+    // translucent pass with a shader that writes no alpha, so it vanished from the MAIN VIEW too
+    // and measured nothing. Only blend modes whose cooked shader exists are testable. The pane's
+    // forced-Opaque write works for the opposite reason: an alpha-blended shader drawn in the
+    // opaque pass just ignores the alpha it produces.
+    // 1 vs 2 and 3 vs 4 are the A/B. If the opaque cube shows in the pane and the translucent one
+    // does not, translucency is being dropped from the capture; if BOTH show, translucency is
+    // fine and the missing effects are missing for some other reason.
+    int   scope_test_obj    = 0;
+    float scope_test_dist   = 300.0f;  // cm ahead of the capture camera (its local +X)
+    float scope_test_size   = 0.5f;    // uniform scale on the 100 cm engine Cube
+
+    // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------
+    // The whole scope-FX question reduces to one unanswered thing: scene-colour sources render but
+    // have post-processing FORCED OFF by the engine (SceneCaptureRendering.cpp:853), so anything
+    // whose look is produced in post never arrives; final-colour sources keep post but come out
+    // SOLID BLACK on this title. These are per-capture properties that plausibly cause that black
+    // and have never been tested. Each was verified as a real Blueprint-accessible UPROPERTY in
+    // the UE 5.5 source before being wired here, so a null result means "not the cause" rather
+    // than "the write went nowhere".
+    //
+    // bAlwaysPersistRenderingState. We force it TRUE so exposure/TAA state survives between manual
+    // captures and a low-rate scope holds a steady image. But that persistent state IS a temporal
+    // history, and the reported symptom -- "an image I can't quite recognize, then fades to
+    // complete black" -- is the signature of a history converging to black, not of a frame that
+    // renders black. 0 drops it. Costs the steady image: a diagnosis knob, not a comfort one.
+    int   scope_persist    = 1;
+    // bCameraCutThisFrame, written EVERY tick. The renderer resets it to false after each capture
+    // (SceneCaptureRendering.cpp:1410), so a one-shot write measures nothing. A camera cut
+    // invalidates the temporal history every frame -- the same hypothesis as scopepersist from the
+    // other side, and the side that KEEPS the persistent state the exposure pin needs.
+    int   scope_cam_cut    = 0;
+    // PostProcessBlendWeight. At 0 the capture's own PostProcessSettings do not blend in at all,
+    // so if the black survives, nothing WE wrote into those settings caused it -- which is the
+    // control the exposure pin never had. <0 leaves the engine default untouched.
+    float scope_pp_weight  = -1.0f;
+
+    // ---- DEPTH OF FIELD ON THE CAPTURE: TRIED, DID NOT WORK ----------------------------------
+    // MEASURED 2026-08-16: applied cleanly ("capture DOF -- 2 of 2 fields applied") with
+    // scopesrc=8 and scopepersist=0, and the shields' colour STILL did not appear. Kept because
+    // the write works and the lever may be useful for something else; it is NOT the fix.
+    //
+    // The reasoning that produced it was WRONG, recorded here so it is not rebuilt. The shield
+    // census reports the material's TranslucencyPass as 1, which was decoded as
+    // TPT_TranslucencyAfterDOFModulate -- a value of ETranslucencyPass, the RENDERER'S INTERNAL
+    // enum. The field is EMaterialTranslucencyPass (Material.h:140), whose members are
+    // MTP_BeforeDOF=0, MTP_AfterDOF=1, MTP_AfterMotionBlur=2. So 1 means plain AFTER DOF, and the
+    // separate MODULATE buffer that the whole argument rested on is not involved at all -- the
+    // modulate pass is not selectable from a material, it is derived from BLEND_Modulate, and this
+    // material is Additive. Decoding a reflected byte against a same-named enum from a different
+    // header is an easy and completely silent mistake.
+    //
+    // ONLY MEANINGFUL WITH A POST-PROCESSED SOURCE (scopesrc=8): a scene-colour capture skips the
+    // post chain entirely, so the DOF pass cannot run there whatever these say. A HIGH f-stop runs
+    // the pass with a tiny aperture, so the image stays essentially in focus.
+    float scope_dof        = 0.0f;        // f-stop; 0 = leave DOF alone
+    float scope_dof_focus  = 100000.0f;   // focal distance, cm -- far, so nothing blurs
 };
 
 extern Config g_cfg;
 extern char     g_cfg_path[MAX_PATH];
+// The user's own settings (halo_vr_user.cfg) -- never shipped, survives updates. The catalog of
+// available keys is the shipped halo_vr_user_reference.txt, which is documentation, not parsed.
+extern char     g_user_cfg_path[MAX_PATH];
+// Dev/troubleshooting overrides (halo_vr_dev.cfg) -- shipped all-commented, beats the user file.
+extern char     g_dev_cfg_path[MAX_PATH];
 extern char     g_calib_path[MAX_PATH];
 extern char     g_calib_path_right[MAX_PATH];
 // Result of select_calib_for_hand(). Returned rather than logged because this file is kept free
@@ -1505,5 +2152,41 @@ void write_default_config();
 bool parse_config_file(const char* path);
 void load_config();
 void write_calib_file();
+// Create the halo_vr_user.cfg template if absent (exclusive create; never touches an existing file).
+void ensure_user_cfg_template();
+// TRUE if the file exists and contains at least one active (uncommented) key line.
+bool config_file_has_uncommented_keys(const char* path);
+
+// Keyboard gestures poll GetAsyncKeyState, which reads GLOBAL key state -- keys typed into ANY
+// app register, game focused or not. On a machine that keeps working while the game runs, End /
+// Page Down / Delete / Ctrl+Home / Ctrl+PgUp are ordinary editing keys, and a background session
+// silently ran calibrations on them and toggled the kill switch ("something keeps recreating my
+// calibration file", 2026-08-15: four garbage aim calibrations in ten seconds of desktop
+// scrolling). Every keyboard gesture therefore requires the game to OWN THE FOREGROUND WINDOW.
+// The in-headset workflow is unaffected -- a played game is the foreground window -- and the
+// menu-armed calibration path never needed the keyboard at all.
+inline bool game_window_focused() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid != 0 && pid == GetCurrentProcessId();
+}
+
+// ---- In-game settings-menu bridge (see Config.cpp). The menu script's file access is
+// sandboxed to <profile>\data\, so the plugin mirrors the catalogs + live files there and
+// applies the script's command file back into the real cfg files on the ~2 s poll.
+extern char g_data_dir[MAX_PATH];
+extern char g_user_ref_path[MAX_PATH];
+extern char g_menu_cmd_path[MAX_PATH];
+extern char g_user_mirror_path[MAX_PATH];
+extern char g_ref_mirror_path[MAX_PATH];
+extern char g_dev_mirror_path[MAX_PATH];
+extern char g_calib_mirror_path[MAX_PATH];
+extern char g_status_path[MAX_PATH];
+// Menu-armed calibration mode: 0 = off, 1 = pose-match armed, 2 = aim-ray armed. Written by the
+// bridge (calib:pose / calib:aim / calib:off commands) and by the trigger edges in Plugin.cpp;
+// the update() gesture block treats an armed mode as a held calibration key.
+extern std::atomic<int> g_menu_calib_mode;
+// Consume menu commands + refresh the data\ mirrors. Returns how many commands were applied.
+int menu_bridge_tick();
 
 } // namespace halo

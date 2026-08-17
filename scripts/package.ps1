@@ -35,13 +35,48 @@ Copy-Item (Join-Path $repo 'build\halo_vr.dll') (Join-Path $stage 'plugins\') -F
 # broken. The plugin degrades quietly in exactly that case (a missing cutscene_hint.png just turns
 # the hint off), so nothing downstream would report it either. Assert the payload instead: CI fails
 # here, before a release exists, rather than a user finding out.
-$required = @('config.txt', 'halo_vr.cfg', 'cvars_data.txt', 'user_script.txt',
+$required = @('config.txt', 'halo_vr.cfg', 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt',
+              'cvars_data.txt', 'user_script.txt',
               'reticle_ring.png', 'cutscene_hint.png',
+              'scripts\halo_vr_settings.lua',
               'plugins\halo_vr.dll', 'plugins\CutsceneDetectionPlugin.dll')
 $missing = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
 if ($missing.Count -gt 0) {
     throw ("Release payload incomplete -- missing: {0}`n" -f ($missing -join ', ')) +
           "If the file exists locally, it is probably UNTRACKED: commit it, or CI ships without it."
+}
+
+# The inverse checks. USER-OWNED files must never ship: the zip OVERWRITES whatever it contains
+# on upgrade (UEVR's Import Config merges file-by-file), so shipping one would clobber every
+# player's kept settings -- their absence from the zip is exactly what makes settings survive
+# updates and "delete halo_vr_user.cfg" mean "back to shipped defaults".
+$forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg') |
+    Where-Object { Test-Path (Join-Path $stage $_) }
+if ($forbidden.Count -gt 0) {
+    throw ("Release payload contains user-owned files -- must not ship: {0}" -f ($forbidden -join ', '))
+}
+
+# Both shipped catalogs must be INERT -- every line commented. The dev catalog is parsed after
+# halo_vr_user.cfg, so one uncommented key would silently override every player's settings; the
+# reference catalog is the menu players copy lines from verbatim, so it must document every key
+# in its inert form.
+foreach ($catalog in 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt') {
+    if (Select-String -Path (Join-Path $stage $catalog) -Pattern '^[A-Za-z0-9_]+=' -Quiet) {
+        throw "$catalog in the payload has UNCOMMENTED keys -- shipped catalogs must be inert."
+    }
+}
+
+# And the shipped halo_vr.cfg may carry ONLY the calibration data. Settings defaults live in the
+# compiled plugin (Config.hpp), so any other active key here would be a shipped override nobody
+# decided on -- and one an update would silently clobber.
+$calibKeys = @('grip','gripyaw','griproll','calibver','offx','offy','offz','aimoffyaw','aimoffpitch',
+               'aimcalibver','dirgrip','dirgripyaw','dirgriproll','diroffx','diroffy','diroffz',
+               'pivauto','pivx','pivy','pivz','calibrelative')
+$cfgActive = @(Select-String -Path (Join-Path $stage 'halo_vr.cfg') -Pattern '^([A-Za-z0-9_]+)=' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() })
+$stray = @($cfgActive | Where-Object { $calibKeys -notcontains $_ })
+if ($stray.Count -gt 0) {
+    throw ("halo_vr.cfg in the payload has non-calibration keys (settings belong in code + the catalogs): {0}" -f ($stray -join ', '))
 }
 
 $zip = Join-Path $repo 'build\HaloCampaignEvolved.zip'
