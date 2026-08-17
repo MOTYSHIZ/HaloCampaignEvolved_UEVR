@@ -346,6 +346,44 @@ CoVariation::Verdict CoVariation::sample(double candidate, double reference) {
         : Verdict::Mismatch;
 }
 
+// ------------------------------------------------------------------ value agreement
+
+void ValueAgreement::reset() {
+    m_have_last  = false;
+    m_ref_motion = 0.0;
+    m_worst      = 0.0;
+    m_samples    = 0;
+    m_strikes    = 0;
+}
+
+ValueAgreement::Verdict ValueAgreement::sample(double candidate, double reference) {
+    const double err = wrapped_delta(candidate, reference, m_cfg.wrap);
+    if (err > m_worst) m_worst = err;
+
+    if (m_have_last) m_ref_motion += wrapped_delta(reference, m_last_ref, m_cfg.wrap);
+    m_last_ref  = reference;
+    m_have_last = true;
+    ++m_samples;
+
+    // Disagreement is decided on a RUN, not a single sample: the two values are read a moment apart,
+    // so one of them can legitimately be a tick stale mid-swing. A real wrong-field reads wrong on
+    // every sample, so a short run separates them without needing a wider tolerance.
+    if (err > m_cfg.tolerance) {
+        ++m_strikes;
+        if (m_strikes > m_worst_run) m_worst_run = m_strikes;
+        if (m_strikes >= m_cfg.strikes_to_fail) return Verdict::Mismatch;
+    } else {
+        m_strikes = 0;
+    }
+
+    if (m_samples < m_cfg.min_samples) return Verdict::Pending;
+    if (m_ref_motion < m_cfg.reference_motion_required) {
+        return (m_samples >= m_cfg.max_samples) ? Verdict::Inconclusive : Verdict::Pending;
+    }
+    // Enough samples, enough movement, and the last run of samples agreed.
+    return (m_strikes == 0) ? Verdict::Match : Verdict::Pending;
+}
+
 // ------------------------------------------------------------------ tier reporting
 
 bool TierReporter::changed(uintptr_t address, const char* tier) {

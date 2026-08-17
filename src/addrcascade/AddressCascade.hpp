@@ -240,6 +240,73 @@ private:
     uint32_t m_samples     = 0;
 };
 
+// ------------------------------------------------------------------ validating a DATA offset, harder
+//
+// CoVariation above asks whether the field MOVES when the quantity moves. That catches a field that
+// has gone dead, and it is the right tool when you have no way to predict the value. When you CAN
+// predict it, it is far too weak, and weak in the direction that matters:
+//
+//   the likeliest consequence of a target patch is not that your offset lands on something dead --
+//   it is that a field was inserted and your offset now lands on the NEIGHBOURING field of the same
+//   hot struct, which moves just as much as the one you wanted.
+//
+// So when the candidate should EQUAL a reference you already have (after whatever transform relates
+// them), test that instead. Measured on a real target: the correct field agreed with its reference
+// to 0.01 degrees, while the neighbouring field 4 bytes away differed by 139. That is not a
+// marginal signal.
+//
+// Feed it values in the SAME convention -- do the negation/scaling/unit conversion before calling.
+// Sample while you are NOT driving the candidate, for the same reason as CoVariation: if you are
+// writing it, you are testing your own arithmetic.
+class ValueAgreement {
+public:
+    struct Config {
+        // Max |candidate - reference| still considered agreement. Set it from the observed healthy
+        // error with generous margin, NOT from what feels tidy: the failure it must separate from
+        // is a different field entirely, which is usually wrong by tens or hundreds of units.
+        double tolerance = 5.0;
+        // The window must see this much reference movement before a Match is credited. A static
+        // window can agree by coincidence -- two fields that happen to hold the same value while
+        // nothing is happening prove nothing. Set 0 for a quantity that legitimately sits still.
+        double reference_motion_required = 10.0;
+        uint32_t min_samples = 16;
+        uint32_t max_samples = 600;
+        // Consecutive out-of-tolerance samples before declaring Mismatch. One bad sample is a
+        // transient (a frame where the two are read a tick apart); several in a row is a fact.
+        uint32_t strikes_to_fail = 8;
+        double   wrap = 0.0;   // 360.0 for degrees; 0 for linear quantities
+    };
+
+    enum class Verdict { Pending, Match, Mismatch, Inconclusive };
+
+    explicit ValueAgreement(const Config& cfg) : m_cfg(cfg) {}
+
+    Verdict sample(double candidate, double reference);
+    void    reset();
+
+    double   worst_error() const      { return m_worst; }
+    double   reference_motion() const { return m_ref_motion; }
+    uint32_t samples() const          { return m_samples; }
+
+    // THE NUMBER TO TUNE strikes_to_fail AGAINST -- longest RUN of consecutive out-of-tolerance
+    // samples seen. Measured on a real target, the peak error was useless as a discriminator:
+    // healthy play spiked to 56 deg while a genuinely wrong field sat at 82-94, which is not enough
+    // separation to trust. Duration separates them cleanly instead, because a wrong field disagrees
+    // on EVERY sample indefinitely while a healthy excursion is a transient. Report this from a
+    // healthy session, then set strikes_to_fail well above what you saw.
+    uint32_t worst_run() const        { return m_worst_run; }
+
+private:
+    Config   m_cfg{};
+    bool     m_have_last  = false;
+    double   m_last_ref   = 0.0;
+    double   m_ref_motion = 0.0;
+    double   m_worst      = 0.0;
+    uint32_t m_samples    = 0;
+    uint32_t m_strikes    = 0;
+    uint32_t m_worst_run  = 0;
+};
+
 // ------------------------------------------------------------------ reporting which rung won
 //
 // A cascade that does not say HOW it resolved will happily run a whole population on its fallback
