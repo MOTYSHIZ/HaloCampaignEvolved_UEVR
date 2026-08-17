@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 using namespace uevr;
 
@@ -309,18 +310,36 @@ void audio_comp_tick(bool engaged, uint32_t tick,
     if (comp == nullptr) {
         // Sweep for the live instance, throttled exactly like the reticle scan -- and only while
         // unresolved, so the steady state costs one tracked-pointer check per tick.
+        //
+        // BUT A THROTTLE ALONE IS NOT A TERMINATION CONDITION. If HaloAudioListener never resolves
+        // -- a rename in a game patch, or a mode that has no listener -- "only while unresolved"
+        // means forever, and this becomes a full ~296k sweep every ~3.75 s for the whole session.
+        // So failure is counted and eventually gives up: losing the audio fix is a far better
+        // outcome than a permanent periodic stall, and the log says which happened.
+        constexpr int kMaxFailures = 12;
+        static int s_failures = 0;
+        if (s_failures >= kMaxFailures) return;
+
         if (tick - g_ak_scan_tick < 120) return;
         g_ak_scan_tick = tick;
         auto* arr = API::get()->get_uobject_array();
         if (arr == nullptr) return;
+
+        // Memoised per sweep, for the reason given at the reticle_rescan and resolve_rig sweeps:
+        // class_name_of returns a wstring by value, so the bare form is ~296k allocations here.
+        std::unordered_map<const void*, std::wstring> name_of_class;
+
         const int32_t n = arr->get_object_count();
         for (int32_t i = 0; i < n; ++i) {
             auto* o = arr->get_object(i);
             if (o == nullptr) continue;
-            const std::wstring cn = class_name_of(o);
-            if (cn.find(L"HaloAudioListener") == std::wstring::npos) continue;
             auto* cls = o->get_class();
-            if (cls != nullptr && o == cls->get_class_default_object()) continue;
+            if (cls == nullptr) continue;
+            auto memo = name_of_class.find(cls);
+            if (memo == name_of_class.end()) memo = name_of_class.emplace(cls, class_name_of(o)).first;
+            const std::wstring& cn = memo->second;
+            if (cn.find(L"HaloAudioListener") == std::wstring::npos) continue;
+            if (o == cls->get_class_default_object()) continue;
             g_ak_listener.set_at(o, i);
             comp = o;
             // Capture the authored relative transform for the release path. Raw property reads;
@@ -339,7 +358,16 @@ void audio_comp_tick(bool engaged, uint32_t tick,
                                  g_ak_rel_rot[0], g_ak_rel_rot[1], g_ak_rel_rot[2]);
             break;
         }
-        if (comp == nullptr) return;
+        if (comp == nullptr) {
+            if (++s_failures >= kMaxFailures) {
+                API::get()->log_info("[Halo-CampE-UEVR] AUDIOCOMP: no HaloAudioListener after %d "
+                                     "sweeps -- giving up. Positional audio keeps following the "
+                                     "game camera rather than your head for this session.",
+                                     kMaxFailures);
+            }
+            return;
+        }
+        s_failures = 0;
     }
 
     if (!ak_resolve_functions(comp)) return;
