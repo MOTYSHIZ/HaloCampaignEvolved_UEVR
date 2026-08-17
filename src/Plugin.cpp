@@ -1,4 +1,4 @@
-// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
+﻿// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
 //
 // Ships as halo_vr.dll, reading halo_vr.cfg from the profile root. Motion-controller aim is the
 // centrepiece, but the scope is the whole VR feel of the game, not just aim.
@@ -103,6 +103,9 @@
 #include "Reticule.hpp"
 #include "CutsceneHint.hpp"
 
+// The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
+#include "Scope.hpp"
+
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
 #include "AimTrace.hpp"
@@ -112,7 +115,12 @@
 #include "HitTrace.hpp"
 #include "AimWatch.hpp"
 #include "AimDirect.hpp"
+#include "AimConverge.hpp"
 #include "GameSettings.hpp"
+
+// View-consumer fixes: the audio listener drive and the dev exec harness. The navpoint half
+// lives in this file (it shares the reticle widget scan below).
+#include "ViewFix.hpp"
 
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
@@ -308,6 +316,12 @@ std::atomic<float> g_aim_rate_yaw{0.0f}, g_aim_rate_pitch{0.0f};
 // a ray origin, and its on-foot source (the rig's camera parent, reached through the first-person
 // weapon) does not exist while seated.
 std::atomic<float> g_view_pos_x{0.0f}, g_view_pos_y{0.0f}, g_view_pos_z{0.0f};
+
+// The RENDERED EYE position (post-stereo, HMD transform applied) -- distinct from g_view_pos_*
+// above, which is the GAME CAMERA the pre-hook hands us. World-space markers must use this one:
+// see the note at the publish site in on_post_calculate_stereo_view_offset.
+std::atomic<float> g_eye_pos_x{0.0f}, g_eye_pos_y{0.0f}, g_eye_pos_z{0.0f};
+std::atomic<bool>  g_have_eye_pos{false};
 std::atomic<bool>  g_have_view_pos{false};
 
 std::atomic<float> g_render_view_yaw{0.0f};
@@ -355,11 +369,29 @@ TrackedObject g_stick_pawn_base;
 // boarding/swap/dismount EVENT, never a standing rate increase. Game thread only.
 uint32_t g_rig_fast_until = 0;
 
-// This tick's weapon-route liveness, published by the detector. Snap/smooth turn gates on it so
-// turning stands down the INSTANT the weapon vanishes at boarding, without waiting out the stick
-// debounce -- entering a vehicle used to bank several accidental snap turns in that window. A
-// weapon swap loses turning for ~0.3 s, which is imperceptible. Game thread only.
-bool g_route_alive_now = true;
+// This tick's "the player has first-person foot control" verdict, published by the detector.
+// Snap/smooth turn gates on it so turning stands down the INSTANT that control is lost at
+// boarding, without waiting out the stick debounce -- entering a vehicle used to bank several
+// accidental snap turns in that window. A weapon swap loses turning for ~0.3 s, imperceptible.
+//
+// NOT simply the weapon route. Standing unarmed kills the route while leaving the player in full
+// first-person control, and gating turning on the route alone was half of why the campaign's
+// opening felt broken. The detector below is where the two are told apart. Game thread only.
+bool g_fp_control_now = true;
+
+// This tick's "on foot, in first person, holding nothing" verdict -- the stick-mode exception's own
+// state, published because the rig block hides the arms on exactly the same condition. Deliberately
+// the SAME signal rather than a second "is there a weapon" test: two tests would drift, and the one
+// state where they disagreed would be a pair of T-posed arms in someone's face.
+bool g_on_foot_unarmed = false;
+
+// The game's own cutscene state (BlamCinematicSubsystem::IsCinematicInProgress), owned by the
+// cutscene block and READ by the stick-mode detector earlier in the same tick. A cutscene can leave
+// the player standing weaponless in first person, which is indistinguishable from the campaign's
+// unarmed opening by any signal the detector has -- so the on-foot exception consults the
+// authoritative answer instead of trying to infer one. Game thread only.
+bool g_cine_active    = false;
+bool g_cine_answering = false;
 
 // True while the grip brake is held AND the delivery is pad-side (brake_mode 2/3). Written by the
 // game thread, consumed in the XInput hook.
@@ -375,6 +407,11 @@ std::atomic<bool> g_cut2d_engaged{false};
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
+
+// Menu-armed calibration: trigger states sampled (and eaten) in on_xinput_get_state while
+// g_menu_calib_mode is armed. RT = save & exit, LT = save & re-arm on release.
+std::atomic<bool> g_menu_calib_lt{false};
+std::atomic<bool> g_menu_calib_rt{false};
 std::atomic<bool> g_calib_start{false};
 std::atomic<bool> g_calib_finish{false};
 // Raw pad-button state, published by the XInput hook and consumed on the game thread. The hook
@@ -539,6 +576,12 @@ Quat g_calib_prev_gun{0.0f, 0.0f, 0.0f, 1.0f};
 bool g_calib_valid = false;
 Quat g_calib_gun_world{0.0f, 0.0f, 0.0f, 1.0f};   // weapon world orientation, frozen
 Vec3 g_calib_off_world{0.0f, 0.0f, 0.0f};         // weapon world offset, frozen
+// Head displacement from the standing origin at the instant of the freeze, VR room space. The hold
+// rides any change from this so the frozen weapon stays put relative to the PLAYER rather than to
+// the camera, which is what keeps head movement during the hold out of the fitted mount. Always
+// zero while the head is leashed. See the hold-ride block in the rig update.
+Vec3 g_calib_delta_room{0.0f, 0.0f, 0.0f};
+bool g_calib_have_delta = false;
 Quat g_last_gun_world{0.0f, 0.0f, 0.0f, 1.0f};    // updated every driven tick
 #if HALO_VR_DEV
 // CALIBJUMP: consecutive driven frames across a calibration release. Each quantity is differenced
@@ -707,6 +750,29 @@ void dump_hud_visibility_once(uint32_t tick) {
 // Reticule.hpp. They cannot be defined here: everything below sits in an anonymous namespace, so a
 // definition here would be internal to this translation unit and the reticule module could not see
 // it. reticle_rescan() below still populates them through the extern declarations.
+
+// Resolved NAVPOINT container widgets (navclass instances -- the screen-space waypoint/objective
+// layer), collected by the same sweep. Unlike the reticles these have no cross-TU consumer, so
+// plain statics in this anonymous namespace are the whole storage. hud_navpoint_follow() is the
+// only reader; see it for why a stale shift must be RELEASED rather than left in place.
+// SHUTDOWN LATCH. Set at the first sign of teardown (window message, or a null engine on the
+// tick) and never cleared -- once the game is going down there is nothing to resume. Every
+// callback that touches game objects or does work checks it FIRST: after teardown the objects
+// we would write to are being destroyed, and the hooks we would drive are being removed.
+std::atomic<bool> g_shutting_down{false};
+
+TrackedObject g_navpoints[4];
+int           g_nav_count = 0;
+bool          g_nav_shift_applied = false;   // a non-zero RenderTranslation is currently in place
+
+// RENDER-RATE APPLICATION (navrender). The first navfix iteration wrote the shift from the
+// ~32 Hz tick and read as JITTER: the aim-vs-view delta moves at render rate, so a tick-rate
+// correction lags it for most of every frame -- the same class of bug as the rig re-apply and
+// movelive before it ("compute in the callback that consumes the value", third occurrence).
+// The tick now only CALIBRATES (probes the game's own projection for pixels-per-tan) and the
+// stereo callback applies, using the exact same-frame delta it already owns.
+std::atomic<bool>  g_nav_apply{false};    // tick-evaluated gates; render applies only while true
+std::atomic<float> g_nav_keff{1000.0f};   // measured px-per-tan, EMA of the tick's probe
 
 
 
@@ -1050,6 +1116,223 @@ void material_hunt(uint32_t tick) {
 }
 
 
+// ---------------------------------------------------------------- SHIELD FX CENSUS  [dev only]
+//
+// WHAT QUESTION THIS ANSWERS
+// The scope's capture renders enemy shields as unshaded outlines: the geometry arrives, the
+// shading does not. The leading explanation is that their look is produced in POST, which the
+// engine force-disables for every scene-colour capture (SceneCaptureRendering.cpp:853). That is a
+// THEORY until the shield primitives themselves are read. Three reads decide it:
+//
+//   bRenderCustomDepth / CustomDepthStencilValue -- a mesh rendering to custom depth is being
+//       drawn by a post-process pass keyed on depth/stencil. Set on shields => the post-process
+//       explanation is CONFIRMED, and it also explains the unlit projectiles in one stroke.
+//   bHiddenInSceneCapture / bVisibleInSceneCaptureOnly -- checked FIRST because if the game simply
+//       hides shields from scene captures, every other explanation is irrelevant and the fix is
+//       one property write. Never looked at until now.
+//   material domain / blend mode / shading model -- says whether a capture-only stand-in could
+//       ever look right, and whether the material is one a scene capture can shade at all.
+//
+// Same discipline as material_hunt above: chunked (a full sweep is ~296k objects and doing it in
+// one tick collapses framerate -- this has already cost a live session once), throttled, and it
+// stops for good. Dev builds only.
+int32_t g_shield_census_idx  = 0;
+bool    g_shield_census_done = false;
+int     g_shield_census_hits = 0;
+int     g_shield_census_pass = 0;
+int32_t g_shield_census_last_n = 0;
+
+#if HALO_VR_DEV
+// Read a bool UPROPERTY by name, honouring the bitfield mask. get_property_data<uint8_t> alone
+// returns the byte SHARED by up to eight bitfields, so without the mask every packed flag reads
+// as whatever its neighbours happen to be -- a false positive generator.
+static int read_bool_prop(API::UObject* obj, const wchar_t* name) {
+    if (obj == nullptr) return -1;
+    auto* cls = obj->get_class();
+    if (cls == nullptr) return -1;
+    auto* prop = cls->find_property(name);
+    if (prop == nullptr) return -1;
+    auto* byte = reinterpret_cast<uint8_t*>(obj) + prop->get_offset();
+    auto* bp = static_cast<API::FBoolProperty*>(prop);
+    const uint8_t mask = bp->get_field_mask();
+    // A native (non-bitfield) bool carries a full 0xFF mask, so the masked test covers both cases.
+    // The mask==0 arm is defensive only.
+    return (mask == 0) ? (*byte != 0) : ((*byte & mask) != 0);
+}
+
+static int read_byte_prop(API::UObject* obj, const wchar_t* name) {
+    if (obj == nullptr) return -1;
+    auto* cls = obj->get_class();
+    if (cls == nullptr) return -1;
+    auto* prop = cls->find_property(name);
+    if (prop == nullptr) return -1;
+    return *(reinterpret_cast<uint8_t*>(obj) + prop->get_offset());
+}
+
+static std::string outer_path_of(API::UObject* o) {
+    std::string path;
+    for (API::UObject* q = o; q != nullptr; q = q->get_outer()) {
+        const auto* fn = q->get_fname();
+        path = (fn != nullptr ? narrow(fn->to_string()) : std::string("?"))
+             + (path.empty() ? "" : "." + path);
+    }
+    return path;
+}
+#endif
+
+void shield_fx_census(uint32_t tick) {
+#if HALO_VR_DEV
+    if (!g_cfg.shield_census || g_shield_census_done) return;
+
+    static uint32_t last = 0;
+    if (tick - last < 4) return;
+    last = tick;
+
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return;
+    const int32_t n = arr->get_object_count();
+    if (g_shield_census_idx == 0 && g_shield_census_pass > 0 && n < g_shield_census_last_n + 5000)
+        return;
+
+    int processed = 0;
+    while (g_shield_census_idx < n && processed < 2000) {
+        auto* o = arr->get_object(g_shield_census_idx++);
+        ++processed;
+        if (o == nullptr) continue;
+
+        const std::wstring cn = class_name_of(o);
+        if (cn != L"SkeletalMeshComponent" && cn != L"StaticMeshComponent" &&
+            cn != L"InstancedStaticMeshComponent") continue;
+
+        // LIVE INSTANCES ONLY. A class default object and a Blueprint archetype both carry the
+        // same properties and would report confidently about geometry that is not in the level --
+        // the exact false positive the earlier shield probe hit. Everything actually placed or
+        // spawned lives under PersistentLevel.
+        const std::string path = outer_path_of(o);
+        if (path.find("PersistentLevel") == std::string::npos) continue;
+
+        // MATCH ON THE WHOLE PATH, not just the component's own name. Jackal shields happen to
+        // name the component "Shield" (verified), but that was luck: a cover shield whose mesh
+        // component is called something else would report ZERO live shields and read as "none in
+        // range" rather than as a filter that missed. The owning ACTOR carries the word in every
+        // case seen so far (BP_JackalShieldWeaponActor_C, BP_CovPortableShield...), so testing the
+        // path catches both. Broader on purpose -- extra rows are cheap here and each one prints
+        // the material it wears, whereas a silent miss costs a whole test session.
+        std::string hay = path;
+        for (auto& c : hay) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (hay.find("shield") == std::string::npos) continue;
+
+        if (g_shield_census_hits < 24) {
+            const int cd   = read_bool_prop(o, L"bRenderCustomDepth");
+            const int hsc  = read_bool_prop(o, L"bHiddenInSceneCapture");
+            const int vsco = read_bool_prop(o, L"bVisibleInSceneCaptureOnly");
+            const int mainp= read_bool_prop(o, L"bRenderInMainPass");
+            int stencil = -1;
+            if (auto* cls = o->get_class()) {
+                if (auto* p = cls->find_property(L"CustomDepthStencilValue"))
+                    stencil = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(o) + p->get_offset());
+            }
+
+            // Material element 0. GetMaterial is BlueprintPure on UPrimitiveComponent
+            // (PrimitiveComponent.h:1431), so it is reachable by reflection: int32 ElementIndex at
+            // offset 0, the returned pointer at 8.
+            API::UObject* mat = nullptr;
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                *reinterpret_cast<int32_t*>(p) = 0;
+                o->call_function(L"GetMaterial", p);
+                mat = *reinterpret_cast<API::UObject**>(p + 8);
+            }
+            // Walk MaterialInstance -> Parent to the base UMaterial, which is where the domain and
+            // blend mode actually live. Bounded: a cyclic or absurd chain must not hang a tick.
+            std::string mat_name = (mat != nullptr) ? outer_path_of(mat) : std::string("<none>");
+            API::UObject* base = mat;
+            for (int hop = 0; hop < 4 && base != nullptr && class_name_of(base) != L"Material"; ++hop) {
+                auto* cls = base->get_class();
+                auto* pp = (cls != nullptr) ? cls->find_property(L"Parent") : nullptr;
+                base = (pp != nullptr)
+                     ? *reinterpret_cast<API::UObject**>(reinterpret_cast<uint8_t*>(base) + pp->get_offset())
+                     : nullptr;
+            }
+            const int domain = read_byte_prop(base, L"MaterialDomain");
+            const int blend  = read_byte_prop(base, L"BlendMode");
+            const int shade  = read_byte_prop(base, L"ShadingModel");
+
+            // FULL PROPERTY DUMP, ONCE PER DISTINCT BASE MATERIAL.
+            //
+            // The shield's colour is lost in the capture while its DISTORTION survives -- measured
+            // with this exact material on a cube (scopetest=6), correct in the world, colourless in
+            // the pane. That splits the material's two contributions, and the only way to reason
+            // about which is which is to read what the material actually declares. Dumped once
+            // rather than per primitive: all 54 shields share one base material, and 54 copies of
+            // the same 20 fields would bury it.
+            //
+            // The reference to diff against is EmissiveMeshMaterial, whose equivalent dump is in
+            // docs\BLAM_AIM_FINDINGS.md -- an unlit material that behaves normally.
+            static API::UObject* s_dumped_base = nullptr;
+            if (base != nullptr && base != s_dumped_base) {
+                s_dumped_base = base;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] SHIELDMAT %s :: usesDistortion=%d refractMode=%d "
+                    "refractMethod=%d translucencyPass=%d sepTranslucency=%d translucencyLighting=%d "
+                    "twoSided=%d thinSurface=%d disablePreExposure=%d forceNoEmissive=%d "
+                    "allowNegEmissive=%d disableDepthTest=%d frontLayer=%d screenSpaceRefl=%d "
+                    "usedWithSkel=%d usedWithNiagaraMesh=%d",
+                    outer_path_of(base).c_str(),
+                    read_bool_prop(base, L"bUsesDistortion"),
+                    read_byte_prop(base, L"RefractionMode"),
+                    read_byte_prop(base, L"RefractionMethod"),
+                    read_byte_prop(base, L"TranslucencyPass"),
+                    read_bool_prop(base, L"bEnableSeparateTranslucency"),
+                    read_byte_prop(base, L"TranslucencyLightingMode"),
+                    read_bool_prop(base, L"TwoSided"),
+                    read_bool_prop(base, L"bIsThinSurface"),
+                    read_bool_prop(base, L"bDisablePreExposureScale"),
+                    read_bool_prop(base, L"bForceNoEmissive"),
+                    read_bool_prop(base, L"bAllowNegativeEmissiveColor"),
+                    read_bool_prop(base, L"bDisableDepthTest"),
+                    read_bool_prop(base, L"bAllowFrontLayerTranslucency"),
+                    read_bool_prop(base, L"bScreenSpaceReflections"),
+                    read_bool_prop(base, L"bUsedWithSkeletalMesh"),
+                    read_bool_prop(base, L"bUsedWithNiagaraMeshParticles"));
+            }
+
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] SHIELDFX %s :: customdepth=%d stencil=%d hiddenInCapture=%d "
+                "captureOnly=%d mainpass=%d mat='%s' base='%s' domain=%d blend=%d shading=%d",
+                path.c_str(), cd, stencil, hsc, vsco, mainp, mat_name.c_str(),
+                base != nullptr ? outer_path_of(base).c_str() : "<unresolved>",
+                domain, blend, shade);
+        }
+        ++g_shield_census_hits;
+    }
+
+    if (g_shield_census_idx >= n) {
+        ++g_shield_census_pass;
+        g_shield_census_last_n = n;
+        API::get()->log_info("[Halo-CampE-UEVR] SHIELDFX pass %d complete: %d live shield "
+                             "primitive(s) from %d objects%s",
+                             g_shield_census_pass, g_shield_census_hits, n,
+                             g_shield_census_hits == 0
+                                 ? "  <-- none in range; stand near a shielded enemy and retry"
+                                 : "");
+        // Shields belong to enemies that stream in, so a first pass can legitimately find nothing.
+        // Re-sweep on meaningful array growth, same reasoning as material_hunt.
+        if (g_shield_census_pass >= 4) {
+            g_shield_census_done = true;
+            API::get()->log_info("[Halo-CampE-UEVR] SHIELDFX finished after %d passes",
+                                 g_shield_census_pass);
+        } else {
+            g_shield_census_idx = 0;
+            g_shield_census_hits = 0;
+        }
+    }
+#else
+    (void)tick;   // Dev-only diagnostic: omitted from release builds (see DevTools.hpp).
+#endif
+}
+
+
 // The world-space mesh reticule and the widget reticule now live in Reticule.cpp.
 // Driven from update() below via reticule_mesh_ensure/_move and reticule_widget_ensure/_move.
 
@@ -1211,7 +1494,7 @@ void reticle_rescan(uint32_t tick) {
     // Everything the sweep produces has exactly two consumers, and in the shipping profile both go
     // quiet seconds after a level loads:
     //   g_reticles         -> hud_reticle_follow (returns immediately when hudfollow=0)
-    //     ⚠️ hud_follow's CODE default is true, not 0. Both shipped and live profiles set
+    //     âš ï¸ hud_follow's CODE default is true, not 0. Both shipped and live profiles set
     //     hudfollow=0, so in practice this term is false -- but a config without that line
     //     re-enables the sweep permanently, which is the microstutter this gate exists to stop.
     //     The safe default is false; left as-is only because changing it is a behaviour change.
@@ -1226,6 +1509,7 @@ void reticle_rescan(uint32_t tick) {
                      || g_cfg.hud_follow                             // moves/hides the flat reticle
                      || reticle_widget_needs_pick()                  // still choosing a widget to host
                      || reticle_stray_check_due(tick)                // HUD rebuilt a second crosshair
+                     || ((g_cfg.nav_fix || g_cfg.nav_world) && g_nav_count == 0)   // navpoint layer not yet resolved
                      || (g_cfg.menu_detect && !g_ui_manager_ok.load());   // candidates are the fallback
     if (!needed) return;
 
@@ -1252,6 +1536,20 @@ void reticle_rescan(uint32_t tick) {
     const std::wstring wanted = wanted_widget_class();
     std::unordered_map<const void*, std::wstring> name_of_class;
 
+    // The navpoint class comes from config (navclass -- a pak-inventory guess until confirmed
+    // live), so it is widened once per sweep rather than per object -- the same reasoning as the
+    // hoist above, arrived at separately. The default lives HERE, not in the struct initializer:
+    // a char-array string default on the global g_cfg does not survive MSVC's
+    // constant-initialization (see the note on nav_class in Config.hpp).
+    g_nav_count = 0;
+    const char* nav_eff = (g_cfg.nav_class[0] != '\0') ? g_cfg.nav_class : "WBP_Navpoints";
+    wchar_t nav_class_w[64] = {0};
+    if (g_cfg.nav_fix || g_cfg.nav_world) {
+        for (size_t k = 0; k < 63 && nav_eff[k] != '\0'; ++k) {
+            nav_class_w[k] = (wchar_t)(unsigned char)nav_eff[k];
+        }
+    }
+
     const int32_t n = arr->get_object_count();
     for (int32_t i = 0; i < n; ++i) {
         auto* o = arr->get_object(i);
@@ -1267,7 +1565,8 @@ void reticle_rescan(uint32_t tick) {
 
         const bool is_reticle = cn.find(wanted) != std::wstring::npos;
         const bool is_menu    = g_cfg.menu_detect && is_menuish_class(cn);
-        if (!is_reticle && !is_menu && !g_cfg.menu_dump) continue;
+        const bool is_nav     = nav_class_w[0] != 0 && cn.find(nav_class_w) != std::wstring::npos;
+        if (!is_reticle && !is_menu && !is_nav && !g_cfg.menu_dump) continue;
 
         auto* cls = ocls;
         if (cls != nullptr && o == cls->get_class_default_object()) continue;   // never the CDO
@@ -1276,6 +1575,10 @@ void reticle_rescan(uint32_t tick) {
             g_reticles[g_reticle_count].obj.set_at(o, i);
             g_reticles[g_reticle_count].found_tick = tick;
             ++g_reticle_count;
+        }
+        if (is_nav && g_nav_count < 4) {
+            g_navpoints[g_nav_count].set_at(o, i);
+            ++g_nav_count;
         }
         // (strays are collapsed after the loop, once the full list exists -- see below)
         if (is_menu && g_menu_candidate_count < 8) {
@@ -1326,6 +1629,18 @@ void reticle_rescan(uint32_t tick) {
                        (path.empty() ? "" : "." + path);
             }
             API::get()->log_info("[Halo-CampE-UEVR]   [%d] %s", i, path.c_str());
+        }
+    }
+
+    // Navpoint resolution, logged on CHANGE for the same reason as the reticles above. "0
+    // resolved" while navfix=1 means the navclass guess is wrong -- menudump the live widget
+    // names and correct the config, not the code.
+    if (g_cfg.nav_fix || g_cfg.nav_world) {
+        static int last_nav = -1;
+        if (g_nav_count != last_nav) {
+            last_nav = g_nav_count;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVFIX: %d navpoint container(s) resolved "
+                                 "(navclass='%s')", g_nav_count, nav_eff);
         }
     }
 
@@ -1546,6 +1861,1497 @@ void hud_reticle_follow(float aim_pitch, float aim_yaw, uint32_t tick) {
     }
 }
 
+// SCREEN-SPACE NAVPOINT CORRECTION (navfix) -- docs\CAMERA_CONSUMERS_FINDINGS.md issue C.
+//
+// The game projects waypoint/objective markers against ITS OWN camera -- which the aim driver
+// points at the controller -- while the player looks along the view lock's pinned yaw, so the
+// whole projected layer drifts with the right hand (README known issue). The exact fix is
+// upstream (feed the projection the rendered rotation at its source); this is the FIRST-ORDER
+// correction: shift the navpoint container by where the RENDERED view's forward lands in the
+// game's own projection. Exact for markers at the view centre, degrades with off-centre angle
+// -- a uniform translation cannot re-project each marker individually -- and off-screen
+// edge-clamped markers will still misbehave.
+//
+// Same arithmetic as hud_reticle_follow with the roles swapped: the reticle moves TO the aim
+// direction (+tan(aim-view)); the game pre-shifted the marker layer BY -tan(aim-view), so the
+// correction is +tan(aim-view) again. If one path ever reads correct and the other mirrored,
+// suspect this reasoning first and A/B the sign by observation.
+//
+// DISENGAGE IS HALF THE FEATURE. In stick mode (and whenever the delta is unavailable) the
+// game's own projection is already correct, so the shift must drop to ZERO, once -- a stale
+// translation here is this exact bug re-introduced in reverse.
+void hud_navpoint_follow(bool engaged, double aim_pitch, double aim_yaw, uint32_t tick) {
+    if (!engaged || !g_cfg.nav_fix) {
+        g_nav_apply = false;   // stop the render-rate writer BEFORE zeroing, or it re-shifts
+        if (g_nav_shift_applied) {
+            g_nav_shift_applied = false;
+            for (int i = 0; i < g_nav_count; ++i) {
+                auto* o = g_navpoints[i].get();
+                if (o == nullptr) continue;
+                // A zeroed buffer reads as (0,0) in both the float and the double layout, so the
+                // release does not depend on hud_float being set correctly.
+                alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+                o->call_function(L"SetRenderTranslation", q);
+            }
+            API::get()->log_info("[Halo-CampE-UEVR] NAVFIX: correction released");
+        }
+        return;
+    }
+
+    if (g_nav_count == 0) { g_nav_apply = false; return; }   // scan is driven from update()
+
+    const float view_yaw   = g_render_view_yaw.load();
+    const float view_pitch = g_render_view_pitch.load();
+    const float dyaw   = wrap180((float)aim_yaw   - view_yaw);
+    const float dpitch = g_cfg.nav_pitch ? wrap180((float)aim_pitch - view_pitch) : 0.0f;
+
+    // Behind-the-view: tan() flips sign and a confident wrong shift is worse than none. Hold the
+    // last value rather than snapping to zero -- markers are already meaningless at this angle.
+    if (std::fabs(dyaw) > 89.0f || std::fabs(dpitch) > 89.0f) return;
+
+    float px = 0.0f, py = 0.0f;
+    bool  projected = false;
+
+    // Engine projection first (same lane as hudproject above): project a point along the
+    // RENDERED view direction through the game's own ProjectWorldToScreen -- which uses the aim
+    // camera -- and read the correction as that point's distance from the viewport centre.
+    // Exact at the view centre by construction, and no constant to calibrate.
+    if (g_cfg.nav_project && g_have_view_pos.load()) {
+        static API::UObject* gps = nullptr;
+        static API::UObject* wll = nullptr;
+        static bool tried = false;
+        if (!tried) {
+            tried = true;
+            if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.GameplayStatics"))
+                gps = c->get_class_default_object();
+            if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetLayoutLibrary"))
+                wll = c->get_class_default_object();
+        }
+        auto* pc = API::get()->get_player_controller(0);
+        if (gps != nullptr && wll != nullptr && pc != nullptr) {
+            const float vy = view_yaw * DEG2RAD, vp = view_pitch * DEG2RAD;
+            const float cp = std::cos(vp);
+            const Vec3 o{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+            // 1000 cm along the view: the projection origin IS the camera whose position we
+            // published, so the probe distance barely matters -- direction is the payload.
+            const Vec3 w{o.x + cp * std::cos(vy) * 1000.0f,
+                         o.y + cp * std::sin(vy) * 1000.0f,
+                         o.z + std::sin(vp) * 1000.0f};
+
+            double sx = 0.0, sy = 0.0;
+            bool ok = false;
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                *reinterpret_cast<void**>(p) = pc;                 // Player
+                auto* wv = reinterpret_cast<double*>(p + 8);       // WorldPosition
+                wv[0] = w.x; wv[1] = w.y; wv[2] = w.z;
+                gps->call_function(L"ProjectWorldToScreen", p);
+                const auto* sp = reinterpret_cast<const double*>(p + 32);
+                sx = sp[0]; sy = sp[1];
+                ok = p[49] != 0;
+            }
+
+            double vw = 0.0, vh = 0.0;
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                *reinterpret_cast<void**>(p) = pc;                 // WorldContextObject
+                wll->call_function(L"GetViewportSize", p);
+                const auto* vs = reinterpret_cast<const double*>(p + 8);
+                vw = vs[0]; vh = vs[1];
+            }
+
+            if (ok && vw > 1.0 && vh > 1.0 && std::isfinite(sx) && std::isfinite(sy)) {
+                px = (float)(vw * 0.5 - sx);
+                py = (float)(vh * 0.5 - sy);
+                if (!g_cfg.nav_pitch) py = 0.0f;
+                projected = true;
+            }
+        }
+    }
+
+    // RENDER-RATE MODE: the tick's job ends at CALIBRATION. The probe above measured the game
+    // projection's actual pixels-per-tan at this instant; fold it into the shared constant and
+    // let the stereo callback do the writing with a same-frame delta. Sampled only when the
+    // delta is big enough to carry signal -- near zero the division is noise.
+    if (g_cfg.nav_render) {
+        if (projected) {
+            const float t = std::tan(dyaw * DEG2RAD);
+            if (std::fabs(dyaw) >= 3.0f && std::fabs(t) > 0.01f) {
+                const float k = px / t;
+                if (std::isfinite(k) && k > 100.0f && k < 20000.0f) {
+                    const float prev = g_nav_keff.load();
+                    g_nav_keff = prev + 0.2f * (k - prev);
+                }
+            }
+        } else {
+            g_nav_keff = g_cfg.nav_k;   // navproject=0: the manual knob drives the render path
+        }
+        g_nav_apply = true;
+        g_nav_shift_applied = true;   // the render path is writing; release must still zero
+        static uint32_t last_klog = 0;
+        if (tick - last_klog >= 600) {
+            last_klog = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVFIX: render-rate mode, keff=%.0f px/tan "
+                                 "(dyaw=%.1f at calib)", g_nav_keff.load(), dyaw);
+        }
+        return;
+    }
+
+    if (!projected) {
+        px = g_cfg.nav_k * std::tan(dyaw * DEG2RAD);
+        py = -g_cfg.nav_k * std::tan(dpitch * DEG2RAD);
+    }
+    px = clampf(px, -g_cfg.nav_max, g_cfg.nav_max);
+    py = clampf(py, -g_cfg.nav_max, g_cfg.nav_max);
+    if (!std::isfinite(px) || !std::isfinite(py)) return;
+
+    for (int i = 0; i < g_nav_count; ++i) {
+        auto* o = g_navpoints[i].get();
+        if (o == nullptr) {
+            // Recycled slot: force a rescan and skip the tick -- writing through residue is how a
+            // "working" feature pins itself to a dead object.
+            g_nav_count = 0;
+            return;
+        }
+        alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+        if (g_cfg.hud_float) {
+            auto* f = reinterpret_cast<float*>(q);
+            f[0] = px; f[1] = py;
+        } else {
+            auto* d = reinterpret_cast<double*>(q);
+            d[0] = (double)px; d[1] = (double)py;
+        }
+        o->call_function(L"SetRenderTranslation", q);
+    }
+    g_nav_shift_applied = true;
+
+    static uint32_t last_log = 0;
+    if (tick - last_log >= 600) {           // ~20 s
+        last_log = tick;
+        API::get()->log_info("[Halo-CampE-UEVR] NAVFIX: dyaw=%.1f dpitch=%.1f -> shift=(%.0f,%.0f)%s",
+                             dyaw, dpitch, px, py, projected ? " [projected]" : " [navk]");
+    }
+}
+
+// WORLD-SPACE NAVPOINTS (navworld) -- the lane that has no angular ceiling.
+//
+// WHY (docs\CAMERA_CONSUMERS_FINDINGS.md, 2026-08-13): every screen-space correction is capped
+// by the flat HUD quad, which spans only Â±20.7Â°Ã—Â±12.0Â° of view -- a marker for an enemy 30Â°
+// off-centre CANNOT sit on that enemy no matter how exact the canvas math is. So markers move
+// into the WORLD: one mesh marker per live navpoint, placed along the true world direction of
+// its target, head-relative correct by construction.
+//
+// WHERE THE DIRECTION COMES FROM. The game's HaloUINavpointsManager projects each marker
+// against ITS camera (the aim camera) and stamps the result into the container's canvas slots.
+// That projection is a pinhole we can measure and invert:
+//   * TWO probe points along known view-relative directions, pushed through the game's own
+//     ProjectWorldToScreen, yield the projection constant (px per tan) AND the aim camera's
+//     true yaw/pitch -- no trust in ControlRotation's pitch (which decouples from the camera).
+//   * Each visible child's slot position then inverts to a world direction:
+//       yaw = cam_yaw + atan(cx/keff), pitch = cam_pitch - atan(cy/keff)   (canvas y is DOWN)
+// Slot positions are read one tick stale; the direction of a marker moves at target-screen
+// speed (slow), unlike the aim-vs-view delta, so tick-rate reading is fine here.
+//
+// LIMITS, stated: markers the game has already edge-clamped (its off-screen arrows) carry no
+// recoverable direction -- those are SKIPPED here and the flat layer's own edge arrow still
+// serves. Distance is unknown per marker, so all markers sit at navworlddist with
+// distance-normalised scale -- direction is what matters and is exact.
+//
+// DISENGAGE: stick mode / cutscenes / kill switch hide the whole pool one-shot; the game's
+// flat layer is never touched by this lane (navfix's shift is forced released while navworld
+// owns the job, so the flat markers stay game-native).
+TrackedObject g_navw_pool[8];
+bool          g_navw_mid_ok[8] = {};        // dynamic material bound on this slot
+bool          g_navw_compensated = false;   // VREditor exposure-compensated MIC bound (pak present)
+
+// LAST TRUE DIRECTION per marker, keyed by the marker's widget instance (element+0x08). While a
+// marker is EDGE-CLAMPED its screen position tracks the aim frustum and the inversion yields a
+// hand-following direction -- the lane's structural ceiling. But whenever the aim sweeps near
+// enough that the marker is comfortably inside the canvas, the inversion is TRUE: cache that,
+// and hold the marker at its last true direction while clamped. In normal play the aim crosses
+// most of the view constantly, so directions refresh opportunistically and markers read as
+// world-pinned without any Blam-side target data. Keys recycle with the game's widget pool; a
+// recycled key serves a stale direction only until its first unclamped refresh.
+struct NavwCachedDir { void* wkey = nullptr; float yaw = 0, pitch = 0; bool valid = false; };
+NavwCachedDir g_navw_dirs[12];
+
+// PUBLISHED FOR RENDER-RATE RE-PLACEMENT (lane 2). The tick resolves each objective's world
+// position and how far along the ray to draw; the STEREO CALLBACK re-derives the marker's
+// transform from the CURRENT eye every frame.
+//
+// This matters because the marker is drawn CLOSE (4 m): at that range the direction from eye to
+// objective swings quickly as the player walks, so a transform computed at the ~32 Hz tick and
+// left alone for the intervening 90 Hz frames visibly stutters -- field-reported as "a bit
+// jittery when I walk around". Same lesson as the rig re-apply and movelive before it: compute
+// in the callback that CONSUMES the value. Fourth occurrence.
+struct NavwPlaced { float ox, oy, oz, dist; };
+NavwPlaced       g_navw_placed[8] = {};
+std::atomic<int> g_navw_placed_n{0};
+
+// The widget CLASS each pool slot is currently wearing. Navpoints are not all objectives --
+// the same map carries co-op partners, tracked enemies, item highlights, each with its own
+// authored art (and its own colour semantics). Every entry names its class, so a slot re-hosts
+// whenever the navpoint occupying it changes type; without this every marker would wear the
+// objective icon regardless of what it actually marks.
+void* g_navw_slot_class[8] = {};
+
+// What KIND of navpoint each slot is showing, classified from its widget class name. Drives
+// per-kind sizing: an objective wants to be seen from anywhere, a floor weapon should not shout.
+enum NavwKind : uint8_t { NAVW_OTHER = 0, NAVW_OBJECTIVE, NAVW_ALLY, NAVW_ENEMY, NAVW_ITEM };
+NavwKind g_navw_slot_kind[8] = {};
+
+// The size multiplier each slot RESOLVED to, decided once at host time where the class name is
+// in hand (override first, then kind default). Placement reads this rather than re-deriving,
+// so what the log printed and what the marker is drawn at cannot disagree.
+float g_navw_slot_size[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
+NavwKind navw_classify(const std::wstring& cn) {
+    if (cn.find(L"Objective")    != std::wstring::npos
+     || cn.find(L"Scripted")     != std::wstring::npos) return NAVW_OBJECTIVE;
+    // CO-OP PARTNERS / allies. The pak carries WBP_NavpointWidgetPlayer and the
+    // MI_UI_Navmarker_Ally_* materials; without this they classify as "other" and draw at FULL
+    // base size -- bigger than the objectives, which is backwards.
+    if (cn.find(L"Player")       != std::wstring::npos
+     || cn.find(L"Ally")         != std::wstring::npos
+     || cn.find(L"Partner")      != std::wstring::npos
+     || cn.find(L"Teammate")     != std::wstring::npos
+     || cn.find(L"Squad")        != std::wstring::npos) return NAVW_ALLY;
+    // DESTINATION IS THE ENEMY MARK ON THIS TITLE -- established by elimination, not by the
+    // name. Across a full session the live map produced exactly three classes: Objective (the
+    // objective), WidgetItemHighlight (floor weapons) and Destination, which appears in
+    // MULTIPLES simultaneously and is what the field kept reporting as "the enemy markers are
+    // still large". Filing it under objective on the strength of the word "Destination" is
+    // exactly the naming guess that made navsizeenemy govern an empty set for three rounds.
+    if (cn.find(L"Destination")  != std::wstring::npos
+     || cn.find(L"Hostile")      != std::wstring::npos
+     || cn.find(L"TrackedTarget")!= std::wstring::npos
+     || cn.find(L"GhostTarget")  != std::wstring::npos
+     || cn.find(L"Enemy")        != std::wstring::npos) return NAVW_ENEMY;
+    if (cn.find(L"Item")         != std::wstring::npos
+     || cn.find(L"Highlight")    != std::wstring::npos
+     || cn.find(L"Weapon")       != std::wstring::npos) return NAVW_ITEM;
+    return NAVW_OTHER;
+}
+
+const char* navw_kind_name(NavwKind k) {
+    switch (k) {
+    case NAVW_OBJECTIVE: return "objective";
+    case NAVW_ALLY:      return "ally";
+    case NAVW_ENEMY:     return "enemy";
+    case NAVW_ITEM:      return "item";
+    default:             return "other";
+    }
+}
+
+// PER-CLASS SIZE OVERRIDE, by name -- "WBP_NavpointDestination_C:0.3,WBP_NavpointRecon_C:0.4".
+//
+// Kind classification is a GUESS at this game's taxonomy from class names, and the guesses have
+// been wrong: WBP_NavpointDestination_C was filed as an objective (x0.8) when the field reads it
+// as an enemy mark. Rather than keep re-guessing which bucket a class belongs in, this addresses
+// any class by name. Checked before the kind default; returns <0 when the class is not listed.
+float navw_class_override(const std::wstring& cn) {
+    const char* s = g_cfg.nav_size_class;
+    if (s == nullptr || s[0] == '\0') return -1.0f;
+    const std::string narrow_cn = narrow(cn);
+    while (*s != '\0') {
+        while (*s == ' ' || *s == ',') ++s;
+        const char* name = s;
+        while (*s != '\0' && *s != ':' && *s != ',') ++s;
+        if (*s != ':') { while (*s != '\0' && *s != ',') ++s; continue; }
+        const size_t nlen = (size_t)(s - name);
+        ++s;                                    // past ':'
+        const float mult = (float)atof(s);
+        while (*s != '\0' && *s != ',') ++s;    // past the value
+        if (nlen == 0 || !(mult > 0.0f)) continue;
+        // Substring match, so either the bare name or the _C form works.
+        if (narrow_cn.find(std::string(name, nlen)) != std::string::npos) return mult;
+    }
+    return -1.0f;
+}
+
+// Per-kind size multiplier over nav_world_scale.
+float navw_kind_size(NavwKind k) {
+    switch (k) {
+    case NAVW_OBJECTIVE: return g_cfg.nav_size_obj;
+    case NAVW_ALLY:      return g_cfg.nav_size_ally;
+    case NAVW_ENEMY:     return g_cfg.nav_size_enemy;
+    case NAVW_ITEM:      return g_cfg.nav_size_item;
+    default:             return g_cfg.nav_size_other;
+    }
+}
+
+// Collect a widget's Image children (in tree order). The FIRST image is not always the icon --
+// a navpoint layout can carry an on-screen icon AND an off-screen arrow, and picking blind is
+// how the objective marker came back gold when its class changed. navworldimg selects which.
+int navw_collect_images(API::UObject* owner, API::UObject** out, int cap, int depth = 0) {
+    if (owner == nullptr || cap <= 0) return 0;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return 0;
+    int got = 0;
+    const int32_t n = arr->get_object_count();
+    for (int32_t i = 0; i < n && got < cap; ++i) {
+        auto* o = arr->get_object(i);
+        if (o == nullptr || o->get_outer() != owner) continue;
+        const std::wstring cn = class_name_of(o);
+        if (cn.find(L"Image") != std::wstring::npos) { out[got++] = o; continue; }
+        if (depth < 2 && (cn == L"WidgetTree" || cn.find(L"Panel") != std::wstring::npos
+                          || cn.find(L"Overlay") != std::wstring::npos
+                          || cn.find(L"Box") != std::wstring::npos)) {
+            got += navw_collect_images(o, out + got, cap - got, depth + 1);
+        }
+    }
+    return got;
+}
+bool          g_navw_shown = false;         // anything visible last tick (drives one-shot hide)
+std::atomic<float> g_navw_keff{1000.0f};    // measured px-per-tan (independent of navfix's)
+
+// Outermost-package test: live widgets are outered under /Engine/Transient; the blueprint
+// ARCHETYPE (which also matches the class-name scan) is outered under /Game/... and writes to
+// it do nothing. The scan cannot tell them apart; this can.
+bool navw_is_live_widget(API::UObject* o) {
+    API::UObject* top = o;
+    while (top != nullptr && top->get_outer() != nullptr) top = top->get_outer();
+    if (top == nullptr) return false;
+    const auto* fn = top->get_fname();
+    if (fn == nullptr) return false;
+    const std::wstring n = fn->to_string();
+    return n.find(L"Transient") != std::wstring::npos;
+}
+
+// HOST THE NAVPOINT ART on a marker quad, re-hosting when the slot changes navpoint TYPE.
+//
+// `want_class` is the navpoint's OWN widget class, taken from its map entry -- so a co-op
+// partner marker wears the partner art, a tracked enemy wears the enemy art, and each keeps the
+// colour that carries its meaning. nullptr falls back to navworldclass, then to the objective
+// widget. Returns true when a widget is on the quad.
+//
+// HOST THE ICON, NOT THE WHOLE WIDGET. A navpoint widget is a HUD LAYOUT (icon plus a
+// distance/label block, authored for a canvas); hosted whole on a square quad it renders a
+// window onto that layout -- the "same text, cropped" seen in the field three times. Sizing from
+// its desired size cannot fix that either: a widget that never enters a viewport never lays out
+// and reports desired=(0,0) (measured). So the IMAGE child is hosted instead, with the whole
+// widget as the fallback and navworldicon=0 to force it.
+bool navw_host_class(API::UObject* comp, int slot, API::UClass* want_class) {
+    if (comp == nullptr) return false;
+
+    API::UClass* nav_wcls = want_class;
+    if (nav_wcls == nullptr && g_cfg.nav_world_class[0] != '\0') {
+        const std::string a{g_cfg.nav_world_class};
+        const std::wstring w(a.begin(), a.end());
+        nav_wcls = API::get()->find_uobject<API::UClass>(w.c_str());
+        if (nav_wcls == nullptr) {
+            // Bare name: sweep for a widget class whose name matches.
+            if (auto* arr = API::get()->get_uobject_array()) {
+                const int32_t n = arr->get_object_count();
+                for (int32_t k = 0; k < n; ++k) {
+                    auto* o = arr->get_object(k);
+                    if (o == nullptr) continue;
+                    if (class_name_of(o).find(L"WidgetBlueprintGeneratedClass") == std::wstring::npos)
+                        continue;
+                    const auto* fn = o->get_fname();
+                    if (fn != nullptr && fn->to_string().find(w) != std::wstring::npos) {
+                        nav_wcls = reinterpret_cast<API::UClass*>(o);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (nav_wcls == nullptr) {
+        nav_wcls = API::get()->find_uobject<API::UClass>(
+            L"WidgetBlueprintGeneratedClass /Game/UI/Hud/Navpoints/ScriptedNavpoints/"
+            L"WBP_NavpointObjective.WBP_NavpointObjective_C");
+    }
+    if (nav_wcls == nullptr) return false;
+    if (slot >= 0 && slot < 8 && g_navw_slot_class[slot] == (void*)nav_wcls) return true;  // already wearing it
+
+    auto* wbl_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetBlueprintLibrary");
+    auto* wbl = (wbl_cls != nullptr) ? wbl_cls->get_class_default_object() : nullptr;
+    auto* pc0 = API::get()->get_player_controller(0);
+    if (wbl == nullptr || pc0 == nullptr) return false;
+
+    API::UObject* w = nullptr;
+    {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<void**>(p) = pc0;          // WorldContextObject
+        *reinterpret_cast<void**>(p + 8) = nav_wcls; // WidgetType
+        *reinterpret_cast<void**>(p + 16) = pc0;     // OwningPlayer
+        wbl->call_function(L"Create", p);
+        w = *reinterpret_cast<API::UObject**>(p + 24);
+    }
+    if (w == nullptr) return false;
+
+    API::UObject* host = w;
+    const char* which = "whole widget";
+    int n_imgs = 0;
+    if (g_cfg.nav_world_icon) {
+        API::UObject* imgs[8] = {};
+        n_imgs = navw_collect_images(w, imgs, 8);
+        if (n_imgs > 0) {
+            const int pick = (g_cfg.nav_world_img >= 0 && g_cfg.nav_world_img < n_imgs)
+                           ? g_cfg.nav_world_img : 0;
+            host = imgs[pick];
+            which = "image child";
+        }
+    }
+    { alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+      *reinterpret_cast<void**>(q) = host;
+      comp->call_function(L"SetWidget", q); }
+
+    const double px = (g_cfg.nav_world_draw > 0.0f) ? (double)g_cfg.nav_world_draw : 128.0;
+    { alignas(16) uint8_t sz[RIG_PARAM_BUF] = {0};
+      auto* sd = reinterpret_cast<double*>(sz);
+      sd[0] = px; sd[1] = px;
+      comp->call_function(L"SetDrawSize", sz); }
+
+    // NAME THE NAVPOINT CLASS, not just the image class. The previous log said only
+    // "hosting HaloUIImage", which is true of every marker and therefore identifies nothing --
+    // when the objective marker came back gold there was no way to tell WHICH art it had picked
+    // up. The class name is also what the kind classification (and per-kind sizing) reads.
+    const std::wstring wcn = class_name_of(w);
+    const NavwKind kind = navw_classify(wcn);
+    const float ov = navw_class_override(wcn);
+    const float mult = (ov > 0.0f) ? ov : navw_kind_size(kind);
+    if (slot >= 0 && slot < 8) {
+        g_navw_slot_class[slot] = (void*)nav_wcls;
+        g_navw_slot_kind[slot]  = kind;
+        g_navw_slot_size[slot]  = mult;
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: slot %d = %s [kind=%s size x%.2f%s] hosting "
+                         "%s (%s, %d image(s), navworldimg=%d) draw=%.0fpx",
+                         slot, narrow(wcn).c_str(), navw_kind_name(kind), mult,
+                         (ov > 0.0f) ? " BY navsizeclass" : "",
+                         narrow(class_name_of(host)).c_str(), which, n_imgs,
+                         g_cfg.nav_world_img, px);
+    return true;
+}
+
+// One pool slot: a small sphere, absolute transform, no collision, no shadow -- the
+// reticule_mesh_ensure recipe with the parts this lane needs.
+//
+// OWNER: the FP WEAPON actor (the rig component's outer), exactly like the reticule mesh --
+// NOT the pawn. v3 parented these to the pawn and the field result was "3 markers placed,
+// none visible": this title hides the first-person pawn's components from the player's own
+// view, so a pawn-owned marker exists, positions, and never renders for the person wearing
+// the headset. The weapon actor is the one actor PROVEN to render owner-visible components
+// here. It dies in vehicles, which is fine -- navworld hides in stick mode anyway, and the
+// TrackedObject pool re-creates on the next foot segment.
+API::UObject* navw_ensure_slot(int i) {
+    if (auto* c = g_navw_pool[i].get_checked(L"WidgetComponent")) return c;
+    g_navw_mid_ok[i] = false;
+
+    auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
+    auto* owner = (rig != nullptr) ? rig->get_outer() : nullptr;
+    if (owner == nullptr) return nullptr;   // no FP weapon this tick: try again next tick
+
+    // THE SHARED WIDGET-QUAD RECIPE (Reticule.cpp). Markers are the same kind of object as the
+    // reticule -- a world-space WidgetComponent built by the OblivionVR deferred sequence, the
+    // only world-space visual proven to render on this title. That sequence, its measured
+    // BlendMode offset and the exposure-compensated material chain live in ONE place; this call
+    // site supplies only what is navpoint-specific (which widget, how big).
+    bool compensated = false;
+    auto* comp = widget_quad_begin(owner, /*blend=*/2, &compensated);
+    if (comp == nullptr) return nullptr;
+    g_navw_compensated = compensated;
+    g_navw_mid_ok[i] = true;
+
+    // THE HOSTED WIDGET -- not optional. A WidgetComponent with no widget builds a DEGENERATE
+    // quad (CurrentDrawSize 0,0) and renders nothing, which is how the background-fill-only
+    // version of this marker stayed invisible. navw_host_class() supplies the art; passing
+    // nullptr takes the configured/default class, and the placement loop re-hosts per navpoint
+    // type as slots are reused.
+    const bool hosted = navw_host_class(comp, i, nullptr);
+
+    widget_quad_finish(owner, comp, /*bounds_scale=*/10.0f);
+
+    g_navw_pool[i].set(comp);
+    API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: marker slot %d created as WIDGET quad on %s "
+                         "(mic=%d hosted=%d)", i, narrow(class_name_of(owner)).c_str(),
+                         (int)g_navw_mid_ok[i], (int)hosted);
+    return comp;
+}
+
+void navw_hide_all() {
+    for (int i = 0; i < 8; ++i) {
+        auto* c = g_navw_pool[i].get_checked(L"WidgetComponent");
+        if (c == nullptr) continue;
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        p[0] = 0;
+        c->call_function(L"SetVisibility", p);
+    }
+}
+
+void nav_world_tick(bool engaged, uint32_t tick) {
+    if (!g_cfg.nav_world || !engaged) {
+        if (g_navw_shown) { g_navw_shown = false; navw_hide_all();
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: markers hidden (gates)"); }
+        return;
+    }
+    if (!g_have_view_pos.load() || !g_have_render_yaw.load()) return;
+
+    // ---- CALIBRATION: two probes through the game's own projection. A yields the camera's
+    // rotation, B (offset a known 10Â° in view yaw) yields the constant; one fixed-point pass
+    // resolves their mutual dependency, and the EMA absorbs the rest.
+    static API::UObject* gps = nullptr;
+    static API::UObject* wll = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.GameplayStatics"))
+            gps = c->get_class_default_object();
+        if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetLayoutLibrary"))
+            wll = c->get_class_default_object();
+    }
+    auto* pc = API::get()->get_player_controller(0);
+
+    // Every remaining exit says WHY, rate-limited -- the v1 of this function went dark instead,
+    // and locating its dead gate took a live session.
+    static uint32_t s_blocked_log = 0;
+    auto blocked = [&](const char* why) {
+        if (tick - s_blocked_log >= 600) {
+            s_blocked_log = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: blocked(%s)", why);
+        }
+    };
+
+    if (gps == nullptr || wll == nullptr || pc == nullptr) { blocked("no projection surface"); return; }
+
+    const float vy = g_render_view_yaw.load(), vp = g_render_view_pitch.load();
+    const Vec3  o{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+    auto project = [&](float yaw_deg, float pitch_deg, double* sx, double* sy) -> bool {
+        const float cy2 = std::cos(pitch_deg * DEG2RAD);
+        const Vec3 w{o.x + cy2 * std::cos(yaw_deg * DEG2RAD) * 1000.0f,
+                     o.y + cy2 * std::sin(yaw_deg * DEG2RAD) * 1000.0f,
+                     o.z + std::sin(pitch_deg * DEG2RAD) * 1000.0f};
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<void**>(p) = pc;
+        auto* wv = reinterpret_cast<double*>(p + 8);
+        wv[0] = w.x; wv[1] = w.y; wv[2] = w.z;
+        gps->call_function(L"ProjectWorldToScreen", p);
+        const auto* sp = reinterpret_cast<const double*>(p + 32);
+        *sx = sp[0]; *sy = sp[1];
+        return p[49] != 0 && std::isfinite(sp[0]) && std::isfinite(sp[1]);
+    };
+
+    double vw = 0, vh = 0;
+    float keff = g_navw_keff.load(), cam_yaw = 0.0f, cam_pitch = 0.0f;
+    // ⚠️ LANE 2 MUST NOT ENTER THIS BLOCK. It reads the objective's world position directly and
+    // needs no projection, no calibration and no conditioning -- but the block below RETURNS
+    // early on a rejected probe, and every one of those returns leaves the markers exactly where
+    // they were. That is a marker frozen in world space that the player can walk around, which
+    // is precisely what the field reported ("sometimes it just disconnects"). The guard exists
+    // for the screen-inversion lanes; running it ahead of a lane that does not need it is the
+    // same mistake as the first time this ordering was wrong, and it has now cost two rounds.
+    if (g_cfg.nav_world_src != 2) {
+        // Probes + conditioning + calibration -- screen-inversion lanes only. Lane 1 reads each
+        // LIVE SCREEN POSITION out of the instance map (f32 pair at element+0x50 -- the anatomy
+        // dumps settled the layout after the "world position" read was refuted twice) and
+        // inverts it through this same measured projection, so it needs keff/cam like lane 0.
+        //
+        // CONDITIONING RULE (added after live keff collapse, 2026-08-14): the probes only carry
+        // signal while the view sits reasonably inside the aim camera's frustum. When the hand
+        // is far off the view -- exactly when a naive sample is garbage -- the right move is to
+        // KEEP the previous markers and calibration untouched, not to hide anything and not to
+        // learn from a degenerate sample. keff=300 with cam_pitch=-66 in the field log was this
+        // failure: ill-conditioned samples poisoning the EMA and flinging every marker.
+        double axs = 0, ays = 0, bxs = 0, bys = 0;
+        if (!project(vy, vp, &axs, &ays)) { blocked("probe A rejected -- keeping last markers"); return; }
+        if (!project(vy + 10.0f, vp, &bxs, &bys)) { blocked("probe B rejected -- keeping last markers"); return; }
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            *reinterpret_cast<void**>(p) = pc;
+            wll->call_function(L"GetViewportSize", p);
+            const auto* vs = reinterpret_cast<const double*>(p + 8);
+            vw = vs[0]; vh = vs[1];
+        }
+        if (vw <= 1.0 || vh <= 1.0) { blocked("no viewport"); return; }
+        if (std::fabs(axs - vw * 0.5) > vw * 0.40 || std::fabs(ays - vh * 0.5) > vh * 0.40) {
+            blocked("aim too far off view -- keeping last markers");
+            return;
+        }
+
+        for (int it = 0; it < 2; ++it) {   // fixed-point: d needs k, k needs d
+            const float d  = std::atan((float)(axs - vw * 0.5) / keff);
+            const float t2 = std::tan(d + 10.0f * DEG2RAD) - std::tan(d);
+            if (std::fabs(t2) < 1e-4f) break;
+            const float k = (float)(bxs - axs) / t2;
+            // Plausibility BAND, not just finiteness: px-per-tan is (vw/2)/tan(hfov/2), so any
+            // real value sits between ~0.2*vw (hfov 136) and ~0.9*vw (hfov 58). Outside =
+            // degenerate sample; keep the previous constant.
+            if (std::isfinite(k) && k > 0.2f * (float)vw && k < 0.9f * (float)vw) keff = k;
+        }
+        {
+            const float prev = g_navw_keff.load();
+            g_navw_keff = prev + 0.2f * (keff - prev);
+            keff = g_navw_keff.load();
+        }
+        // The aim camera's true rotation, from probe A (which lies along the RENDERED view).
+        cam_yaw   = vy - RAD2DEG * std::atan((float)(axs - vw * 0.5) / keff);
+        cam_pitch = vp + RAD2DEG * std::atan((float)(ays - vh * 0.5) / keff);
+    }
+
+    // ---- LANE 1 (navworldsrc=1, default): TRUE WORLD POSITIONS from the manager's
+    // NavpointInstances map. Decoded live 2026-08-14 by raw-dumping an element while comparing
+    // against the camera: each instance carries the marker's CURRENT SCREEN POSITION at +0x50
+    // (f32 pair, per-frame) and the TARGET WORLD POSITION at +0x78 (FVector, doubles, UE cm --
+    // verified static across view motion and ~273 m from the camera at island-plausible
+    // coordinates). Placing at the true position beats every screen-inversion scheme: exact at
+    // any distance, correct even BEHIND the player (the flat layer's edge-clamp limitation
+    // simply ceases to exist), and needs no calibration at all.
+    //
+    // The property is a TMap (MapProperty -- no reflected element type reachable from here), so
+    // iteration is raw: {data, num, max} header, elements at data + slot*navworldstride, and a
+    // SPARSE array -- removed markers leave holes. Every slot is therefore VALIDATED (finite,
+    // inside world bounds, not all-zero) and invalid slots are skipped; a wrong stride yields
+    // skipped slots and a log count, never garbage placement. Stride is a dev-tunable for the
+    // day a game patch moves it.
+    // ---- LANE 2 (navworldsrc=2, DEFAULT): THE OBJECTIVE'S TRUE WORLD POSITION.
+    //
+    // SETTLED 2026-08-16 by the manager-rooted graph walk (navscan=5) plus live verification:
+    //
+    //   manager                                  (UObject, via the widget tree -- reflection)
+    //     +0xB8  NavpointInstances {data,num,max}          (the TMap, named property)
+    //       element[s] at data + s*stride              (stride 0x78; screen pair at +0x50)
+    //         +0x20 -> entry ; position FVector3f at entry+0x28
+    //         +0x28 -> entry ; position FVector3f at entry+0x38   (same address, 0x10 apart)
+    //
+    // PROOF it is the OBJECTIVE and not the player: read (-18648.5, 7074.3, 898.2) while the
+    // player stood at (-18560.5, 7192.1) -- ~1.5 m apart, matching the field report that the
+    // objective cannot be approached closer than ~2 m -- and it stayed CONSTANT as the camera
+    // moved. (The player-position hits in the same walk came from manager+0x60
+    // CachedPlayerController, a chain this lane deliberately does not use.)
+    //
+    // Entries are NOT uniform: element[1] in the same live map had no position at either
+    // offset (a different navpoint kind). So every candidate is validated and skipped when
+    // implausible -- a marker is only ever placed on data that reads like a world position.
+    if (g_cfg.nav_world_src == 2) {
+        API::UObject* mgr = nullptr;
+        for (int i = 0; i < g_nav_count; ++i) {
+            auto* w = g_navpoints[i].get();
+            if (w == nullptr || !navw_is_live_widget(w)) continue;
+            if (auto* mp = w->get_property_data<void*>(L"NavpointsManager")) {
+                if (*mp != nullptr) { mgr = reinterpret_cast<API::UObject*>(*mp); break; }
+            }
+        }
+        // FAIL BY HIDING, NEVER BY FREEZING. A marker left at its last world position when the
+        // data behind it goes away reads as a waypoint you can walk around -- worse than no
+        // waypoint, because it is confidently wrong. Every exit below hides first.
+        if (mgr == nullptr) {
+            blocked("no live NavpointsManager");
+            if (g_navw_shown) { g_navw_shown = false; navw_hide_all(); g_navw_placed_n = 0; }
+            return;
+        }
+        struct FMapRaw { void* data; int32_t num; int32_t max; };
+        auto* map = mgr->get_property_data<FMapRaw>(L"NavpointInstances");
+        if (map == nullptr || map->data == nullptr || map->num <= 0) {
+            if (g_navw_shown) { g_navw_shown = false; navw_hide_all(); g_navw_placed_n = 0; }
+            return;
+        }
+        const int32_t stride = (g_cfg.nav_world_stride > 0x40 && g_cfg.nav_world_stride < 0x400)
+                             ? g_cfg.nav_world_stride : 0x78;
+        // THE RENDERED EYE, not the game camera. Every ray below (direction, trace, facing) is
+        // cast from where the player's eye actually is, so a marker drawn short still lines up
+        // with the objective behind it. Using the camera made the alignment range-dependent.
+        const Vec3 vo = g_have_eye_pos.load()
+            ? Vec3{g_eye_pos_x.load(), g_eye_pos_y.load(), g_eye_pos_z.load()}
+            : Vec3{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+
+        // Read an FVector3f through one candidate chain. Returns false unless every step is
+        // readable AND the result reads like a world position.
+        auto try_chain = [&](const uint8_t* elem, int32_t ptr_off, int32_t pos_off, Vec3* out) -> bool {
+            if (IsBadReadPtr(elem + ptr_off, 8)) return false;
+            const uint64_t p = *reinterpret_cast<const uint64_t* const>(elem + ptr_off);
+            if (p < 0x10000 || p > 0x7FFFFFFFFFFFull) return false;
+            const uint8_t* e = reinterpret_cast<const uint8_t*>((uintptr_t)p);
+            if (IsBadReadPtr(e + pos_off, 12)) return false;
+            const float* f = reinterpret_cast<const float*>(e + pos_off);
+            if (!std::isfinite(f[0]) || !std::isfinite(f[1]) || !std::isfinite(f[2])) return false;
+            if (std::fabs(f[0]) > 1.0e6f || std::fabs(f[1]) > 1.0e6f || std::fabs(f[2]) > 1.0e5f) return false;
+            // NEAR-zero, not exactly zero. An unbound entry holds tiny fractions (~1e-8), which
+            // an == 0 test passes and %.0f prints as "-0" -- that is how a phantom marker ended
+            // up parked at the world origin 191 m away, field-visible as a stray icon.
+            if (std::fabs(f[0]) < 1.0f && std::fabs(f[1]) < 1.0f) return false;
+            *out = Vec3{f[0], f[1], f[2]};
+            return true;
+        };
+
+        int used = 0, seen_entries = 0;
+        for (int32_t s = 0; s < map->max && s < 16 && used < 8; ++s) {
+            const uint8_t* elem = reinterpret_cast<const uint8_t*>(map->data) + (size_t)s * stride;
+            if (IsBadReadPtr(elem, (size_t)stride)) continue;
+            Vec3 wp{};
+            if (!try_chain(elem, 0x20, 0x28, &wp) && !try_chain(elem, 0x28, 0x38, &wp)) continue;
+            ++seen_entries;
+
+            auto* comp = navw_ensure_slot(used);
+            if (comp == nullptr) break;
+
+            // THIS navpoint's own art. Element+0x10 is its widget class (anatomy dump: +0x08 is
+            // the live widget instance, +0x10 its WidgetBlueprintGeneratedClass), so an objective,
+            // a co-op partner and a tracked enemy each keep their authored icon and colour
+            // instead of every marker wearing the objective's.
+            {
+                API::UClass* ecls = nullptr;
+                if (!IsBadReadPtr(elem + 0x10, 8)) {
+                    auto* cand = *reinterpret_cast<API::UObject* const*>(elem + 0x10);
+                    if (cand != nullptr && !IsBadReadPtr(cand, 0x30)
+                        && class_name_of(cand).find(L"WidgetBlueprintGeneratedClass") != std::wstring::npos) {
+                        ecls = reinterpret_cast<API::UClass*>(cand);
+                    }
+                }
+                navw_host_class(comp, used, ecls);
+            }
+
+            // ---- PLACEMENT: exact DIRECTION, managed DISTANCE.
+            // The true position is known, but drawing there buries the marker behind terrain
+            // and shrinks it to nothing at range. Draw along the true direction instead, at
+            // min(true, navworldmax), pulled in front of anything the trace finds nearer --
+            // the reticule's surface doctrine, applied to waypoints. Angular size is held
+            // constant so the shortened range is invisible; the direction, which is the
+            // information, stays exact.
+            const float tdx = wp.x - vo.x, tdy = wp.y - vo.y, tdz = wp.z - vo.z;
+            const float true_dist = std::sqrt(tdx * tdx + tdy * tdy + tdz * tdz);
+            if (!(true_dist > 1.0f)) continue;   // degenerate: objective on top of the camera
+            const Vec3 dir{tdx / true_dist, tdy / true_dist, tdz / true_dist};
+
+            // PULL BACK toward the player, the reticule's surface-offset idea applied to the
+            // objective itself: draw the marker navworldback cm SHORT of the thing it marks, so
+            // it floats in front of its target rather than inside it. Applied before the clamp,
+            // so it only bites when the objective is nearer than navworldmax.
+            float draw_dist = true_dist - g_cfg.nav_world_back;
+            if (draw_dist > g_cfg.nav_world_max) draw_dist = g_cfg.nav_world_max;
+            bool  occluded  = false;
+            // Say ONCE whether tracing is even available. "Never pulled in front" reads the same
+            // whether the trace is missing geometry or was never resolved at all, and that
+            // ambiguity is what made the field's "sometimes invisible" hard to act on.
+            {
+                static int s_trace_state = -1;
+                const int now_state = g_cfg.nav_world_trace ? (hit_trace_ready() ? 1 : 0) : 2;
+                if (now_state != s_trace_state) {
+                    s_trace_state = now_state;
+                    API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: occlusion trace %s",
+                                         now_state == 1 ? "READY" :
+                                         now_state == 0 ? "UNAVAILABLE (markers can be occluded)"
+                                                        : "disabled by navworldtrace=0");
+                }
+            }
+            if (g_cfg.nav_world_trace && hit_trace_ready()) {
+                const Vec3 tstart{vo.x, vo.y, vo.z};
+                const Vec3 tend{vo.x + dir.x * draw_dist, vo.y + dir.y * draw_dist,
+                                vo.z + dir.z * draw_dist};
+                Vec3 hit{};
+                API::UObject* ignore[2] = {};
+                int n_ignore = 0;
+                if (auto* pawn = API::get()->get_local_pawn(0)) ignore[n_ignore++] = pawn;
+                if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
+                    if (auto* wep = rigc->get_outer()) ignore[n_ignore++] = wep;
+                }
+                if (hit_trace(tstart, tend, ignore, n_ignore, &hit)) {
+                    const float hx = hit.x - vo.x, hy = hit.y - vo.y, hz = hit.z - vo.z;
+                    const float hd = std::sqrt(hx * hx + hy * hy + hz * hz);
+                    if (hd > 1.0f && hd < draw_dist) {
+                        // Stand off by the LARGER of the fixed offset and 20% of the hit range:
+                        // a flat 60 cm leaves the quad's corners inside the surface up close.
+                        const float standoff = (g_cfg.nav_world_surf > hd * 0.2f)
+                                             ? g_cfg.nav_world_surf : hd * 0.2f;
+                        draw_dist = (hd > standoff) ? (hd - standoff) : (hd * 0.5f);
+                        occluded = true;
+                    }
+                }
+            }
+            if (draw_dist < 50.0f) draw_dist = 50.0f;   // never inside the player's face
+
+            const Vec3 place{vo.x + dir.x * draw_dist, vo.y + dir.y * draw_dist,
+                             vo.z + dir.z * draw_dist};
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = place.x; d[1] = place.y; d[2] = place.z;
+                comp->call_function(L"K2_SetWorldLocation", p);
+            }
+            {
+                // Face the viewer -- a widget quad is edge-on invisible otherwise.
+                const float fh = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = (double)(std::atan2(-dir.z, fh) * RAD2DEG);   // normal back at the eye
+                d[1] = (double)(std::atan2(-dir.y, -dir.x) * RAD2DEG);
+                d[2] = 0.0;
+                comp->call_function(L"K2_SetWorldRotation", p);
+            }
+            {
+                // Scale from the DRAWN distance (constant apparent size however far the marker
+                // was pulled in) times the PER-KIND multiplier: an objective should read from
+                // across the level, a floor weapon should not compete with it.
+                const float mult = (used < 8) ? g_navw_slot_size[used] : 1.0f;
+                const double sc = (double)(g_cfg.nav_world_scale * mult * draw_dist / 1000.0f);
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = sc; d[1] = sc; d[2] = sc;
+                comp->call_function(L"SetWorldScale3D", p);
+            }
+            // Publish for the render-rate re-place (see g_navw_placed).
+            if (used < 8) {
+                g_navw_placed[used] = NavwPlaced{wp.x, wp.y, wp.z, draw_dist};
+            }
+            { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetVisibility", p); }
+            {
+                const float gain = g_navw_compensated
+                                 ? 1.0f : g_cfg.aim_widget_gain * g_cfg.aim_widget_tint;
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* c = reinterpret_cast<float*>(p);
+                c[0] = gain * g_cfg.nav_world_cr;
+                c[1] = gain * g_cfg.nav_world_cg;
+                c[2] = gain * g_cfg.nav_world_cb;
+                c[3] = 1.0f;
+                comp->call_function(L"SetTintColorAndOpacity", p);
+            }
+#if HALO_VR_DEV
+            if (g_cfg.nav_world_log && (tick % 64) == 0) {
+                API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD[%d]: objective=(%.0f,%.0f,%.0f) "
+                                     "true=%.0fcm drawn=%.0fcm%s", used, wp.x, wp.y, wp.z,
+                                     true_dist, draw_dist, occluded ? " [pulled in front]" : "");
+            }
+#endif
+            ++used;
+        }
+        for (int i = used; i < 8; ++i) {
+            auto* c = g_navw_pool[i].get_checked(L"WidgetComponent");
+            if (c == nullptr) continue;
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            p[0] = 0;
+            c->call_function(L"SetVisibility", p);
+        }
+        g_navw_placed_n = used;   // arm/disarm the render-rate re-place to match
+        g_navw_shown = (used > 0) || g_navw_shown;
+
+        // ---- HIDE THE FLAT NAVPOINTS while the world markers are doing their job. Two sets of
+        // waypoints for the same objectives is confusing, and the flat ones are the pair that is
+        // wrong in VR (projected against the aim camera).
+        //
+        // SELF-HEALING, deliberately: the hide is tied to used > 0, so if this lane ever stops
+        // placing -- no manager, empty map, stick mode, kill switch -- the game's own markers
+        // come straight back rather than leaving the player with no waypoints at all. Re-asserted
+        // every tick because the HUD re-shows its children on weapon swap, respawn and scope.
+        if (g_cfg.nav_hide_flat) {
+            static bool s_flat_hidden = false;
+            const bool want_hidden = (used > 0);
+            API::UObject* container = nullptr;
+            for (int i = 0; i < g_nav_count; ++i) {
+                auto* w = g_navpoints[i].get();
+                if (w == nullptr || !navw_is_live_widget(w)) continue;
+                if (auto* pp = w->get_property_data<void*>(L"NavpointsContainer")) {
+                    if (*pp != nullptr) { container = reinterpret_cast<API::UObject*>(*pp); break; }
+                }
+            }
+            if (container != nullptr) {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                p[0] = want_hidden ? 1 : 4;   // 1 = Collapsed, 4 = SelfHitTestInvisible
+                container->call_function(L"SetVisibility", p);
+                if (want_hidden != s_flat_hidden) {
+                    s_flat_hidden = want_hidden;
+                    API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: flat navpoint layer %s",
+                                         want_hidden ? "hidden (world markers active)"
+                                                     : "restored (no world markers)");
+                }
+            }
+        }
+        static uint32_t last_tlog = 0;
+        if (tick - last_tlog >= 600) {
+            last_tlog = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: %d marker(s) at OBJECTIVE world "
+                                 "positions (map num=%d max=%d, %d entr(ies) resolved)",
+                                 used, map->num, map->max, seen_entries);
+        }
+        return;
+    }
+
+    if (g_cfg.nav_world_src == 1) {
+        API::UObject* mgr = nullptr;
+        for (int i = 0; i < g_nav_count; ++i) {
+            auto* w = g_navpoints[i].get();
+            if (w == nullptr || !navw_is_live_widget(w)) continue;
+            if (auto* mp = w->get_property_data<void*>(L"NavpointsManager")) {
+                if (*mp != nullptr) { mgr = reinterpret_cast<API::UObject*>(*mp); break; }
+            }
+        }
+        if (mgr == nullptr) { blocked("no live NavpointsManager"); return; }
+        struct FMapRaw { void* data; int32_t num; int32_t max; };
+        auto* map = mgr->get_property_data<FMapRaw>(L"NavpointInstances");
+        if (map == nullptr || map->data == nullptr || map->num <= 0) {
+            // No live markers is a normal state, not a fault -- hide and go quiet.
+            if (g_navw_shown) { g_navw_shown = false; navw_hide_all(); }
+            return;
+        }
+        const int32_t stride = (g_cfg.nav_world_stride > 0x40 && g_cfg.nav_world_stride < 0x400)
+                             ? g_cfg.nav_world_stride : 0x78;
+        const Vec3 vo{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+
+#if HALO_VR_DEV
+        // INSTANCE ANATOMY (navworldlog >= 3, one-shot per value change): walk every 8-byte
+        // slot of each live instance and NAME anything that is a UObject pointer. Exists
+        // because +0x78 was field-refuted as "the position" (the warthog objective was active
+        // while it read near-zero): the instance almost certainly references its TARGET OBJECT,
+        // and following that pointer to the actor's live location is the offset-guess-free
+        // design. Run this with an ACTIVE flat-HUD waypoint and the dump names the slot.
+        {
+            static int s_anat_done = 0;
+            if (g_cfg.nav_world_log >= 3 && s_anat_done != g_cfg.nav_world_log) {
+                s_anat_done = g_cfg.nav_world_log;
+                for (int32_t s = 0; s < map->max && s < 4; ++s) {
+                    const uint8_t* base = reinterpret_cast<const uint8_t*>(map->data)
+                                        + (size_t)s * stride;
+                    if (IsBadReadPtr(base, (size_t)stride)) continue;
+                    API::get()->log_info("[Halo-CampE-UEVR] NAVANAT slot %d @%p:", s, (const void*)base);
+                    for (int32_t off = 0; off + 8 <= stride; off += 8) {
+                        const uint64_t qv = *reinterpret_cast<const uint64_t*>(base + off);
+                        if (qv == 0) continue;
+                        // Plausible heap/user pointer? Try it as a UObject and name it.
+                        if (qv > 0x10000 && qv < 0x7FFFFFFFFFFF
+                            && !IsBadReadPtr(reinterpret_cast<const void*>(qv), 0x30)) {
+                            auto* cand = reinterpret_cast<API::UObject*>(qv);
+                            const std::wstring cn2 = class_name_of(cand);
+                            if (!cn2.empty()) {
+                                API::get()->log_info("[Halo-CampE-UEVR] NAVANAT   +0x%02X ptr -> %s",
+                                                     off, narrow(cn2).c_str());
+                                continue;
+                            }
+                        }
+                        const double dv = *reinterpret_cast<const double*>(base + off);
+                        const float f0 = *reinterpret_cast<const float*>(base + off);
+                        const float f1 = *reinterpret_cast<const float*>(base + off + 4);
+                        if (std::isfinite(dv) && std::fabs(dv) > 1e-3 && std::fabs(dv) < 1e8) {
+                            API::get()->log_info("[Halo-CampE-UEVR] NAVANAT   +0x%02X dbl %.2f "
+                                                 "| f32 (%.2f, %.2f)", off, dv, f0, f1);
+                        } else if (std::isfinite(f0) && std::isfinite(f1)
+                                   && (std::fabs(f0) > 1e-3 || std::fabs(f1) > 1e-3)
+                                   && std::fabs(f0) < 1e8 && std::fabs(f1) < 1e8) {
+                            API::get()->log_info("[Halo-CampE-UEVR] NAVANAT   +0x%02X f32 (%.2f, %.2f)",
+                                                 off, f0, f1);
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        int used = 0;
+        int found = 0;
+        for (int32_t s = 0; s < map->max && s < 16 && used < 8 && found < map->num; ++s) {
+            const uint8_t* base = reinterpret_cast<const uint8_t*>(map->data) + (size_t)s * stride;
+            if (IsBadReadPtr(base + 0x50, 8)) continue;
+            // THE MARKER'S LIVE SCREEN POSITION (f32 pair at +0x50, viewport px) -- the one
+            // per-marker quantity this map reliably carries (anatomy-dump-settled; the map is
+            // WIDGET bookkeeping, world targets are not in it). Inverted through the measured
+            // projection below into a world direction. Off-viewport values = stale/edge slots.
+            const float* sp = reinterpret_cast<const float*>(base + 0x50);
+            const float msx = sp[0], msy = sp[1];
+            if (!std::isfinite(msx) || !std::isfinite(msy)) continue;
+            if (msx < (float)vw * -0.2f || msx > (float)vw * 1.2f
+                || msy < (float)vh * -0.2f || msy > (float)vh * 1.2f) continue;
+            if (std::fabs(msx) < 1.0f && std::fabs(msy) < 1.0f) continue;   // zeroed slot
+            ++found;
+
+            float m_yaw   = cam_yaw + RAD2DEG * std::atan((msx - (float)vw * 0.5f) / keff);
+            float m_pitch = cam_pitch - RAD2DEG * std::atan((msy - (float)vh * 0.5f) / keff);
+
+            // CLAMP-AWARE DIRECTION CACHE (see g_navw_dirs). Comfortably-central screen
+            // positions are trusted and cached per marker; near-edge ones are presumed clamped
+            // and the cached direction is served instead when one exists.
+            {
+                void* wkey = nullptr;
+                if (!IsBadReadPtr(base + 0x08, 8)) wkey = *reinterpret_cast<void* const*>(base + 0x08);
+                const bool central = std::fabs(msx - (float)vw * 0.5f) < (float)vw * 0.33f
+                                  && std::fabs(msy - (float)vh * 0.5f) < (float)vh * 0.33f;
+                if (wkey != nullptr) {
+                    NavwCachedDir* entry = nullptr;
+                    NavwCachedDir* spare = nullptr;
+                    for (auto& e : g_navw_dirs) {
+                        if (e.wkey == wkey) { entry = &e; break; }
+                        if (spare == nullptr && !e.valid) spare = &e;
+                    }
+                    if (entry == nullptr && central) {
+                        entry = (spare != nullptr) ? spare : &g_navw_dirs[0];
+                        entry->wkey = wkey;
+                        entry->valid = false;
+                    }
+                    if (entry != nullptr) {
+                        if (central) {
+                            entry->yaw = m_yaw; entry->pitch = m_pitch; entry->valid = true;
+                        } else if (entry->valid) {
+                            m_yaw = entry->yaw; m_pitch = entry->pitch;
+                        }
+                    }
+                }
+            }
+            const float dist = g_cfg.nav_world_dist;
+            const float mcp = std::cos(m_pitch * DEG2RAD);
+            const Vec3 wpos{vo.x + mcp * std::cos(m_yaw * DEG2RAD) * dist,
+                            vo.y + mcp * std::sin(m_yaw * DEG2RAD) * dist,
+                            vo.z + std::sin(m_pitch * DEG2RAD) * dist};
+
+            auto* comp = navw_ensure_slot(used);
+            if (comp == nullptr) break;
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = wpos.x; d[1] = wpos.y; d[2] = wpos.z;
+                comp->call_function(L"K2_SetWorldLocation", p);
+            }
+            {
+                // FACE THE VIEWER -- a widget quad is edge-on invisible without this.
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = (double)(-m_pitch);            // normal back toward the viewer
+                d[1] = (double)wrap180(m_yaw + 180.0f);
+                d[2] = 0.0;
+                comp->call_function(L"K2_SetWorldRotation", p);
+            }
+            {
+                const double sc = (double)(g_cfg.nav_world_scale * clampf(dist, 300.0f, 20000.0f) / 1000.0f);
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* d = reinterpret_cast<double*>(p);
+                d[0] = sc; d[1] = sc; d[2] = sc;
+                comp->call_function(L"SetWorldScale3D", p);
+            }
+            { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetVisibility", p); }
+            {
+                // EXPOSURE GAIN, re-asserted per placement -- the reticule-proven fix for the
+                // stock Widget3D material tonemapping to black in bright scenes ("black marks in
+                // the sky", twice). The component reverts the tint on internal rebuilds, so this
+                // is a standing assert, not a one-shot. Unity gain when the pak's compensated
+                // material bound instead.
+                // gain x tint, SAME AS THE RETICULE'S EFFECTIVE VALUE (~5120 in the field log).
+                // v1 applied the gain alone (5.0) -- three orders of magnitude too dim under
+                // this title's pre-exposure, indistinguishable from black. The brightness lives
+                // in aim_widget_tint; the two multiply.
+                const float gain = g_navw_compensated
+                                 ? 1.0f : g_cfg.aim_widget_gain * g_cfg.aim_widget_tint;
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                auto* c = reinterpret_cast<float*>(p);
+                c[0] = gain * g_cfg.nav_world_cr;
+                c[1] = gain * g_cfg.nav_world_cg;
+                c[2] = gain * g_cfg.nav_world_cb;
+                c[3] = 1.0f;
+                comp->call_function(L"SetTintColorAndOpacity", p);
+            }
+#if HALO_VR_DEV
+            if (g_cfg.nav_world_log && (tick % 64) == 0) {
+                API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD[%d]: screen=(%.0f,%.0f) -> "
+                                     "yaw=%.1f pitch=%.1f", used, msx, msy, m_yaw, m_pitch);
+            }
+#endif
+            ++used;
+        }
+        for (int i = used; i < 8; ++i) {
+            auto* c = g_navw_pool[i].get_checked(L"WidgetComponent");
+            if (c == nullptr) continue;
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            p[0] = 0;
+            c->call_function(L"SetVisibility", p);
+        }
+        g_navw_shown = (used > 0) || g_navw_shown;
+        static uint32_t last_wlog = 0;
+        if (tick - last_wlog >= 600) {
+            last_wlog = tick;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: %d marker(s) placed by screen-pos "
+                                 "inversion (map num=%d max=%d stride=0x%X keff=%.0f cam=%.1f/%.1f)",
+                                 used, map->num, map->max, stride, keff, cam_yaw, cam_pitch);
+        }
+        return;
+    }
+
+    // ---- LANE 0 (navworldsrc=0, fallback): the widget-tree screen-inversion walk.
+    // g_navpoints holds both the live widget and the blueprint
+    // archetype (same class name); only the Transient-outered one renders. The container is a
+    // HaloUIOverlay (measured live 2026-08-13 via the MCP object search) -- an OVERLAY, not a
+    // canvas: its children carry OverlaySlots with no coordinates, and the manager positions
+    // markers through each child's RenderTransform instead. Both container families are
+    // accepted; the per-child position code below handles both slot models.
+    API::UObject* panel = nullptr;
+    int n_live = 0, n_prop = 0;
+    for (int i = 0; i < g_nav_count; ++i) {
+        auto* w = g_navpoints[i].get();
+        if (w == nullptr || !navw_is_live_widget(w)) continue;
+        ++n_live;
+        auto* pp = w->get_property_data<void*>(L"NavpointsContainer");
+        if (pp == nullptr || *pp == nullptr) continue;
+        ++n_prop;
+        auto* cand = reinterpret_cast<API::UObject*>(*pp);
+        const std::wstring ccn = class_name_of(cand);
+        if (ccn.find(L"Panel") == std::wstring::npos && ccn.find(L"Overlay") == std::wstring::npos) continue;
+        panel = cand;
+        break;
+    }
+    if (panel == nullptr) {
+        static char why[96];
+        sprintf_s(why, "no live container (live=%d prop-ok=%d of %d)", n_live, n_prop, g_nav_count);
+        blocked(why);
+        return;
+    }
+
+    // The DPI scale, once per sweep: overlay-child RenderTransform translations are in slate
+    // units; the engine maps those to viewport px by this factor.
+    float vscale = 1.0f;
+    {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<void**>(p) = pc;
+        wll->call_function(L"GetViewportScale", p);
+        const float vs2 = *reinterpret_cast<const float*>(p + 8);
+        if (std::isfinite(vs2) && vs2 > 0.05f && vs2 < 20.0f) vscale = vs2;
+    }
+
+    // LEAF COLLECTION, two levels deep. Measured live: NavpointsContainer held only two
+    // OverlaySlots -- nested PIN CONTAINERS (the manager's PinContainers property), with the
+    // marker widgets one level down. A child that is itself a container contributes its
+    // children; anything else is a leaf.
+    API::UObject* leaves[24] = {};
+    double leaf_base_x[24] = {}, leaf_base_y[24] = {};   // translation inherited from the pin container
+    int n_leaves = 0;
+    auto children_of = [&](API::UObject* cont, API::UObject** out, int cap) -> int {
+        int32_t cn = 0;
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            cont->call_function(L"GetChildrenCount", p);
+            cn = *reinterpret_cast<int32_t*>(p);
+        }
+        int got = 0;
+        for (int32_t ci = 0; ci < cn && got < cap; ++ci) {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            *reinterpret_cast<int32_t*>(p) = ci;
+            cont->call_function(L"GetChildAt", p);
+            auto* c = *reinterpret_cast<API::UObject**>(p + 8);
+            if (c != nullptr) out[got++] = c;
+        }
+        return got;
+    };
+#if HALO_VR_DEV
+    // DEEP PROBE (navworldlog >= 2, one-shot per value change): where does the game actually
+    // put a marker's position? Round 1 said not the leaf's RenderTransform; round 2 said not
+    // the pin container's either. This dumps every plausible widget-side channel (transforms,
+    // paddings, slot paddings) plus the manager's NavpointInstances -- whose elements may carry
+    // the TARGET WORLD POSITION outright, which would obsolete screen inversion entirely.
+    static int s_deep_done = 0;
+    const bool deep = (g_cfg.nav_world_log >= 2 && s_deep_done != g_cfg.nav_world_log);
+    if (deep) s_deep_done = g_cfg.nav_world_log;
+    auto dump_widget_channels = [&](API::UObject* w, const char* tag) {
+        if (w == nullptr) return;
+        double tx = 0, ty = 0;
+        if (auto* rt = w->get_property_data<double>(L"RenderTransform")) { tx = rt[0]; ty = rt[1]; }
+        float pad[4] = {0, 0, 0, 0};
+        if (auto* pm = w->get_property_data<float>(L"Padding")) { memcpy(pad, pm, 16); }
+        float spad[4] = {0, 0, 0, 0};
+        const char* slot_cls = "?";
+        static std::string slot_cls_s;
+        if (auto* sp = w->get_property_data<void*>(L"Slot")) {
+            if (*sp != nullptr) {
+                auto* so = reinterpret_cast<API::UObject*>(*sp);
+                slot_cls_s = narrow(class_name_of(so));
+                slot_cls = slot_cls_s.c_str();
+                if (auto* pm2 = so->get_property_data<float>(L"Padding")) { memcpy(spad, pm2, 16); }
+            }
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] NAVDEEP %s: %s rt=(%.1f,%.1f) pad=(%.1f,%.1f,%.1f,%.1f) "
+                             "slot=%s spad=(%.1f,%.1f,%.1f,%.1f)",
+                             tag, narrow(class_name_of(w)).c_str(), tx, ty,
+                             pad[0], pad[1], pad[2], pad[3], slot_cls,
+                             spad[0], spad[1], spad[2], spad[3]);
+    };
+    auto dump_fields_of = [&](API::UObject* o, const char* tag) {
+        if (o == nullptr) return;
+        auto* cls2 = o->get_class();
+        API::get()->log_info("[Halo-CampE-UEVR] NAVDEEP %s: instance of %s", tag,
+                             narrow(class_name_of(o)).c_str());
+        int lvl = 0;
+        for (auto* s2 = reinterpret_cast<API::UStruct*>(cls2); s2 != nullptr && lvl < 3;
+             s2 = s2->get_super_struct(), ++lvl) {
+            int n2 = 0;
+            for (auto* f2 = s2->get_child_properties(); f2 != nullptr && n2 < 48; f2 = f2->get_next(), ++n2) {
+                auto* nm = f2->get_fname();
+                if (nm == nullptr) continue;
+                API::get()->log_info("[Halo-CampE-UEVR] NAVDEEP %s:   +0x%04X %s", tag,
+                                     reinterpret_cast<API::FProperty*>(f2)->get_offset(),
+                                     narrow(nm->to_string()).c_str());
+            }
+        }
+    };
+    if (deep) {
+        // The manager and its instance array, reached through the live widget.
+        for (int i = 0; i < g_nav_count; ++i) {
+            auto* w = g_navpoints[i].get();
+            if (w == nullptr || !navw_is_live_widget(w)) continue;
+            if (auto* mp = w->get_property_data<void*>(L"NavpointsManager")) {
+                if (*mp != nullptr) {
+                    auto* mgr = reinterpret_cast<API::UObject*>(*mp);
+                    struct FRawArr { void* data; int32_t num; int32_t max; };
+                    if (auto* arr2 = mgr->get_property_data<FRawArr>(L"NavpointInstances")) {
+                        API::get()->log_info("[Halo-CampE-UEVR] NAVDEEP: NavpointInstances num=%d",
+                                             arr2->num);
+                        auto** elems = reinterpret_cast<API::UObject**>(arr2->data);
+                        for (int e = 0; e < arr2->num && e < 3; ++e) {
+                            if (elems != nullptr && !IsBadReadPtr(elems, sizeof(void*) * (e + 1))
+                                && elems[e] != nullptr) {
+                                dump_fields_of(elems[e], "inst");
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+#endif
+    {
+        API::UObject* first[12] = {};
+        const int n_first = children_of(panel, first, 12);
+#if HALO_VR_DEV
+        if (deep) {
+            dump_widget_channels(panel, "panel");
+            for (int i = 0; i < n_first; ++i) {
+                dump_widget_channels(first[i], "pin");
+                API::UObject* second[12] = {};
+                const int ns2 = children_of(first[i], second, 12);
+                for (int k = 0; k < ns2 && k < 4; ++k) dump_widget_channels(second[k], "leaf");
+            }
+        }
+#endif
+        for (int i = 0; i < n_first && n_leaves < 24; ++i) {
+            const std::wstring ccn2 = class_name_of(first[i]);
+            const bool is_container = ccn2.find(L"Overlay") != std::wstring::npos
+                                   || ccn2.find(L"Panel") != std::wstring::npos
+                                   || ccn2.find(L"Box") != std::wstring::npos;
+            if (is_container) {
+                // THE PIN CONTAINER CARRIES THE POSITION (measured live 2026-08-14: leaves read
+                // RenderTransform (0,0) and every marker collapsed onto the aim axis). The
+                // manager translates each pin container; the marker widget sits untranslated
+                // inside it. Inherit it here and sum with whatever the leaf itself carries.
+                double bx = 0, by = 0;
+                if (auto* rt = first[i]->get_property_data<double>(L"RenderTransform")) {
+                    if (std::isfinite(rt[0]) && std::isfinite(rt[1])) { bx = rt[0]; by = rt[1]; }
+                }
+                API::UObject* second[12] = {};
+                const int n_second = children_of(first[i], second, 12);
+                for (int k = 0; k < n_second && n_leaves < 24; ++k) {
+                    leaf_base_x[n_leaves] = bx;
+                    leaf_base_y[n_leaves] = by;
+                    leaves[n_leaves++] = second[k];
+                }
+            } else {
+                leaves[n_leaves++] = first[i];
+            }
+        }
+    }
+    const int n_children = n_leaves;
+
+    // Filter accounting, so "no markers" is always explainable from the log. The v1 of this
+    // function had silent early-outs and cost a live investigation to even locate the gate --
+    // the blocked(reason) doctrine exists for exactly this.
+    int n_vis = 0, n_slot = 0, n_edge = 0;
+    double sample_cx = 0, sample_cy = 0;
+    int used = 0;
+    for (int ci = 0; ci < n_children && used < 8; ++ci) {
+        API::UObject* child = leaves[ci];
+        if (child == nullptr) continue;
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            child->call_function(L"GetVisibility", p);
+            const uint8_t vis = p[0];
+            // ESlateVisibility: 0=Visible, 3/4=HitTestInvisible variants; 1=Collapsed 2=Hidden.
+            if (vis == 1 || vis == 2) continue;
+        }
+        ++n_vis;
+
+        // POSITION SOURCE, by slot family (measured live: this container is an Overlay).
+        //   * CanvasPanelSlot: position + anchors, converted to centre-relative viewport px.
+        //   * OverlaySlot (no coordinates): the manager positions the child through its
+        //     RenderTransform; the translation is in SLATE units of the child's local space,
+        //     which the engine maps to viewport px by the DPI scale -- so multiply by
+        //     GetViewportScale rather than guessing a design resolution.
+        double cx = 0, cy2 = 0;
+        bool have_pos = false;
+        auto* slot_pp = child->get_property_data<void*>(L"Slot");
+        auto* slot = (slot_pp != nullptr && *slot_pp != nullptr)
+                   ? reinterpret_cast<API::UObject*>(*slot_pp) : nullptr;
+        if (slot != nullptr && class_name_of(slot).find(L"CanvasPanelSlot") != std::wstring::npos) {
+            {
+                alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                slot->call_function(L"GetPosition", p);
+                const auto* d = reinterpret_cast<const double*>(p);
+                cx = d[0]; cy2 = d[1];
+            }
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            slot->call_function(L"GetAnchors", p);
+            const auto* a = reinterpret_cast<const double*>(p);   // FAnchors: Min(x,y), Max(x,y)
+            const double anch_x = (a[0] + a[2]) * 0.5;
+            const double anch_y = (a[1] + a[3]) * 0.5;
+            if (std::isfinite(anch_x) && std::isfinite(anch_y)
+                && anch_x >= -0.01 && anch_x <= 1.01 && anch_y >= -0.01 && anch_y <= 1.01) {
+                cx = anch_x * vw + cx - vw * 0.5;
+                cy2 = anch_y * vh + cy2 - vh * 0.5;
+            } else {
+                cx -= vw * 0.5;
+                cy2 -= vh * 0.5;
+            }
+            have_pos = true;
+        } else {
+            // Overlay child: the PIN CONTAINER's inherited translation plus the child's own
+            // RenderTransform (usually zero), slate units -> viewport px via the DPI scale.
+            double ox = leaf_base_x[ci], oy = leaf_base_y[ci];
+            auto* rt = child->get_property_data<double>(L"RenderTransform");
+            if (rt != nullptr && std::isfinite(rt[0]) && std::isfinite(rt[1])) {
+                ox += rt[0];
+                oy += rt[1];
+            }
+            cx = ox * (double)vscale;
+            cy2 = oy * (double)vscale;
+            have_pos = true;
+        }
+        if (!have_pos) continue;
+        ++n_slot;
+        // Edge-clamped (the game's own off-screen arrows): direction unrecoverable, skip.
+        sample_cx = cx; sample_cy = cy2;
+        if (std::fabs(cx) > vw * 0.45 || std::fabs(cy2) > vh * 0.45) { ++n_edge; continue; }
+
+        const float m_yaw   = cam_yaw + RAD2DEG * std::atan((float)cx / keff);
+        const float m_pitch = cam_pitch - RAD2DEG * std::atan((float)cy2 / keff);
+
+        auto* comp = navw_ensure_slot(used);
+        if (comp == nullptr) break;
+        const float dist = g_cfg.nav_world_dist;
+        const float cp = std::cos(m_pitch * DEG2RAD);
+        const Vec3 wpos{o.x + cp * std::cos(m_yaw * DEG2RAD) * dist,
+                        o.y + cp * std::sin(m_yaw * DEG2RAD) * dist,
+                        o.z + std::sin(m_pitch * DEG2RAD) * dist};
+        {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            auto* d = reinterpret_cast<double*>(p);
+            d[0] = wpos.x; d[1] = wpos.y; d[2] = wpos.z;
+            comp->call_function(L"K2_SetWorldLocation", p);
+        }
+        {
+            const double s = (double)(g_cfg.nav_world_scale * dist / 1000.0f);
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            auto* d = reinterpret_cast<double*>(p);
+            d[0] = s; d[1] = s; d[2] = s;
+            comp->call_function(L"SetWorldScale3D", p);
+        }
+        { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetVisibility", p); }
+        ++used;
+
+#if HALO_VR_DEV
+        if (g_cfg.nav_world_log && (tick % 64) == 0) {
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD[%d]: slot=(%.0f,%.0f) -> yaw=%.1f pitch=%.1f "
+                                 "(cam=%.1f/%.1f keff=%.0f)", used - 1, cx, cy2, m_yaw, m_pitch,
+                                 cam_yaw, cam_pitch, keff);
+        }
+#endif
+    }
+    for (int i = used; i < 8; ++i) {
+        auto* c = g_navw_pool[i].get_checked(L"WidgetComponent");
+        if (c == nullptr) continue;
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        p[0] = 0;
+        c->call_function(L"SetVisibility", p);
+    }
+    g_navw_shown = (used > 0) || g_navw_shown;
+
+    static uint32_t last_log = 0;
+    if (tick - last_log >= 600) {
+        last_log = tick;
+        if (used > 0) {
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: %d marker(s) world-placed "
+                                 "(keff=%.0f cam=%.1f/%.1f)", used, keff, cam_yaw, cam_pitch);
+        } else {
+            // The blocked(reason) line: which filter ate everything, with one sample position so
+            // a wrong coordinate model is visible in a single log excerpt.
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: 0 placed (children=%d visible=%d "
+                                 "canvas-slotted=%d edge-skipped=%d lastpos=(%.0f,%.0f) "
+                                 "viewport=%.0fx%.0f keff=%.0f)",
+                                 n_children, n_vis, n_slot, n_edge, sample_cx, sample_cy, vw, vh, keff);
+        }
+    }
+}
+
+#if HALO_VR_DEV
+// NAVSCAN -- the waypoint-position hunt harness (docs\CAMERA_CONSUMERS_FINDINGS.md, the
+// target-derived design). The screen-space marker source is aim-poisoned beyond repair
+// (field-settled 2026-08-15), so the marker's TRUE world position must come from the Blam
+// side, where the game demonstrably keeps it. The hunt manufactures a known value: the player
+// STANDS AT the objective, so the waypoint's stored position ~= the view position -- which
+// this harness reads itself, converts per unit hypothesis, and feeds to the MemScan worker.
+// The player never touches a coordinate.
+//
+//   navscan=1  scan for (x,y) as FLOAT UE CENTIMETRES
+//   navscan=2  scan for (x,y) as FLOAT BLAM WORLD UNITS (cm / 304.8)
+//   navscan=3  scan for (x,y) as FLOAT METRES          (cm / 100)
+//   navscan=0  between every step -- resets the scanner's edge for the next one
+//
+// X,Y only, deliberately: the marker hovers some unknown height above the ground the player
+// stands on, so Z would reject the very record being hunted.
+void nav_scan_tick() {
+    static int s_last = 0;
+    if (g_cfg.nav_scan == s_last) return;
+    s_last = g_cfg.nav_scan;
+    if (g_cfg.nav_scan == 0) {
+        g_cfg.mem_scan = false;   // re-arm the scanner's edge for the next hypothesis
+        return;
+    }
+    if (!g_have_view_pos.load()) {
+        API::get()->log_info("[Halo-CampE-UEVR] NAVSCAN: no view position yet -- enter gameplay first");
+        return;
+    }
+    const float cx = g_view_pos_x.load(), cy = g_view_pos_y.load(), cz = g_view_pos_z.load();
+
+    // navscan=4: the TLS-GRAPH WALK -- the anchor search. Heap scans proved the objective's
+    // wu-pair lives in a RELOCATING event buffer (round 2 forensics); this instead walks the
+    // pointer graph from the sim's TLS root, where a hit's CHAIN is a stable structural path.
+    if (g_cfg.nav_scan == 4) {
+        nav_tls_scan(cx / 304.8f, cy / 304.8f);
+        return;
+    }
+
+    // navscan=5: THE UE-SIDE WALK -- manager-rooted, and the one that should have been first.
+    // Graphics and UI are UE's domain on this hybrid (the research doc says so outright), so
+    // the navpoints MANAGER -- a UObject reached through the widget tree navworld already
+    // resolves -- is a STABLE root, unlike anything in the Blam heap. A hit's offset chain from
+    // it is directly hardcodable as per-tick resolution.
+    if (g_cfg.nav_scan == 5) {
+        API::UObject* mgr = nullptr;
+        for (int i = 0; i < g_nav_count; ++i) {
+            auto* w = g_navpoints[i].get();
+            if (w == nullptr || !navw_is_live_widget(w)) continue;
+            if (auto* mp = w->get_property_data<void*>(L"NavpointsManager")) {
+                if (*mp != nullptr) { mgr = reinterpret_cast<API::UObject*>(*mp); break; }
+            }
+        }
+        if (mgr == nullptr) {
+            API::get()->log_info("[Halo-CampE-UEVR] NAVSCAN 5: no live NavpointsManager "
+                                 "(navworld=1 and an active waypoint are required)");
+            return;
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] NAVSCAN 5: manager @%p, standing at "
+                             "cm=(%.1f, %.1f) -> wu=(%.3f, %.3f)",
+                             (void*)mgr, cx, cy, cx / 304.8f, cy / 304.8f);
+        nav_graph_scan((uintptr_t)mgr, cx / 304.8f, cy / 304.8f);
+        return;
+    }
+
+    float sx = cx, sy = cy;
+    const char* hyp = "UE centimetres (float)";
+    switch ((g_cfg.nav_scan - 1) % 3) {
+    case 1: sx = cx / 304.8f; sy = cy / 304.8f; hyp = "Blam world units (float, cm/304.8)"; break;
+    case 2: sx = cx * 0.01f;  sy = cy * 0.01f;  hyp = "metres (float, cm/100)"; break;
+    default: break;
+    }
+    snprintf(g_cfg.mem_scan_vals, sizeof(g_cfg.mem_scan_vals), "%.3f,%.3f", sx, sy);
+    g_cfg.mem_scan = true;    // mem_scan_tick (called right after this in the poll) sees the edge
+    API::get()->log_info("[Halo-CampE-UEVR] NAVSCAN %d: standing at cm=(%.1f, %.1f, %.1f) -> "
+                         "scanning as %s: %s",
+                         g_cfg.nav_scan, cx, cy, cz, hyp, g_cfg.mem_scan_vals);
+}
+#else
+inline void nav_scan_tick() {}
+#endif
+
 // The aim control loop (control-rotation reads, the control law, pose reading) is in MotionAimControl.cpp.
 // ---------------------------------------------------------------- the loop
 
@@ -1635,11 +3441,50 @@ static void reticule_ray_angles(double aim_yaw, double aim_pitch, float* out_yaw
     float tau_ms = used_setpoint ? g_cfg.aim_reticule_smooth_ctrl_ms
                                  : g_cfg.aim_reticule_smooth_ms;
     {
+        // MOTION-GATE RATE, measured HERE by differentiating this function's own input.
+        //
+        // It used to read g_setpoint_rate_dps, which only the fallback loop's feedforward path
+        // writes -- and that path is further gated on a measured plant gain, so under the
+        // shipped direct-drive aim it sits at 0 for a whole session. The gate then read "hand
+        // is still" and every deliberate swing carried the FULL filter: precisely the lag the
+        // gate was built to remove. Same trap the MOVERESID diagnostic documents at its own
+        // call site, same fix: differentiate the value actually in hand.
+        //
+        // Details that matter:
+        //   * The PRE-filter angles are differentiated. The filtered output under-reads rate
+        //     during exactly the swings that must open the gate.
+        //   * The instantaneous rate RISES the gate immediately (a swing's first sample already
+        //     disengages the filter -- zero added lag at onset) and DECAYS over ~120 ms, so a
+        //     single tremor spike at rest cannot flicker the filter off and re-admit the
+        //     shimmer it exists to hide.
+        //   * A source switch or divergence-guard snap is a discontinuity, not motion: the
+        //     sample is skipped, so at rest a snap stays EASED by the filter as designed
+        //     instead of becoming an instant jump.
+        static float rate_gate_dps = 0.0f;
+        static float prev_in_yaw = 0.0f, prev_in_pitch = 0.0f;
+        static bool  have_prev_in = false;
+        static bool  prev_used_setpoint = false;
+
+        if (prev_used_setpoint != used_setpoint) have_prev_in = false;
+        prev_used_setpoint = used_setpoint;
+
+        if (dt > 0.0f) {
+            if (have_prev_in) {
+                const float dy = wrap180(yaw - prev_in_yaw);
+                const float dp = pitch - prev_in_pitch;
+                const float inst = std::sqrt(dy * dy + dp * dp) / dt;
+                const float decay = std::exp(-dt / 0.120f);
+                rate_gate_dps = (inst > rate_gate_dps) ? inst : rate_gate_dps * decay;
+            }
+            prev_in_yaw = yaw;
+            prev_in_pitch = pitch;
+            have_prev_in = true;
+        }
+
         const float slow = g_cfg.aim_reticule_smooth_slow_dps;
         const float fast = g_cfg.aim_reticule_smooth_fast_dps;
         if (fast > slow) {
-            const float rate = halo::g_setpoint_rate_dps.load();
-            const float t = clampf((rate - slow) / (fast - slow), 0.0f, 1.0f);
+            const float t = clampf((rate_gate_dps - slow) / (fast - slow), 0.0f, 1.0f);
             tau_ms *= (1.0f - t);   // -> 0 ms (raw) as the swing gets faster
         }
     }
@@ -1671,7 +3516,14 @@ void update() {
     if (tick - g_cfg_check_tick >= 64) {
         g_cfg_check_tick = tick;
         PerfScope _perf(PERF_CFG);
+        // Settings-menu bridge FIRST, so a command applied this tick is parsed by the very same
+        // load_config below -- the menu's changes land within one poll, like any file edit.
+        const int menu_applied = menu_bridge_tick();
         load_config();
+        if (menu_applied > 0) {
+            API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
+                                 menu_applied);
+        }
 
         // Re-apply hotkey overrides on top of what was just parsed (see g_kill_override). Each is
         // released when the file's own value CHANGES, so an edit still beats a stale hotkey.
@@ -1718,6 +3570,7 @@ void update() {
         // Immediately after the reload, on the TICK thread: this is where the trace file actually
         // gets written, deliberately far away from the input path that fills the buffer.
         aim_trace_tick();
+        nav_scan_tick();   // BEFORE mem_scan_tick: it composes the values and arms the edge
         mem_scan_tick();
         mem_diff_tick();
         // The SHIPPING aim write. Separate call from blam_aim_tick() below on purpose: that one is
@@ -1728,11 +3581,86 @@ void update() {
         aim_watch_tick();
         aim_direct_tick();
         game_settings_tick(g_stick_mode.load());
+        // The culling fix (shipping code): re-applies the cull distance on value/level change
+        // and a slow insurance timer. Poll cadence is exactly right for all three triggers.
+        cull_fix_tick();
+        // Dev builds only (inline no-ops otherwise): the on-change console-command harness, the
+        // audio-object survey, and the navpoint/CHUD recon dump. Config-poll rate on purpose --
+        // all are edge-triggered on their keys changing, never per-tick work.
+        dev_exec_tick();
+        audio_dump_tick();
+        nav_dump_tick();
     }
 
     // Above every early-out below, so the numbers still arrive when the driver is disabled or
     // parked in a menu -- "it stutters at the frontend too" is a diagnosis, not a gap.
     perf_report(tick);
+
+    // THE SCOPE, also above every early-out: it must HIDE the pane on ticks where the aim stack
+    // is parked (menus, seats, invalid pose -- the paths that return early below), and the
+    // first placement at the end of the tick would never run on exactly those ticks. It consumes
+    // the ray scope_notice_ray() deposited LAST tick, so pane placement trails the reticule by
+    // one ~32 Hz tick -- invisible next to the smoothing already on the reticule itself.
+#if HALO_VR_DEV
+    // SCOPEDEV state line, ~2 s: every input the scope's gates consume, so a dead pane is
+    // explainable from the log alone (the aim-servo `blocked(reason)` idea, applied here).
+    if ((tick % 64) == 33) {
+        API::get()->log_info("[Halo-CampE-UEVR] SCOPEDEV state: active=%d edges=%u ltmax=%u "
+                             "captures=%u havevp=%d inmenu=%d stick=%d devray=%d scope=%d",
+                             (int)g_scope_active.load(), g_scope_lt_edges.load(),
+                             (unsigned)g_scope_lt_max.load(), g_scope_captures.load(),
+                             (int)g_have_view_pos.load(),
+                             (int)g_in_menu.load(), (int)g_stick_mode.load(),
+                             (int)g_cfg.scope_dev_ray, (int)g_cfg.scope_enabled);
+    }
+    // SCOPE DEV RAY (scopedevray=1, dev cfg): synthesize the ray from the RENDERED VIEW instead of
+    // the controller. Exists because the SimVR null driver never validates the controller aim
+    // pose, so the on-foot reticule path -- the scope's real ray source -- stays parked and the
+    // scope cannot be exercised by headless automation at all. View pos/yaw/pitch are published
+    // by the stereo callback, which does run under the sim. Verification only; a release build
+    // does not contain this path.
+    if (g_cfg.scope_dev_ray && g_have_view_pos.load() && !g_in_menu.load()) {
+        const Vec3 devo{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()};
+        const float vy = g_render_view_yaw.load() * DEG2RAD;
+        const float vp = g_render_view_pitch.load() * DEG2RAD;
+        const float cp = std::cos(vp);
+        const Vec3 devt{devo.x + cp * std::cos(vy) * 500.0f,
+                        devo.y + cp * std::sin(vy) * 500.0f,
+                        devo.z + std::sin(vp) * 500.0f};
+        auto* dev_pawn = API::get()->get_local_pawn(0);
+        auto* dev_root = follow_object(reinterpret_cast<API::UObject*>(dev_pawn), L"RootComponent");
+        if (dev_root != nullptr) scope_notice_ray(devo, devt, dev_root, tick);
+
+        // TRACE FROM THE VIEW TOO, so the "what did the ray hit" readout is exercisable under
+        // SimVR. The real trace lives in the on-foot reticule block, which never runs here: the
+        // null driver never validates a controller pose, so the plugin sits in stick mode and
+        // that whole path is skipped. Without this the identification work cannot be tested
+        // headlessly at all. Throttled -- this is a full line trace, not a free read.
+        if (hit_trace_ready() && (tick % 8) == 0) {
+            API::UObject* ig[2] = {nullptr, nullptr};
+            int nig = 0;
+            if (dev_pawn != nullptr) ig[nig++] = reinterpret_cast<API::UObject*>(dev_pawn);
+            if (auto* wa = fp_weapon_actor()) ig[nig++] = wa;
+            // A SEPARATE, LONG end point. devt is only 500 cm out -- fine for defining a
+            // direction, useless as a trace: looking level across open ground there is nothing
+            // within five metres, so the trace correctly returned nothing and the readout looked
+            // broken when it was simply out of range.
+            const float reach = 20000.0f;   // 200 m
+            const Vec3 devfar{devo.x + cp * std::cos(vy) * reach,
+                              devo.y + cp * std::sin(vy) * reach,
+                              devo.z + std::sin(vp) * reach};
+            Vec3 devhit{};
+            const bool got_dev = hit_trace(devo, devfar, ig, nig, &devhit);
+            static uint32_t s_dev_trace_rep = 0;
+            if ((s_dev_trace_rep++ % 40) == 0) {
+                API::get()->log_info("[Halo-CampE-UEVR] HITDEV: trace %s (reach %.0fm)",
+                                     got_dev ? "HIT" : "no hit", reach / 100.0f);
+            }
+            if (got_dev) hit_trace_dev_report();
+        }
+    }
+#endif
+    scope_frame_end(tick);
 
 #if HALO_VR_DEV
     // One-shot: name the project's collision channels so the reticule trace channel can be chosen
@@ -1740,8 +3668,27 @@ void update() {
     {
         static bool dumped = false;
         if (!dumped && tick > 200) { dumped = true; hit_trace_dump_channels(); }
+        // Same one-shot window: prove the shield getters answer against a live enemy.
+        static bool probed = false;
+        if (!probed && tick > 240) { probed = true; hit_trace_dev_shield_probe(); }
     }
 #endif
+
+    // A distance key arrived as a legacy METRES value and was scaled to cm. Said once, loudly: a
+    // silent rescale is the same class of surprise as the unit mismatch it exists to prevent.
+    {
+        static bool said_units = false;
+        if (!said_units && g_cfg.legacy_units_key != nullptr) {
+            said_units = true;
+            API::get()->log_info("[Halo-CampE-UEVR] UNITS: %s=%.2f looked like the old METRES value, "
+                                 "so it was read as %.0f cm. Distance settings are CENTIMETRES now "
+                                 "(matching Unreal) -- write %s=%.0f to silence this. Check the other "
+                                 "distance keys in the same file while you are there.",
+                                 g_cfg.legacy_units_key, g_cfg.legacy_units_val,
+                                 g_cfg.legacy_units_val * 100.0f,
+                                 g_cfg.legacy_units_key, g_cfg.legacy_units_val * 100.0f);
+        }
+    }
 
     // An aim offset with no aimcalibver stamp has an INFERRED schema, and inferring wrong is a
     // constant yaw error that is invisible until you compare where you point with where shots go --
@@ -1755,6 +3702,39 @@ void update() {
                                  "view-lock frame is NOT applied. If aim sits off by a constant, run "
                                  "the Page Down calibration once: it re-measures against the current "
                                  "frame and stamps the result 2.");
+        }
+    }
+
+    // ---- UEVR'S OWN ROOMSCALE RE-CENTRE, WHICH DOES THE SAME JOB AS THE LEASH.
+    //
+    // VR_RoomscaleMovement re-centres the standing origin to the HMD every frame, X and Z only
+    // (FFakeStereoRenderingHook.cpp: `current_standing_origin.x = hmd_pos.x; ... // dont touch the
+    // Y axis`). That IS a lateral leash at radius zero, and it defaults on -- so it was cancelling
+    // lateral head movement before this plugin's leash existed, which is why the effect was noticed
+    // as "already leashed somehow", why it was lateral-only, and why hmdleashlat had so little to
+    // do once we added it.
+    //
+    // It also means hmdleash=0 WAS A LIE: switching ours off left UEVR's running, so the option we
+    // want to offer people who find a tight leash nauseating did nothing. The setting has to own
+    // both or it is not a setting.
+    //
+    // Note what UEVR's version is actually FOR: the line above the re-centre moves the pawn by the
+    // head offset, so you walk in-game. That half does not work on this title -- the Blam sim owns
+    // the player's position and overwrites the UE actor -- so all that survives is the re-centre.
+    // We lose nothing by taking it over, and we gain a radius, which UEVR's has no notion of.
+    //
+    // Written on CHANGE only. It is a UEVR mod value, not a config poll, and rewriting it every
+    // tick would be a per-tick engine call for a value that changes when the player edits a file.
+    {
+        static int last_want = -1;
+        const int want = g_cfg.hmd_leash ? 1 : 0;
+        if (want != last_want) {
+            last_want = want;
+            API::VR::set_mod_value("VR_RoomscaleMovement", false);
+            API::get()->log_info("[Halo-CampE-UEVR] LEASH: VR_RoomscaleMovement forced OFF -- it is a "
+                                 "zero-radius lateral leash of UEVR's own, and hmdleash owns this "
+                                 "behaviour now (hmdleash=%d, lat=%.2f vert=%.2f)",
+                                 want, g_cfg.hmd_leash_lat * 100.0f, g_cfg.hmd_leash_vert * 100.0f);
         }
     }
 
@@ -1802,9 +3782,9 @@ void update() {
                 static uint32_t last = 0;
                 if (tick - last >= 60) {
                     last = tick;
-                    API::get()->log_info("[Halo-CampE-UEVR] HMDLEASH: absorbed drift lat=%.3fm vert=%.3fm "
-                                         "(limits %.2f/%.2f) origin -> (%.3f,%.3f,%.3f)",
-                                         lat, dy, g_cfg.hmd_leash_lat, g_cfg.hmd_leash_vert, nx, ny, nz);
+                    API::get()->log_info("[Halo-CampE-UEVR] HMDLEASH: absorbed drift lat=%.1fcm vert=%.1fcm "
+                                         "(limits %.0f/%.0f cm) origin -> (%.3f,%.3f,%.3f)",
+                                         lat * 100.0f, dy * 100.0f, g_cfg.hmd_leash_lat * 100.0f, g_cfg.hmd_leash_vert * 100.0f, nx, ny, nz);
                 }
 #endif
             }
@@ -1814,6 +3794,14 @@ void update() {
     // ---- Calibrate key, edge-detected on the GAME THREAD.
     // GetAsyncKeyState reads global key state, so it registers with the headset on and the game
     // focused -- which is the only way this is usable mid-session.
+    //
+    // FOREGROUND-GATED (2026-08-15). "Global" cuts the other way too: the keys registered while
+    // the game sat in the BACKGROUND, and End (end of line), Page Down (scrolling), Ctrl+Home
+    // (top of document) and Ctrl+PgUp (previous tab) are keys a desktop session presses
+    // constantly -- the log showed four garbage aim calibrations in ten seconds of desktop
+    // work, which is the calibbtn lesson below re-imported through the keyboard. Every gesture
+    // in this block now requires game_window_focused(); headset play is unaffected because a
+    // played game IS the foreground window.
     //
     // KEYBOARD ONLY, AND DELIBERATELY SO.
     //
@@ -1829,14 +3817,51 @@ void update() {
     // UEVR Lua UI, which is deliberate by construction -- and that is another reason not to keep a
     // hidden binding around in the meantime.
     {
-        const bool held = (g_cfg.calib_key != 0) &&
-                          ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0);
+        // ---- MENU-ARMED CALIBRATION -- the "UEVR Lua UI" home the removal note above always
+        // anticipated. The settings menu arms a mode (bridge command); an armed mode behaves
+        // exactly like the calibration key being HELD, and the triggers (sampled + eaten in
+        // on_xinput_get_state) supply the release edges:
+        //   RIGHT trigger: drop the mode -> the hold falls -> the existing release edge solves
+        //                  and saves, once, and the gesture is over.
+        //   LEFT trigger:  interrupt the hold only while pressed -> its press edge solves and
+        //                  saves, its release re-enters the hold -- consecutive calibrations
+        //                  with no menu round-trip.
+        {
+            static int s_prev_mode = 0;
+            int mode = g_menu_calib_mode.load(std::memory_order_relaxed);
+            if (mode != 0 && g_menu_calib_rt.load(std::memory_order_relaxed)) {
+                g_menu_calib_mode.store(0, std::memory_order_relaxed);
+                mode = 0;
+            }
+            if (mode != s_prev_mode) {
+                if (mode != 0) {
+                    API::get()->log_info("[Halo-CampE-UEVR] MENU CALIBRATION ARMED (%s): close the UEVR menu "
+                                         "(controllers do not reach the game while it is open), align, then "
+                                         "RIGHT trigger = save & finish, LEFT trigger = save & re-arm.",
+                                         mode == 1 ? "weapon pose" : "aim ray");
+                } else {
+                    API::get()->log_info("[Halo-CampE-UEVR] MENU CALIBRATION finished/disarmed.");
+                }
+                s_prev_mode = mode;
+            }
+        }
+        const int  menu_mode = g_menu_calib_mode.load(std::memory_order_relaxed);
+        const bool menu_lt   = g_menu_calib_lt.load(std::memory_order_relaxed);
+        // The gate for every keyboard gesture below. The menu-armed path is deliberately NOT
+        // gated: arming is an explicit act, and its triggers only arrive through the game's own
+        // input in the first place.
+        const bool key_focus = game_window_focused();
+
+        const bool held = (key_focus && (g_cfg.calib_key != 0) &&
+                           ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0)) ||
+                          (menu_mode == 1 && !menu_lt);
         const bool was  = g_calib_held.exchange(held);
         if (held && !was) g_calib_start  = true;
         if (!held && was) g_calib_finish = true;
 
-        const bool aim_down = (g_cfg.aim_calib_key != 0) &&
-                              ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0);
+        const bool aim_down = (key_focus && (g_cfg.aim_calib_key != 0) &&
+                               ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0)) ||
+                              (menu_mode == 2 && !menu_lt);
         const bool aim_was  = g_aimcal_held.exchange(aim_down);
         // Publish it: blamangles drives the sim's angular control state from a sim-thread hook in
         // BlamAim.cpp, which cannot see this file's anonymous namespace. Without this the actuator
@@ -1845,6 +3870,38 @@ void update() {
         halo::g_aim_calibrating.store(aim_down, std::memory_order_relaxed);
         if (aim_down && !aim_was) {
             g_aimcal_start = true;
+
+            // CALIBRATE FROM YOUR NEUTRAL POSITION -- i.e. with your head at the standing origin.
+            //
+            // This is a measurement procedure, not a nag. Convergence bends the command by
+            // roughly (eye-to-camera offset / range to target), and calibrating inside that bend
+            // means measuring the hand-to-aim offset through a lens that is itself moving:
+            // MEASURED over four calibrations 45 s apart while walked away from the pawn, the bend
+            // at capture was +1.8, -17.7, -19.0 degrees, and then did not engage at all.
+            //
+            // The capture removes the bend, and that works -- those four produced offsets agreeing
+            // to ~2 degrees. What it cannot remove is the bend CHANGING between the capture and the
+            // next drive tick, which is the residual snap. At the standing origin the bend is
+            // identically zero, so there is nothing to remove and nothing to change: the gesture
+            // becomes exact, and the offset it stores is the clean one that stays valid at every
+            // displacement afterwards.
+            //
+            // Warn, do not refuse. A player who cannot conveniently recentre is better served by a
+            // slightly noisy calibration than by a gesture that will not run.
+            {
+                constexpr float NEUTRAL_WARN_CM = 10.0f;
+                Vec3 dv{};
+                const float dcm = halo::aim_converge_delta(&dv)
+                    ? std::sqrt(dv.x * dv.x + dv.y * dv.y + dv.z * dv.z) : 0.0f;
+                if (dcm > NEUTRAL_WARN_CM) {
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] AIM CALIBRATE: WARNING -- your head is %.0f cm from the standing "
+                        "origin. Aim will settle for a moment after you release, and the fit is "
+                        "noisier than it needs to be. RESET YOUR PLAY AREA (or set hmdleash=1) and "
+                        "calibrate from your neutral position for an exact result.", dcm);
+                }
+            }
+
             API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATE: aim frozen -- point your controller at the "
                                  "reticle, then release");
         }
@@ -1881,7 +3938,7 @@ void update() {
         // rescue you from.
         if (g_cfg.kill_key != 0) {
             const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool kill_down = ctrl && ((GetAsyncKeyState(g_cfg.kill_key) & 0x8000) != 0);
+            const bool kill_down = key_focus && ctrl && ((GetAsyncKeyState(g_cfg.kill_key) & 0x8000) != 0);
             const bool kill_was  = g_kill_held.exchange(kill_down);
             if (kill_down && !kill_was) {
                 g_cfg.enabled = !g_cfg.enabled;
@@ -1904,7 +3961,7 @@ void update() {
         // broken path. The two settings are independent; the toggle changes one thing.
         if (g_cfg.mode_key != 0) {
             const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool down = ctrl && ((GetAsyncKeyState(g_cfg.mode_key) & 0x8000) != 0);
+            const bool down = key_focus && ctrl && ((GetAsyncKeyState(g_cfg.mode_key) & 0x8000) != 0);
             const bool was  = g_mode_held.exchange(down);
             if (down && !was) {
                 const bool to_direct = !g_cfg.aim_direct;
@@ -1924,6 +3981,45 @@ void update() {
     if (g_aimcal_finish.exchange(false)) {
         g_have_ref = false;
         g_aimcal_capture = true;   // next capture MEASURES the offset instead of restoring it
+    }
+
+    // ---- VIEW-CONSUMER FIXES (audio listener, navpoint layer). Sited ABOVE every early-out --
+    // including the kill switch -- because both must be able to RELEASE when their gates drop:
+    // update() returning early with an override still applied is the stale-correction bug in a
+    // new coat. Gated on g_cfg.enabled inside `fixes_ok`, so enabled=0 means "everything back to
+    // vanilla", corrections included.
+    //
+    // The ControlRotation read is repeated here rather than hoisted from below because the read
+    // below sits UNDER the frontend bail (at the frontend there is no Blam gameplay camera). The
+    // same frontend test guards this one; the read itself fails closed on garbage regardless.
+    {
+        const bool want_any = g_cfg.audio_fix || g_cfg.audio_comp || g_cfg.nav_fix
+                           || g_nav_shift_applied;   // releases still pending count as wanted
+        double vf_pitch = 0.0, vf_yaw = 0.0;
+        bool   have_aim = false;
+        if (want_any) {
+            auto* pc0 = API::get()->get_player_controller(0);
+            const std::wstring pcn = (pc0 != nullptr)
+                ? class_name_of(reinterpret_cast<API::UObject*>(pc0)) : std::wstring();
+            const bool frontend = pcn.find(L"Frontend") != std::wstring::npos;
+            if (pc0 != nullptr && !frontend) {
+                void* vf_pc = nullptr;
+                have_aim = read_control_rotation(&vf_pitch, &vf_yaw, &vf_pc);
+            }
+        }
+        const bool fixes_ok = g_cfg.enabled && g_cfg.view_lock && !g_stick_mode.load()
+                           && have_aim && g_have_render_yaw.load();
+        audio_fix_tick(g_cfg.audio_fix && fixes_ok && g_have_view_pos.load(),
+                       g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load(),
+                       g_render_view_yaw.load(), g_render_view_pitch.load());
+        audio_comp_tick(g_cfg.audio_comp && fixes_ok && g_have_view_pos.load(), tick,
+                        g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load(),
+                        g_render_view_yaw.load(), g_render_view_pitch.load());
+        // navworld supersedes the flat-layer shift: while it owns the job, hud_navpoint_follow
+        // sees "disengaged" and releases, so the flat markers stay game-native under the
+        // world-space ones.
+        hud_navpoint_follow(fixes_ok && !g_cfg.nav_world, vf_pitch, vf_yaw, tick);
+        nav_world_tick(fixes_ok, tick);
     }
 
     if (!g_cfg.enabled) { g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return; }
@@ -1952,6 +4048,7 @@ void update() {
         // stale proxy as the menu-state bug above, same fix.
         if (!frontend) reticle_rescan(tick);
         material_hunt(tick);
+        shield_fx_census(tick);
         run_mat_dump();
         texture_param_hunt(tick);
 
@@ -1972,6 +4069,19 @@ void update() {
         // UI-manager state (verified: pause menu closed -> false, open -> true).
         const bool now_menu = frontend || g_menu_widget_open.load();
         const bool was_menu = g_in_menu.exchange(now_menu);
+        // Published every tick rather than on the edge, for the same reason as stick mode below:
+        // the BlamDrive watchdog reads it from outside this file's anonymous namespace, and a
+        // publication that only fires on transitions is one missed tick from misjudging the state.
+        halo::g_menu_active.store(now_menu, std::memory_order_relaxed);
+        // The narrower one, published alongside: `frontend` WITHOUT the widget term. See the header
+        // -- the sim keeps running (and keeps calling the hook) while a menu widget is open, so the
+        // two questions have different answers and the wrong one silences a watchdog.
+        halo::g_frontend_active.store(frontend, std::memory_order_relaxed);
+        // Read-only PlayerController for off-thread READERS (the BlamDrive layout guard). Published
+        // here, above every early-out, precisely because it must survive the motion stack standing
+        // down -- unlike g_aim_law_pc further below, which is deliberately armed-only. Cleared at
+        // the frontend so nobody reads a menu controller as if it were gameplay.
+        halo::g_read_only_pc.store(frontend ? nullptr : pc0, std::memory_order_relaxed);
         if (was_menu != now_menu) {
             API::get()->log_info("[Halo-CampE-UEVR] IN_MENU %d -> %d (frontend=%d widget=%d norig=%d) pc=%s",
                                  (int)was_menu, (int)now_menu, (int)frontend,
@@ -2001,7 +4111,51 @@ void update() {
                 g_rig_resolve_tick = 0;      // resolve on this very tick's rig block
             }
             prev_route = route_alive;
-            g_route_alive_now = route_alive;   // turning gates on this (see the TURNING block)
+
+            // ---- ON FOOT WITH NO WEAPON -- the one case "no weapon" must NOT mean "give the
+            // camera back". The campaign opens unarmed, and without this exception those first
+            // minutes ran as flat gamepad with motion aim and turning dead.
+            //
+            // Both terms must AGREE before the exception applies, and each fails closed on its own:
+            //   * the game says it is presenting FIRST PERSON  (fp_presentation_state; -1 unknown)
+            //   * the arms rig is live on the local pawn       (rig_tracked_component)
+            // The rig term is what keeps the POST-LOAD window behaving as before: it reads 0 there
+            // (nothing resolved yet), so stick mode still engages during a load exactly as designed.
+            //
+            // A CUTSCENE IS EXCLUDED OUTRIGHT. A scene can leave the player standing weaponless in
+            // first person, which no signal here can tell from the unarmed opening -- but the game
+            // answers that question directly, so ask it rather than infer. Only honoured while the
+            // subsystem is actually answering; on a build without it the term is inert and the
+            // camera heuristic downstream carries cutscenes exactly as before.
+            //
+            // It cannot fire in a vehicle unless the perspective byte reads first-person while
+            // seated -- the one thing here that has not been measured on a real ride, and the
+            // reason `stickonfoot` exists as an off switch.
+            const int  persp   = fp_presentation_state(route_alive);
+            const bool in_cine = g_cine_answering && g_cine_active;
+            const bool on_foot = g_cfg.stick_onfoot && !route_alive && persp == 1 && !in_cine
+                                 && rig_tracked_component() != nullptr;
+
+            // Either route is "the player is driving in first person", which is what turning wants.
+            g_fp_control_now   = route_alive || on_foot;
+            g_on_foot_unarmed  = on_foot;   // the rig block hides the arms on this
+
+            // A successful suppression produces NO stick-mode transition at all -- which is the
+            // point, and also means the log would be silent about the very state this exists for.
+            // So log the edge itself, and the raw byte with it: the unarmed opening and a vehicle
+            // ride are then directly comparable in one file.
+            {
+                static int prev_on_foot = -1;
+                if ((int)on_foot != prev_on_foot) {
+                    prev_on_foot = (int)on_foot;
+                    API::get()->log_info("[Halo-CampE-UEVR] ON-FOOT (no weapon) %s -- persp=%d "
+                                         "rigcomp=%d. %s",
+                                         on_foot ? "ENGAGED" : "cleared",
+                                         g_dbg_persp.load(), (int)rig_component_alive(),
+                                         on_foot ? "motion aim and turning stay with the player"
+                                                 : "stick mode decides normally");
+                }
+            }
 
             // DISMOUNT WATCHER: the rig component survives a ride (R1-measured), and the new
             // weapon actor re-attaches to it the moment the game gives the weapon back. Its
@@ -2033,12 +4187,16 @@ void update() {
             }
             const bool pawn_match = (pawn != nullptr) && (pawn == base);
 
-            const bool signal = g_cfg.stick_mode && gameplay && !route_alive;
+            const bool signal = g_cfg.stick_mode && gameplay && !route_alive && !on_foot;
 
             // Debounce, in ~32 Hz ticks. Enter is slow on purpose: a weapon swap kills the route
             // for up to the resolve cadence (~2 s), and flapping the camera mode mid-fight is
             // worse than a late vehicle transition. Exit is quick -- the route reviving IS a
             // successful resolve, which is already debounce enough.
+            //
+            // This is now the FALLBACK path, not the usual one: when the perspective byte answers
+            // it short-circuits enter entirely (below), and the debounce only carries builds or
+            // states where it does not.
             static uint32_t on_streak = 0, off_streak = 0;
             const uint32_t need_on  = (uint32_t)(clampf(g_cfg.stick_on_s,  0.1f, 30.0f) * 32.0f);
             const uint32_t need_off = (uint32_t)(clampf(g_cfg.stick_off_s, 0.03f, 30.0f) * 32.0f);
@@ -2046,6 +4204,18 @@ void update() {
             bool want = g_stick_mode.load();
             if (signal) { off_streak = 0; if (++on_streak  >= need_on)  want = true;  }
             else        { on_streak  = 0; if (++off_streak >= need_off) want = false; }
+
+            // PERSPECTIVE FLIP COLLAPSES THE ENTER DEBOUNCE TO ZERO -- the use the FA session that
+            // found this field recommended, now that the same read is here for the on-foot case.
+            //
+            // The debounce exists ONLY to tell a vehicle seat from a weapon swap, and it costs
+            // 0.75 s of hand-driven vehicle camera on every boarding. Weapon-absence is ambiguous;
+            // a perspective flip is not -- a swap does not change how the game frames the player.
+            // So when the byte positively says "no longer first person", stop waiting.
+            //
+            // Enter only. Exit is already near-instant via the dismount watcher, and letting this
+            // force an EXIT would hand the camera back mid-ride the moment the byte twitched.
+            if (signal && persp == 0) want = true;
 
             // Force bypasses the detector outright -- the A/B lever, and the manual fallback if
             // some vehicle seat keeps its FP weapon alive and the detector misses.
@@ -2080,11 +4250,16 @@ void update() {
                 // -- the snap-turn path, which every room->game anchor already consumes. The
                 // reference restore below is offset-based (desired aim == ctrl + saved offset), so
                 // it is correct whichever side of the re-prime it lands on.
+                // persp/onfoot are here for one reason: ONE vehicle ride settles whether the
+                // perspective byte actually distinguishes a seat from standing unarmed. An ENTER
+                // line reading `persp=<the first-person value> onfoot=0` while genuinely seated
+                // means the byte does NOT change on boarding and `stickonfoot` must go to 0.
                 API::get()->log_info("[Halo-CampE-UEVR] STICK MODE %s (route=%d rigcomp=%d pawnmatch=%d "
-                                     "gameplay=%d force=%d) -- %s",
+                                     "gameplay=%d force=%d persp=%d onfoot=%d) -- %s",
                                      want ? "ENTER" : "EXIT",
                                      (int)route_alive, (int)rig_component_alive(), (int)pawn_match,
                                      (int)gameplay, g_cfg.stick_force,
+                                     g_dbg_persp.load(), (int)on_foot,
                                      want ? "sticks pass through, the game camera owns the view"
                                           : "motion aim re-anchoring");
             }
@@ -2141,9 +4316,12 @@ void update() {
             static std::string cine_name;      // last sighted cinematic camera class, for the log
 
             // The game's own answer, polled below. Held across ticks: the engage/release logic
-            // after the poll gate runs per tick.
-            static bool s_cin_active = false;  // IsCinematicInProgress(), when the subsystem answers
-            static bool s_cin_ok     = false;  // whether the subsystem is answering at all
+            // after the poll gate runs per tick. FILE-SCOPE rather than function-local because the
+            // stick-mode detector earlier in this same tick consults it (see g_cine_active); it
+            // reads the PREVIOUS tick's value, which at a 4 Hz poll against a multi-second movie is
+            // not a distinction that exists.
+            bool& s_cin_active = g_cine_active;   // IsCinematicInProgress(), when it answers
+            bool& s_cin_ok     = g_cine_answering;// whether the subsystem is answering at all
 
             static uint32_t cut_poll = 0;
             if (tick - cut_poll >= 8) {        // ~4 Hz: the camera signal holds for seconds
@@ -2487,7 +4665,8 @@ void update() {
         if (tick - last > 300) {
             last = tick;
             API::get()->log_info("[Halo-CampE-UEVR] IDLE: ControlRotation read failed (offset 0x%zX rejected) "
-                                 "-- different PlayerController class?", CONTROL_ROTATION_OFFSET);
+                                 "-- different PlayerController class?",
+                                 (size_t)g_control_rotation_offset.load(std::memory_order_relaxed));
         }
         g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return;
     }
@@ -2500,6 +4679,11 @@ void update() {
         g_ref_pc = pc;
         g_have_ref = false;
         g_rig_neutral_valid = false;   // rig neutral is captured with the aim reference; drop both
+        // The smoothed convergence range describes geometry in the level we just left. It would
+        // wash out on its own within a few hundred ms, but "a few hundred ms of aim bent toward a
+        // wall that no longer exists" is exactly the kind of first-second-after-a-load weirdness
+        // that gets reported as a calibration bug. Measure it fresh instead.
+        halo::aim_converge_reset();
 
         // Level transition: drop the UObjectHook attachment and the rig pointer BEFORE the old
         // actors are torn down. See attach_release() -- this is what keeps us out of the
@@ -2548,18 +4732,11 @@ void update() {
     // Aim is the ray from an origin THROUGH the point the gun points at, so sliding the gun
     // sideways with unchanged rotation still moves aim. Straight from UEVR's controller-aim path.
     {
+        // Shared with derive_ctrl_angles' copy of this sightline -- one definition of "where the
+        // player is", so the two cannot disagree. It also handles the unleashed case, where the
+        // standing origin stops being a body reference at all.
         Vec3 origin{};
-        bool have_origin = false;
-
-        if (g_cfg.aim_origin == 1) {
-            const auto so = API::VR::get_standing_origin();   // body reference; head motion does NOT alter aim
-            origin = Vec3{so.x, so.y, so.z};
-            have_origin = true;
-        } else {
-            Vec3 hpos{}; Quat hq{};
-            const auto hidx = API::VR::get_hmd_index();
-            if (hidx >= 0 && get_pose(hidx, &hpos, &hq, /*use_aim=*/false)) { origin = hpos; have_origin = true; }
-        }
+        const bool have_origin = aim_sightline_origin(&origin);
 
         if (have_origin) {
             Vec3 t{
@@ -2600,10 +4777,10 @@ void update() {
                     ? std::atan2(drift, g_cfg.xdist_m) * RAD2DEG : 0.0f;
                 API::get()->log_info(
                     "[Halo-CampE-UEVR] SIGHTLINE mode=%d origin=(%.3f,%.3f,%.3f) hmd=(%.3f,%.3f,%.3f) "
-                    "stand=(%.3f,%.3f,%.3f) drift=%.3fm swing=%.2fdeg xdist=%.1f haveH=%d",
+                    "stand=(%.3f,%.3f,%.3f) drift=%.1fcm swing=%.2fdeg xdist=%.0fcm haveH=%d",
                     g_cfg.aim_origin, origin.x, origin.y, origin.z,
                     have_h ? hp.x : 0.0f, have_h ? hp.y : 0.0f, have_h ? hp.z : 0.0f,
-                    so.x, so.y, so.z, drift, swing, g_cfg.xdist_m, (int)have_h);
+                    so.x, so.y, so.z, drift * 100.0f, swing, g_cfg.xdist_m * 100.0f, (int)have_h);
             }
         }
 #endif
@@ -2679,8 +4856,39 @@ void update() {
             API::get()->log_info("[Halo-CampE-UEVR] reference RESTORED from saved calibration: offset yaw=%.1f pitch=%.1f (frame yaw %.1f)",
                                  g_cfg.aim_off_yaw, g_cfg.aim_off_pitch, aim_frame_yaw_use());
         } else {
-            g_ref_aim_yaw   = (float)aim_yaw;
-            g_ref_aim_pitch = (float)aim_pitch;
+            // CAPTURE IN INTENT SPACE, NOT COMMAND SPACE.
+            //
+            // aim_yaw is the game's ACHIEVED aim, and under 6DoF convergence that is the intent
+            // already BENT toward the traced range. The drive re-applies that bend to whatever
+            // reference we store here, so capturing the bent value hands it over twice: at the
+            // capture instant ctrl == ref_ctrl, so desired == ref_aim, and the command comes out
+            // converge(aim_yaw) rather than aim_yaw. The aim therefore JUMPS by exactly the bend
+            // on the first tick after release -- a snap the instant the calibration lands, scaling
+            // with how far the head has walked (a metre of divergence at 5 m is ~11 degrees).
+            //
+            // Removing the bend before storing fixes both halves at once: the release is seamless
+            // again, and the saved offset is bend-free, so restoring it later at a different
+            // divergence or range gets this session's geometry applied rather than that one's.
+            //
+            // converge() is small and smooth, so subtracting the bend measured AT aim_yaw inverts
+            // it to first order; what is left is second order in how much the bend varies across
+            // that angle, which is nothing. Identically a no-op while the head is leashed, where
+            // converge declines to act at all.
+            float ref_yaw = (float)aim_yaw, ref_pitch = (float)aim_pitch;
+            {
+                float by = ref_yaw, bp = ref_pitch;
+                if (halo::aim_converge_apply(&by, &bp)) {
+                    ref_yaw   = wrap180(ref_yaw - wrap180(by - ref_yaw));
+                    ref_pitch = ref_pitch - (bp - ref_pitch);
+                    API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATE: removed the convergence "
+                                         "bend (%.2f,%.2f deg) before capture -- the drive re-applies "
+                                         "it live, and storing it would double it",
+                                         wrap180(by - (float)aim_yaw), bp - (float)aim_pitch);
+                }
+            }
+
+            g_ref_aim_yaw   = ref_yaw;
+            g_ref_aim_pitch = ref_pitch;
             g_have_ref = true;
             g_gain_hold = true; g_gain_hold_until = tick + 90;   // let the aim settle before measuring gain
 
@@ -2689,10 +4897,10 @@ void update() {
                 // aims IS the calibration. Store it, not the absolute pair.
                 // WRITE SITE 1 of 2: store MINUS the frame, so the saved offset does not encode
                 // where this session was injected. Must mirror use site 1 exactly.
-                g_cfg.aim_off_yaw   = wrap180((float)aim_yaw - ctrl_yaw - calib_frame_yaw_write());
+                g_cfg.aim_off_yaw   = wrap180(ref_yaw - ctrl_yaw - calib_frame_yaw_write());
                 // Stamp the AIM version only -- this gesture rebased the aim offset and nothing else.
                 if (g_cfg.calib_relative) g_cfg.aim_calib_ver = 2;
-                g_cfg.aim_off_pitch = (float)aim_pitch - ctrl_pitch;
+                g_cfg.aim_off_pitch = ref_pitch - ctrl_pitch;
                 g_cfg.aim_off_valid = true;
                 write_calib_file();
                 API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATED: offset yaw=%.1f pitch=%.1f -> saved",
@@ -2946,41 +5154,53 @@ void update() {
                                      g_rig_parent != nullptr
                                         ? narrow(class_name_of(g_rig_parent)).c_str()
                                         : "<none - falling back to ControlRotation yaw>");
+            }
 
-                // Read the grip point off the weapon socket -- ONCE, then latched.
-                //
-                // This used to re-read per rig resolve, justified as "a different weapon means a
-                // different grip". True of the geometry, wrong as a policy: the mount offset is
-                // fitted AGAINST this value, so re-reading it silently invalidates the fit. Worse,
-                // the read samples a LIVE ANIMATED skeleton, so consecutive derives of the SAME
-                // socket on the SAME weapon disagree by tens of centimetres depending on what the
-                // arms were mid-pose -- measured at 43.7 cm across one mission restart.
-                //
-                // A calibration pins it properly (see the solve, which sets pivot_from_calib). This
-                // latch is what protects a session that has not calibrated yet: one derive, then
-                // constant, so the arms cannot move because the rig happened to re-resolve.
+            // ---- THE GRIP PIVOT -- derived ONCE, then latched, and only ONCE THERE IS A WEAPON.
+            //
+            // This used to re-read per rig resolve, justified as "a different weapon means a
+            // different grip". True of the geometry, wrong as a policy: the mount offset is
+            // fitted AGAINST this value, so re-reading it silently invalidates the fit. Worse,
+            // the read samples a LIVE ANIMATED skeleton, so consecutive derives of the SAME
+            // socket on the SAME weapon disagree by tens of centimetres depending on what the
+            // arms were mid-pose -- measured at 43.7 cm across one mission restart.
+            //
+            // It sits OUTSIDE the rig-identity branch above, gated on the weapon route instead,
+            // because the rig can now be acquired from the pawn before any weapon exists. Left
+            // inside, the one derive this session gets would sample the UNARMED pose -- and the
+            // unarmed pose is a T-pose, the furthest thing from a weapon idle there is -- and then
+            // latch it forever; and the identity branch would never re-enter when the gun finally
+            // arrived, because the rig is the same component either way.
+            //
+            // A calibration pins it properly (see the solve, which sets pivot_from_calib). This
+            // latch is what protects a session that has not calibrated yet: one derive, then
+            // constant, so the arms cannot move because the rig happened to re-resolve.
+            {
+                auto* rig_now = reinterpret_cast<API::UObject*>(g_rig_component.load());
                 static bool s_pivot_latched = false;
-                if (g_cfg.piv_auto && !g_pivot_from_calib && !s_pivot_latched) {
+                if (g_cfg.piv_auto && !g_pivot_from_calib && !s_pivot_latched
+                    && rig_now != nullptr && fp_weapon_route_alive()) {
                     s_pivot_latched = true;
-                    log_pivot_candidates(found);
+                    log_pivot_candidates(rig_now);
 
-                    // The socket NAME has been observed arriving empty at runtime even with no
-                    // pivsocket line in the config and nothing but the default initialiser writing
-                    // it. Cause not established. Since an empty name silently disables the pivot
-                    // term entirely -- and a zero pivot is what makes the weapon swing on a lever
-                    // when you only rotated -- fall back rather than fail closed, and say so.
+                    // CAUSE ESTABLISHED 2026-08-12: MSVC's constant-initialization of the global
+                    // g_cfg drops char-array string defaults (kept numeric ones) -- measured by
+                    // printing the global (empty) vs a stack instance (the literal). This
+                    // fallback is therefore THE default now, not a workaround: Config.hpp
+                    // deliberately ships the field empty and points here. Since an empty name
+                    // silently disables the pivot term entirely -- and a zero pivot is what makes
+                    // the weapon swing on a lever when you only rotated -- fall back rather than
+                    // fail closed, and say so.
                     const char* sock = g_cfg.piv_socket;
                     if (sock[0] == '\0') {
-                        sock = "PrimaryWeapon";
-                        API::get()->log_info("[Halo-CampE-UEVR] pivot socket name was EMPTY -- falling back to "
-                                             "'%s' (set pivsocket= explicitly to override)", sock);
+                        sock = "PrimaryWeapon";   // the built-in default (see Config.hpp note)
                     }
 
                     wchar_t wsock[64] = {0};
                     MultiByteToWideChar(CP_UTF8, 0, sock, -1, wsock, 63);
 
                     Vec3 piv{};
-                    if (derive_pivot(found, wsock, &piv)) {
+                    if (derive_pivot(rig_now, wsock, &piv)) {
                         g_cfg.piv_x = piv.x + g_cfg.piv_adj_x;
                         g_cfg.piv_y = piv.y + g_cfg.piv_adj_y;
                         g_cfg.piv_z = piv.z + g_cfg.piv_adj_z;
@@ -3054,6 +5274,169 @@ void update() {
             }
         }
 
+        // ---- HIDE THE ARMS WHILE UNARMED (doctrine in Config.hpp).
+        //
+        // The empty first-person arms are T-POSED -- the game never expects them to be looked at,
+        // because on a flat screen "no weapon" means no viewmodel at all. Now that the rig follows
+        // the hand while unarmed, that T-pose swings around with it.
+        //
+        // WHAT GETS HIDDEN: the rig with PROPAGATION (its six armour static meshes are children and
+        // would otherwise stay behind as floating shoulder pads) plus the shield shell, which is a
+        // SIBLING and so is not covered by propagation. The full-body shadow proxy is deliberately
+        // left alone -- it belongs at the player's feet and is not part of the first-person arms.
+        //
+        // APPLIED ON CHANGE, then re-asserted on a slow cadence while hidden. Not per tick: this is
+        // a UFunction call that walks children, and the tunables rule here is explicit that engine
+        // calls do not belong on every tick. Not once-only either -- the game re-poses and re-shows
+        // first-person components on pickups and level events, and a one-shot hide that gets
+        // silently undone reads exactly like the hide never working.
+        //
+        // !!! WE ONLY EVER UNDO OUR OWN HIDE. NEVER ASSERT "VISIBLE" ON OUR OWN INITIATIVE.
+        //
+        // The first version computed a desired visibility every tick and wrote it, so "not unarmed"
+        // meant an active SetVisibility(TRUE). That is not a no-op: a vehicle seat, a cutscene and
+        // a checkpoint that loads you straight into a Warthog are all "not unarmed", and the game
+        // has ALREADY torn down first-person presentation in every one of them. Writing `true`
+        // there overrode the game's own hide and left the arms floating in the middle of a
+        // third-person chase camera -- field-reported 2026-08-16 from a checkpoint load in a
+        // vehicle, with `FP arms shown` in the log as the write that did it.
+        //
+        // Visibility belongs to the GAME. The only claim this feature has is the hide it performed
+        // itself, so the state tracked below is `we_hid` -- did WE hide these arms -- and not "what
+        // should visibility be". If we never hid them we never write, and whatever the game decided
+        // stands untouched. That is also why there is no "restore on startup" path: there is
+        // nothing to restore until we have taken something away.
+        //
+        // FAIL-SAFE DIRECTION IS UNCHANGED: every path that stops wanting the hide -- config off,
+        // kill switch, weapon returned -- runs the restore, because `we_hid` is true and
+        // `want_hidden` is false. Nothing can leave the arms hidden behind us.
+        {
+            static bool     we_hid   = false;   // did WE hide them; the ONLY thing we may undo
+            static void*    last_rig = nullptr;
+            static uint32_t last_assert_tick = 0;
+
+            // ANTI-FLICKER GRACE, ON THE HIDE DIRECTION ONLY.
+            //
+            // A vehicle dismount leaves you weaponless for a couple of frames before the game hands
+            // the gun back, and that was enough to fire a full hide/show cycle: measured at 24 ms,
+            // about two frames at 90 Hz, on every one of five dismounts in a session. Requiring the
+            // unarmed state to HOLD before acting costs nothing anywhere it matters -- a genuinely
+            // unarmed stretch lasts minutes, and the arms already take a beat to disappear at the
+            // start of a scene -- while a transient cannot reach the hide at all.
+            //
+            // Deliberately asymmetric: SHOWING stays instant. Late arms are a glitch, but late
+            // hiding is just a T-pose lingering a moment longer, and there is never a reason to
+            // make a weapon-in-hand wait for a timer.
+            constexpr uint32_t HIDE_GRACE_TICKS = 5;   // ~150 ms at this loop's ~32 Hz
+            static bool     unarmed_prev  = false;
+            static uint32_t unarmed_since = 0;
+            if (g_on_foot_unarmed && !unarmed_prev) unarmed_since = tick;
+            unarmed_prev = g_on_foot_unarmed;
+            const bool unarmed_held = g_on_foot_unarmed
+                                   && (tick - unarmed_since) >= HIDE_GRACE_TICKS;
+
+            auto* rig_v = reinterpret_cast<API::UObject*>(g_rig_component.load());
+            // Two reasons to hide the arms: the unarmed T-pose stopgap (hide_arms, grace-gated),
+            // and the standing "never show arms" preference (show_arms=0), which needs no grace.
+            const bool want_hidden = g_cfg.enabled &&
+                                     ((g_cfg.hide_arms && unarmed_held) || !g_cfg.show_arms);
+
+            // A NEW rig component is a different object that we have never touched, so our claim
+            // does not carry over to it. Dropping the claim rather than restoring is deliberate:
+            // the component we hid is gone, and writing `visible` to its replacement would be
+            // exactly the unsolicited assertion this block exists to avoid.
+            if (rig_v != last_rig) { last_rig = rig_v; we_hid = false; }
+
+            // Re-assert only while WE hold the hide. The game re-shows first-person components on
+            // pickups and level events, so a one-shot hide gets silently undone; but a re-assert
+            // that ran when we did not own the state would be the original bug on a timer.
+            const bool due = we_hid && want_hidden && (tick - last_assert_tick >= 32u);
+
+            if (rig_v != nullptr && (want_hidden != we_hid || due)) {
+                if (want_hidden != we_hid) {
+                    API::get()->log_info("[Halo-CampE-UEVR] FP arms %s (unarmed=%d hidearms=%d showarms=%d)",
+                                         want_hidden ? (g_cfg.show_arms ? "HIDDEN -- unarmed, no arm IK yet"
+                                                                        : "HIDDEN -- showarms=0")
+                                                     : "restored -- our hide released",
+                                         (int)g_on_foot_unarmed, (int)g_cfg.hide_arms, (int)g_cfg.show_arms);
+                }
+                rig_set_visible(rig_v, !want_hidden);
+                if (auto* sh = shield_shell()) rig_set_visible(sh, !want_hidden);
+
+                // The hide PROPAGATES, and propagation crosses actor attachment -- so it just
+                // blanked the attached weapon's components too. When the weapon is wanted
+                // visible (showarms=0 is "just the floating gun"), re-show its own subtree.
+                // Fail-visible: if the root cannot be read the weapon stays hidden with the
+                // arms, and one log line says so.
+                if (want_hidden && g_cfg.show_weapon) {
+                    if (auto* wa = fp_weapon_actor()) {
+                        alignas(16) uint8_t rp[16] = {0};
+                        wa->call_function(L"K2_GetRootComponent", rp);
+                        auto* wroot = *reinterpret_cast<API::UObject**>(rp);
+                        if (wroot != nullptr) {
+                            rig_set_visible(wroot, true);
+                        } else {
+                            static bool s_root_warned = false;
+                            if (!s_root_warned) {
+                                s_root_warned = true;
+                                API::get()->log_info("[Halo-CampE-UEVR] showarms=0: weapon root "
+                                                     "unresolved -- the weapon hides with the arms");
+                            }
+                        }
+                    }
+                }
+                we_hid = want_hidden;
+                last_assert_tick = tick;
+
+                // READ IT BACK. On this title a successful call is not evidence anything changed --
+                // half the write paths here were accepted and inert -- and an anim graph that
+                // re-asserts visibility every frame would leave this fighting it at 1 Hz, which
+                // presents as flicker rather than as a failure. Reported ONCE so a real problem is
+                // in the log without a stream of lines if the property simply is not readable.
+                static bool s_readback_warned = false;
+                if (!s_readback_warned) {
+                    if (auto* vis = rig_v->get_property_data<bool>(L"bVisible")) {
+                        if (!IsBadReadPtr(vis, sizeof(bool)) && *vis == want_hidden) {
+                            s_readback_warned = true;
+                            API::get()->log_info("[Halo-CampE-UEVR] FP arms: SetVisibility did not "
+                                                 "stick (bVisible=%d, wanted %d) -- the arms are "
+                                                 "being re-shown by something else. hidearms=0 to "
+                                                 "stop trying.",
+                                                 (int)*vis, (int)!want_hidden);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- WEAPON VISIBILITY PREFERENCE (showweapon=0). SetActorHiddenInGame on the weapon
+        // ACTOR -- deliberately a different flag from the bVisible tree the arms hide uses, so
+        // the two preferences compose instead of undoing each other. Same claim rules as the
+        // arms: track the actor, drop the claim when it swaps (a swap resets to a fresh actor
+        // the game just showed, which re-applies the hide), restore only what we hid, and
+        // re-assert at ~1 Hz while we hold it, since pickups and level events re-show things.
+        {
+            static bool     weap_hid = false;
+            static void*    last_weap = nullptr;
+            static uint32_t last_weap_assert = 0;
+            auto* wa = fp_weapon_actor();
+            if (static_cast<void*>(wa) != last_weap) { last_weap = wa; weap_hid = false; }
+            const bool want_weap_hidden = g_cfg.enabled && !g_cfg.show_weapon;
+            const bool wdue = weap_hid && want_weap_hidden && (tick - last_weap_assert >= 32u);
+            if (wa != nullptr && (want_weap_hidden != weap_hid || wdue)) {
+                if (want_weap_hidden != weap_hid) {
+                    API::get()->log_info("[Halo-CampE-UEVR] FP weapon %s (showweapon=%d)",
+                                         want_weap_hidden ? "HIDDEN" : "restored",
+                                         (int)g_cfg.show_weapon);
+                }
+                alignas(16) uint8_t p[16] = {0};
+                p[0] = want_weap_hidden ? 1 : 0;
+                wa->call_function(L"SetActorHiddenInGame", p);
+                weap_hid = want_weap_hidden;
+                last_weap_assert = tick;
+            }
+        }
+
         // Manual recenter: any CHANGE to `recenter` re-captures the neutral at the current hand
         // position. Edge-triggered on the value, not level-triggered on a flag -- see the config.
         {
@@ -3091,6 +5474,20 @@ void update() {
             g_calib_gun_world = g_last_gun_world;
             g_calib_off_world = g_last_off_world;
             g_calib_valid = true;
+
+            // WHERE YOUR HEAD WAS, so the hold can ride any movement away from it and the solve can
+            // cancel it. Room space and un-mapped on purpose: the transform into game space belongs
+            // to the rig block, which owns the rotation offset and world scale, and doing it here
+            // would freeze a mapping that a snap turn can change mid-hold.
+            {
+                Vec3 hp{}; Quat hq{};
+                const auto hidx = API::VR::get_hmd_index();
+                const auto so = API::VR::get_standing_origin();
+                g_calib_have_delta = (hidx >= 0) && get_pose(hidx, &hp, &hq, /*use_aim=*/false);
+                g_calib_delta_room = g_calib_have_delta
+                    ? Vec3{hp.x - so.x, hp.y - so.y, hp.z - so.z}
+                    : Vec3{0.0f, 0.0f, 0.0f};
+            }
             API::get()->log_info("[Halo-CampE-UEVR] CALIBRATE: weapon frozen -- move your controller onto it, then release");
         }
 
@@ -3527,13 +5924,34 @@ void update() {
                 // (The position half of the removed arm-bind snapshot was here. Same story as the
                 // orientation half above, and the BINDSNAP instrument that measured it read 0.00 cm
                 // on every calibration -- the two samples were always from the same update() call.)
+                // WHAT THE HAND IS MEASURED FROM. This one subtraction decides whether the arms
+                // follow your controllers or stay bolted to the pawn, so it is worth being exact:
+                // it is the same term UEVR uses for every UObjectHook controller attachment, and it
+                // is NOT the head.
+                //
+                // UObjectHook.cpp:1963-2054 composes an attached component as
+                //     hand_world = (view_location - gamespace(hmd - standing_origin))    <- final_position
+                //                                 - gamespace(hand - hmd)
+                //                = view_location - gamespace(hand - STANDING ORIGIN)
+                // -- the head term cancels exactly. The anchor is the STANDING ORIGIN: a fixed room
+                // point, the same body reference the aim sightline already uses (aimorigin=1).
+                //
+                // We add our offset to the rig's PARENT, the game's CameraComponent, which stands in
+                // for view_location. UEVR moves the rendered EYE off that camera by
+                // (hmd - standing_origin) and leaves the camera itself alone -- so measuring the hand
+                // from the standing origin is precisely what makes the arms land in the right place
+                // relative to your eye, whatever your head is doing.
+                //
+                // Subtracting the LIVE HMD instead (what this did before) is the same thing ONLY
+                // while the standing origin sits on your head -- which is exactly the state a leash
+                // maintains. That is why it looked correct for months and fell apart the moment
+                // hmdleash=0 let the two separate: the arms then held station at the pawn while the
+                // eye walked away, and riganchor=0 could not help because it drops the anchor
+                // altogether rather than fixing which one is used.
                 Vec3 hand = rigpos;
                 if (g_cfg.rig_body_anchor) {
-                    Vec3 hpos{}; Quat hq{};
-                    const auto hidx = API::VR::get_hmd_index();
-                    if (hidx >= 0 && get_pose(hidx, &hpos, &hq, /*use_aim=*/false)) {
-                        hand = Vec3{rigpos.x - hpos.x, rigpos.y - hpos.y, rigpos.z - hpos.z};
-                    }
+                    const auto so = API::VR::get_standing_origin();
+                    hand = Vec3{rigpos.x - so.x, rigpos.y - so.y, rigpos.z - so.z};
                 }
 
                 if (!g_rig_neutral_valid.load() && g_have_ref.load()) {
@@ -3599,14 +6017,66 @@ void update() {
                                 hand.y - g_rig_neutral_y.load(),
                                 hand.z - g_rig_neutral_z.load()};
                 }
-                d_vr = quat_rotate(q_ro, d_vr);
 
-                const float dx = d_vr.x * g_cfg.rig_scale;
-                const float dy = d_vr.y * g_cfg.rig_scale;
-                const float dz = d_vr.z * g_cfg.rig_scale;
-                // Same turn correction as the orientation -- if only one of them gets it they
+                // ROOM DISPLACEMENT -> GAME-SPACE RIG DISPLACEMENT, as ONE named transform.
+                //
+                // It was inline until the calibration hold needed the same mapping for the head's
+                // own displacement. Two copies of this would be two things to keep in step -- the
+                // rotation offset, the world scale and the VR->UE axis swap -- and a hold that
+                // mapped displacement even slightly differently from the live pose would put the
+                // error straight into the fit, which is the one place it must not go.
+                //
+                // Same turn correction as the orientation: if only one of them gets it they
                 // disagree and the weapon slides sideways with every snap.
-                Vec3 pose_off = quat_rotate(q_turn, Vec3{-dz, dx, dy});
+                auto vr_to_rig = [&](const Vec3& v) {
+                    const Vec3 r = quat_rotate(q_ro, v);
+                    return quat_rotate(q_turn, Vec3{-r.z * g_cfg.rig_scale,
+                                                     r.x * g_cfg.rig_scale,
+                                                     r.y * g_cfg.rig_scale});
+                };
+
+                Vec3 pose_off = vr_to_rig(d_vr);
+
+                // ---- THE CALIBRATION HOLD RIDES YOUR HEAD.
+                //
+                // While the weapon is frozen it is held at a fixed offset from the CAMERA, which is
+                // fine only while your head is at the camera. Unleashed it is not: walk during the
+                // hold and the weapon you are being asked to put your hand on floats away toward
+                // your abandoned body, so the match is physically impossible.
+                //
+                // Worse, it silently corrupts the fit. The solve is
+                //     L = R_ctrl^-1 * (off_frozen - pose_off_release + R_gun*G)
+                // and pose_off carries the head displacement, so what lands in L is
+                //     P(delta_freeze - delta_release)
+                // -- HEAD MOVEMENT DURING THE HOLD, baked into the mount as a constant and carried
+                // to disk. (A CONSTANT displacement was always harmless: it is present in both the
+                // frozen capture and the release solve and cancels. Only the change matters.)
+                //
+                // So the held offset tracks that same displacement. The weapon then holds still
+                // relative to YOU, and P(delta) appears on both sides of the solve and cancels
+                // exactly, leaving a fit built only from head-RELATIVE hand positions. Correct by
+                // construction rather than by asking the player to keep still.
+                //
+                // Zero, and skipped entirely, whenever the head is leashed -- the displacement is
+                // then always zero, so this cannot alter an existing calibration.
+                Vec3 hold_ride{0.0f, 0.0f, 0.0f};
+                if (calibrating || g_calib_finish.load()) {
+                    Vec3 hp{}; Quat hq{};
+                    const auto hidx = API::VR::get_hmd_index();
+                    if (g_calib_have_delta && hidx >= 0
+                        && get_pose(hidx, &hp, &hq, /*use_aim=*/false)) {
+                        const auto so2 = API::VR::get_standing_origin();
+                        // Linear, so the difference of the two mapped displacements is the mapping
+                        // of their difference -- taken against the LIVE frame, which is the one
+                        // this frame's pose_off was built in.
+                        hold_ride = vr_to_rig(Vec3{(hp.x - so2.x) - g_calib_delta_room.x,
+                                                   (hp.y - so2.y) - g_calib_delta_room.y,
+                                                   (hp.z - so2.z) - g_calib_delta_room.z});
+                    }
+                }
+                const Vec3 calib_off_held{g_calib_off_world.x + hold_ride.x,
+                                          g_calib_off_world.y + hold_ride.y,
+                                          g_calib_off_world.z + hold_ride.z};
 
                 // Optional travel clamp, OFF by default (rigclamp<=0).
                 //
@@ -3672,10 +6142,15 @@ void update() {
                     // with G normally 0, so:
                     //   L = inverse(R_ctrl) * (off_frozen - pose + R_gun_frozen*G)
                     const Vec3 G_now{g_cfg.piv_x, g_cfg.piv_y, g_cfg.piv_z};
+                    // calib_off_held, NOT g_calib_off_world: the hold rides the head, so the value
+                    // the player was actually matching against is the ridden one. Solving against
+                    // the raw capture instead would both re-import the displacement this is meant
+                    // to cancel AND put a visible jump at release, since the weapon would leave the
+                    // place it was just being held.
                     const Vec3 arm_frozen = quat_rotate(g_calib_gun_world, G_now);
-                    const Vec3 resid{g_calib_off_world.x - pose_off.x + arm_frozen.x,
-                                     g_calib_off_world.y - pose_off.y + arm_frozen.y,
-                                     g_calib_off_world.z - pose_off.z + arm_frozen.z};
+                    const Vec3 resid{calib_off_held.x - pose_off.x + arm_frozen.x,
+                                     calib_off_held.y - pose_off.y + arm_frozen.y,
+                                     calib_off_held.z - pose_off.z + arm_frozen.z};
                     const Vec3 L = quat_rotate(quat_conj(q_ctrl), resid);
                     g_cfg.off_x = clampf(L.x, -100.0f, 100.0f);
                     g_cfg.off_y = clampf(L.y, -100.0f, 100.0f);
@@ -3732,7 +6207,7 @@ void update() {
                     // CALIBSOLVE -- every term of the mount solve, so it can be READ rather than
                     // inferred. `resid` and `L` are the useful fields.
                     //
-                    // ⚠️ THE `delta` FIELD IS TAUTOLOGICAL. IT CANNOT DETECT ANYTHING.
+                    // âš ï¸ THE `delta` FIELD IS TAUTOLOGICAL. IT CANNOT DETECT ANYTHING.
                     //
                     // It was written to compare the frozen gun rotation against the live one, on the
                     // theory that the pivot lever multiplies any difference into centimetres of
@@ -3810,7 +6285,7 @@ void update() {
                 if (g_cfg.piv_viz) off = pose_off;
 
                 // While calibrating, hold the exact world offset captured at freeze.
-                if (calibrating) off = g_calib_off_world;
+                if (calibrating) off = calib_off_held;
 
                 g_last_off_world = off;
 
@@ -3871,6 +6346,28 @@ void update() {
                             const bool have_origin = (g_rig_parent != nullptr)
                                 && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &origin);
 
+                            // ANCHOR THE RAY WHERE THE PLAYER'S EYE IS, once the eye has left the
+                            // camera. The marker's job is to sit over the thing the shot will hit,
+                            // as SEEN BY THE PLAYER, and that only survives being drawn short if the
+                            // ray it sits on starts at the eye: every point on an eye-anchored ray
+                            // projects onto the same background point, so the visibility cap costs
+                            // nothing. Drawn short on a CAMERA-anchored ray it lies by
+                            // offset * (1/drawn - 1/actual) -- at 1 m of divergence, a 6 m cap and a
+                            // 30 m target, about 7 degrees. That is the "shots land at the reticule
+                            // instead of at what I'm pointing at" report, and it is why the marker
+                            // and the aim have to be built from ONE piece of geometry.
+                            //
+                            // Leashed, delta is ~0 and this is the same point as before.
+                            bool conv = halo::aim_converge_engaged();
+                            if (have_origin && conv) {
+                                Vec3 eye_d{};
+                                if (halo::aim_converge_delta(&eye_d)) {
+                                    origin.x += eye_d.x; origin.y += eye_d.y; origin.z += eye_d.z;
+                                } else {
+                                    conv = false;
+                                }
+                            }
+
                             if (have_origin) {
                                 // Only borrow a prop if the cube path is actually wanted -- otherwise
                                 // the map quietly loses a piece of set dressing for nothing.
@@ -3890,8 +6387,26 @@ void update() {
                                 {
                                     // UE forward from the reticule's chosen angles -- game aim, or
                                     // the smoothed controller setpoint. See reticule_ray_angles.
+                                    //
+                                    // ENGAGED, THE RAY IS THE INTENT, NOT THE ACHIEVED AIM. Those
+                                    // are different rays once convergence is on: the achieved aim
+                                    // is the intent BENT so a shot from the camera lands on the
+                                    // target, so following it from an eye-anchored origin would
+                                    // apply the correction twice and mark the wrong point. The
+                                    // intent ray from the eye is the one whose hit both the marker
+                                    // and the aim are derived from -- one piece of geometry, two
+                                    // consumers.
+                                    //
+                                    // Passing it in as the "aim" argument also keeps the divergence
+                                    // guard honest: with src=1 it would otherwise measure the
+                                    // correction itself as loop error and snap every frame.
+                                    double ray_yaw = aim_yaw, ray_pitch = aim_pitch;
+                                    if (conv) {
+                                        ray_yaw   = (double)halo::g_desired_yaw.load();
+                                        ray_pitch = (double)halo::g_desired_pitch.load();
+                                    }
                                     float r_yaw = 0.0f, r_pitch = 0.0f;
-                                    reticule_ray_angles(aim_yaw, aim_pitch, &r_yaw, &r_pitch);
+                                    reticule_ray_angles(ray_yaw, ray_pitch, &r_yaw, &r_pitch);
                                     const float cp = std::cos(r_pitch * DEG2RAD);
                                     const Vec3 fwd{cp * std::cos(r_yaw * DEG2RAD),
                                                    cp * std::sin(r_yaw * DEG2RAD),
@@ -3928,6 +6443,7 @@ void update() {
 
                                         Vec3 hit{};
                                         bool got = false;
+                                        HALO_VR_DEV_ONLY(hit_trace_dev_report());
                                         {
                                             // Inside the gate, so `n` counts real traces and `mean`
                                             // is the cost of one -- not an average diluted by the
@@ -3935,11 +6451,12 @@ void update() {
                                             PerfScope _pt(PERF_TRACE);
                                             got = hit_trace(origin, far_end, ignore, nignore, &hit);
                                         }
+                                        float h = 0.0f;
                                         if (got) {
                                             const float hx = hit.x - origin.x;
                                             const float hy = hit.y - origin.y;
                                             const float hz = hit.z - origin.z;
-                                            const float h = std::sqrt(hx * hx + hy * hy + hz * hz);
+                                            h = std::sqrt(hx * hx + hy * hy + hz * hz);
                                             if (h > cap) {
                                                 // Beyond the cap: park at the cap EXACTLY. No
                                                 // surface offset -- there is no surface here to
@@ -3959,6 +6476,43 @@ void update() {
                                             // not pop the reticule between two depths.
                                             d = cap;
                                         }
+
+                                        // THE RANGE, handed to the aim. `h` and not `d`: the drawn
+                                        // distance carries the visibility cap and the surface
+                                        // standoff, neither of which has anything to do with how
+                                        // far the target actually is. Aiming at the capped point
+                                        // would put the shot short of the wall the marker is
+                                        // painted on -- the exact confusion this feature exists to
+                                        // remove. Fed on a MISS too (as "no measurement"), because
+                                        // the filter's own miss policy is to hold, not to guess.
+                                        halo::aim_converge_feed(h, got, g_last_dt);
+
+#if HALO_VR_DEV
+                                        // AIMCONV -- the whole correction on one line, so "my shots
+                                        // land left of the reticule" can be READ. offset is how far
+                                        // the eye has left the shot origin, range is what the trace
+                                        // measured, and dyaw/dpitch is the bend those two produce.
+                                        // If dyaw is 0 while offset is large, the feature is not
+                                        // engaged and the reason is one of the gates in
+                                        // aim_converge_engaged().
+                                        if (g_cfg.aim_conv_log > 0
+                                            && (tick % (uint32_t)g_cfg.aim_conv_log) == 0) {
+                                            Vec3 dl{};
+                                            const bool have_d = halo::aim_converge_delta(&dl);
+                                            float cy = halo::g_desired_yaw.load();
+                                            float cp2 = halo::g_desired_pitch.load();
+                                            const float iy = cy, ip = cp2;
+                                            const bool bent = halo::aim_converge_apply(&cy, &cp2);
+                                            API::get()->log_info(
+                                                "[Halo-CampE-UEVR] AIMCONV eng=%d offset=(%.1f,%.1f,%.1f)cm "
+                                                "|off|=%.1f have=%d | hit=%d h=%.0f drawn=%.0f range=%.0fcm "
+                                                "| intent=(y%.2f,p%.2f) cmd=(y%.2f,p%.2f) d=(y%.2f,p%.2f) bent=%d",
+                                                (int)conv, dl.x, dl.y, dl.z,
+                                                std::sqrt(dl.x*dl.x + dl.y*dl.y + dl.z*dl.z), (int)have_d,
+                                                (int)got, h, d, halo::aim_converge_range(),
+                                                iy, ip, cy, cp2, wrap180(cy - iy), cp2 - ip, (int)bent);
+                                        }
+#endif
                                     }
                                     const Vec3 target{origin.x + fwd.x * d,
                                                       origin.y + fwd.y * d,
@@ -4054,6 +6608,20 @@ void update() {
                                     // feature is switched off.
                                     g_ret_origin = origin;
                                     g_have_ret_origin = true;
+                                    // Hand the scope THIS tick's aim ray, built RAW from the
+                                    // game's live aim angles rather than from the reticule's
+                                    // target: reticule_ray_angles layers display smoothing tuned
+                                    // for a floating dot, and the first headset pass showed that
+                                    // smoothing as the whole pane trailing the hand. Only the
+                                    // direction matters; 500 cm is an arbitrary ray length.
+                                    {
+                                        const float cp_s = std::cos((float)aim_pitch * DEG2RAD);
+                                        const Vec3 scope_target{
+                                            origin.x + cp_s * std::cos((float)aim_yaw * DEG2RAD) * 500.0f,
+                                            origin.y + cp_s * std::sin((float)aim_yaw * DEG2RAD) * 500.0f,
+                                            origin.z + std::sin((float)aim_pitch * DEG2RAD) * 500.0f};
+                                        scope_notice_ray(origin, scope_target, rig, tick);
+                                    }
                                     if (g_cfg.aim_mesh) reticule_mesh_ensure(rig);
 
                                     // Park on the view axis for measurement runs (see aim_park_view).
@@ -4136,10 +6704,24 @@ void update() {
                 // rigclamp was already applied to the pose part above. What remains here is only a
                 // sanity rail so a bad solve cannot fling the weapon out of the world -- it must
                 // stay well clear of any legitimate mount offset or it becomes the same bug again.
+                //
+                // AND IT MUST NOT BOUND THE PLAYER'S OWN TRAVEL. `off` is pose + mount - arm, and
+                // pose is as large as the room: at world scale 1.312 a 200 cm rail saturates after
+                // ~1.5 m of real walking. Leashed that never happens, because the leash holds the
+                // pose term near zero -- but with hmdleash=0 a fixed rail on the TOTAL silently
+                // becomes a movement limit, i.e. "the arms stop following me once I go far enough",
+                // which is the same complaint this whole anchor fix exists to answer.
+                //
+                // So bound the SOLVED part only, which is what a bad solve actually corrupts. The
+                // pose term is folded into the parent's frame first so the two are subtractable.
                 constexpr float SANITY_CM = 200.0f;
-                const float ex = clampf(off.x, -SANITY_CM, SANITY_CM);
-                const float ey = clampf(off.y, -SANITY_CM, SANITY_CM);
-                const float ez = clampf(off.z, -SANITY_CM, SANITY_CM);
+                Vec3 pose_par = pose_off;
+                if (g_cfg.rig_mode == 2 || g_cfg.rig_mode == 3) {
+                    pose_par = quat_rotate(quat_conj(q_parent), pose_off);
+                }
+                const float ex = pose_par.x + clampf(off.x - pose_par.x, -SANITY_CM, SANITY_CM);
+                const float ey = pose_par.y + clampf(off.y - pose_par.y, -SANITY_CM, SANITY_CM);
+                const float ez = pose_par.z + clampf(off.z - pose_par.z, -SANITY_CM, SANITY_CM);
 
                 g_dbg_rig_x = ex; g_dbg_rig_y = ey; g_dbg_rig_z = ez;
                 g_dbg_pos_x = rigpos.x; g_dbg_pos_y = rigpos.y; g_dbg_pos_z = rigpos.z;
@@ -4293,10 +6875,11 @@ void update() {
     // Consumes the player's raw right-stick X (sampled in the XInput hook before the aim value
     // replaced it). Adjusts the locked view yaw, so the world turns while aim stays on the gun.
     // Stands down in stick mode: the right stick IS the game's look input there, and consuming it
-    // for snap turn would rotate the player twice. Also stands down the instant the weapon route
-    // dies (g_route_alive_now) -- boarding a vehicle otherwise banks accidental snaps during the
-    // enter debounce, because the player is already using the stick as a vehicle camera.
-    if (g_cfg.turn_mode != 0 && !g_stick_mode.load() && g_route_alive_now) {
+    // for snap turn would rotate the player twice. Also stands down the instant first-person foot
+    // control is lost (g_fp_control_now) -- boarding a vehicle otherwise banks accidental snaps
+    // during the enter debounce, because the player is already using the stick as a vehicle camera.
+    // Standing unarmed keeps turning: it is still the player's own camera to turn.
+    if (g_cfg.turn_mode != 0 && !g_stick_mode.load() && g_fp_control_now) {
         const float sx = g_raw_stick_x.load();
         const bool past_dz = std::fabs(sx) > g_cfg.turn_dz;
 
@@ -4394,15 +6977,52 @@ public:
         if (n > 0 && n < MAX_PATH) {
             sprintf_s(g_cfg_path, MAX_PATH,
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr.cfg", appdata);
+            sprintf_s(g_user_cfg_path, MAX_PATH,
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_user.cfg", appdata);
+            sprintf_s(g_user_ref_path, MAX_PATH,
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_user_reference.txt", appdata);
+            sprintf_s(g_dev_cfg_path, MAX_PATH,
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_dev.cfg", appdata);
             sprintf_s(g_calib_path, MAX_PATH,
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_calib.cfg", appdata);
+            sprintf_s(g_data_dir, MAX_PATH,
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\data", appdata);
         } else {
             strcpy_s(g_cfg_path, MAX_PATH, "halo_vr.cfg");
+            strcpy_s(g_user_cfg_path, MAX_PATH, "halo_vr_user.cfg");
+            strcpy_s(g_user_ref_path, MAX_PATH, "halo_vr_user_reference.txt");
+            strcpy_s(g_dev_cfg_path, MAX_PATH, "halo_vr_dev.cfg");
             strcpy_s(g_calib_path, MAX_PATH, "halo_vr_calib.cfg");
+            strcpy_s(g_data_dir, MAX_PATH, "data");
         }
         strcpy_s(g_calib_path_right, MAX_PATH, g_calib_path);
 
-        load_config();   // writes a commented default file if none exists
+        // Settings-menu bridge files live under the profile's data\ folder -- the one location
+        // UEVR's Lua sandbox lets scripts read and write (see menu_bridge_tick in Config.cpp).
+        CreateDirectoryA(g_data_dir, nullptr);
+        sprintf_s(g_menu_cmd_path, MAX_PATH, "%s\\halo_vr_menu_set.txt", g_data_dir);
+        sprintf_s(g_user_mirror_path, MAX_PATH, "%s\\halo_vr_user_mirror.cfg", g_data_dir);
+        sprintf_s(g_ref_mirror_path, MAX_PATH, "%s\\halo_vr_user_reference.txt", g_data_dir);
+        sprintf_s(g_dev_mirror_path, MAX_PATH, "%s\\halo_vr_dev_mirror.cfg", g_data_dir);
+        sprintf_s(g_calib_mirror_path, MAX_PATH, "%s\\halo_vr_calib_mirror.cfg", g_data_dir);
+        sprintf_s(g_status_path, MAX_PATH, "%s\\halo_vr_status.txt", g_data_dir);
+
+        ensure_user_cfg_template();   // all-comment template; never touches an existing file
+        load_config();                // writes a commented default halo_vr.cfg if none exists
+
+        // Every override layer now ships or is template-created, so file EXISTENCE says nothing --
+        // log the layers actually DOING something. Dev loudest: the shipped halo_vr_dev.cfg is
+        // all-commented, so an uncommented key there is the first thing a support log should show.
+        if (config_file_has_uncommented_keys(g_dev_cfg_path)) {
+            API::get()->log_info("[Halo-CampE-UEVR] DEV OVERRIDES ACTIVE: %s has uncommented keys "
+                                 "(beats halo_vr_user.cfg on every ~2 s reload; the shipped file "
+                                 "has none, and updates overwrite it)",
+                                 g_dev_cfg_path);
+        }
+        if (config_file_has_uncommented_keys(g_user_cfg_path)) {
+            API::get()->log_info("[Halo-CampE-UEVR] user overrides: %s applied (survives updates)",
+                                 g_user_cfg_path);
+        }
 
         // Calibration is per-hand, and it must be resolved AFTER load_config -- aimhand lives in
         // halo_vr.cfg, so the correct file is not known until that has been read.
@@ -4431,14 +7051,92 @@ public:
         // must survive even if the settings line below changes shape.
         API::get()->log_info("[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v%s  (halo_vr.dll)",
                              HALO_VR_VERSION);
+
+        // WHICH BACKEND ARE WE LOADED INTO. UEVR publishes its own identity to plugins, and until
+        // now we logged none of it -- so establishing that a reporter was on a third-party fork
+        // rather than the pinned nightly meant reading UEVR's own header out of their log and
+        // recognising the tag by eye. It cost a round trip on a report that mattered.
+        //
+        // This is not a support boundary, it is a fact worth stating: the plugin hooks addresses
+        // and callbacks that belong to whatever backend actually loaded it, so "which one" is the
+        // first question any aim or stereo bug has to answer.
+        {
+            // get_build_date()/get_build_time() are deliberately NOT logged: measured on the pinned
+            // nightly, this backend returns them UNEXPANDED ("~6,2.~4,2.~0,4"), so they would be
+            // noise in every report forever. Tag, branch and commit are what identify a build --
+            // and a fork announces itself in the first two (the report that prompted this read
+            // "tag=UEVR_AFW_v1.0-beta.4 branch=AFW").
+            const auto* fns = API::get()->param()->functions;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] UEVR backend: tag=%s branch=%s commit=%s (+%u past tag, %u total)",
+                fns->get_tag(), fns->get_branch(), fns->get_commit_hash(),
+                fns->get_commits_past_tag(), fns->get_total_commits());
+        }
         API::get()->log_info("[Halo-CampE-UEVR] closed-loop controller aim. "
-                             "enabled=%d floor=%.2f full=%.1fdeg max=%.2f xdist=%.0fm fake_pad=%d",
+                             "enabled=%d floor=%.2f full=%.1fdeg max=%.2f xdist=%.0fcm fake_pad=%d",
                              (int)g_cfg.enabled, g_cfg.floor, g_cfg.full_deg, g_cfg.max_out,
-                             g_cfg.xdist_m, (int)g_cfg.fake_pad);
-        API::get()->log_info("[Halo-CampE-UEVR] KILL SWITCH: set enabled=0 in %s (re-read every ~2s)", g_cfg_path);
+                             g_cfg.xdist_m * 100.0f, (int)g_cfg.fake_pad);
+        API::get()->log_info("[Halo-CampE-UEVR] KILL SWITCH: Ctrl+Home, or add enabled=0 to %s (re-read every ~2s)", g_user_cfg_path);
     }
 
-    void on_pre_engine_tick(API::UGameEngine*, float delta) override {
+    // ---- TEARDOWN -----------------------------------------------------------------------------
+    //
+    // WHY THIS EXISTS (2026-08-16): the plugin had NO shutdown path at all. On exit it left a
+    // live INLINE HOOK on a sim-thread function called ~2600 times a second, an audio-listener
+    // override on the game's own component, several dynamically created WidgetComponents, and
+    // the game's controller settings still overridden -- `game_settings_restore()` was written,
+    // documented as "called at shutdown", and had NO CALLERS.
+    //
+    // Every exit path (Alt+F4 AND the in-game Exit to Desktop) was ending in a STACK OVERFLOW
+    // (c00000fd) inside UEVRBackend's `Framework shutting down...`, which dies dirty, writes
+    // crash.dmp, and leaves Steam wedged at "Stopping" -- destroying the relaunch loop. Our
+    // still-installed hook being torn out from under a running sim thread while UEVR unhooks
+    // itself is a plausible contributor to that recursion, and leaving it installed is wrong
+    // regardless of blame.
+    //
+    // So: release everything OURS at the first sign of shutdown, once, in a fixed order --
+    // hook first (it is the one thing executing on another thread), then the writes we hold on
+    // game objects, then our own components. Idempotent and safe to call from any thread.
+    static void plugin_teardown(const char* why) {
+        static std::atomic<bool> done{false};
+        if (done.exchange(true)) return;
+        g_shutting_down.store(true, std::memory_order_release);
+        API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN (%s): releasing hook, overrides and components", why);
+
+        // 1. THE INLINE HOOK FIRST. blam_drive_tick() removes it when blam_angles is 0, and it
+        //    is the only thing we own that runs on the sim thread.
+        g_cfg.blam_angles = 0;
+        blam_drive_tick();
+        aim_watch_shutdown();
+
+        // 2. Writes we hold on the GAME'S objects: the audio listener override, and the
+        //    controller settings the mod changes transiently (restoring these was already
+        //    written and simply never called).
+        audio_fix_tick(false, 0, 0, 0, 0, 0);
+        audio_comp_tick(false, 0, 0, 0, 0, 0, 0);
+        game_settings_restore();
+
+        // 3. Our own components: hand the game's crosshair back and park the markers.
+        reticule_widget_release();
+        navw_hide_all();
+
+        API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN complete");
+    }
+
+    // WM_CLOSE covers Alt+F4 and the window's X. WM_QUIT/WM_DESTROY cover the engine-initiated
+    // path (the in-game Exit to Desktop), which never sends WM_CLOSE.
+    bool on_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) override {
+        if (msg == WM_CLOSE || msg == WM_QUIT || msg == WM_DESTROY) {
+            plugin_teardown(msg == WM_CLOSE ? "WM_CLOSE" : (msg == WM_QUIT ? "WM_QUIT" : "WM_DESTROY"));
+        }
+        return true;   // never swallow: the game must still process its own exit
+    }
+
+    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
+        if (g_shutting_down.load(std::memory_order_acquire)) return;
+        // A null engine on the tick is the engine-loop teardown that never sends a window
+        // message -- the in-game "Exit to Desktop" path. Treat it as the same signal.
+        if (engine == nullptr) { plugin_teardown("engine null"); return; }
         if (delta > 0.0f && delta < 1.0f) g_last_dt = delta;
         update();
     }
@@ -4453,9 +7151,12 @@ public:
     //
     // is_double: the header states the pointer must be interpreted per this flag, and this game
     // is double-precision (LWC). Treating a double rotator as floats would corrupt the view.
+    // Guarded like every other callback: after teardown the rig/marker components this writes
+    // through are being destroyed, and the view lock has nothing left to enforce.
     void on_pre_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int index, float,
                                              UEVR_Vector3f* position, UEVR_Rotatorf* rotation,
                                              bool is_double) override {
+        if (g_shutting_down.load(std::memory_order_acquire)) return;
         // ---- THE VIEW POSITION, published for the vehicle reticule.
         //
         // On foot the reticule takes its ray origin from the rig's attach parent (the camera
@@ -4464,13 +7165,24 @@ public:
         // camera's world position is handed to us regardless. Same discipline as the rotation
         // below: read, publish, no reflection on the render thread.
         if (position != nullptr) {
+            float px, py, pz;
             if (is_double) {
                 auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
-                g_view_pos_x = (float)p->x; g_view_pos_y = (float)p->y; g_view_pos_z = (float)p->z;
+                px = (float)p->x; py = (float)p->y; pz = (float)p->z;
             } else {
-                g_view_pos_x = position->x; g_view_pos_y = position->y; g_view_pos_z = position->z;
+                px = position->x; py = position->y; pz = position->z;
             }
+            g_view_pos_x = px; g_view_pos_y = py; g_view_pos_z = pz;
             g_have_view_pos = true;
+
+            // THE SHOT-ORIGIN HALF of the eye offset. This callback runs BEFORE UEVR applies the
+            // HMD transform (FFakeStereoRenderingHook.cpp: the pre loop, then the transform, then
+            // the post loop), so `position` here is the GAME's camera -- where shots come from --
+            // and the post callback's is the rendered EYE. Their difference is the whole of what
+            // aim convergence needs. Measured at the source rather than reconstructed, because
+            // reconstructing it means agreeing about world scale, rotation offset and which space
+            // the standing origin lives in, and any one of those being wrong is silent.
+            halo::aim_converge_note_pre(index, px, py, pz);
         }
 
         // ---- RENDER-RATE RIG RE-APPLY.
@@ -4684,6 +7396,35 @@ public:
         }
         g_prev_view_out = out_now;
         g_have_prev_out = true;
+
+        // ---- NAVFIX, RENDER-RATE APPLICATION (navrender). This callback owns both terms of the
+        // delta in the SAME frame: viewIn (the aim camera, published above as g_dbg_view_in) and
+        // `locked` (what the eyes get). The tick calibrated keff from the game's own projection;
+        // this write is therefore lag-free by construction -- the fix for the jitter the tick-rate
+        // version produced. Yaw-only (pitch is the DecoupledPitchUIAdjust double-count, navpitch).
+        // g_nav_count/g_navpoints are tick-written; a stale read here costs one frame of a widget
+        // list that TrackedObject::get() re-validates anyway. Same UFunction-from-this-callback
+        // precedent as the rig re-apply above.
+        if (g_nav_apply.load() && !g_stick_mode.load()) {
+            const float ndyaw = wrap180(g_dbg_view_in.load() - locked);
+            if (std::fabs(ndyaw) <= 89.0f) {
+                const float npx = clampf(g_nav_keff.load() * std::tan(ndyaw * DEG2RAD),
+                                         -g_cfg.nav_max, g_cfg.nav_max);
+                if (std::isfinite(npx)) {
+                    for (int i = 0; i < g_nav_count && i < 4; ++i) {
+                        auto* o = g_navpoints[i].get();
+                        if (o == nullptr) continue;
+                        alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+                        if (g_cfg.hud_float) {
+                            reinterpret_cast<float*>(q)[0] = npx;
+                        } else {
+                            reinterpret_cast<double*>(q)[0] = (double)npx;
+                        }
+                        o->call_function(L"SetRenderTranslation", q);
+                    }
+                }
+            }
+        }
     }
 
     // Minimal by design: reads two pre-computed scalars and writes the pad struct. No reflection,
@@ -4691,9 +7432,73 @@ public:
     // Read-only. Runs after UEVR has composed HMD tracking, so `rotation` here is the finished
     // view in GAME space -- what the player is actually looking along. Published for the movement
     // frame; nothing is written back.
-    void on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int, float,
-                                              UEVR_Vector3f*, UEVR_Rotatorf* rotation,
+    void on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int index, float,
+                                              UEVR_Vector3f* position, UEVR_Rotatorf* rotation,
                                               bool is_double) override {
+        if (g_shutting_down.load(std::memory_order_acquire)) return;
+        // THE EYE HALF of the eye-to-shot-origin offset. Same callback pair, same eye index, one
+        // subtraction apart -- see the pre callback. `position` has been through UEVR's HMD
+        // transform by now, so this IS the rendered eye.
+        if (position != nullptr) {
+            float ex = 0.0f, ey = 0.0f, ez = 0.0f;
+            if (is_double) {
+                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
+                ex = (float)p->x; ey = (float)p->y; ez = (float)p->z;
+            } else {
+                ex = position->x; ey = position->y; ez = position->z;
+            }
+            halo::aim_converge_note_post(index, ex, ey, ez);
+            // PUBLISHED FOR WORLD-SPACE MARKERS. This is the RENDERED EYE, which the pre-hook
+            // position is not: any marker placed along a ray cast from the game camera appears
+            // displaced once the player's head is elsewhere, and the error GROWS the closer the
+            // marker is drawn (atan(offset/range)) -- the exact "offsets at different ranges and
+            // angles" reported from the field, and the same parallax HitTrace.hpp documents for
+            // the reticule. Markers must reason from here.
+            g_eye_pos_x = ex; g_eye_pos_y = ey; g_eye_pos_z = ez;
+            g_have_eye_pos = true;
+
+            // ---- NAVPOINT MARKERS, RE-PLACED AT RENDER RATE.
+            //
+            // The tick decided WHICH objective and HOW FAR along the ray to draw (that needs the
+            // navpoint map and a trace, neither of which belongs on this thread). What it cannot
+            // do is decide WHERE: at a 4 m draw distance the eye-to-objective direction changes
+            // materially between 32 Hz ticks, and a transform left stale for two frames reads as
+            // jitter while walking. So the direction is re-derived here, from the eye this frame,
+            // against the cached objective position -- the rig re-apply pattern exactly.
+            //
+            // Cheap by construction: two UFunction calls per VISIBLE marker (usually one), no
+            // reflection lookups, no allocation, nothing that walks an array.
+            if (g_cfg.nav_world && g_cfg.nav_world_src == 2 && g_cfg.nav_world_render) {
+                const int n = g_navw_placed_n.load();
+                for (int i = 0; i < n && i < 8; ++i) {
+                    auto* comp = g_navw_pool[i].get_checked(L"WidgetComponent");
+                    if (comp == nullptr) continue;
+                    const NavwPlaced pl = g_navw_placed[i];
+                    const float dx = pl.ox - ex, dy = pl.oy - ey, dz = pl.oz - ez;
+                    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (!(d > 1.0f) || !std::isfinite(d)) continue;
+                    const float k = pl.dist / d;
+                    {
+                        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                        auto* v = reinterpret_cast<double*>(p);
+                        v[0] = (double)(ex + dx * k);
+                        v[1] = (double)(ey + dy * k);
+                        v[2] = (double)(ez + dz * k);
+                        comp->call_function(L"K2_SetWorldLocation", p);
+                    }
+                    {
+                        const float fh = std::sqrt(dx * dx + dy * dy) / d;
+                        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+                        auto* v = reinterpret_cast<double*>(p);
+                        v[0] = (double)(std::atan2(-dz / d, fh) * RAD2DEG);
+                        v[1] = (double)(std::atan2(-dy, -dx) * RAD2DEG);
+                        v[2] = 0.0;
+                        comp->call_function(L"K2_SetWorldRotation", p);
+                    }
+                }
+            }
+        }
+
         if (rotation == nullptr) return;
         if (is_double) {
             auto* r = reinterpret_cast<UEVR_Rotatord*>(rotation);
@@ -4707,6 +7512,7 @@ public:
     }
 
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override {
+        if (g_shutting_down.load(std::memory_order_acquire)) return;
         g_xhits.fetch_add(1);
         if (state == nullptr || user_index != 0) return;
 
@@ -4756,6 +7562,22 @@ public:
                     (now_btn & 0x0001) ? " DUP" : "",      (now_btn & 0x0002) ? " DDOWN" : "",
                     (now_btn & 0x0004) ? " DLEFT" : "",    (now_btn & 0x0008) ? " DRIGHT" : "");
             }
+        }
+
+        // ---- MENU-ARMED CALIBRATION TRIGGERS. While the settings menu has armed a calibration,
+        // the triggers ARE the gesture (RT = save & exit, LT = save & re-arm on release), so both
+        // are sampled here and then EATEN -- ending a calibration must never fire the weapon
+        // (same suppression lane as the scope's LT). With UEVR's own menu open this state was
+        // already zeroed upstream by the VR mod, so an armed mode simply waits for the menu to
+        // close; that is why the menu text says to close it.
+        if (g_menu_calib_mode.load(std::memory_order_relaxed) != 0) {
+            g_menu_calib_lt.store(state->Gamepad.bLeftTrigger  >= 128, std::memory_order_relaxed);
+            g_menu_calib_rt.store(state->Gamepad.bRightTrigger >= 128, std::memory_order_relaxed);
+            state->Gamepad.bLeftTrigger  = 0;
+            state->Gamepad.bRightTrigger = 0;
+        } else {
+            g_menu_calib_lt.store(false, std::memory_order_relaxed);
+            g_menu_calib_rt.store(false, std::memory_order_relaxed);
         }
 
         // ---- CONTROL REMAPPING. Must run BEFORE the aim output overwrites the right stick, and
@@ -4835,6 +7657,14 @@ public:
                     state->Gamepad.wButtons |= (WORD)g_cfg.map_rstick_down;
                 }
             }
+        }
+
+        // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
+        // keeps Blam's native zoom (viewmodel hide, zoomed look speed) from ever engaging under
+        // the VR presentation. Menus and vehicle seats are excluded inside, so LT still means
+        // whatever the game says it means there.
+        if (scope_handle_lt(state->Gamepad.bLeftTrigger, g_in_menu.load(), g_stick_mode.load())) {
+            state->Gamepad.bLeftTrigger = 0;
         }
 
         // ---- MOVEMENT DIRECTION. Rotate the LEFT stick into the player's facing frame.
