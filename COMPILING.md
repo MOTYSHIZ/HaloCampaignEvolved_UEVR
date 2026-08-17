@@ -53,7 +53,7 @@ zip's SHA-256 for the release notes.
 | File | What lives there |
 |---|---|
 | `src/Math.hpp` / `Math.cpp` | Pure maths — quaternions, rotators, the calibration least-squares solve. **No plugin state, no UEVR API.** Per-frame helpers are `inline` in the header; calibration-only routines are in the `.cpp` |
-| `src/Config.hpp` / `Config.cpp` | The `Config` struct, `g_cfg`, and everything touching the two files beside the profile: `halo_vr.cfg` (tunables + kill switch) and `halo_vr_calib.cfg` (calibration results, applied last so they win) |
+| `src/Config.hpp` / `Config.cpp` | The `Config` struct, `g_cfg`, and everything touching the four files beside the profile, in read order: `halo_vr.cfg` (shipped **calibration data only**), `halo_vr_user.cfg` (the user's settings — generated on first run as the full commented catalog; never shipped, survives updates), `halo_vr_dev.cfg` (dev/troubleshooting catalog — ships fully commented) and `halo_vr_calib.cfg` (calibration results, applied last so they win). **The settings defaults are the struct's field initialisers** — changing one changes shipped behaviour |
 | `src/UeObject.hpp` / `UeObject.cpp` | UE object plumbing: `TrackedObject` (recycle-safe handles), `FName` resolution, class-name lookup |
 | `src/Rig.hpp` / `Rig.cpp` | The first-person weapon rig — making the visible gun and arms follow your hand, via **relative** component transforms |
 | `src/Reticule.hpp` / `Reticule.cpp` | Both aim reticules (our own mesh one, and one hosting the game's own reticle widget) plus the asset-loading helpers that feed them |
@@ -101,14 +101,15 @@ compile-time switch, in the spirit of Unreal's `WITH_EDITOR`.
 #endif
 ```
 
-`HALO_VR_DEV` defaults to **0**, so `scriptsuild.ps1` and CI produce a clean player build with
-nothing to remember or strip. To compile the diagnostics in, define it:
+`HALO_VR_DEV` defaults to **0**, so `scripts\build.ps1` and CI produce a clean player build with
+nothing to remember or strip. To compile the diagnostics in, add `/DHALO_VR_DEV=1` to the compiler
+arguments in `scripts\build.ps1`.
 
-The repo's own dev loop does this for you; contributors who want the diagnostics can add the
-define to the compiler arguments in `scriptsuild.ps1`.
-
-If a diagnostic key in `halo_vr.cfg` seems to do nothing, that is expected on a normal build — the
-code is not there. Rebuild with the switch defined.
+The diagnostic and research keys themselves are catalogued in `profile/halo_vr_dev.cfg`, which
+ships with the mod fully commented (packaging asserts the shipped copy is inert — uncommenting a
+key is a deliberate, local act). The ones tagged `[dev build]` there only act when this switch is
+compiled in — on a normal build they parse and do nothing, which is expected, not broken. Rebuild
+with the switch defined.
 
 ## Notes for contributors
 
