@@ -409,6 +409,11 @@ void reticule_mesh_ensure(API::UObject* rig) {
     }
     if (mesh == nullptr) {
         static const wchar_t* kMeshes[] = {
+            // The intended shipped ring, FIRST. It used to be aim_mesh_path's default in
+            // Config.hpp, but a char-array string default on the global g_cfg does not survive
+            // MSVC's constant-initialization (see the note there), so it belongs in this
+            // candidate list -- which also degrades correctly if a game patch moves the asset.
+            L"StaticMesh /Game/FX/Meshes/Primitives/Torus/SM_Torus_ThinDense_01.SM_Torus_ThinDense_01",
             L"StaticMesh /Engine/BasicShapes/Torus.Torus",
             L"StaticMesh /Engine/EngineMeshes/Torus.Torus",
             L"StaticMesh /Engine/EditorMeshes/Torus.Torus",
@@ -470,6 +475,103 @@ void reticule_mesh_ensure(API::UObject* rig) {
     API::get()->log_info("[Halo-CampE-UEVR] reticule mesh CREATED on %s @%p (mesh=%s)",
                          narrow(class_name_of(owner)).c_str(), (void*)comp,
                          mesh != nullptr ? "ok" : "MISSING");
+}
+
+// ---- THE SHARED WORLD-SPACE WIDGET QUAD (see Reticule.hpp for why this is the only copy).
+//
+// BlendMode has no setter, so the property is written directly. Offset 1428 was verified against
+// the live object (OpacityFromTexture reads 1.0f at 1424 immediately before it). ONE definition:
+// a second copy of this constant in another file is exactly how a patch breaks one call site and
+// leaves the other silently wrong.
+constexpr size_t WIDGET_BLENDMODE_OFFSET = 1428;
+
+API::UObject* widget_quad_begin(API::UObject* owner, int blend_mode, bool* out_exposure_compensated) {
+    if (out_exposure_compensated != nullptr) *out_exposure_compensated = false;
+    if (owner == nullptr) return nullptr;
+
+    auto* wc_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetComponent");
+    if (wc_cls == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] widget quad: UMG.WidgetComponent class NOT FOUND");
+        return nullptr;
+    }
+    auto* comp = API::get()->add_component_by_class(owner, wc_cls, /*deferred=*/true);
+    if (comp == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] widget quad: deferred add_component_by_class FAILED");
+        return nullptr;
+    }
+
+    *(reinterpret_cast<uint8_t*>(comp) + WIDGET_BLENDMODE_OFFSET) =
+        (uint8_t)clampf((float)blend_mode, 0.0f, 2.0f);
+
+    // The MIC itself, not a MID of the parent Material. Preferred: the VR-editor pass-through
+    // variant, which multiplies SlateUI by EyeAdaptationInverse -- the stock Widget3D pass is
+    // unlit but still multiplied by the scene's PRE-EXPOSURE, so authored colours tonemap to
+    // near-black in bright scenes. The optional HaloCEReticleColor LogicMod pak supplies it;
+    // without that pak this resolves null and the stock MIC keeps prior behaviour.
+    API::UObject* mic = find_or_load_material(
+        "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
+        "WidgetVRPassThrough_Translucent_OneSided");
+    const bool compensated = (mic != nullptr);
+    if (mic == nullptr) {
+        mic = API::get()->find_uobject<API::UObject>(
+            L"MaterialInstanceConstant /Engine/EngineMaterials/Widget3DPassThrough_Translucent."
+            L"Widget3DPassThrough_Translucent");
+    }
+    if (mic != nullptr) {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<int32_t*>(p) = 0;
+        *reinterpret_cast<void**>(p + 8) = mic;
+        comp->call_function(L"SetMaterial", p);
+    }
+    if (out_exposure_compensated != nullptr) *out_exposure_compensated = compensated;
+
+    // Space FIRST: setting the widget before the space can build the render target for the wrong
+    // mode. 0 = World, 1 = Screen.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetWidgetSpace", p); }
+    // Two-sided: if the facing maths is ever off by 180 the quad is still visible rather than
+    // invisible, which is a much easier failure to diagnose.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetTwoSided", p); }
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetCollisionEnabled", p); }
+    // Absolute transform, so the owner actor's own motion does not drag the quad around.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; p[1] = 1; p[2] = 1;
+      comp->call_function(L"SetAbsolute", p); }
+    // A dynamically added component inherits tick settings from the CDO, and the redraw that
+    // fills the render target happens on tick.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
+      comp->call_function(L"SetComponentTickEnabled", p); }
+    // Widget components only redraw when they think they are visible; a quad off to the side of
+    // the view is precisely the case that gets culled.
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
+      comp->call_function(L"SetTickWhenOffscreen", p); }
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; comp->call_function(L"SetCastShadow", p); }
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetVisibility", p); }
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetHiddenInGame", p); }
+    return comp;
+}
+
+void widget_quad_finish(API::UObject* owner, API::UObject* comp, float bounds_scale) {
+    if (owner == nullptr || comp == nullptr) return;
+    // FINISH LAST. Registration happens here, so everything set before -- blend mode, material,
+    // widget, draw size -- is already in place when the component builds its render target and
+    // scene proxy. FTransform is identity at UE5 double precision.
+    {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        *reinterpret_cast<void**>(p) = comp;          // Component
+        p[8] = 0;                                     // bManualAttachment
+        auto* t = reinterpret_cast<double*>(p + 16);
+        t[0] = 0.0; t[1] = 0.0; t[2] = 0.0; t[3] = 1.0;   // Rotation (x,y,z,w)
+        t[4] = 0.0; t[5] = 0.0; t[6] = 0.0;               // Translation
+        t[8] = 1.0; t[9] = 1.0; t[10] = 1.0;              // Scale3D
+        owner->call_function(L"FinishAddComponent", p);
+    }
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+      *reinterpret_cast<float*>(p) = bounds_scale;
+      comp->call_function(L"SetBoundsScale", p); }
+    // Re-assert ABSOLUTE after registration -- the pre-finish SetAbsolute does not survive the
+    // attach (field-proven: a marker rode a departing dropship, inheriting its parent's motion
+    // between placements).
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; p[1] = 1; p[2] = 1;
+      comp->call_function(L"SetAbsolute", p); }
 }
 
 // ---- WIDGET RETICULE
@@ -751,72 +853,20 @@ void reticule_widget_ensure(API::UObject* rig) {
         return;
     }
 
-    // ---- DEFERRED CONSTRUCTION, configure, THEN finish.
-    //
-    // CREDIT: this sequence comes from Pande's OblivionVR (Profile/scripts/VRHud.lua), which puts a
-    // game HUD widget into world space and renders it in colour:
-    //
-    //     comp = actor:AddComponentByClass(WidgetClass, false, zero_transform, /*deferred*/ false)
-    //     comp:SetWidget(w); comp:SetDrawSize(...); comp:SetMaterial(0, translucent_MIC)
-    //     comp.BlendMode = 2
-    //     actor:FinishAddComponent(comp, false, zero_transform)
-    //
-    // The ordering is the whole point. A registered component builds its render target AND picks
-    // its material from BlendMode immediately, so setting those AFTERWARDS loses: the CDO write
-    // never propagates, and a post-hoc material swap runs against a null render target.
-    // Deferring registration lets all of it be set BEFORE anything is built.
-    //
-    // It also assigns the translucent MaterialInstanceConstant DIRECTLY rather than creating a MID
-    // from the base material -- the base is what rendered WorldGridMaterial here.
-    auto* comp = API::get()->add_component_by_class(owner, wc_cls, /*deferred=*/true);
+    // ---- DEFERRED CONSTRUCTION, configure, THEN finish -- via widget_quad_begin(), the ONE
+    // copy of the recipe (its banner above documents the ordering, the credit to Pande's
+    // OblivionVR, the measured BlendMode offset and the exposure-compensated material chain).
+    // The navpoint markers build the identical object; keeping a private copy here is what put
+    // that measured offset in two files.
+    auto* comp = widget_quad_begin(owner, g_cfg.aim_widget_blend, &g_ret_widget_exposure_compensated);
     if (comp == nullptr) {
         g_ret_widget_failed = true;
-        API::get()->log_info("[Halo-CampE-UEVR] widget reticule: deferred add_component_by_class FAILED");
         return;
     }
-
-    // BlendMode has no setter, so write the property directly. Offset 1428 was verified against the
-    // live object (OpacityFromTexture reads 1.0f at 1424 immediately before it).
-    constexpr size_t BLENDMODE_OFFSET = 1428;
-    *(reinterpret_cast<uint8_t*>(comp) + BLENDMODE_OFFSET) =
-        (uint8_t)clampf((float)g_cfg.aim_widget_blend, 0.0f, 2.0f);
-
-    // The MIC itself, not a MID of the parent Material.
-    //
-    // Preferred: the VR-editor pass-through variant, which multiplies SlateUI by
-    // EyeAdaptationInverse. The stock Widget3D pass is unlit but still multiplied by the scene's
-    // PRE-EXPOSURE, so in bright scenes the authored reticle colours tonemap to near-black -- the
-    // long-standing "dark crosshair". The game's cook omits the VREditor materials; the optional
-    // HaloCEReticleColor LogicMod supplies them, and this loads on demand from that pak. Without
-    // the pak this resolves null and the stock (exposure-crushed) MIC keeps prior behaviour.
-    //
-    // CREDIT: elliotttate's HaloCampaignEvolved-UEVR identified the pre-exposure mechanism, the
-    // EyeAdaptationInverse antidote, and ships the LogicMod pak (used with permission).
-    API::UObject* mic = find_or_load_material(
-        "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
-        "WidgetVRPassThrough_Translucent_OneSided");
-    if (mic == nullptr) {
-        mic = API::get()->find_uobject<API::UObject>(
-            L"MaterialInstanceConstant /Engine/EngineMaterials/Widget3DPassThrough_Translucent."
-            L"Widget3DPassThrough_Translucent");
-    }
-    if (mic != nullptr) {
-        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-        *reinterpret_cast<int32_t*>(p) = 0;
-        *reinterpret_cast<void**>(p + 8) = mic;
-        comp->call_function(L"SetMaterial", p);
-        g_ret_widget_exposure_compensated =
-            mic->get_full_name().find(L"WidgetVRPassThrough") != std::wstring::npos;
-        // Log the material actually applied, not a guess about which branch we took -- reading
-        // "stock Widget3DPassThrough" under an override that had plainly loaded cost real time.
-        API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %S (gain %s)",
-                             mic->get_full_name().c_str(),
-                             g_ret_widget_exposure_compensated ? "forced 1.0" : "aimwidgetgain");
-    }
-
-    // Space FIRST: setting the widget before the space can build the render target for the wrong
-    // mode. 0 = World, 1 = Screen.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetWidgetSpace", p); }
+    API::get()->log_info("[Halo-CampE-UEVR] widget reticule material: %s (gain %s)",
+                         g_ret_widget_exposure_compensated ? "VREditor pass-through"
+                                                           : "stock Widget3DPassThrough",
+                         g_ret_widget_exposure_compensated ? "forced 1.0" : "aimwidgetgain");
 
     // FVector2D is double under UE5 LWC.
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
@@ -824,35 +874,14 @@ void reticule_widget_ensure(API::UObject* rig) {
       d[0] = g_cfg.aim_widget_draw; d[1] = g_cfg.aim_widget_draw;
       comp->call_function(L"SetDrawSize", p); }
 
-    // Two-sided: if our facing maths is ever off by 180 the reticule is still visible rather than
-    // invisible, which is a much easier failure to diagnose.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetTwoSided", p); }
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetCollisionEnabled", p); }
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; p[1] = 1; p[2] = 1;
-      comp->call_function(L"SetAbsolute", p); }
-
+    // (two-sided / no-collision / absolute / tick / offscreen-tick / no-shadow / visible are all
+    // set by widget_quad_begin -- the shared recipe. Only the reticule-specific parts remain.)
     const float s = g_cfg.aim_widget_scale;
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
       auto* d = reinterpret_cast<double*>(p); d[0] = s; d[1] = s; d[2] = s;
       comp->call_function(L"SetWorldScale3D", p); }
 
     host_widget(comp, w);
-
-    // Explicit: a dynamically added component inherits tick settings from the CDO, and the redraw
-    // that fills the render target happens on tick.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
-      comp->call_function(L"SetComponentTickEnabled", p); }
-
-    // Widget components only redraw when they think they are visible; a reticule that sits off to
-    // the side of the view is precisely the case that gets culled.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1;
-      comp->call_function(L"SetTickWhenOffscreen", p); }
-
-    // No shadow: it is a HUD element, and a floating quad throwing a shadow onto the level reads as
-    // a bug immediately. Also keeps it out of the depth/shadow passes entirely.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; comp->call_function(L"SetCastShadow", p); }
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 1; comp->call_function(L"SetVisibility", p); }
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; p[0] = 0; comp->call_function(L"SetHiddenInGame", p); }
 
     // ---- TRANSLUCENT MATERIAL, BOUND TO THE COMPONENT'S OWN RENDER TARGET.
     // Replaces the Masked material the component built for itself. CreateDynamicMaterialInstance
@@ -903,26 +932,10 @@ void reticule_widget_ensure(API::UObject* rig) {
         comp->call_function(L"SetBackgroundColor", p);
     }
 
-    // FINISH LAST. Registration happens here, so everything above -- blend mode, material, widget,
-    // draw size, two-sided -- is already in place when the component builds its render target and
-    // scene proxy. FTransform is identity: quat(0,0,0,1), translation 0, scale 1, at UE5 double
-    // precision (32-byte quat, then 32 for translation incl. padding, then 32 for scale).
-    {
-        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-        *reinterpret_cast<void**>(p) = comp;          // Component
-        p[8] = 0;                                     // bManualAttachment
-        auto* t = reinterpret_cast<double*>(p + 16);
-        t[0] = 0.0; t[1] = 0.0; t[2] = 0.0; t[3] = 1.0;   // Rotation (x,y,z,w)
-        t[4] = 0.0; t[5] = 0.0; t[6] = 0.0;               // Translation
-        t[8] = 1.0; t[9] = 1.0; t[10] = 1.0;              // Scale3D
-        owner->call_function(L"FinishAddComponent", p);
-    }
-
-    // BoundsScale: uevrlib sets this too -- small widget components get frustum-culled without
-    // it as soon as they sit near the edge of view.
-    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-      *reinterpret_cast<float*>(p) = 10.0f;
-      comp->call_function(L"SetBoundsScale", p); }
+    // FINISH LAST -- registration, plus the anti-cull bounds and the absolute re-assert, all in
+    // widget_quad_finish() (the shared recipe). Everything above is in place before the render
+    // target and scene proxy are built, which is the whole point of the deferred construction.
+    widget_quad_finish(owner, comp, /*bounds_scale=*/10.0f);
 
     // Scale AFTER finishing. FinishAddComponent takes a RelativeTransform and applies it, so the
     // identity transform passed above overwrites any scale set before it.

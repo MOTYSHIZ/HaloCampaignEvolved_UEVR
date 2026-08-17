@@ -68,6 +68,38 @@ extern bool g_ret_widget_exposure_compensated;
 void reticule_mesh_ensure(uevr::API::UObject* rig);
 void reticule_mesh_move(const Vec3& p);
 
+// Find a material by path, loading it from disk if necessary (bare object path or class-prefixed).
+// Exposed for the navpoint markers, which need the same exposure-compensated pass-through chain
+// the widget reticule uses -- the stock Widget3D material tonemaps to near-black in bright scenes.
+uevr::API::UObject* find_or_load_material(const std::string& object_path);
+
+// ---- WORLD-SPACE WIDGET QUAD -- THE ONE COPY OF THIS RECIPE ------------------------------------
+//
+// Building a UWidgetComponent that actually renders in world space on this title is a sequence of
+// non-obvious, order-dependent steps (deferred construction credited to OblivionVR, a BlendMode
+// property write at a MEASURED offset because there is no setter, the exposure-compensated
+// pass-through MIC with a stock fallback, and registration LAST so the render target and scene
+// proxy are built from finished state). It took the whole 2026-08-14 render hunt to establish, and
+// the navpoint markers need exactly the same thing as the reticule.
+//
+// So it lives here ONCE and both callers use it. A second hand-rolled copy would put that measured
+// offset and that ordering in two places, where a game patch fixes one and silently rots the other
+// -- the same trap the repo's "never a second copy" rule exists for.
+//
+// USE:  comp = widget_quad_begin(owner, blend, &compensated);
+//       ... caller sets ITS widget (SetWidget / host_widget) and draw size ...
+//       widget_quad_finish(owner, comp, bounds_scale);
+//
+// `out_exposure_compensated` reports whether the VREditor MIC bound (unity tint gain) or the stock
+// one did (the caller must apply gain itself). Returns nullptr on failure, having logged why.
+uevr::API::UObject* widget_quad_begin(uevr::API::UObject* owner, int blend_mode,
+                                      bool* out_exposure_compensated);
+
+// Register the deferred component and apply the anti-cull bounds. MUST be called after the widget
+// is set: registration builds the render target, and a component registered with no widget builds a
+// DEGENERATE (0,0) quad that renders nothing -- a failure that cost a full field session.
+void widget_quad_finish(uevr::API::UObject* owner, uevr::API::UObject* comp, float bounds_scale);
+
 // ---- widget reticule -------------------------------------------------------------------------
 void reticule_widget_ensure(uevr::API::UObject* rig);
 void reticule_widget_move(const Vec3& target, const Vec3& origin);
