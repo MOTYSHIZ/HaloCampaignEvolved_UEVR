@@ -49,6 +49,25 @@ bool hit_trace_ready();
 bool hit_trace(const Vec3& start, const Vec3& end,
                uevr::API::UObject* const* ignore, int ignore_count, Vec3* out_hit);
 
+// The COMPONENT the last successful hit_trace() struck, or nullptr if it could not be resolved.
+//
+// Exists because this game's shield meshes cannot be rendered into the scope's capture (skeletal
+// meshes whose shading comes from a post pass the engine force-disables for scene captures), so a
+// player sighting through the pane can be aimed into a shield that is invisible to them. Knowing
+// what the aim ray actually struck is what lets the mod warn instead of relying on the picture.
+//
+// Valid only for the tick that produced it -- the reticule traces every tick. Never store it.
+uevr::API::UObject* hit_trace_last_component();
+
+#if HALO_VR_DEV
+// Logs what the aim ray is currently on, on change only. The instrument that decides whether
+// shield detection through the trace is viable at all.
+void hit_trace_dev_report();
+// One-shot probe: reads shield state off a live enemy's damage component directly, so the
+// reflected getters can be proven to answer without having to land the aim ray on an enemy.
+void hit_trace_dev_shield_probe();
+#endif
+
 #if HALO_VR_DEV
 // Log the project's named collision channels and the aimreticuletracechannel index for each.
 //
