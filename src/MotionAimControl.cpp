@@ -36,6 +36,7 @@
 #include "AimTrace.hpp"
 #include "GameSettings.hpp"
 #include "AimDirect.hpp"
+#include "AimConverge.hpp"
 #include "DevTools.hpp"
 
 #include <atomic>
@@ -64,6 +65,9 @@ std::atomic<float> g_turn_offset{0.0f};
 std::atomic<float> g_desired_yaw{0.0f}, g_desired_pitch{0.0f};
 std::atomic<bool>  g_aim_calibrating{false};
 std::atomic<bool>  g_stick_mode_active{false};
+std::atomic<bool>  g_menu_active{true};      // true until proven otherwise -- see MotionAimControl.hpp
+std::atomic<bool>  g_frontend_active{true};  // ditto: "not yet established" must never read as live
+std::atomic<void*> g_read_only_pc{nullptr};  // see MotionAimControl.hpp -- NOT the aim law's pointer
 std::atomic<float> g_setpoint_rate_dps{0.0f};
 
 // ---------------------------------------------------------------- ADAPTIVE GAIN
@@ -320,7 +324,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
 
     Vec3 fwd = quat_forward(cq);
 
-    // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -----------------------------------------------------
+    // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
     // WHY ROLL MOVES AIM AT ALL. The direction above comes from the OpenXR AIM pose, which is
     // rigidly attached to the controller with its axis tilted well off the handle. You roll about
@@ -330,14 +334,26 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
     //
     // It is then AMPLIFIED ASYMMETRICALLY by the yaw extraction: yaw is atan2(fwd.x, -fwd.z), so
     // as the cone carries the vector toward steeper pitch the horizontal projection shrinks and the
-    // same displacement becomes a much larger yaw. One roll direction climbs toward level, the
-    // other toward the pole -- which is why rolling left and right do not cost the same.
+    // same displacement becomes a much larger yaw.
     //
-    // THE FIX. Take the direction from the GRIP pose instead. The grip's forward IS the handle
-    // axis, so rolling about it leaves the vector exactly invariant -- roll stops reaching aim at
-    // all. The constant difference between "where the handle points" and "where you feel you are
-    // pointing" is a fixed offset, which the Page Down calibration already exists to absorb, so no
-    // hand-tuned tilt constant is needed: switch this on and recalibrate once.
+    // THE PROPOSED FIX. Take the direction from the GRIP pose. If the grip's forward IS the handle
+    // axis then rolling about it leaves the vector invariant, and the constant "handle points here,
+    // I feel I am pointing there" difference is exactly what the Page Down calibration absorbs.
+    //
+    // ⚠️ WHAT 27,826 LOGGED SAMPLES ACTUALLY ESTABLISHED (2026-08-09), because the obvious reading
+    // of them is wrong:
+    //   * SOLID -- the sightline term is negligible: |mean| 0.18 deg, past 1 deg in 2.4% of
+    //     samples, no trend against roll. Widening xdist cannot help; that hypothesis is dead.
+    //   * SOLID -- grip forward is STEEPLY PITCHED: mean 41.5 deg, past 60 deg in HALF of samples,
+    //     against the aim pose's 7.7 deg / 0.3%. So grip YAW is an atan2 over a small horizontal
+    //     projection, whatever the vector does.
+    //   * NOT ESTABLISHED -- anything measured against `roll` in that run. It came from a
+    //     Tait-Bryan decomposition whose yaw/roll split degenerates as 1/cos(pitch), and half the
+    //     samples were past 60 deg. The headline "grip yaw swings 1.08 deg/deg of roll" is the
+    //     instrument failing near gimbal lock, not the vector moving. The aim pose's 0.19 deg/deg
+    //     is suspect for the same reason.
+    // The AIMROLL instrument now takes roll as the swing-twist about grip forward, which is
+    // well-conditioned at any pitch. Re-measure before adopting or deleting this option.
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
@@ -348,16 +364,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
     }
 
     Vec3 origin{};
-    bool have_origin = false;
-    if (g_cfg.aim_origin == 1) {
-        const auto so = API::VR::get_standing_origin();
-        origin = Vec3{so.x, so.y, so.z};
-        have_origin = true;
-    } else {
-        Vec3 hpos{}; Quat hq{};
-        const auto hidx = API::VR::get_hmd_index();
-        if (hidx >= 0 && get_pose(hidx, &hpos, &hq, /*use_aim=*/false)) { origin = hpos; have_origin = true; }
-    }
+    const bool have_origin = aim_sightline_origin(&origin);
     if (have_origin) {
         Vec3 t{
             cpos.x + fwd.x * g_cfg.xdist_m - origin.x,
@@ -388,10 +395,29 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
             const bool have_grip = get_pose(ridx, &gpos, &gq, /*use_aim=*/false);
             const Vec3 afwd = quat_forward(cq);
             const Vec3 gfwd = have_grip ? quat_forward(gq) : Vec3{0.0f, 0.0f, 0.0f};
-            // Controller roll about its own handle axis, in UE convention.
+
+            // ROLL BY SWING-TWIST, NOT BY quat_to_rotator.
+            //
+            // The first version took roll from a Tait-Bryan decomposition. Yaw and roll DEGENERATE
+            // as pitch steepens -- the split amplifies as 1/cos(pitch), so 2x at 60 deg and ~6x at
+            // 80 -- and the measured grip pitch runs past 60 deg in HALF of all samples. The first
+            // 27k-sample run produced "grip yaw swings 1.08 deg per degree of roll", which is the
+            // decomposition coming apart near gimbal lock rather than the vector moving. Every
+            // conclusion drawn against that axis was measuring the instrument.
+            //
+            // The twist of q about an axis a is well-conditioned at any pitch:
+            //   proj  = (q.xyz . a) a ,  twist = normalize(quat(proj, q.w))
+            // Taken about the GRIP FORWARD, which is the axis the wrist actually rolls about, so
+            // this is the physical quantity the whole question is about.
             float gp = 0.0f, gy = 0.0f, gr = 0.0f;
             if (have_grip) {
-                quat_to_rotator(-gq.z, gq.x, gq.y, -gq.w, &gp, &gy, &gr);
+                float discard_roll = 0.0f;   // quat_to_rotator dereferences all three unconditionally
+                quat_to_rotator(-gq.z, gq.x, gq.y, -gq.w, &gp, &gy, &discard_roll);
+                const float d = gq.x * gfwd.x + gq.y * gfwd.y + gq.z * gfwd.z;
+                const float px = gfwd.x * d, py = gfwd.y * d, pz = gfwd.z * d;
+                const float n  = std::sqrt(px * px + py * py + pz * pz);
+                gr = 2.0f * std::atan2(n, std::fabs(gq.w)) * RAD2DEG;
+                if (d < 0.0f) gr = -gr;
             }
             API::get()->log_info(
                 "[Halo-CampE-UEVR] AIMROLL src=%d roll=%.1f | aim=(y%.2f,p%.2f) grip=(y%.2f,p%.2f) "
@@ -430,9 +456,14 @@ bool desired_aim_now(float* out_yaw, float* out_pitch) {
 // against the PLAYER CONTROLLER PUBLISHED BY THE TICK rather than a fresh engine walk -- the hook
 // must not touch engine containers from its thread.
 bool read_control_rotation_hook(double* out_pitch, double* out_yaw) {
+    // Prefer the law's pointer when it is armed; fall back to the read-only one so a caller that
+    // merely wants to LOOK at ControlRotation still can while the motion stack is stood down. Both
+    // are validated below, so the fallback widens availability without widening trust.
     auto* pc = reinterpret_cast<const uint8_t*>(g_aim_law_pc.load());
+    if (pc == nullptr) pc = reinterpret_cast<const uint8_t*>(g_read_only_pc.load());
     if (pc == nullptr) return false;
-    const double* rot = reinterpret_cast<const double*>(pc + CONTROL_ROTATION_OFFSET);
+    const double* rot = reinterpret_cast<const double*>(
+        pc + g_control_rotation_offset.load(std::memory_order_relaxed));
     if (IsBadReadPtr(rot, sizeof(double) * 3)) return false;
     const double pv = rot[0], yv = rot[1];
     if (!std::isfinite(pv) || !std::isfinite(yv)) return false;
@@ -459,11 +490,23 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
 
     // Published for the reticule (see the header). Set before the deadband and shaping so it is the
     // raw setpoint, not something the actuator has already filtered.
+    //
+    // AND BEFORE THE CONVERGENCE CORRECTION, deliberately. There are two distinct quantities from
+    // here on and conflating them is the trap:
+    //   INTENT  (g_desired_*) -- where the player is pointing. What the reticule draws along and
+    //                            what the movement frame rotates by; both want a direction that
+    //                            does not twitch when the depth under the crosshair changes.
+    //   COMMAND (cmd_*)       -- what is written into the game's aim, bent so the shot LANDS on the
+    //                            point the intent ray hits. Depth-dependent by definition.
+    // Every drive site takes the command; nothing else does. See AimConverge.hpp.
     g_desired_yaw   = desired_yaw;
     g_desired_pitch = desired_pitch;
 
-    float err_yaw   = wrap180(desired_yaw   - (float)aim_yaw);
-    float err_pitch = wrap180(desired_pitch - (float)aim_pitch);
+    float cmd_yaw = desired_yaw, cmd_pitch = desired_pitch;
+    aim_converge_apply(&cmd_yaw, &cmd_pitch);
+
+    float err_yaw   = wrap180(cmd_yaw   - (float)aim_yaw);
+    float err_pitch = wrap180(cmd_pitch - (float)aim_pitch);
 
     // Schmitt-gated deadband: leaving the band takes dead_deg, re-entering takes dead_deg *
     // dead_hyst, so an error hovering at the edge cannot chatter the stick between 0 and `floor`.
@@ -640,10 +683,16 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     // a build per guess (launches are unreliable), the mapping is a live tunable: +1 reproduces the
     // steered setpoint exactly, -1 mirrors the hand's motion about the calibration reference.
     if (g_cfg.aim_direct && aim_direct_ready()) {
-        const double want_yaw   = (double)(g_ref_aim_yaw.load() + g_cfg.aim_direct_sign_x * dctrl_yaw);
-        const double want_pitch = g_cfg.drive_pitch
-            ? (double)(g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch)
-            : aim_pitch;
+        float wy = g_ref_aim_yaw.load() + g_cfg.aim_direct_sign_x * dctrl_yaw;
+        float wp = g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch;
+        // Corrected HERE TOO, and with the same call, because this is the LOCAL VIEW half of the
+        // aim pair -- blamangles writes the simulation, this writes what you see. The two halves
+        // disagreeing by even a degree is the documented "heavy jitter" failure, so a correction
+        // applied to one and not the other would be worse than no correction at all.
+        aim_converge_apply(&wy, &wp);
+
+        const double want_yaw   = (double)wy;
+        const double want_pitch = g_cfg.drive_pitch ? (double)wp : aim_pitch;
         if (aim_direct_set(want_pitch, want_yaw)) {
             *out_rx = 0.0f;
             *out_ry = 0.0f;
@@ -679,13 +728,64 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                      *out_rx, *out_ry, st.ff_rate_yaw);
 }
 
+std::atomic<size_t> g_control_rotation_offset{CONTROL_ROTATION_OFFSET_EXPECTED};
+
+void resolve_control_rotation_offset(void* pc_raw) {
+    static std::atomic<bool> s_done{false};
+    if (pc_raw == nullptr || s_done.load(std::memory_order_relaxed)) return;
+
+    auto* pc = reinterpret_cast<API::UObject*>(pc_raw);
+    auto* p  = pc->get_property_data<double>(L"ControlRotation");
+    if (p == nullptr) {
+        s_done.store(true, std::memory_order_relaxed);
+        API::get()->log_info("[Halo-CampE-UEVR] CTLROT: reflection could not find ControlRotation "
+                             "-- keeping the compiled offset +0x%llX",
+                             (unsigned long long)CONTROL_ROTATION_OFFSET_EXPECTED);
+        return;
+    }
+
+    // VALIDATE BEFORE ADOPTING. A resolved-but-wrong offset is worse than the compiled one, because
+    // it looks authoritative. An FRotator of doubles is 8-byte aligned, and a PlayerController is a
+    // few KB -- anything outside that is not the field we asked for.
+    const uintptr_t off = (uintptr_t)p - (uintptr_t)pc;
+    if (off < 0x40 || off > 0x4000 || (off & 7) != 0) {
+        s_done.store(true, std::memory_order_relaxed);
+        API::get()->log_info("[Halo-CampE-UEVR] CTLROT: reflection returned an implausible offset "
+                             "+0x%llX -- keeping the compiled +0x%llX",
+                             (unsigned long long)off,
+                             (unsigned long long)CONTROL_ROTATION_OFFSET_EXPECTED);
+        return;
+    }
+
+    g_control_rotation_offset.store((size_t)off, std::memory_order_relaxed);
+    s_done.store(true, std::memory_order_relaxed);
+
+    if (off == CONTROL_ROTATION_OFFSET_EXPECTED) {
+        API::get()->log_info("[Halo-CampE-UEVR] CTLROT: ControlRotation at +0x%llX (reflection; "
+                             "matches the compiled expectation)", (unsigned long long)off);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] CTLROT: ControlRotation at +0x%llX -- the compiled "
+                             "expectation +0x%llX is WRONG for this build. Reading there would have "
+                             "failed the sanity gate and taken snap turn, aim and movement with it; "
+                             "using the resolved value instead.",
+                             (unsigned long long)off,
+                             (unsigned long long)CONTROL_ROTATION_OFFSET_EXPECTED);
+    }
+}
+
 bool read_control_rotation(double* out_pitch, double* out_yaw, void** out_pc) {
     auto* pc = API::get()->get_player_controller(0);
     if (pc == nullptr) return false;
     if (out_pc != nullptr) *out_pc = (void*)pc;
 
+    // Resolved HERE because this is the game-thread reader: it already holds a live
+    // PlayerController, it runs before any consumer needs the offset, and the hook-side reader is
+    // deliberately never given a path that touches reflection.
+    resolve_control_rotation_offset(pc);
+
     auto* base = reinterpret_cast<const uint8_t*>(pc);
-    const double* rot = reinterpret_cast<const double*>(base + CONTROL_ROTATION_OFFSET);
+    const double* rot = reinterpret_cast<const double*>(
+        base + g_control_rotation_offset.load(std::memory_order_relaxed));
 
     if (IsBadReadPtr(rot, sizeof(double) * 3)) return false;
 
@@ -712,6 +812,42 @@ bool read_control_rotation(double* out_pitch, double* out_yaw, void** out_pc) {
 // false, and nothing reads it. So aim-method-2 is inert here for architectural reasons, not
 // configuration ones, and its output could only be recovered by racing Blam for the value it is
 // about to overwrite. We read the same upstream source it does -- the controller pose -- directly.
+// THE SIGHTLINE'S BODY REFERENCE. One definition, because there are two sightline sites (here and
+// the closed loop in Plugin.cpp) and they must not be able to disagree about where the player is.
+//
+// aimorigin=1 means "the body", and the STANDING ORIGIN is the body only while something holds it
+// to your head. A leash does exactly that -- at the default radius 0 it re-pins the origin to the
+// HMD every tick, so modes 0 and 1 are numerically the same thing and the setting is inert.
+//
+// With hmdleash=0 nothing holds it. The origin stays where you last recentred while you stand up,
+// lean or roll your chair away, and the sightline then swings by atan(drift / xdist) with no input
+// from you: 1 m of drift at xdist=1000 is 5.7 deg, growing to the size of your room. That is not a
+// tuning problem, it is a stale reference, so an unleashed head demotes mode 1 to mode 0 -- which
+// is drift-free by construction, because the head term cancels out of (cpos + fwd*x - hmd).
+//
+// The cost of the demotion is mode 0's documented drawback: your head orbits ~10 cm about your neck
+// as you look around, worth ~0.6 deg at xdist=1000. Small, constant, and it does not accumulate.
+bool aim_sightline_origin(Vec3* out) {
+    if (g_cfg.aim_origin == 1 && g_cfg.hmd_leash) {
+        const auto so = API::VR::get_standing_origin();
+        *out = Vec3{so.x, so.y, so.z};
+        return true;
+    }
+
+    static bool said_demote = false;
+    if (g_cfg.aim_origin == 1 && !said_demote) {
+        said_demote = true;
+        API::get()->log_info("[Halo-CampE-UEVR] SIGHTLINE: hmdleash=0, so aimorigin=1 (standing "
+                             "origin) is using the HEAD instead -- an unleashed standing origin is "
+                             "a stale body reference and would swing aim as you move.");
+    }
+
+    Vec3 hpos{}; Quat hq{};
+    const auto hidx = API::VR::get_hmd_index();
+    if (hidx >= 0 && get_pose(hidx, &hpos, &hq, /*use_aim=*/false)) { *out = hpos; return true; }
+    return false;
+}
+
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
     const auto pose = use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx);
     const auto& q = pose.rotation;
