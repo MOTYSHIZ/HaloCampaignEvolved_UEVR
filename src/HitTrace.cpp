@@ -222,7 +222,21 @@ bool hit_trace(const Vec3& start, const Vec3& end,
     // Zeroed whole: every field we do NOT set wants its zero value (no complex trace, no actors
     // ignored, no debug draw, channel 0 = Visibility), so a zero fill is correct by construction
     // rather than by our remembering to set each one.
-    std::vector<uint8_t> params((size_t)g_params_size, 0);
+    //
+    // ONE BUFFER, REUSED. The zero fill is required every call; the ALLOCATION is not, and this
+    // runs on the reticule's per-tick trace, so a fresh vector here was a malloc/free per tick for
+    // the life of the session. assign() rewrites the bytes without reallocating after the first
+    // call.
+    //
+    // Deliberately not a fixed stack array like RIG_PARAM_BUF: g_params_size comes from the
+    // engine's own UFunction at runtime, and a compile-time cap that turned out to be too small on
+    // some future build would silently disable tracing -- which would take the reticule AND the
+    // aim convergence with it. Sizing from the engine cannot be wrong.
+    //
+    // Single-threaded by the same argument as the rest of this file: every hit_trace() call site
+    // is inside update(), on the tick thread.
+    static std::vector<uint8_t> params;
+    params.assign((size_t)g_params_size, 0);
     uint8_t* p = params.data();
 
     if (g_off.world_ctx >= 0) *reinterpret_cast<API::UObject**>(p + g_off.world_ctx) = world;

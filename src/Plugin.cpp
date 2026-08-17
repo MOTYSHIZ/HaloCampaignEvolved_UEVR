@@ -7296,6 +7296,12 @@ public:
                         // large number here means the fix is doing a lot of work, not that error
                         // remains: the relative rotation is recomputed against the live parent, so
                         // the world orientation is correct by construction at the moment of writing.
+                        //
+                        // DEV-ONLY: it answers a question rather than playing the game, which is
+                        // the test in DevTools.hpp. It was running on the RENDER path in shipping
+                        // builds -- a formatted log line every ~3.3 s, forever, for a number no
+                        // player can act on.
+#if HALO_VR_DEV
                         static float worst = 0.0f;
                         static uint32_t n = 0;
                         const float d = std::fabs(wrap180(prot.y - g_rigw_parent_yaw.load()));
@@ -7305,6 +7311,7 @@ public:
                                                  "since tick, over last window", worst);
                             worst = 0.0f;
                         }
+#endif
                     }
                 }
             }
