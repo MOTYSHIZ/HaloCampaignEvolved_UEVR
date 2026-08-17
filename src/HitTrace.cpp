@@ -1,6 +1,7 @@
 #include "HitTrace.hpp"
 
 #include "Config.hpp"
+#include "UeObject.hpp"   // narrow(), class_name_of() -- used by the dev hit readout
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -37,6 +38,9 @@ struct Offsets {
 
 // Offset of the impact point WITHIN FHitResult.
 int32_t g_impact_off = -1;
+// Offset of FHitResult::Component (a TWeakObjectPtr), and the component the last trace hit.
+int32_t g_hitcomp_off = -1;
+uevr::API::UObject* g_last_hit_component = nullptr;
 
 std::wstring field_name(API::FField* f) {
     if (f == nullptr) return L"";
@@ -98,6 +102,16 @@ bool resolve() {
         // a line trace. Prefer ImpactPoint, accept Location, so a renamed field is not fatal.
         g_impact_off = offset_of(hit, L"ImpactPoint");
         if (g_impact_off < 0) g_impact_off = offset_of(hit, L"Location");
+
+        // WHAT WE HIT, not just where. The scope cannot render this game's shield meshes (they
+        // are skeletal meshes whose shading comes from a post pass the engine force-disables for
+        // scene captures), so a player sighting through the pane can be aimed into a shield they
+        // cannot see. Knowing the hit's COMPONENT lets the mod say so.
+        // FHitResult::Component is a TWeakObjectPtr: { int32 ObjectIndex; int32 SerialNumber }.
+        // Reading the index and resolving it through the global object array is the only route --
+        // there is no reflected getter, and dereferencing the weak pointer's target directly is
+        // not something this API exposes.
+        g_hitcomp_off = offset_of(hit, L"Component");
     }
 
     API::get()->log_info("[Halo-CampE-UEVR] HITTRACE: resolving LineTraceSingle, params_size=%d",
@@ -109,6 +123,7 @@ bool resolve() {
     log_off("OutHit",       g_off.out_hit);
     log_off("ReturnValue",  g_off.ret);
     log_off("HitResult.Impact", g_impact_off);
+    log_off("HitResult.Component", g_hitcomp_off);
 
     // FAIL CLOSED. Only the fields actually written or read are required -- the optional ones
     // (bTraceComplex, ActorsToIgnore, DrawDebugType, bIgnoreSelf) are left at the zeroed default,
@@ -261,7 +276,161 @@ bool hit_trace(const Vec3& start, const Vec3& end,
     const Vec3 h{(float)ip[0], (float)ip[1], (float)ip[2]};
     if (!std::isfinite(h.x) || !std::isfinite(h.y) || !std::isfinite(h.z)) return false;
     *out_hit = h;
+
+    // WHAT was hit. Published rather than returned so every existing caller is untouched.
+    g_last_hit_component = nullptr;
+    if (g_hitcomp_off >= 0 &&
+        g_off.out_hit + g_hitcomp_off + (int32_t)sizeof(int32_t) * 2 <= g_params_size) {
+        // TWeakObjectPtr { int32 ObjectIndex; int32 ObjectSerialNumber }. Resolve the index
+        // through the global object array; a stale index simply yields nothing, which is the
+        // correct failure here -- never dereference it as a raw pointer.
+        const int32_t idx = *reinterpret_cast<const int32_t*>(p + g_off.out_hit + g_hitcomp_off);
+        auto* arr = API::get()->get_uobject_array();
+        if (arr != nullptr && idx >= 0 && idx < arr->get_object_count()) {
+            g_last_hit_component = reinterpret_cast<API::UObject*>(arr->get_object(idx));
+        }
+    }
     return true;
 }
+
+// The component the last successful trace hit, or nullptr. Valid only until the next trace; the
+// reticule traces every tick, so treat it as this-tick-only and never store it.
+API::UObject* hit_trace_last_component() { return g_last_hit_component; }
+
+#if HALO_VR_DEV
+// Find a component of a given class on an actor, WITHOUT sweeping the object array -- the same
+// route resolve_shield_shell() uses, for the same reason: a full sweep here is the pattern that
+// has already collapsed framerate in a live session. Both arrays are plain TArray<UObject*>.
+API::UObject* find_component_on(API::UObject* actor, const wchar_t* class_substr) {
+    if (actor == nullptr) return nullptr;
+    struct FRawArray { API::UObject** data; int32_t num; int32_t max; };
+    static const wchar_t* kArrays[] = { L"BlueprintCreatedComponents", L"InstanceComponents" };
+    for (const wchar_t* arr_name : kArrays) {
+        auto* arr = actor->get_property_data<FRawArray>(arr_name);
+        if (arr == nullptr || arr->data == nullptr || arr->num <= 0 || arr->num > 512) continue;
+        for (int32_t i = 0; i < arr->num; ++i) {
+            auto* c = arr->data[i];
+            if (c == nullptr) continue;
+            if (class_name_of(c).find(class_substr) != std::wstring::npos) return c;
+        }
+    }
+    return nullptr;
+}
+
+// Read a float from a 0-arg reflected getter. Returns false if the function is absent.
+bool call_float_getter(API::UObject* obj, const wchar_t* fn, float* out) {
+    if (obj == nullptr || out == nullptr) return false;
+    auto* cls = obj->get_class();
+    if (cls == nullptr || cls->find_function(fn) == nullptr) return false;
+    alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+    obj->call_function(fn, q);
+    *out = *reinterpret_cast<float*>(q);
+    return true;
+}
+
+// ONE-SHOT: prove the shield getters answer against a LIVE enemy, without needing to aim at one.
+//
+// Aiming at an Elite under SimVR is impractical (no combat, and the ray has to land on the biped),
+// but the question that actually matters -- do these reflected getters return real values? -- does
+// not need the ray at all. Find any live enemy biped, read its damage component, log what comes
+// back. One full array walk, ONCE, dev builds only.
+void hit_trace_dev_shield_probe() {
+    static bool done = false;
+    if (done) return;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return;
+    done = true;
+
+    const int32_t n = arr->get_object_count();
+    int found = 0;
+    for (int32_t i = 0; i < n && found < 3; ++i) {
+        auto* o = reinterpret_cast<API::UObject*>(arr->get_object(i));
+        if (o == nullptr) continue;
+        if (class_name_of(o).find(L"BlamObjectDamageComponent") == std::wstring::npos) continue;
+        // LIVE INSTANCES ONLY. Filtering on the owner's short name was wrong twice over: a class
+        // default object's outer is the PACKAGE ("/Script/BlamSynchronization"), and a Blueprint
+        // archetype's is the generated class ("BP_BaseVehicleActor_C") -- neither contains
+        // "Default__", so both sailed through and reported a DEFAULT vitality of 1.000 that looked
+        // exactly like a healthy live enemy. A real in-world component's full name always sits
+        // under the level: /Game/Levels/.../PersistentLevel.<Actor>.<Component>.
+        const std::string full = narrow(o->get_full_name());
+        if (full.find("PersistentLevel") == std::string::npos) continue;
+        if (full.find("Default__") != std::string::npos) continue;
+
+        auto* owner = o->get_outer();
+        std::string owner_name = "?";
+        if (owner != nullptr) {
+            if (const auto* fn = owner->get_fname()) owner_name = narrow(fn->to_string());
+        }
+
+        float vit = -1.0f, act = -1.0f, over = -1.0f;
+        const bool a = call_float_getter(o, L"GetShieldVitality", &vit);
+        const bool b = call_float_getter(o, L"GetActiveShieldVitality", &act);
+        const bool c = call_float_getter(o, L"GetOvershieldAmount", &over);
+        API::get()->log_info("[Halo-CampE-UEVR] SHIELDPROBE owner='%s' vitality=%s%.3f "
+                             "active=%s%.3f overshield=%s%.3f",
+                             owner_name.c_str(), a ? "" : "(absent)", vit,
+                             b ? "" : "(absent)", act, c ? "" : "(absent)", over);
+        ++found;
+    }
+    if (found == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] SHIELDPROBE: no live BlamObjectDamageComponent "
+                             "found -- enemies may not be streamed in here");
+    }
+}
+
+// Names what the aim ray is on, ON CHANGE ONLY. This is the instrument that decides whether
+// shield detection is even possible: if an Elite's shield mesh or a Covenant portable shield
+// shows up here when the ray is on one, the mod can warn about a shield it cannot draw. If the
+// ray reports only the biped, detection has to come from somewhere else.
+void hit_trace_dev_report() {
+    auto* comp = g_last_hit_component;
+    static void* last = nullptr;
+    if (comp == last) return;
+    last = comp;
+    if (comp == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] HITWHAT: (nothing resolved)");
+        return;
+    }
+    // Component class + its own name, and the owning actor's name -- the actor is what carries
+    // the recognisable identity (BP_CovPortableShield*, the Elite bipeds), while the component
+    // name is what distinguishes a shield mesh from the body mesh on the same actor.
+    std::string comp_name = "?";
+    if (const auto* fn = comp->get_fname()) comp_name = narrow(fn->to_string());
+    std::string owner = "?";
+    if (auto* o = comp->get_outer()) {
+        if (const auto* fn = o->get_fname()) owner = narrow(fn->to_string());
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] HITWHAT: %s  comp='%s'  owner='%s'",
+                         narrow(class_name_of(comp)).c_str(), comp_name.c_str(), owner.c_str());
+
+    // SHIELD STATE, asked of the SIMULATION rather than inferred from what rendered.
+    //
+    // The scope cannot draw this game's shields (their shading comes from a post pass the engine
+    // force-disables for scene captures), so the requirement -- see enemy state, never fire blind
+    // into an invisible stationary shield -- is met by READING the state instead. Both components
+    // below are reflected on this build; this is the readout that proves the calls actually work
+    // against a live object, which is the one thing the object-array search could not establish.
+    auto* actor = comp->get_outer();
+    if (actor == nullptr) return;
+
+    if (auto* dmg = find_component_on(actor, L"BlamObjectDamageComponent")) {
+        float shield = -1.0f, active = -1.0f, over = -1.0f;
+        const bool a = call_float_getter(dmg, L"GetShieldVitality", &shield);
+        const bool b = call_float_getter(dmg, L"GetActiveShieldVitality", &active);
+        const bool c = call_float_getter(dmg, L"GetOvershieldAmount", &over);
+        API::get()->log_info("[Halo-CampE-UEVR] HITSHIELD: vitality=%s%.3f active=%s%.3f "
+                             "overshield=%s%.3f",
+                             a ? "" : "(absent)", shield, b ? "" : "(absent)", active,
+                             c ? "" : "(absent)", over);
+    }
+    if (auto* dev = find_component_on(actor, L"BlamDeviceMachineComponent")) {
+        alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+        dev->call_function(L"IsShielded", q);
+        API::get()->log_info("[Halo-CampE-UEVR] HITSHIELD: device IsShielded=%d  <-- a stationary "
+                             "shield reports here", (int)q[0]);
+    }
+}
+#endif
 
 }  // namespace halo
