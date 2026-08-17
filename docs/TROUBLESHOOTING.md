@@ -58,8 +58,11 @@ Play Area), and it comes back. Pick standing or seated before you inject and sta
 want to switch mid-session, just expect to recentre afterwards.
 
 **Aim feels laggy or overshoots on fast sweeps.**
-Edit `halo_vr.cfg` live: raise `ffgain` toward 1.2 for lag, raise `dgain` toward 0.3 for
-overshoot. If small motions buzz, raise `dead` slightly (0.6–0.8).
+With the shipping direct-drive aim this should not happen — pointing is written 1:1, with no
+control loop to lag or overshoot. If it does: check `log.txt` for `DEV OVERRIDES ACTIVE` (a
+leftover experiment may have switched the aim path), and try deleting `halo_vr_user.cfg` to rule
+out a stale setting. Only the fallback stick-steer path (`blamangles=0`) has feel tuning —
+`ffgain`, `dgain`, `dead` in `halo_vr_dev.cfg`.
 
 **The ring reticule is missing at mission start.**
 Its material streams in a few seconds after spawn; the mod rebinds automatically. If it never
@@ -67,7 +70,8 @@ appears, check `log.txt` for `reticule mesh asset` / `textured reticule` lines.
 
 **The ring reticule disappeared after a game update.**
 Most likely the game moved or removed an asset, not a bug in the mod. The ring is not shipped art —
-it is built from two assets inside the game's own content, named by path in `halo_vr.cfg`:
+it is built from two assets inside the game's own content, named by path in `halo_vr_dev.cfg`
+(uncomment a key there to point it elsewhere):
 
 ```
 aimmeshpath=StaticMesh /Game/FX/Meshes/Primitives/Torus/SM_Torus_ThinDense_01.SM_Torus_ThinDense_01
@@ -79,12 +83,12 @@ rather than nothing happening. `MI_Arrow` is the likelier casualty — it lives 
 which is the sort of content a shipping patch removes.
 
 Workarounds, in order of preference: point `aimmeshparent` at another material the game still has;
-or set `aimmesh=0` and rely on `aimwidget=1`, which hosts the game's own crosshair at the aim point
-and depends on no fixed asset path. Please report the game version if you hit this — the shipped
-default should be changed to whatever survives.
+or set `aimmesh=0` (its default) in `halo_vr_user.cfg` and rely on the hosted crosshair
+(`aimwidget=1`), which depends on no fixed asset path. Please report the game version if you hit
+this — the built-in default should be changed to whatever survives.
 
 **The reticle/ring is the wrong colour or too big.**
-`aimmeshcr/cg/cb` and `aimmeshscale` in `halo_vr.cfg`, live.
+`aimmeshcr/cg/cb` and `aimmeshscale` in `halo_vr_user.cfg`, live.
 
 **Menus respond to the wrong buttons.**
 Menu handling needs `menudetect=1` (default). In menus, right-controller B is Back and the
