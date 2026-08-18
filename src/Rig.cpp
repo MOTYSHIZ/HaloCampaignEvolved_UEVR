@@ -82,6 +82,52 @@ API::UObject* follow_object(API::UObject* obj, const wchar_t* prop) {
 }
 
 
+// ---------------------------------------------------------------- COMPONENT LOOKUP, OWNER-SCOPED
+// A UE TArray header. Read raw: the elements are UObject* and nothing here ever writes.
+struct FRawArrayRO { void* data; int32_t num; int32_t max; };
+
+// Scan one TArray<UObject*> property of `owner` for a component whose class name matches EXACTLY.
+// Fails closed on anything unreadable rather than faulting -- every hop here can be mid-teardown on
+// this title, and a bogus component is far worse than no component.
+//
+// !!! EXACT, NEVER A PREFIX. The pawn carries BPC_FP_SkeletalMesh_C,
+// BPC_FP_TranslucentSkeletalMesh_C and BPC_FP_ShadowSkeletalMesh_C -- three meshes with three
+// different jobs, and the shadow one is a FULL-BODY proxy standing on the floor. A prefix match
+// picks the wrong one and lifts the player's shadow off the ground (see the shell block below).
+static API::UObject* find_component_in_array(API::UObject* owner, const wchar_t* prop,
+                                             const wchar_t* cls_name) {
+    if (owner == nullptr) return nullptr;
+    auto* arr = owner->get_property_data<FRawArrayRO>(prop);
+    if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) return nullptr;
+    if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) return nullptr;
+
+    auto** elems = reinterpret_cast<API::UObject**>(arr->data);
+    if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) return nullptr;
+
+    for (int32_t i = 0; i < arr->num; ++i) {
+        auto* c = elems[i];
+        if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
+        if (class_name_of(c) == cls_name) return c;
+    }
+    return nullptr;
+}
+
+// A component of the LIVE LOCAL PAWN, by exact class name.
+//
+// BlueprintCreatedComponents lists the construction-script components flat, independent of how they
+// are attached, so it is preferred over walking attachment topology we have not measured.
+// get_local_pawn is the cheap per-frame handle -- no object-array walk, which is the whole point.
+static API::UObject* component_on_pawn(const wchar_t* cls_name) {
+    auto* pawn = API::get()->get_local_pawn(0);
+    if (auto* c = find_component_in_array(pawn, L"BlueprintCreatedComponents", cls_name)) return c;
+    if (auto* c = find_component_in_array(pawn, L"InstanceComponents",         cls_name)) return c;
+    return nullptr;
+}
+
+// The arms rig's class. One spelling, because three separate string literals of the same name is
+// exactly how one of them ends up subtly different.
+static constexpr const wchar_t* kRigClass = L"BPC_FP_SkeletalMesh_C";
+
 // Find the live FP rig by walking BACK from a first-person weapon actor:
 //     weapon actor -> RootComponent -> AttachParent == BPC_FP_SkeletalMesh_C
 // The weapon actor the rig was last reached through. Caching the WEAPON (not the rig) is what
@@ -96,7 +142,7 @@ static API::UObject* rig_through_weapon(API::UObject* wpn) {
     auto* root = follow_object(wpn, L"RootComponent");
     auto* par  = follow_object(root, L"AttachParent");
     if (par == nullptr) return nullptr;
-    if (class_name_of(par).find(L"BPC_FP_SkeletalMesh_C") == std::wstring::npos) return nullptr;
+    if (class_name_of(par).find(kRigClass) == std::wstring::npos) return nullptr;
     return par;
 }
 
@@ -123,7 +169,7 @@ bool fp_weapon_route_alive() {
 // array slot? A weapon swap kills the route but not this; what a vehicle seat does to it is recon
 // R1, answered by this appearing in one log line.
 bool rig_component_alive() {
-    return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C") != nullptr;
+    return g_rig_track.get_checked(kRigClass) != nullptr;
 }
 
 // The first-person weapon ACTOR the rig was last reached through. Exposed for the reticule trace:
@@ -143,7 +189,7 @@ API::UObject* fp_weapon_actor() {
 }
 
 API::UObject* rig_tracked_component() {
-    return g_rig_track.get_checked(L"BPC_FP_SkeletalMesh_C");
+    return g_rig_track.get_checked(kRigClass);
 }
 
 API::UObject* resolve_rig() {
@@ -214,7 +260,195 @@ API::UObject* resolve_rig() {
             return par;
         }
     }
+
+    // ---- PAWN-DOWN FALLBACK: there is no first-person weapon to walk back from.
+    //
+    // Being unarmed is a REAL, PLAYABLE STATE on this game, not just a loading artifact -- the
+    // campaign opens with no weapon in your hands at all. The shipped content carries eighteen
+    // BP_FP_*_WeaponActor classes and not one unarmed variant, so the sweep above is not missing
+    // an actor: there genuinely is none, and it will find nothing however often it runs.
+    //
+    // The rig is a component of the PAWN, so ask the pawn directly. This does NOT violate the
+    // never-adopt-by-class-match banner at the top of this section: the search is scoped to the
+    // LIVE LOCAL PAWN's own component list, so a pooled corpse from a previous life is not
+    // reachable at all -- the same property that makes the weapon walk trustworthy, obtained a
+    // different way.
+    //
+    // Deliberately AFTER the sweep, never before it. The sweep is what establishes g_fp_weapon,
+    // and that handle is what the fast path, the pivot derivation and the reticle re-arm all run
+    // on. Short-circuiting to the pawn would leave the weapon handle permanently unset, so picking
+    // a gun up would never be noticed and the unarmed state would never end.
+    if (auto* rig = component_on_pawn(kRigClass)) {
+        note_resolved_rig(rig);
+        return rig;
+    }
     return nullptr;
+}
+
+// ---------------------------------------------------------------- FIRST-PERSON PRESENTATION
+// "Is the game presenting the player in first person right now?" -- which is the question stick
+// mode actually wants answered, asked directly instead of inferred from whether a gun exists.
+//
+// WHY THE WEAPON IS THE WRONG PROXY. Stick mode stands the whole motion stack down when the FP
+// weapon route dies, because that is what a vehicle seat, a cutscene, death and the post-load
+// window all look like from outside. Standing on your feet with nothing in your hands looks
+// identical to it -- so the campaign's opening minutes played as flat gamepad, motion aim and
+// snap turn dead, which is where new players got stuck.
+//
+// This is the same bug class the menu detector already had and already fixed: `no_rig` was a cheap
+// stand-in for "a load or transition" that also meant "no first-person weapon", i.e. a vehicle. The
+// fix there was to stop proxying and read the real state. Same fix here.
+//
+// THE VALUE IS LEARNED, NOT ASSUMED. CurrentBlamCameraPerspective is an EBlamCameraPerspective
+// byte on BlamPawn. Its declared order is {FirstPerson, ThirdPerson, None}, but the one live sample
+// taken on foot with a weapon in hand read 2 -- which under that order would be `None`. So the
+// declared order cannot be trusted and a hardcoded comparison would be a guess.
+//
+// It does not need to be trusted. Whenever the FP weapon route IS alive the player is
+// unambiguously on foot in first person, so whatever the byte reads at that moment IS this build's
+// first-person value, by observation. The seed below is only what to believe before the first
+// weapon of the session has been seen; the first armed tick corrects it, and a build that orders
+// the enum differently corrects itself with no code change.
+//
+// Returns 1 = first person, 0 = not first person, -1 = could not tell. Callers must treat -1 as
+// "assume nothing" and fall back to the weapon-route behaviour: a build where this property is
+// missing or renamed then behaves exactly as it did before this existed.
+// HOW THE BYTE IS REACHED, and why it is not simply a reflection lookup. The FA session that found
+// this field recorded that reflection AGAINST THE LIVE PAWN INSTANCE fails on this title while a
+// raw read at the offset succeeds -- and its recommendation was explicit: consume it the way
+// ControlRotation is consumed, raw at a validated offset behind IsBadReadPtr, failing closed.
+//
+// So this does what resolve_control_rotation_offset does. Reflection is TRIED, because when it
+// answers it is right by construction and survives a patch that moves the field; its answer is
+// range-checked before adoption, since a resolved-but-wrong offset is worse than a compiled one
+// (it looks authoritative); and the measured offset is the fallback when reflection declines.
+// Which one is in force is logged once, so "the fix silently did nothing" is never a diagnosis
+// anyone has to reach for.
+// ADDR-HYGIENE: resolved -- resolve_perspective_offset() prefers UE reflection, range-checks the
+// answer, and falls back to this measured value only when reflection declines (logged either way).
+constexpr uintptr_t PERSPECTIVE_OFFSET_EXPECTED = 0x3C1;   // BlamPawn+961, measured 2026-08-02
+static std::atomic<size_t> g_persp_offset{PERSPECTIVE_OFFSET_EXPECTED};
+
+static void resolve_perspective_offset(API::UObject* pawn) {
+    static bool s_done = false;
+    if (s_done || pawn == nullptr) return;
+    s_done = true;
+
+    auto* p = pawn->get_property_data<uint8_t>(L"CurrentBlamCameraPerspective");
+    if (p == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] PERSP: reflection could not find "
+                             "CurrentBlamCameraPerspective -- using the measured offset +0x%llX",
+                             (unsigned long long)PERSPECTIVE_OFFSET_EXPECTED);
+        return;
+    }
+    const uintptr_t off = (uintptr_t)p - (uintptr_t)pawn;
+    // A one-byte enum has no alignment to check, so the plausibility gate is position alone: past
+    // the UObject header, inside a pawn a few KB long.
+    if (off < 0x40 || off > 0x4000) {
+        API::get()->log_info("[Halo-CampE-UEVR] PERSP: reflection returned an implausible offset "
+                             "+0x%llX -- keeping the measured +0x%llX",
+                             (unsigned long long)off,
+                             (unsigned long long)PERSPECTIVE_OFFSET_EXPECTED);
+        return;
+    }
+    g_persp_offset.store((size_t)off, std::memory_order_relaxed);
+    API::get()->log_info("[Halo-CampE-UEVR] PERSP: CurrentBlamCameraPerspective at +0x%llX "
+                         "(reflection; the measured expectation is +0x%llX)",
+                         (unsigned long long)off,
+                         (unsigned long long)PERSPECTIVE_OFFSET_EXPECTED);
+}
+
+// EBlamCameraPerspective declares three members, so a live value above this is not the enum -- it
+// is a wrong offset being read as one. Rejecting it costs the on-foot exception (fail closed, the
+// old behaviour) and buys immunity to the failure that would otherwise be invisible: garbage that
+// happens to be stable gets LEARNED while armed, and then every vehicle reads as first person.
+constexpr uint8_t PERSPECTIVE_VALUE_MAX = 3;
+
+// THE SEED. MEASURED, and it took two wrong guesses to stop guessing.
+//
+// It only matters before the session's first weapon -- which IS the campaign opening this exists
+// to fix, so it is not a detail. The history is worth keeping because it is the whole lesson:
+//   * 2 -- VEHICLE_CAMERA_FINDINGS.md §0, read 2026-08-02 on an older build. Flagged in that same
+//          paragraph as not matching the declared enum order. Shipped as the seed; the on-foot
+//          exception never fired.
+//   * 0 -- inferred from the declared order {FirstPerson, ThirdPerson, None} plus a live read that
+//          turned out to be sampled during a CUTSCENE. Shipped; still never fired.
+//   * 1 -- MEASURED. Logged by the value tracer across a full opening (log 2026-08-15 17:23-17:25)
+//          and independently confirmed by the learn path the moment a weapon went live:
+//          `first-person value learned to 1`.
+//
+// The tracer settled in one session what two rounds of reasoning-from-a-constant could not. When a
+// value can be observed, observe it; the declared order of an enum this game did not have to
+// respect is not evidence.
+//
+// What the byte actually does on this build, from the same log: 1 = first person (armed OR
+// unarmed), 0 = cinematic/none, 18 = a transient during level load (rejected by the range gate
+// below, which is why the load window still behaves as it always did).
+//
+// Being wrong here is still not silent: the first armed tick re-learns and says so in the log.
+static uint8_t g_persp_fp_value = 1;
+static bool    g_persp_learned  = false;
+std::atomic<int> g_dbg_persp{-1};         // last raw byte, for the transition log
+
+int fp_presentation_state(bool route_alive) {
+    auto* pawn = API::get()->get_local_pawn(0);
+    if (pawn == nullptr) return -1;
+
+    resolve_perspective_offset(pawn);
+
+    const auto* p = reinterpret_cast<const uint8_t*>(pawn)
+                  + g_persp_offset.load(std::memory_order_relaxed);
+    if (IsBadReadPtr(p, 1)) return -1;
+
+    const uint8_t v = *p;
+    const int prev = g_dbg_persp.exchange((int)v, std::memory_order_relaxed);
+
+    // THE CALIBRATION THE FINDINGS DOC ASKED FOR, taken continuously instead of by appointment.
+    // Edge-triggered, so it costs nothing while the value holds, and one ordinary playthrough
+    // (unarmed opening -> pick up a gun -> board something) records every value this byte takes
+    // and what the player was doing at the time.
+    //
+    // It also exposes the failure this whole approach is exposed to: reflection cannot find the
+    // property on this build, so the offset is unverified and the byte could be an unrelated one
+    // that happens to read a stable value. A session that shows NO change line across a weapon
+    // pickup and a vehicle ride has proved exactly that, and the answer is stickonfoot=0 plus the
+    // GetSeatStates route -- not another guess at the constant.
+    // CAPPED. If the offset is wrong the byte can churn every tick, and an uncapped edge log would
+    // then be 32 lines a second in a shipping build -- the exact chattiness the dev-tooling rule
+    // exists to stop. The cap is also the diagnosis: hitting it AT ALL means this is not a
+    // three-state enum and the whole approach is unsound on this build.
+    static int s_persp_lines = 0;
+    constexpr int PERSP_LINE_CAP = 48;
+    if (prev != (int)v && s_persp_lines <= PERSP_LINE_CAP) {
+        if (++s_persp_lines > PERSP_LINE_CAP) {
+            API::get()->log_info("[Halo-CampE-UEVR] PERSP: value changed more than %d times -- "
+                                 "this byte is not a stable perspective enum on this build. "
+                                 "Silencing; treat the on-foot exception as unreliable here "
+                                 "(stickonfoot=0).", PERSP_LINE_CAP);
+        } else {
+            API::get()->log_info("[Halo-CampE-UEVR] PERSP value %d -> %u (route=%d, believed "
+                                 "first-person value %u%s)",
+                                 prev, (unsigned)v, (int)route_alive, (unsigned)g_persp_fp_value,
+                                 g_persp_learned ? "" : ", SEEDED not learned");
+        }
+    }
+
+    if (v > PERSPECTIVE_VALUE_MAX) return -1;
+
+    if (route_alive) {
+        // A live first-person weapon IS the ground truth. Re-learn on any disagreement rather than
+        // only once: if the value legitimately differs per level or per build, the correction
+        // should follow it instead of latching the first thing ever seen.
+        if (!g_persp_learned || g_persp_fp_value != v) {
+            API::get()->log_info("[Halo-CampE-UEVR] perspective: first-person value %s to %u "
+                                 "(learned from a live FP weapon)",
+                                 g_persp_learned ? "RE-LEARNED" : "learned", (unsigned)v);
+            g_persp_fp_value = v;
+            g_persp_learned  = true;
+        }
+        return 1;
+    }
+    return (v == g_persp_fp_value) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- FP SHIELD SHELL
@@ -240,40 +474,13 @@ static constexpr const wchar_t* kShellClass = L"BPC_FP_TranslucentSkeletalMesh_C
 
 static TrackedObject g_shell_track;
 
-// A UE TArray header -- same shape the stick-mode dismount watcher reads for AttachChildren.
-struct FRawArrayRO { void* data; int32_t num; int32_t max; };
-
-// Scan one TArray<UObject*> property for the shell. Fails closed on anything unreadable rather than
-// faulting: every hop here can be mid-teardown on this title, and a bogus component is far worse
-// than no component.
-static API::UObject* find_shell_in_array(API::UObject* owner, const wchar_t* prop) {
-    if (owner == nullptr) return nullptr;
-    auto* arr = owner->get_property_data<FRawArrayRO>(prop);
-    if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) return nullptr;
-    if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) return nullptr;
-
-    auto** elems = reinterpret_cast<API::UObject**>(arr->data);
-    if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) return nullptr;
-
-    for (int32_t i = 0; i < arr->num; ++i) {
-        auto* c = elems[i];
-        if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
-        if (class_name_of(c) == kShellClass) return c;   // EXACT, see the prefix warning above
-    }
-    return nullptr;
-}
-
 API::UObject* resolve_shield_shell(API::UObject* rig_parent) {
-    // get_local_pawn is the cheap per-frame handle -- no object-array walk. A full sweep here is
-    // exactly the pattern that has already collapsed framerate in a live session once.
-    auto* pawn = API::get()->get_local_pawn(0);
-
-    // BlueprintCreatedComponents lists the construction-script components flat, independent of how
-    // they are attached, so it is preferred over walking attachment topology we have not measured.
-    if (auto* s = find_shell_in_array(pawn, L"BlueprintCreatedComponents")) return s;
-    if (auto* s = find_shell_in_array(pawn, L"InstanceComponents"))         return s;
+    // component_on_pawn covers BlueprintCreatedComponents then InstanceComponents off the live
+    // local pawn -- the cheap per-frame handle, no object-array walk. A full sweep here is exactly
+    // the pattern that has already collapsed framerate in a live session once.
+    if (auto* s = component_on_pawn(kShellClass)) return s;
     // Fallback: as a sibling of the arms, the shell hangs off the arms' own attach parent.
-    if (auto* s = find_shell_in_array(rig_parent, L"AttachChildren"))       return s;
+    if (auto* s = find_component_in_array(rig_parent, L"AttachChildren", kShellClass)) return s;
     return nullptr;
 }
 
@@ -328,6 +535,25 @@ bool rig_set_location(API::UObject* rig, double x, double y, double z) {
     auto* v = reinterpret_cast<double*>(params);
     v[0] = x; v[1] = y; v[2] = z;
     rig->call_function(L"K2_SetRelativeLocation", params);
+    return true;
+}
+
+// ---------------------------------------------------------------- VISIBILITY
+// SetVisibility(bool bNewVisibility, bool bPropagateToChildren).
+//
+// PROPAGATION IS NOT OPTIONAL HERE. UE does not push visibility to children by default, and the
+// arms rig has six BPC_FP_StaticMesh_C children -- the shoulder, elbow and wrist armour. Hiding the
+// rig alone leaves those six floating in front of the camera in the exact shape of the arms that
+// are no longer there, which is a worse artefact than the thing being hidden.
+//
+// It does NOT reach the shield shell: that is a SIBLING of the rig, not a child (see the shell
+// block above), so it takes its own call.
+bool rig_set_visible(API::UObject* comp, bool visible) {
+    if (comp == nullptr) return false;
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    params[0] = visible ? 1 : 0;
+    params[1] = 1;                     // bPropagateToChildren
+    comp->call_function(L"SetVisibility", params);
     return true;
 }
 

@@ -19,11 +19,16 @@ appropriately.
 
 ## Features
 
-- **6DOF motion-controller aim** — a closed-loop controller drives Halo's aim through the game's own
-  input path, so projectiles, target logic, and vehicles keep working exactly as the game intends.
-  Translation counts too: moving your hand moves the aim, not just rotating it.
-- **World-space aim reticule** — a colored ring floating at the true aim point, with the game's own
-  crosshair (and its hit marker) hosted alongside it. Colour, size, and distance are configurable.
+- **True 1:1 motion aim** — the mod writes Halo's own aim state directly, upstream of the game's
+  aim acceleration, deadzone and aim-assist, so projectiles, target logic, and vehicles keep
+  working exactly as the game intends. Shots converge to your sightline, so what you're pointing
+  at is what you hit — even leaning or stepping around the room.
+- **On-target reticle** — the game's own crosshair (hit marker included) placed on the actual
+  surface you're aiming at, traced the same way bullets are. An optional colored ring is available
+  too; both are configurable.
+- **Weapon scope** — left trigger raises a magnified lens on the gun, aimed down the ray your
+  shots actually follow. Halo's flat zoom (which hides the weapon and masks your view) stays
+  suppressed.
 - **Head-relative movement** — push the stick where you look, walk where you look, independent of
   where the gun points. Snap turn supported.
 - **VR control layout** — crouch on right-stick-down, equipment on left-X, d-pad access via
@@ -32,7 +37,9 @@ appropriately.
 - **Pose-match calibration** — optional per-hardware tuning: line your controller up with the visual
   weapon to calibrate grip, and align the aim ray, both persisting across sessions (see
   [Custom calibration](#custom-calibration)). The shipped defaults work without it.
-- **Live configuration** — nearly every tunable re-reads from disk within ~2 seconds, no restart.
+- **In-game settings, and settings that survive updates** — a settings menu in the UEVR overlay
+  (Script UI) edits your personal `halo_vr_user.cfg` live, no restart; updates never touch that
+  file. Calibration can be run from the menu too — no keyboard needed.
 
 ## Requirements
 
@@ -114,7 +121,7 @@ again — see [Known issues](#known-issues). That's an annoyance; wrong button m
 | Right stick **down** | Crouch |
 | Right stick **click** | Melee |
 | Right trigger | Fire |
-| Left trigger | Weapon zoom — **not working yet**, see [Known issues](#known-issues) |
+| Left trigger | Weapon scope — magnified lens on the gun (`scope`/`scopezoom` to tune) |
 | Left grip | Throw grenade |
 | Right A | Jump |
 | Right Y | Switch weapon |
@@ -146,47 +153,75 @@ Motion aim, snap turn and the VR-specific button remaps all stand down while you
 every other button does exactly what the game's normal gamepad layout does.
 
 The switch is automatic, and it also applies during cutscenes — the mod works it out from the game
-taking your first-person weapon away. If you ever find a seat it misses, set `stickforce=1` in
-`halo_vr.cfg` to force these controls on and `0` to go back to automatic; that file is read while
-you play, so it takes effect without restarting.
+taking your first-person weapon away. If you ever find a seat it misses, please report it; as a
+stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
+`halo_vr_dev.cfg`) to force these controls on, and remove it to go back to automatic.
 
 ## Configuration
 
-Everything lives in `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr.cfg`, re-read live. The
-important knobs:
+Your settings file is `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_user.cfg` (created on
+first run). Every available setting — with comments and its default — is listed in
+`halo_vr_user_reference.txt` next to it: copy the keys you want into your file, remove the
+leading `#`, set your value, save. It applies live while you play (~2 s), and the file is yours:
+**updates never touch it**. The important knobs:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `aimhand` | right | Which hand aims — `right` or `left` (see [Left-handed aim](#left-handed-aim)) |
-| `aimrate` | 1 | Aim control at render rate (0 = engine-tick rate) |
-| `ffgain` | 1.0 | Velocity feedforward strength; raise if fast sweeps lag, lower if they overshoot |
-| `dgain` | 0.15 | Damping against overshoot/rubber-banding |
-| `dead` | 0.5 | Aim deadband in degrees |
 | `aimmesh` | 0 | Optional geometric ring at the aim point (off; the game's own crosshair now shows in colour) |
 | `aimmeshcr/cg/cb` | blue | Ring colour, if `aimmesh=1` (RGB 0–1) |
 | `aimmeshscale` | 0.14 | Ring size |
 | `aimreticuledist` | 500 | Ring distance from you, in cm |
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
-| `aimwidgetgain` | 256 | Brightness of the hosted crosshair. Unlit UI is scaled down by the scene's exposure, so it needs a large multiplier; lower it if the crosshair blooms |
+| `aimwidgetgain` | 5 | Brightness of the hosted crosshair (multiplies with `aimwidgettint`). Unlit UI is scaled down by the scene's exposure, so it needs lifting back; lower it if the crosshair blooms |
 | `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
-| `shell` | 1 | Keep the shield/overshield glow on your hands. `0` leaves it where the game puts it |
-| `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step |
-| `stickmode` | 1 | Switch to gamepad controls in vehicles, turrets and cutscenes (see [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets)) |
-| `stickforce` | 0 | `1` forces those controls on, `2` never uses them, `0` decides automatically |
-| `stickon` / `stickoff` | 0.75 / 0.05 | Seconds before switching in and out |
-| `brake` / `brakemode` | 1 / 3 | Grip hard brake, and how it's sent (`3` presses A) |
-| `cutscene2d` | 0 | Optional: watch cutscenes on UEVR's flat 2D screen (`1`) or with eye separation collapsed (`2`) instead of doubled stereo. Off by default while it's being verified — see [Known issues](#known-issues). If the flat view ever fails to switch back after a scene, squeeze a grip to force normal VR back |
-| `cuthint` | 1 | In-VR hint panel shown when `cutscene2d=1`: if the screen doesn't display, open the VR system menu and watch on the desktop view |
-| `vrinactivity` | 100 | Raises UEVR's motion-controls inactivity timeout to its maximum |
+| `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step (`turnmode=2` for smooth turning) |
+| `scope` | 1 | Left-trigger weapon scope (magnified lens on the gun) |
+| `scopezoom` | 16 | Scope magnification |
 
-The full key list with comments is in the shipped `halo_vr.cfg`.
+[`halo_vr_user_reference.txt`](profile/halo_vr_user_reference.txt) is the full player-facing
+catalog — organised by concern, safe to explore, and refreshed by every update, so newly added
+settings always appear there. Your `halo_vr_user.cfg` stays short: just the keys you chose to
+change. Because it is generated rather than shipped, an update can never reset it — and
+**deleting it resets every setting to the built-in defaults** (a fresh template regenerates on
+the next launch).
+
+**Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
+scroll to **Script UI** — three panels live there:
+
+- **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
+  catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
+  Saves to `halo_vr_user.cfg` (so it survives updates like any hand edit) and applies live
+  within a couple of seconds.
+- **Halo VR Calibration** — the two calibration gestures as buttons, no keyboard needed: arm
+  one, close the menu (controllers don't reach the game while it's open), line your controller
+  up, then **right trigger saves & finishes** — or **left trigger saves & re-arms** on release,
+  for consecutive passes. Triggers won't fire your weapon while a calibration is armed. One-press
+  resets take you back to the shipped fit, per gesture or wholesale.
+- **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
+  unless troubleshooting asks.
+
+This ships as `scripts/halo_vr_settings.lua` and needs nothing extra: UEVR's built-in Lua
+scripting loads it automatically.
+
+The defaults themselves are built into the plugin — there is no shipped settings file to hand-edit
+or lose. Two other files do ship next to yours:
+
+- `halo_vr.cfg` now holds **only the shipped weapon calibration**. Don't edit it — recalibrate
+  instead (see [Custom calibration](#custom-calibration)); your results override it and survive
+  updates.
+- [`halo_vr_dev.cfg`](profile/halo_vr_dev.cfg) is the catalog of internal tuning, research and
+  diagnostic knobs — including the aim-drive tunables — every line commented out. **Leave it alone
+  unless you know exactly what you are doing**: wrong values there can wreck performance or aim.
+  Its one everyday use is troubleshooting, where you may be asked to uncomment a key (for example
+  `perflog=1` for a stutter report). Updates overwrite it, so experiments never linger.
 
 ## Left-handed aim
 
-Set `aimhand=left` in `halo_vr.cfg`. The aim, weapon rig and reticule all follow your left
-controller instead of your right.
+Not properly supported yet. An `aimhand` setting exists in the mod's internals, but the newer
+systems don't honour it end to end, so it's hidden from the settings until left-handed play
+actually works — it's on the list.
 
-Two things to know:
+<details><summary>What it was intended to do</summary>
 
 - **Each hand keeps its own calibration.** Switching handedness never overwrites the other hand's
   tuning. The first time you select left, it is seeded by mirroring your right-hand calibration,
@@ -199,6 +234,8 @@ Two things to know:
 The control layout is unchanged: movement stays on the left stick and turning on the right. If you
 would prefer those swapped for left-handed play, say so — it is a small addition, but it is a
 preference rather than an obvious default.
+
+</details>
 
 ## Custom calibration
 
@@ -218,6 +255,15 @@ and **persist across sessions** once set.
 Do the pose-match first (it sets where the weapon sits), then the aim-ray calibration (it sets where
 that weapon shoots). If a calibration ever feels off, just repeat it — the latest one wins.
 
+**Reset your play area first, and calibrate standing where you normally play.** This matters only if
+you've turned the head leash off (`hmdleash=0`); with the default leash it's automatic. Unleashed,
+your eye can be metres from where the game thinks you are, and the mod bends your aim to compensate —
+so calibrating from over there measures your grip through that correction instead of measuring your
+grip. Recentre, calibrate from your neutral position, and the result is exact and stays correct
+wherever you wander afterwards. If you skip this, aim will settle for a moment after you release
+`Page Down` and the fit will be a little noisier; nothing is broken, it's just not as good as it
+could be.
+
 **One calibration covers every weapon.** Per-weapon calibration isn't supported yet — it's planned.
 Until then, a grip tuned on one weapon is the grip used for all of them, which is why the original
 calibration was done on the magnum: a middle-of-the-road result beats one that's perfect on a pistol
@@ -231,9 +277,9 @@ Both calibrations write to a separate file next to the config:
 %APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg
 ```
 
-It's applied *after* `halo_vr.cfg`, so anything in it overrides the matching key there. Keeping it
-separate is deliberate: rewriting `halo_vr.cfg` in place would destroy the comments documenting every
-other setting.
+It's applied after every other config file, so it overrides the shipped calibration in
+`halo_vr.cfg`. Keeping it separate is deliberate: updates refresh the shipped calibration freely
+while your measured fit is never touched.
 
 **To go back to the shipped calibration, delete `halo_vr_calib.cfg`.** It isn't part of the download —
 it only exists once you've calibrated — so there's no original copy to restore, and deleting it simply
@@ -262,29 +308,14 @@ re-downloaded.
   controller binding is coming.
 - **Cutscenes display doubled.** They're pre-rendered movies composited outside the game's 3D
   render, so they don't resolve in stereo; closing one eye makes them watchable. A proper in-VR
-  cinema screen for them is being worked on.
-  - There's an **optional, off-by-default** workaround: `cutscene2d=1` switches to UEVR's flat 2D
-    screen for the duration of a scene (`2` collapses eye separation instead). It's off because
-    it's still being verified after a bug where the view could flip repeatedly when a cutscene
-    ended — that's fixed, and there's now a safety breaker that shuts the feature off for the
-    session if it ever detects rapid flipping, but it hasn't been signed off in a headset yet.
-    **If you enable it and see the view flicker rapidly, set it back to 0 and please send us the
-    log.**
-  - One more caveat for `cutscene2d=1`: over **SteamVR's OpenXR runtime the flat screen may not
-    display in the headset** (a SteamVR compositing limitation — the picture is submitted, and
-    even shows behind the dashboard). If that happens, **open your VR system menu and watch on
-    the desktop view**; a hint panel in VR says so, and `cuthint=0` hides it.
-- **No zoom yet.** Pressing left trigger will hardly do anything for you. This is something that I intend to target relatively soon.
-- **Before you pick up your first weapon, the motion controls stand down.** Your arms sit in a
-  T-pose, motion aim doesn't drive the game's aim, and snap/smooth turning stops responding — so
-  that opening stretch plays as flat gamepad controls, with the right stick doing the looking.
-  Everything corrects itself the moment a weapon is in your hands. The cause is that the mod finds
-  the first-person arms rig *through* the equipped weapon, and it reads that same absence as "not
-  in normal first-person control" — the check that deliberately hands the view back to the game in
-  vehicles and cutscenes. Standing unarmed on foot looks identical to it. Nothing to do in the
-  meantime but use the right stick until you're armed; the unarmed section is short. A later
-  release will separate the two checks so the mod can tell "no weapon" from "not on foot".
-- **Right-hand aiming only.** There's no left-handed mode yet.
+  cinema screen for them is being worked on — an experimental flat-screen mode exists in the
+  internals (`cutscene2d` in `halo_vr_dev.cfg`) but is hidden from the settings until it's been
+  verified in a headset.
+- **Your hands are invisible until you pick up your first weapon.** Motion aim and turning work
+  normally while you're unarmed — but you won't see arms. The game T-poses the empty first-person
+  arms, because on a flat screen holding nothing means there's simply no viewmodel to draw; in VR
+  they'd be right in front of you, following your hand, T-pose and all. They stay hidden until
+  there are proper VR hands to show instead.
 - **UI waypoints and objective markers are misplaced**, and drift with your right-hand aim rather
   than staying pinned to the world. They're positioned against the game's flat view, which the mod
   now steers with your controller — so the marker follows your hand instead of the objective.
@@ -348,13 +379,31 @@ days of its release, and for the plugin SDK this mod is written against. Hail to
 
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
 - **[pancreations / Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR)** — independent prior
-  art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach.
+  art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach. The
+  weapon scope follows his design too: suppress Halo's own zoom and mount a synthetic magnified lens
+  on the gun, and our scope camera's roll lock adapts a construction from his MIT-licensed
+  `scope_logic.cpp` ("preserve the rifle's roll while keeping up perpendicular to the actual bullet
+  direction") — credited at the point of use in `src/Scope.cpp`.
 - **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
   configuration descends from, and for bundling elliotttate's cutscene plugin with it, which is how
-  this project found it. Also for reporting the periodic microstutter fixed in this release, and —
+  this project found it.
+- **ShadowNK** — for the field report and logs on 0.2's movement direction. Those logs exposed that
+  the mod's recorded memory addresses were measurements of one specific game build — silently wrong
+  on any other — and drove the move to verified, self-reporting address resolution that can survive
+  game updates. Exactly the kind of report that makes the mod better for everyone. Also for reporting the periodic microstutter fixed in 0.2, and —
   more usefully than the report itself — for pinning it to *this* profile rather than his own. That
   one observation is what turned an open-ended performance hunt into a search of our own plugin,
   where the cause turned out to be two full object-array sweeps burning ~5% of game-thread time.
+- **[blindcowboy24](https://github.com/blindcowboy24)** — for
+  [PR #6](https://github.com/MOTYSHIZ/HaloCampaignEvolved_UEVR/pull/6), the first outside code
+  contribution to this mod: a second, unrelated set of periodic game-thread stalls, found by
+  *measuring* rather than reasoning — `QueryPerformanceCounter` around each site across a 78-minute
+  session, reported with before-and-after numbers. The largest was invisible to code review:
+  `load_config` re-read the config files off disk every ~60 ticks, forever — normally ~0.45 ms and
+  unnoticeable, but 143.9 ms under disk contention. The other two were the same mistake in two
+  full-array sweeps, rebuilding a class-name string for every one of ~296,000 objects, cut from
+  83.9 ms to 29.8 ms and from 78.5 ms to 21.4 ms. That technique is now used in two further sweeps
+  he never touched.
 
 ### Referenced mod credit
 

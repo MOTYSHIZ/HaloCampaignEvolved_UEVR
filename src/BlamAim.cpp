@@ -5,6 +5,8 @@
 #include "BlamDrive.hpp"
 #include "Config.hpp"
 #include "MotionAimControl.hpp"
+#include "AimConverge.hpp"
+#include "addrcascade/AddressCascade.hpp"
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -36,6 +38,9 @@ namespace {
 //   samples, polled off-thread while the game ran. The chain is only valid INSIDE the sim's own
 //   call stack. A hook runs exactly there, so the same chain that never resolved from the tick
 //   should resolve here. That is the point of hooking rather than a nicety.
+// ADDR-HYGIENE: dev-only -- this file's hooks are installed only when `blamaim` is enabled, a
+// dev-catalog key that ships at 0. NOTE it is the same function BlamDrive resolves BY SIGNATURE; if
+// this path is ever promoted, take the resolved address from there rather than this second copy.
 constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AD0;
 
 // The projectile spawn itself. Hooking this is how the experiment is VERIFIED without eyes on the
@@ -44,6 +49,8 @@ constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AD0;
 //
 //   int create_projectile(SpawnParams* params /*rcx*/)
 //   params+0x1C, +0x28, +0x34 are the three vec3s the creation function marshals into the object.
+// ADDR-HYGIENE: dev-only -- verification hook for the redirect experiments, installed only under
+// `blamaim` (dev-catalog key, ships at 0).
 constexpr uintptr_t RVA_CREATE_PROJECTILE = 0x5A0FB0;
 constexpr uintptr_t P_VEC1 = 0x1C;
 // Local copy so this dead-lane file pulls in nothing from Plugin.cpp. Yaw wraps, so a raw
@@ -78,10 +85,17 @@ constexpr uintptr_t P_VEC2 = 0x28;
 constexpr uintptr_t P_VEC3 = 0x34;
 
 // Chain offsets, straight from the disassembly of that function.
-constexpr uintptr_t RVA_TLS_INDEX    = 0xD72730;
+// (RVA_TLS_INDEX was here. Deleted, not updated: the PE TLS directory publishes that address
+//  canonically, so sim_tls_index() in BlamDrive reads it exactly on any build and there is no
+//  second copy of the number left to go stale.)
+// ADDR-HYGIENE: dev-only -- the whole Blam object-table walk below runs only when `blamaim` is set,
+// which is a dev-catalog key that ships at 0 and is documented as a research tool. A stale offset
+// here breaks an INVESTIGATION, never a player's game. (If any of this is ever promoted to a
+// shipping path, these need the treatment BlamDrive's offsets get: read src\addrcascade\README.md.)
 constexpr uintptr_t OFF_CTX_IN_TLS   = 0x20;
 constexpr uintptr_t OFF_OBJ_TABLE    = 0x50;
 constexpr uintptr_t OBJ_ENTRY_SIZE   = 24;
+// ADDR-HYGIENE: dev-only -- continues the object-table walk above; same gating, same consequence.
 constexpr uintptr_t OFF_OBJ_IN_ENTRY = 0x10;
 constexpr uintptr_t OFF_ORIENT_A     = 0x50;
 constexpr uintptr_t OFF_ORIENT_B     = 0x5C;
@@ -358,6 +372,8 @@ constexpr uintptr_t OFF_UNIT_AIM_ALL[] = { 0x1D4, 0x1F8, 0x204, 0x21C, 0x228 };
 // If the shot still ignores that, no stored aim state drives it and memory writes cannot fix it.
 constexpr uintptr_t OFF_NODE_AIM_ALL[] = { 0x348, 0x37C, 0x3B0, 0x418, 0x480, 0x4B4 };
 
+// ADDR-HYGIENE: dev-only -- candidate aim fields for the redirect experiments, reached only with
+// `blamaim` enabled (dev-catalog key, ships at 0). Stale values cost an investigation, not a player.
 constexpr uintptr_t OFF_UNIT_AIM   = 0x1D4;
 constexpr uintptr_t OFF_UNIT_AIM_2 = 0x1F8;
 constexpr uintptr_t OFF_UNIT_AIM_3 = 0x21C;
@@ -459,17 +475,9 @@ constexpr uint32_t SCAN_BYTES    = 0x600;
 // faulted mid-scan and killed the scan with no output. VirtualQuery gives the real committed
 // extent, so the loop can stop at the boundary instead of walking off it.
 uint32_t readable_floats(uintptr_t obj, uint32_t maxBytes) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery((const void*)obj, &mbi, sizeof(mbi)) == 0) return 0;
-    if (mbi.State != MEM_COMMIT) return 0;
-    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if ((mbi.Protect & readable) == 0) return 0;
-    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
-    const uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    uintptr_t avail = (end > obj) ? (end - obj) : 0;
-    if (avail > maxBytes) avail = maxBytes;
-    return (uint32_t)(avail / 4);
+    // The committed-extent query moved to addrcascade::readable_bytes -- the same reasoning as the
+    // comment above, and the same code that AimWatch and MemScan each had their own copy of.
+    return (uint32_t)(addrcascade::readable_bytes((const void*)obj, maxBytes) / 4);
 }
 
 struct ScanHit { uint16_t obj; uint16_t off; };
@@ -1056,6 +1064,11 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
     // needs the same reference whether or not the redirect is armed.
     float want_yaw = 0.0f, want_pitch = 0.0f;
     const bool have_want = controller_desired_aim(&want_yaw, &want_pitch);
+    // Same 6DoF convergence the drive paths take -- this redirects an actual projectile, so it is a
+    // drive site too, and a redirect built on the uncorrected intent would fight the aim write it is
+    // supposed to agree with. Pure arithmetic over atomics, so it is safe on this spawn hook's
+    // thread. See AimConverge.hpp.
+    if (have_want) aim_converge_apply(&want_yaw, &want_pitch);
 
     // OWNER HUNT (blamdump=1): dump the head of the params struct as dwords so a player shot can be
     // diffed against an AI shot. Filtering by CALL SITE cannot work -- dll+0x5D124E carried 2266 of
@@ -1183,7 +1196,17 @@ void blam_aim_tick() {
             return;
         }
         g_sim_base = (uintptr_t)sim;
-        g_tls_index = *(const uint32_t*)(g_sim_base + RVA_TLS_INDEX);
+
+        // Canonical source, shared with BlamDrive -- NOT a recorded RVA. This file is dev-only, so a
+        // stale offset here fails in a way no player can reproduce: the investigation tool breaks on
+        // a build the shipping path might handle fine, and the session is spent chasing a phantom.
+        uintptr_t tls_rva = 0;
+        if (!sim_tls_index(g_sim_base, &g_tls_index, &tls_rva)) {
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMHOOK: could not read _tls_index from the PE "
+                                 "TLS directory -- handing the address back to blam_drive_tick()");
+            g_cfg.blam_aim = 0;
+            return;
+        }
 
         void* target = (void*)(g_sim_base + RVA_GET_ORIENTATION);
         const int id = API::get()->param()->functions->register_inline_hook(

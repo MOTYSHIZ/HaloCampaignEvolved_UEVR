@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 
 using namespace uevr;
 
@@ -38,11 +39,27 @@ API::UObject* resolve_settings() {
 
     API::UObject* best = nullptr;
     long long best_idx = -1;
+
+    // MEMOISED ON THE CLASS, not rebuilt per object -- class_name_of returns a std::wstring BY
+    // VALUE, so a bare call per object is ~296k heap allocations and FName->string conversions per
+    // sweep. Objects outnumber classes by orders of magnitude, so the same handful of names were
+    // being reconstructed tens of thousands of times. Same technique and same reasoning as the
+    // reticle_rescan and resolve_rig sweeps (see those; measured 78.5 ms -> 21.4 ms there).
+    //
+    // The map is LOCAL TO THE SWEEP on purpose. A process-wide cache keyed on UClass* would fix
+    // every sweep at once and would also be poisonable: a freed UClass whose address is later
+    // reused would answer with the old name forever. Scoped here it cannot go stale.
+    std::unordered_map<const void*, std::wstring> name_of_class;
+
     const int32_t n = arr->get_object_count();
     for (int32_t i = 0; i < n; ++i) {
         auto* o = arr->get_object(i);
         if (o == nullptr) continue;
-        if (class_name_of(o) != L"MeteoriteGameUserSettings") continue;
+        auto* ocls = o->get_class();
+        if (ocls == nullptr) continue;
+        auto memo = name_of_class.find(ocls);
+        if (memo == name_of_class.end()) memo = name_of_class.emplace(ocls, class_name_of(o)).first;
+        if (memo->second != L"MeteoriteGameUserSettings") continue;
         const auto* fn = o->get_fname();
         if (fn == nullptr) continue;
         const std::string nm = narrow(fn->to_string());
@@ -125,21 +142,70 @@ bool settings_are_loaded() {
 }
 
 void game_settings_tick(bool in_stick_mode) {
+    // A COUNTDOWN, not a count-up with an early-out beside it: the ration then applies to every
+    // attempt by construction, and there is no second condition that can bypass it. See the
+    // rationing block below for what this replaced and why.
+    constexpr int kResolveEvery = 30;   // config polls (~2 s each) between sweeps
+    constexpr int kMaxFailures  = 10;   // then stop; ~10 minutes of trying is conclusive
+
+    static int s_countdown = 0;         // 0 = attempt on this call. First call attempts immediately.
+    static int s_failures  = 0;
+
     // NOTHING HERE MAY RUN OUTSIDE GAMEPLAY. resolve_settings() walks the whole ~296k UObject array
     // calling class_name_of on every entry; doing that while a level streams is both the sweep this
     // project bans and a walk over objects that are still being constructed. Gate first, work second.
-    if (!settings_are_loaded()) { g_settings = nullptr; return; }
+    //
+    // Dropping out of gameplay also ARMS the next attempt. The old code got this for free -- a null
+    // cache made it re-resolve immediately -- and losing it would leave a player without invert or
+    // sensitivity handling for up to a minute after every level load. Rationing is for repeated
+    // FAILURE, not for the ordinary case of the object having legitimately been replaced.
+    if (!settings_are_loaded()) {
+        g_settings  = nullptr;
+        s_countdown = 0;
+        return;
+    }
 
     // Re-resolve on a SLOW cadence rather than validating the cached pointer, because validating it
     // means dereferencing it -- and if the object was freed by a level transition, that dereference
     // IS the crash. Re-resolving looks the address up in the live object array instead, which is
     // safe by construction. The full walk is the expensive part, so it is rationed.
-    static int s_since_resolve = 0;
-    if (g_settings == nullptr || ++s_since_resolve >= 30) {
-        s_since_resolve = 0;
-        g_settings = resolve_settings();
-        if (g_settings == nullptr) return;
+    //
+    // ---- THE RATION MUST COVER THE FAILURE PATH TOO.
+    //
+    // This previously read `if (g_settings == nullptr || ++s_since_resolve >= 30)` with the counter
+    // reset only inside. When resolve_settings() returned null, the cache stayed null, so the
+    // condition was true again on the very next call and the counter was never consulted: a full
+    // ~296k sweep EVERY config poll, about every 2 s, for the rest of the session. That is the
+    // exact shape of the stall this project has already shipped once -- a throttle skipped on the
+    // empty path -- and the measured cost of one un-memoised sweep of this kind is 65-84 ms.
+    //
+    // The trigger is not hypothetical: the class simply not being found (a rename in a game patch,
+    // or a window where the object does not exist yet) is enough, and nothing about it is visible
+    // to a player beyond the frame rate collapsing.
+    //
+    // So the counter now gates BOTH paths, and repeated failure gives up rather than retrying
+    // forever. Giving up costs only the invert/sensitivity handling -- the mod plays fine without
+    // it -- which is the right direction to fail.
+    if (s_failures >= kMaxFailures) return;
+
+    if (s_countdown > 0) {
+        --s_countdown;
+    } else {
+        s_countdown = kResolveEvery;    // set BEFORE the sweep, so every exit below is rationed
+        g_settings  = resolve_settings();
+        if (g_settings == nullptr) {
+            if (++s_failures >= kMaxFailures) {
+                API::get()->log_info("[Halo-CampE-UEVR] game settings: MeteoriteGameUserSettings not "
+                                     "found after %d attempts -- giving up. Look inversion and the "
+                                     "aim-loop sensitivity handling are OFF for this session.",
+                                     kMaxFailures);
+            }
+            return;
+        }
+        s_failures = 0;
     }
+
+    if (g_settings == nullptr) return;   // rationed out, nothing resolved yet
 
     if (!g_have_user) {
         // Nothing may be applied before a TRUSTWORTHY capture, or there is no correct value to put

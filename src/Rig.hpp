@@ -86,7 +86,20 @@ uevr::API::UObject* follow_object(uevr::API::UObject* obj, const wchar_t* prop);
 // the route dies in vehicle seats, cutscenes, death and the post-load window, and -- unlike
 // g_rig_component, a raw pointer that goes stale-non-null -- a dead route is DETECTED, not
 // silently followed.
+//
+// It does NOT mean "the player is not on foot": standing unarmed kills the route too. Pair it with
+// fp_presentation_state() below before concluding anything about who should own the camera.
 bool fp_weapon_route_alive();
+
+// Is the game presenting the player in FIRST PERSON right now? 1 = yes, 0 = no, -1 = cannot tell.
+//
+// Reads BlamPawn's own CurrentBlamCameraPerspective, and LEARNS which value means first person by
+// sampling it while a first-person weapon is live (pass route_alive so it can). -1 means the read
+// failed and the caller must assume nothing -- see the doctrine block in Rig.cpp.
+int fp_presentation_state(bool route_alive);
+
+// The last raw perspective byte read, for the transition logs. -1 until one is read.
+extern std::atomic<int> g_dbg_persp;
 
 // Diagnostic twin for the transition logs: is the rig COMPONENT itself still tracked-live? A
 // weapon swap kills the route but keeps the rig (it is the pawn's component); what a vehicle seat
@@ -132,6 +145,11 @@ void forget_shield_shell();
 bool rig_set_rotation(uevr::API::UObject* rig, double pitch, double yaw, double roll);
 bool rig_set_location(uevr::API::UObject* rig, double x, double y, double z);
 bool rig_set_scale(uevr::API::UObject* rig, double s);
+
+// Show/hide a first-person component AND ITS CHILDREN (the rig's six armour static meshes ride on
+// the propagate flag; the shield shell is a sibling and needs its own call). Used to hide the arms
+// while the player is unarmed -- see the hide-arms block in Plugin.cpp for when and why.
+bool rig_set_visible(uevr::API::UObject* comp, bool visible);
 
 // World-space equivalents. See the note in Rig.cpp: the relative ROTATION write does not take on
 // this game's first-person mesh, so rigmode 3 drives the world transform instead of composing a

@@ -15,9 +15,35 @@
 
 namespace halo {
 
-// ControlRotation offset on this build's PlayerController. MEASURED (double-precision FRotator,
-// LWC) -- not derived, so it is validated before use and the driver fails closed if it looks wrong.
-constexpr size_t CONTROL_ROTATION_OFFSET = 0x350;
+// Where ControlRotation sits on the PlayerController. RESOLVED AT RUNTIME, with the measured value
+// below as both the fallback and the expectation.
+//
+// This is the widest-reaching build-dependent constant in the mod, and the only one that is a UE
+// offset rather than a Blam one. read_control_rotation() gates update()'s early-out, ABOVE the
+// turning block -- so if this is wrong the sanity gate fails closed and snap turn never even
+// accumulates. Not "aim does not replicate": the mod does nothing at all. And being a UE offset, it
+// can move on an engine-side change that never touches the Blam sim, which none of the Blam
+// hardening would catch.
+//
+// It is also the easiest to resolve honestly, because it is a real UPROPERTY: reflection gives its
+// address on a live PlayerController, and subtracting the object base gives the offset. That is done
+// ONCE, on the game thread, and every read afterwards is the same raw memory read as before -- which
+// is what the "never reflection" note further down is actually about (the hot path and the hook
+// thread), not about one-time resolution.
+extern std::atomic<size_t> g_control_rotation_offset;
+
+// The value measured on the build this was developed against. Kept as the fallback when reflection
+// cannot answer, and as the expectation that makes a moved offset visible in the log rather than
+// merely survivable.
+// ADDR-HYGIENE: resolved -- resolve_control_rotation_offset() asks UE reflection for the real
+// offset and range-checks the answer before adopting it; this is the fallback when reflection
+// declines, and which one is in force is logged once.
+constexpr size_t CONTROL_ROTATION_OFFSET_EXPECTED = 0x350;
+
+// One-shot, GAME THREAD ONLY -- it walks reflection, which the hook thread must never do. Safe to
+// call every tick; it latches after the first answer. Takes the PlayerController the caller already
+// has, so it never fetches one of its own.
+void resolve_control_rotation_offset(void* pc);
 
 // deg/s per unit deflection measured during the hand calibration that produced full_deg=6.0.
 constexpr float REFERENCE_RATE_DPS = 152.0f;   // ~137 deg/s at 0.90 deflection
@@ -59,6 +85,39 @@ extern std::atomic<bool> g_aim_calibrating;
 // not on the law's code path and does not stand down with it. Left ungated, motion aim keeps
 // steering the vehicle camera while the player's stick is supposed to own it.
 extern std::atomic<bool> g_stick_mode_active;
+
+// TRUE while the frontend or an in-game menu widget owns the input. Published for the third time
+// for the same reason as the two flags above -- Plugin.cpp keeps this state in its anonymous
+// namespace, which a sim-thread hook cannot see. DEFAULTS TO TRUE so that "we have not established
+// that gameplay is running" never reads as "gameplay is running": the BlamDrive watchdog uses it to
+// decide whether the sim ought to be calling the hook at all, and starting that count early
+// condemns a healthy address before the game exists. See the watchdog in BlamDrive.cpp.
+extern std::atomic<bool> g_menu_active;
+
+// TRUE only while the FRONTEND owns the session -- the main menu, where there is no gameplay world
+// and the simulation is not ticking. Deliberately NARROWER than g_menu_active above, and the two
+// must not be confused:
+//
+//   g_menu_active     = frontend OR an in-game menu widget is open. The right question for "who
+//                       owns the input", which is what it was added for.
+//   g_frontend_active = frontend only. The right question for "is the simulation running at all".
+//
+// Measured 2026-08-15, and this is why both exist: with a menu widget open during real gameplay the
+// sim keeps calling its orientation getter (hook observed running while inmenu=1 for three minutes
+// straight). A watchdog that treats "a widget is open" as "the game is not running" therefore stops
+// counting time in which the thing it watches was perfectly possible -- and a watchdog that cannot
+// fire is the failure it was written to prevent, just pointed the other way.
+extern std::atomic<bool> g_frontend_active;
+
+// The gameplay PlayerController, published for READ-ONLY consumers on other threads.
+//
+// Deliberately separate from g_aim_law_pc, which is published only once the aim law is ARMED so an
+// early-out leaves the law steering from nothing rather than from a stale reference. That is right
+// for a driver and wrong for a reader: the BlamDrive layout guard only wants to READ
+// ControlRotation, and tying that to the law's arming meant it could not validate at all whenever
+// the motion stack stood down (no controller poses, calibration hold, idle). Measured 2026-08-15:
+// the guard sat blocked for ten minutes under exactly that condition, holding the sim write off.
+extern std::atomic<void*> g_read_only_pc;
 
 // Magnitude of the smoothed SETPOINT angular velocity, deg/s -- how fast the player is actually
 // swinging, as the control law already measures it for feedforward. Published so the reticule can
@@ -164,5 +223,9 @@ bool read_control_rotation_hook(double* out_pitch, double* out_yaw);
 
 // A tracked device pose, rejecting the identity placeholder UEVR returns before tracking is live.
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
+
+// The aim sightline's body reference, honouring aimorigin AND the leash state. Both sightline
+// sites call this; see the definition for why an unleashed head cannot use the standing origin.
+bool aim_sightline_origin(Vec3* out);
 
 } // namespace halo
