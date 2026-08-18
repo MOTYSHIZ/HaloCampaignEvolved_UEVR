@@ -67,6 +67,12 @@ jobs:
           files: |
             build/HaloCampaignEvolved.zip
             build/HaloCampaignEvolved.zip.sha256
+          # DRAFT, NOT PUBLISHED. A tag build assembles the release -- notes, the zip, and the
+          # SHA-256 CI itself computed -- then stops, so a human reads it before anyone can
+          # download it. Publishing is a deliberate click, never a side effect of a tag push.
+          # This is also what keeps the CI-artifact rule honest: the files attached and the
+          # hash published come from THIS build, so they cannot drift apart.
+          draft: true
           generate_release_notes: true
           # append_body, NOT body: this adds the hash to whatever notes are already on the release
           # instead of replacing them. Hand-written release notes survive a re-run of the same tag.
