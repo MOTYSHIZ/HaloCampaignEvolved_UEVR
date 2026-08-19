@@ -56,6 +56,22 @@ bool                   g_have_last = false;
 double                 g_stage_motion = 0.0;   // total aim movement seen during the current stage
 uintptr_t              g_l2 = 0;               // stage-2 result, kept as the fallback target
 
+// PATCH-SURVIVAL DIAGNOSTICS for the writer hunt (2026-08-18).
+//
+// That day's game patch moved the orientation getter 0x10 bytes -- BlamDrive's signature caught it
+// and carried on -- but it also changed this chain's codegen: every candidate the watchpoint caught
+// was a STACK address, so the rotator we followed was a temporary holding garbage by the time the
+// game thread read it. Field log: "neither rax 0x384337DFC8 nor L2 0x384337E420 matches the live
+// aim", four times, then give up -- and the user got the stick loop.
+//
+// A persistent aim mirror CANNOT live on a stack: the frame is reused on the next call. So a stack
+// candidate is never the thing we want. These record what the handler actually saw, so one live
+// session says whether a non-stack writer exists to catch at all rather than us guessing.
+std::atomic<uint32_t>  g_cand_stack{0};    // candidates rejected for being on the writing stack
+std::atomic<uint32_t>  g_cand_heap{0};     // candidates that were NOT on a stack
+std::atomic<uintptr_t> g_cand_last_stack{0};
+std::atomic<uintptr_t> g_cand_last_heap{0};
+
 // THE AUTHORITATIVE AIM IS A QUATERNION, and it lives 0x20 BELOW L2 in the same struct.
 //
 // exe+0x36297B0 is not a getter -- it reads four doubles from [rcx+0x00/08/10/18] and multiply-adds
@@ -169,6 +185,23 @@ LONG CALLBACK veh(EXCEPTION_POINTERS* ep) {
 
     const uintptr_t rbx = (uintptr_t)ep->ContextRecord->Rbx;
     if (rbx >= 0x10000ull && rbx < 0x7FFFFFFFFFFFull && (rbx & 7ull) == 0) {
+        // REJECT THE WRITING THREAD'S OWN STACK. gs:[0x08] and gs:[0x10] are this thread's TEB
+        // StackBase and StackLimit, so this costs two register reads and NO dereference -- which is
+        // what makes it safe here, where a nested fault would be fatal.
+        //
+        // A rotator living in a stack frame is a temporary by definition, since the frame is reused
+        // on the next call. Following one is how the 2026-08-18 build burned all five attempts on
+        // addresses that read as garbage by the time the game thread checked them.
+        const uintptr_t stack_hi = __readgsqword(0x08);
+        const uintptr_t stack_lo = __readgsqword(0x10);
+        if (stack_lo != 0 && stack_hi > stack_lo && rbx >= stack_lo && rbx < stack_hi) {
+            g_cand_stack.fetch_add(1, std::memory_order_relaxed);
+            g_cand_last_stack.store(rbx, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        g_cand_heap.fetch_add(1, std::memory_order_relaxed);
+        g_cand_last_heap.store(rbx, std::memory_order_relaxed);
+
         uintptr_t expected = 0;
         if (g_caught_src.compare_exchange_strong(expected, rbx)) {
             g_caught_rcx.store((uintptr_t)ep->ContextRecord->Rcx);
@@ -397,6 +430,17 @@ void aim_direct_tick() {
         if (g_attempts >= MAX_ATTEMPTS) {
             API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: gave up locating the rotator after %d attempts"
                                  " with aim motion present - falling back to the stick loop", MAX_ATTEMPTS);
+            // WHAT THE HANDLER ACTUALLY SAW. Without this the give-up says only that the hunt
+            // failed, not whether there was anything findable -- which is the difference between
+            // "our filter is too strict" and "this build has no persistent mirror to find", and
+            // those need opposite fixes. Cheap: printed once, on a path that has already given up.
+            API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: candidates seen -- %u on the writing "
+                                 "thread's STACK (last 0x%llX, rejected: a stack frame is reused, so "
+                                 "it can never hold a persistent mirror), %u NOT on a stack (last "
+                                 "0x%llX). If that second count is 0, this build never writes the "
+                                 "rotator from a durable object on the watched path.",
+                                 g_cand_stack.load(), (unsigned long long)g_cand_last_stack.load(),
+                                 g_cand_heap.load(),  (unsigned long long)g_cand_last_heap.load());
             g_stage = Stage::Failed;
             return;
         }
