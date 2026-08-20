@@ -15,7 +15,7 @@ on Blam. So a number of workarounds were required to get aim and movement workin
 appropriately.
 
 > **Status: early access.** Built and tested against the Steam release of Halo: Campaign Evolved,
-> on the [latest tested UEVR build](#uevr-version). Works in multiplayer!
+> on [UEVR nightly-01138 or newer](#uevr-version). Works in multiplayer!
 
 ## Features
 
@@ -44,29 +44,35 @@ appropriately.
 ## Requirements
 
 - **Halo: Campaign Evolved** (Steam).
-- **UEVR** — the [latest tested build](#uevr-version). Older builds will not render this game.
+- **UEVR** — [nightly-01138 or newer](#uevr-version). Older builds render this game black.
 - A VR headset set to the **OpenXR** runtime — the shipped config selects this for you. OpenVR
   mis-assigns controller bindings; see [Runtime](#runtime-use-openxr) if yours ends up on it.
-- A VR controller pair (developed against Quest touch controllers over Steam Link).
+- A VR controller pair. Developed against Quest touch controllers over Steam Link, and used on
+  several other setups since. If your controllers are not being seen at all, your `log.txt` will
+  say `using_controllers=0` — that is UEVR never binding them, which happens before this mod gets
+  a say, so start there rather than with mod settings.
 
 ## UEVR version
 
-**Latest tested: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138).**
+**Minimum: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138). Newer is
+fine.**
 
-This is the build the mod is developed and tested against, and the one to use if you want a known-good
-setup.
+**Anything older will not work**, and this is the one hard rule here. Halo: Campaign Evolved runs a
+nonstandard UE 5.5.4 that needs the double-precision view-matrix handling introduced in 01138 —
+before that, the scene renders black with a working HUD. That is a floor, not a ceiling.
 
-**Older builds will not work.** Halo: Campaign Evolved runs a nonstandard UE 5.5.4 that needs the
-double-precision view-matrix handling introduced in 01138 — before that, the scene renders black with
-a working HUD.
+**Newer nightlies and forks work in practice.** 01138 is what the mod is *developed against*, so it
+is the safest answer if something is behaving oddly and you want to remove a variable. But later
+nightlies (01139 among them) and PureDark's **AFW** fork are in regular use with this mod, including
+by the people who build it. Being on one of those is not a red flag and is not the first thing to
+suspect when something breaks.
 
-**Newer nightlies are untested, not unsupported.** UEVR moves quickly and later builds may well work
-fine; we simply haven't verified them against this mod. If you try one, we'd genuinely like to hear
-how it went — that's how this line gets updated.
+If you do hit a problem, the version is worth *mentioning* — the mod logs it at startup, so it is
+already in your `log.txt` — but please do not assume it is the cause and reinstall on that basis.
 
 ## Install
 
-1. Install the [latest tested UEVR build](#uevr-version) and run `UEVRInjector.exe` once so it
+1. Install [UEVR nightly-01138 or newer](#uevr-version) and run `UEVRInjector.exe` once so it
    creates its folders.
 2. Download `HaloCampaignEvolved.zip` from this repo's **Releases** page.
 3. In the UEVR frontend, click **Import Config** and select the downloaded zip.
