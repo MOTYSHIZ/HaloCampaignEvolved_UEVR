@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 using namespace uevr;
 
@@ -44,6 +45,10 @@ std::atomic<uintptr_t> g_target{0};       // the authoritative rotator (L2)
 std::atomic<uintptr_t> g_caught_src{0};   // source pointer (rbx) from the most recent trap
 std::atomic<uintptr_t> g_caught_rax{0};   // rax at the trap -- stage 3's (rejected) candidate
 std::atomic<uintptr_t> g_caught_rcx{0};   // rcx at the trap -- stage 4's quaternion SOURCE
+std::atomic<uintptr_t> g_caught_rip{0};   // RIP at the trap -- the WRITER instruction. Module-
+                                          // relative it is a build-stable code RVA, the entry
+                                          // point for reading the game's own address derivation
+                                          // (the AIMDIG chain dig).
 std::atomic<uintptr_t> g_quat_src{0};     // [obj+0x1D0]: what the sync function copies FROM
 std::atomic<bool>      g_watching{false};
 PVOID                  g_veh = nullptr;
@@ -113,12 +118,148 @@ bool                   g_waiting_logged = false;
 // but a few milliseconds.
 //
 // Deliberately NOT cleared by aim_direct_invalidate(): surviving the invalidate is the whole point.
-// It is a per-session memory, not persisted -- the offset is only assumed stable within one run.
 bool      g_hint_valid      = false;
 ptrdiff_t g_hint_target_off = 0;
 int       g_hint_stage      = 0;      // 0 = not yet matched, 1 = matched once, awaiting aim motion
 double    g_hint_ref_yaw    = 0.0;
 bool      g_hint_miss_logged = false;
+
+// ---- PERSISTED HINT (halo_vr_aimcache.txt) ------------------------------------------------------
+// The per-session hint above removes the hunt from LEVEL LOADS; this removes it from LAUNCHES.
+// Ready writes {exe build stamp, pc-relative offset, absolute VA} to a small cache file next to
+// the cfg files; the next launch seeds the hint from it when the stamp matches. Both candidates go
+// through the SAME before-and-after-motion validation as the in-session hint, so a stale cache
+// costs two ticks and falls through to the watch -- this is a warm start, never a shortcut past
+// validation. Which anchor survives a relaunch (the pc-relative offset, the absolute VA, neither)
+// was UNKNOWN when this was written; the re-arm log names what validated, so field logs answer it.
+// The build stamp (PE TimeDateStamp + SizeOfImage -- the same pair debuggers match PDBs with)
+// makes a game patch invalidate the cache by construction. Deleting the file = cold start, safe:
+// it is a cache, not configuration, and the next Ready rewrites it. aimcache=0 disables both
+// read and write.
+uintptr_t g_hint_abs        = 0;      // absolute VA of last run's target (second candidate)
+
+uint64_t exe_build_stamp() {
+    auto* base = (const uint8_t*)GetModuleHandleA(nullptr);
+    if (base == nullptr) return 0;
+    auto* dos = (const IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto* nt = (const IMAGE_NT_HEADERS64*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    return ((uint64_t)nt->FileHeader.TimeDateStamp << 32) | nt->OptionalHeader.SizeOfImage;
+}
+
+void aimcache_path(char* out, size_t n) {
+    // Next to the cfg files, derived from g_cfg_path so there is exactly one notion of where
+    // the profile lives.
+    strncpy_s(out, n, g_cfg_path, _TRUNCATE);
+    char* slash = strrchr(out, '\\');
+    if (slash != nullptr) *(slash + 1) = '\0'; else out[0] = '\0';
+    strncat_s(out, n, "halo_vr_aimcache.txt", _TRUNCATE);
+}
+
+void aimcache_save() {
+    if (!g_cfg.aim_cache || g_target.load() == 0) return;
+    char path[MAX_PATH]; aimcache_path(path, sizeof(path));
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "wb") != 0 || f == nullptr) return;
+    fprintf(f, "# halo_vr_aimcache.txt -- machine+build cache written by the mod, NOT a setting.\r\n"
+               "# Safe to DELETE: the next launch just re-locates the aim rotator the slow way once.\r\n"
+               "schema=1\r\n"
+               "stamp=%llX\r\n"
+               "pcoff=%llX\r\n"
+               "abs=%llX\r\n",
+            (unsigned long long)exe_build_stamp(),
+            (unsigned long long)(uint64_t)g_hint_target_off,
+            (unsigned long long)(uint64_t)g_target.load());
+    fclose(f);
+}
+
+void aimcache_load() {
+    if (!g_cfg.aim_cache) return;
+    char path[MAX_PATH]; aimcache_path(path, sizeof(path));
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || f == nullptr) return;   // no cache: normal cold start
+    int schema = 0;
+    unsigned long long stamp = 0, off = 0, abs_va = 0, v = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        if (sscanf_s(line, "schema=%d", &schema) == 1) continue;
+        if (sscanf_s(line, "stamp=%llX", &v) == 1) { stamp = v; continue; }
+        if (sscanf_s(line, "pcoff=%llX", &v) == 1) { off = v; continue; }
+        if (sscanf_s(line, "abs=%llX",   &v) == 1) { abs_va = v; continue; }
+    }
+    fclose(f);
+    if (schema != 1 || stamp == 0) return;                      // unreadable/foreign: ignore
+    if (stamp != exe_build_stamp()) {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: aim cache is from a DIFFERENT game build - "
+                             "ignoring it (the next successful locate rewrites it)");
+        return;
+    }
+    g_hint_target_off  = (ptrdiff_t)off;
+    g_hint_valid       = (off != 0);
+    g_hint_abs         = (uintptr_t)abs_va;
+    g_hint_stage       = 0;
+    g_hint_miss_logged = false;
+    if (g_hint_valid || g_hint_abs != 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: warm start from aim cache - trying last "
+                             "run's rotator (pc+0x%llX, abs 0x%llX) before any watch",
+                             (unsigned long long)off, (unsigned long long)abs_va);
+    }
+}
+
+// ---- RUNG 1: THE DERIVATION CHAIN -------------------------------------------------------------
+// The rotator is reachable from the PlayerController by pure pointer derefs:
+//
+//     objbase = [[PC + 0x318] + 0x3C8]          <- the object that owns the aim state
+//     L2      = [objbase + 0x1C0] + 0x20        <- the rotator the watch used to hunt for
+//
+// Found by the AIMDIG dig (2026-08-19, docs\Perf\arms-log-20260819.md) and confirmed on four
+// launches with entirely different addresses. This is what the watchpoint hunt was substituting
+// for: the PlayerController is a UObject we already hold every tick, so this resolves in
+// MICROSECONDS with no debug registers, no thread suspension, no VEH, and -- unlike the hunt --
+// no waiting on the player to move before it can even start.
+//
+// ADDR-HYGIENE: structural -- these are STRUCT OFFSETS inside live objects, not code/module
+// addresses, and none of them is trusted on its own. Every candidate goes through the SAME
+// before-and-after-motion ValueAgreement check the cached hint uses (matches the real aim, then
+// still matches after the aim has MOVED), so a patch that moves any field in the chain fails
+// closed to the watch hunt exactly as before -- degraded, never wrong. `aimchain=0` disables the
+// rung outright, and blamfault 0x100 corrupts it on purpose to prove the fallback still runs.
+// ADDR-HYGIENE: structural -- struct offsets, never trusted alone; every candidate must match the
+// live aim before AND after it moves (ValueAgreement), and a miss falls back to the watch hunt.
+constexpr ptrdiff_t OFF_PC_TO_LINK   = 0x318;
+constexpr ptrdiff_t OFF_LINK_TO_OBJ  = 0x3C8;
+constexpr ptrdiff_t OFF_OBJ_TO_REC   = 0x1C0;
+constexpr ptrdiff_t OFF_REC_TO_ROT   = 0x20;
+
+int  g_chain_stage = 0;          // 0 = not yet matched, 1 = matched once, awaiting aim motion
+double g_chain_ref_yaw = 0.0;
+bool g_chain_miss_logged = false;
+bool g_chain_vtable_logged = false;
+
+bool chain_read_ptr(uintptr_t p, uintptr_t* out) {
+    if (p == 0 || IsBadReadPtr((const void*)p, sizeof(uintptr_t))) return false;
+    const uintptr_t v = *(const uintptr_t*)p;
+    if (v != 0 && (v < 0x10000ull || v >= 0x7FFFFFFFFFFFull)) return false;
+    *out = v;
+    return true;
+}
+
+// Walk the chain. Returns the L2 candidate, or 0 if any hop is unreadable/implausible.
+uintptr_t chain_candidate(void* pc, uintptr_t* out_objbase) {
+    if (pc == nullptr) return 0;
+    uintptr_t link = 0, objb = 0, rec = 0;
+    if (!chain_read_ptr((uintptr_t)pc + OFF_PC_TO_LINK, &link) || link == 0) return 0;
+    if (!chain_read_ptr(link + OFF_LINK_TO_OBJ, &objb) || objb == 0) return 0;
+#if HALO_VR_DEV
+    // FAULT INJECTION (blamfault 0x100): a chain whose middle hop has moved, i.e. the shape of a
+    // future patch. Must fall through to the watch, not write somewhere arbitrary.
+    if (g_cfg.blam_fault & 0x100) objb += 0x400;
+#endif
+    if (!chain_read_ptr(objb + OFF_OBJ_TO_REC, &rec) || rec == 0) return 0;
+    if (out_objbase != nullptr) *out_objbase = objb;
+    return rec + OFF_REC_TO_ROT;
+}
 
 constexpr int    MAX_ATTEMPTS  = 5;    // a locate that keeps failing must give up, not retry forever
 constexpr int    STAGE_TICKS   = 12;   // ~24 s per stage: long enough to span a player standing still
@@ -209,6 +350,7 @@ LONG CALLBACK veh(EXCEPTION_POINTERS* ep) {
             // through rax (`vmovups xmm0,[rax]` immediately before `vmovups [rbx+0x20],xmm0`), so
             // rax and rbx only belong together when they come from one trap.
             g_caught_rax.store((uintptr_t)ep->ContextRecord->Rax);
+            g_caught_rip.store(rip);
         }
     }
     return EXCEPTION_CONTINUE_EXECUTION;
@@ -219,6 +361,7 @@ void begin_watch(uintptr_t addr) {
     g_caught_src = 0;
     g_caught_rax = 0;
     g_caught_rcx = 0;
+    g_caught_rip = 0;
     g_stage_motion = 0.0;
     g_watch_addr = addr;
     if (g_veh == nullptr) g_veh = AddVectoredExceptionHandler(1, veh);
@@ -310,6 +453,13 @@ void note_stage_timeout(const char* stage) {
 
 bool aim_direct_ready() { return g_target.load() != 0; }
 
+// Read-only views for the AIMDIG chain dig (MemScan.cpp): the resolved target, the quaternion
+// source, and the writer instruction's address. Plain loads -- meaningful once Ready.
+uintptr_t aim_direct_target()     { return g_target.load(); }
+uintptr_t aim_direct_quat_src()   { return g_quat_src.load(); }
+uintptr_t aim_direct_writer_rip() { return g_caught_rip.load(); }
+uintptr_t aim_direct_known_pc()   { return (uintptr_t)g_known_pc; }
+
 void aim_direct_invalidate() {
     if (g_watching.load()) end_watch();
     g_target = 0;
@@ -319,6 +469,8 @@ void aim_direct_invalidate() {
     g_attempts = 0;
     g_have_last = false;
     g_waiting_logged = false;
+    g_chain_stage = 0;
+    g_chain_miss_logged = false;   // re-report per controller: the chain is re-walked from the new PC
 }
 
 bool aim_direct_set(double pitch_deg, double yaw_deg) {
@@ -363,6 +515,11 @@ void aim_direct_tick() {
         return;
     }
 
+    // Warm start: seed the hint from last run's cache, once. Sits after the enable gate so a
+    // session that never turns the feature on never touches the file.
+    static bool s_cache_checked = false;
+    if (!s_cache_checked) { s_cache_checked = true; aimcache_load(); }
+
     void* pc = nullptr;
     double p = 0.0, y = 0.0;
     const bool have_pc = read_control_rotation(&p, &y, &pc) && pc != nullptr;
@@ -385,6 +542,81 @@ void aim_direct_tick() {
 
     switch (g_stage) {
     case Stage::Idle: {
+        // RUNG 1 FIRST -- see the derivation-chain block above. Costs four pointer reads, so it is
+        // tried on every Idle tick ahead of the cached hint and the watch; a failure here is free
+        // and simply falls through to them.
+        if (g_cfg.aim_chain) {
+            uintptr_t objb = 0;
+            const uintptr_t cand = chain_candidate(pc, &objb);
+            if (cand != 0 && plausible_rotator(cand) && rotator_matches_aim(cand, p, y)) {
+                if (g_chain_stage == 0) {
+                    g_chain_stage   = 1;
+                    g_chain_ref_yaw = y;
+                } else if (std::fabs(y - g_chain_ref_yaw) >= MOTION_DEG) {
+                    // Tracked the real aim BEFORE and AFTER it moved: the same ValueAgreement the
+                    // hint and the watch are held to, so this is a resolve, not a guess.
+                    g_target = cand;
+                    g_l2     = cand;
+                    g_stage  = Stage::Ready;
+                    g_chain_stage = 0;
+                    // The quaternion the Euler is derived FROM, at the same fixed offset the sync
+                    // reads: objbase+0x1D0 == (rotator-0x20)+... -- taken from the record so the
+                    // firing resync lands on our value, exactly as the watch path sets it.
+                    const uintptr_t qcand = cand - sizeof(double) * 4;
+                    if (!IsBadReadPtr((const void*)qcand, sizeof(double) * 4)) {
+                        const double* q = (const double*)qcand;
+                        double n = 0.0; bool finite = true;
+                        for (int i = 0; i < 4; ++i) {
+                            if (!std::isfinite(q[i])) { finite = false; break; }
+                            n += q[i] * q[i];
+                        }
+                        if (finite && std::fabs(n - 1.0) < 0.01) g_quat = qcand;
+                    }
+                    // Keep the hint and the on-disk cache in step, so a session where the chain
+                    // later breaks still has the older rungs primed.
+                    if (g_known_pc != nullptr) {
+                        g_hint_target_off  = (ptrdiff_t)(cand - (uintptr_t)g_known_pc);
+                        g_hint_valid       = true;
+                        g_hint_stage       = 0;
+                        g_hint_miss_logged = false;
+                        aimcache_save();
+                    }
+                    // The object's vtable, module-relative: the class identity, logged once so a
+                    // field log says WHICH class the chain landed on if a patch ever moves it.
+                    unsigned long long vt_rva = 0;
+                    if (objb != 0 && !IsBadReadPtr((const void*)objb, 8)) {
+                        const uintptr_t vt = *(const uintptr_t*)objb;
+                        const uintptr_t base = (uintptr_t)GetModuleHandleA(nullptr);
+                        if (vt >= base) vt_rva = (unsigned long long)(vt - base);
+                    }
+                    API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: resolved by CHAIN "
+                                         "(PC+0x%llX -> +0x%llX = obj 0x%llX [vtable dll+0x%llX] "
+                                         "-> +0x%llX -> +0x%llX = 0x%llX) - no watch, no suspend",
+                                         (unsigned long long)OFF_PC_TO_LINK,
+                                         (unsigned long long)OFF_LINK_TO_OBJ,
+                                         (unsigned long long)objb, vt_rva,
+                                         (unsigned long long)OFF_OBJ_TO_REC,
+                                         (unsigned long long)OFF_REC_TO_ROT,
+                                         (unsigned long long)cand);
+                    return;
+                }
+            } else if (cand == 0 || !plausible_rotator(cand)) {
+                // Say it ONCE per invalidate. Whether this chain still holds is exactly what a
+                // future build needs to know, and a silent fallback would make rung 1 look like it
+                // never existed -- the same reasoning as the cached-hint miss below.
+                if (!g_chain_miss_logged) {
+                    g_chain_miss_logged = true;
+                    API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: derivation chain did not "
+                                         "resolve (PC+0x%llX -> +0x%llX -> +0x%llX) - a struct "
+                                         "offset has moved; falling back to the watch",
+                                         (unsigned long long)OFF_PC_TO_LINK,
+                                         (unsigned long long)OFF_LINK_TO_OBJ,
+                                         (unsigned long long)OFF_OBJ_TO_REC);
+                }
+                g_chain_stage = 0;
+            }
+        }
+
         // FAST RE-ARM. Tried before the motion gate below, so it can confirm while the player is
         // still -- the slow path cannot even start until they move.
         if (g_hint_valid) {
@@ -409,6 +641,7 @@ void aim_direct_tick() {
                                          "(pc+0x%llX = 0x%llX) - skipped the watch",
                                          (unsigned long long)g_hint_target_off,
                                          (unsigned long long)cand);
+                    aimcache_save();   // keep the on-disk warm start current for the next launch
                     return;
                 }
             } else {
@@ -424,6 +657,22 @@ void aim_direct_tick() {
                 }
                 g_hint_valid = false;
                 g_hint_stage = 0;
+                // Second candidate from the on-disk cache: last run's ABSOLUTE address. Large
+                // blam allocations often land at the same VA across launches on this title even
+                // when the pc-relative distance moves, so try it through the same validation
+                // before conceding to the watch. One shot; skipped when it names the address
+                // that just failed.
+                if (g_hint_abs != 0 && g_hint_abs != (uintptr_t)pc + g_hint_target_off) {
+                    g_hint_target_off = (ptrdiff_t)(g_hint_abs - (uintptr_t)pc);
+                    g_hint_abs        = 0;
+                    g_hint_valid      = true;
+                    g_hint_miss_logged = false;
+                    API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: trying the cache's ABSOLUTE "
+                                         "address next (0x%llX)",
+                                         (unsigned long long)((uintptr_t)pc + g_hint_target_off));
+                } else {
+                    g_hint_abs = 0;
+                }
             }
         }
 
@@ -563,6 +812,7 @@ void aim_direct_tick() {
                     g_hint_valid       = true;
                     g_hint_stage       = 0;
                     g_hint_miss_logged = false;
+                    aimcache_save();   // and the next LAUNCH -- see the persisted-hint block
                 }
                 const double* r = (const double*)src;
                 // The OFFSET is logged alongside the address because it is the only half that means
@@ -602,6 +852,7 @@ void aim_direct_tick() {
                     g_hint_valid       = true;
                     g_hint_stage       = 0;
                     g_hint_miss_logged = false;
+                    aimcache_save();   // and the next LAUNCH -- see the persisted-hint block
                 }
 
                 // The quaternion the Euler is derived FROM sits 0x20 below L2. Accepted only if it
@@ -632,6 +883,20 @@ void aim_direct_tick() {
                                          ? (uintptr_t)(g_l2 - (uintptr_t)g_known_pc) : 0),
                                      quat_ok ? "OK" : "NOT FOUND",
                                      (unsigned long long)qcand, (unsigned long long)src);
+                // The trap's RIP, module-relative: a BUILD-STABLE code RVA for the instruction
+                // that reads L2 (`vmovups xmm0,[rax]`). Disassembling above it shows how the game
+                // derived rax -- the derivation chain the AIMDIG dig is after. Logged every Ready
+                // so cross-session and cross-build logs are directly comparable.
+                {
+                    const uintptr_t wrip = g_caught_rip.load();
+                    const uintptr_t base = (uintptr_t)GetModuleHandleA(nullptr);
+                    if (wrip != 0) {
+                        API::get()->log_info("[Halo-CampE-UEVR] AIMDIRECT: L1 stamped from L2 by code at "
+                                             "0x%llX (dll+0x%llX)",
+                                             (unsigned long long)wrip,
+                                             (unsigned long long)(wrip >= base ? wrip - base : 0));
+                    }
+                }
 
                 // STAGE 4: the cache is refreshed from [obj+0x1D0] by a change-guarded sync
                 // (exe+0x5B5D7A0: vmovupd ymm0,[rcx+0x1D0] ... vcmppd/test/je ... vmovups [rbx],ymm2).

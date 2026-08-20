@@ -125,7 +125,7 @@
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.3.1"
+#define HALO_VR_VERSION "0.3.3"
 
 using namespace uevr;
 
@@ -475,9 +475,18 @@ std::atomic<float> g_last_dt{0.033f};   // engine tick delta, for smooth turn
 // measured, on the reasoning that one trace is cheap -- exactly the reasoning that produced the
 // periodic microstutter these timers exist to catch. Unlike the other four it is not gated behind a
 // tick counter, so `n` here should track the tick count and `mean` is the per-frame cost.
-enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_SHELL, PERF_TRACE, PERF_COUNT };
+// PERF_BRIDGE is the settings-menu file bridge (menu_bridge_tick), nested inside PERF_CFG's
+// window so the two can be told apart: the bridge was shipped in v0.3.0 doing 9 synchronous
+// opens/~130 KB of re-reads per poll on this thread -- the same I/O class whose measured
+// 143.9/108.7 ms contention stalls got load_config its stat gate (Config.cpp).
+// PERF_NAVHOST times only the EXPENSIVE path of navw_host_class (widget Create + image-child
+// collection): the re-host storm ranked #1 in-plugin freeze candidate for the v0.3.1 field
+// reports (docs\Perf\V031-EPISODIC-WORKLOADS-2026-08-19.md), and it had never been frame-timed.
+enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_SHELL, PERF_TRACE, PERF_BRIDGE,
+                PERF_NAVHOST, PERF_COUNT };
 const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   ",
-                                            "resolve_shell ", "reticule_trace" };
+                                            "resolve_shell ", "reticule_trace", "menu_bridge   ",
+                                            "navw_rehost   " };
 
 struct PerfStat {
     double   max_ms = 0.0;
@@ -1479,6 +1488,13 @@ bool visibility_means_shown(uint8_t v) {
 // Deliberately re-resolved on a timer rather than cached once. Actors on this title are pooled and
 // recycled and holding a reference across frames is a known crash here, so the pointer is treated
 // as valid only for the ~2 s window it was found in, and its class is re-checked before every use.
+// Last tick the aim path actually reached reticule_widget_ensure(). needs_pick mirrors ensure's
+// OWN early-out, but ensure also has a CALLER precondition -- the rig/pawn must have resolved --
+// and without this stamp the sweep below cannot see it: measured 2026-08-19, a session whose rig
+// never came up (SimVR, controllers idle) ran the ~55 ms sweep every ~4 s for five minutes
+// straight, feeding a pick that could never bind. Stamped at both ensure call sites.
+uint32_t g_ret_ensure_seen_tick = 0;
+
 void reticle_rescan(uint32_t tick) {
     // Throttled UNCONDITIONALLY -- including when the count is zero. A class name that matches
     // nothing would otherwise turn this into a full object-array sweep with a class-name lookup
@@ -1505,9 +1521,15 @@ void reticle_rescan(uint32_t tick) {
     // Each condition is re-tested every 120 ticks rather than latched, so turning hudfollow on in
     // the config, or losing the widget binding, brings the scan straight back. That is why this is
     // a demand check and not a "scanned once, done" flag.
+    // needs_pick is AND-ed with "the consumer ran recently": ensure() is only called once a
+    // rig/pawn has resolved, so while the rig is down a sweep feeds a pick nothing can consume.
+    // The 240-tick window also covers cold boot (stamp still 0, tick small), priming candidates
+    // before the first bind; after rig-up, ensure stamps every tick and the next 120-tick
+    // boundary sweeps fresh -- worst case the bind waits one throttle period, same as today.
     const bool needed = g_cfg.menu_dump                              // discovery: the sweep IS the product
                      || g_cfg.hud_follow                             // moves/hides the flat reticle
-                     || reticle_widget_needs_pick()                  // still choosing a widget to host
+                     || (reticle_widget_needs_pick()
+                         && tick - g_ret_ensure_seen_tick < 240)     // still choosing, and bindable
                      || reticle_stray_check_due(tick)                // HUD rebuilt a second crosshair
                      || ((g_cfg.nav_fix || g_cfg.nav_world) && g_nav_count == 0)   // navpoint layer not yet resolved
                      || (g_cfg.menu_detect && !g_ui_manager_ok.load());   // candidates are the fallback
@@ -2183,24 +2205,273 @@ float navw_kind_size(NavwKind k) {
 // Collect a widget's Image children (in tree order). The FIRST image is not always the icon --
 // a navpoint layout can carry an on-screen icon AND an off-screen arrow, and picking blind is
 // how the objective marker came back gold when its class changed. navworldimg selects which.
-int navw_collect_images(API::UObject* owner, API::UObject** out, int cap, int depth = 0) {
+int navw_collect_images(API::UObject* owner, API::UObject** out, int cap) {
     if (owner == nullptr || cap <= 0) return 0;
     auto* arr = API::get()->get_uobject_array();
     if (arr == nullptr) return 0;
-    int got = 0;
+
+    // ONE pass over the object array, not one per container. The recursive version re-walked the
+    // whole array for the root AND AGAIN for every WidgetTree/Panel/Overlay/Box child it met
+    // (depth<=2), so one re-host cost 3+ full walks -- the multi-hundred-ms game-thread stall
+    // class behind the v0.3.1 freeze reports (docs\Perf\V031-EPISODIC-WORKLOADS-2026-08-19.md).
+    // Here every object is tested once by hopping <=3 outers toward `owner`; a navpoint widget's
+    // subtree is a handful of nodes, so the DFS below runs over a tiny local list.
+    struct Node { API::UObject* obj; API::UObject* outer; };
+    Node nodes[64];
+    int n_nodes = 0;
+
     const int32_t n = arr->get_object_count();
-    for (int32_t i = 0; i < n && got < cap; ++i) {
+    for (int32_t i = 0; i < n && n_nodes < 64; ++i) {
         auto* o = arr->get_object(i);
-        if (o == nullptr || o->get_outer() != owner) continue;
-        const std::wstring cn = class_name_of(o);
-        if (cn.find(L"Image") != std::wstring::npos) { out[got++] = o; continue; }
-        if (depth < 2 && (cn == L"WidgetTree" || cn.find(L"Panel") != std::wstring::npos
-                          || cn.find(L"Overlay") != std::wstring::npos
-                          || cn.find(L"Box") != std::wstring::npos)) {
-            got += navw_collect_images(o, out + got, cap - got, depth + 1);
+        if (o == nullptr) continue;
+        API::UObject* p = o->get_outer();
+        for (int hop = 0; hop < 3 && p != nullptr; ++hop) {
+            if (p == owner) { nodes[n_nodes++] = { o, o->get_outer() }; break; }
+            p = p->get_outer();
         }
     }
-    return got;
+
+    // The SAME selection the recursive version made -- array order within one parent, containers
+    // recursed inline, Images collected at up to depth 2 -- replayed over the local list. The
+    // ORDER is load-bearing: navworldimg indexes into it, so a reordering would silently re-pick
+    // every player's icon art.
+    struct Dfs {
+        const Node* nodes;
+        int         n_nodes;
+        static bool is_container(const std::wstring& cn) {
+            return cn == L"WidgetTree" || cn.find(L"Panel") != std::wstring::npos
+                || cn.find(L"Overlay") != std::wstring::npos
+                || cn.find(L"Box") != std::wstring::npos;
+        }
+        int walk(API::UObject* parent, API::UObject** out, int cap, int depth) const {
+            if (cap <= 0) return 0;
+            int got = 0;
+            for (int i = 0; i < n_nodes && got < cap; ++i) {
+                if (nodes[i].outer != parent) continue;
+                auto* o = nodes[i].obj;
+                const std::wstring cn = class_name_of(o);
+                if (cn.find(L"Image") != std::wstring::npos) { out[got++] = o; continue; }
+                if (depth < 2 && is_container(cn))
+                    got += walk(o, out + got, cap - got, depth + 1);
+            }
+            return got;
+        }
+    };
+    const Dfs dfs{ nodes, n_nodes };
+    return dfs.walk(owner, out, cap, 0);
+}
+
+// The array-free lane: walk the widget's OWN subtree through reflection --
+// WidgetTree -> RootWidget -> Slots[] -> Content, depth-first. A few dozen property reads
+// instead of a ~300k-object array pass, so a host event stops costing a visible frame.
+//
+// NOT interchangeable with the array lane by construction: UMG outers every tree widget FLAT
+// to the WidgetTree object, so the array lane's "tree order" is really CREATION order, while
+// this lane yields SLOT-HIERARCHY order. navworldimg indexes into the result, so if the two
+// orders ever disagree for a class, trusting this lane would silently re-pick that marker's
+// art on every player's machine. Hence the hybrid below: this lane is only used for a class
+// after one live host has PROVEN both lanes return the identical sequence.
+int navw_collect_images_tree(API::UObject* owner, API::UObject** out, int cap,
+                             const char** why = nullptr) {
+    const char* why_local = "ok";
+    if (why == nullptr) why = &why_local;
+    *why = "ok";
+    if (owner == nullptr || cap <= 0) { *why = "no owner"; return 0; }
+    auto* tree_pp = owner->get_property_data<API::UObject*>(L"WidgetTree");
+    if (tree_pp == nullptr) { *why = "no WidgetTree prop"; return 0; }
+    if (*tree_pp == nullptr || IsBadReadPtr(*tree_pp, 0x30)) { *why = "WidgetTree null"; return 0; }
+    auto* root_pp = (*tree_pp)->get_property_data<API::UObject*>(L"RootWidget");
+    if (root_pp == nullptr) { *why = "no RootWidget prop"; return 0; }
+    if (*root_pp == nullptr || IsBadReadPtr(*root_pp, 0x30)) { *why = "RootWidget null"; return 0; }
+    struct Walk {
+        static int rec(API::UObject* w, API::UObject** out, int cap, int depth) {
+            // Depth bounds runaway recursion only -- it must clear a real HUD widget's nesting.
+            // This game's objective navpoint puts its icons SEVEN containers down (SizeBox ->
+            // Overlay -> Overlay -> ScaleBox -> NamedSlot -> Overlay -> Border -> Image); a cap
+            // of 6 returned zero images and read as a lane mismatch. 12 clears that with margin.
+            if (w == nullptr || cap <= 0 || depth > 12) return 0;
+            const std::wstring cn = class_name_of(w);
+            if (cn.find(L"Image") != std::wstring::npos) { out[0] = w; return 1; }
+            // Any widget with a Slots array is a panel; everything else (leaf widgets, nested
+            // user widgets -- which the array lane also does not enter) ends the branch.
+            struct FRawArr { void* data; int32_t num; int32_t max; };
+            auto* slots = w->get_property_data<FRawArr>(L"Slots");
+            if (slots == nullptr || slots->data == nullptr || slots->num <= 0 || slots->num > 64) return 0;
+            int got = 0;
+            auto** elems = reinterpret_cast<API::UObject**>(slots->data);
+            for (int i = 0; i < slots->num && got < cap; ++i) {
+                auto* slot = elems[i];
+                if (slot == nullptr || IsBadReadPtr(slot, 0x30)) continue;
+                auto* content_pp = slot->get_property_data<API::UObject*>(L"Content");
+                if (content_pp == nullptr || *content_pp == nullptr || IsBadReadPtr(*content_pp, 0x30)) continue;
+                got += rec(*content_pp, out + got, cap - got, depth + 1);
+            }
+            return got;
+        }
+    };
+    const int n = Walk::rec(*root_pp, out, cap, 0);
+    if (n == 0) *why = "walk found no images";
+    return n;
+}
+
+// VERIFY-THEN-TRUST dispatch between the two collect lanes, per widget class.
+//
+// First host of a class runs BOTH lanes, serves the array result (ground truth for order), and
+// certifies the tree lane only if the sequences match element-for-element. Every later host of
+// a certified class takes the tree lane -- so the ~10 ms array pass is paid at most ONCE per
+// class per session, and a marker kind whose orders disagree stays on the array lane forever
+// rather than silently re-picking its art. A certified lane that later returns nothing (a
+// future engine's UMG moving the Slots layout, say) demotes itself back to the array walk out
+// loud instead of hosting a blank quad. navwtree=0 forces the array lane everywhere -- the
+// live A/B, and the drill that proves the fallback still works (fallbacks that never run rot).
+int navw_collect_images_hybrid(API::UClass* cls, API::UObject* w, API::UObject** out, int cap,
+                               const char** lane) {
+    *lane = "array";
+    if (!g_cfg.navw_tree || cls == nullptr) return navw_collect_images(w, out, cap);
+
+    // 16 slots: this game ships ~11 navpoint widget classes (incl. image-less bases, which the
+    // pre-certify sweep also feeds through here); at 8 the cache filled with bases and the two
+    // classes that actually host every mission fell out, re-verifying on every host.
+    struct Cache { wchar_t cls[96]; int8_t tree_ok; };
+    static Cache s_cache[16] = {};
+    static int   s_cache_n = 0;
+
+    wchar_t cn[96] = {};
+    if (const auto* fn = cls->get_fname()) {
+        const std::wstring s = fn->to_string();
+        wcsncpy_s(cn, s.c_str(), 95);
+    }
+    if (cn[0] == L'\0') return navw_collect_images(w, out, cap);
+
+    for (int i = 0; i < s_cache_n; ++i) {
+        if (wcscmp(s_cache[i].cls, cn) != 0) continue;
+        if (!s_cache[i].tree_ok) return navw_collect_images(w, out, cap);
+        const int n = navw_collect_images_tree(w, out, cap);
+        if (n > 0) { *lane = "tree"; return n; }
+        s_cache[i].tree_ok = 0;
+        API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: tree lane went EMPTY for %s - demoted "
+                             "back to the array walk", narrow(cn).c_str());
+        *lane = "array(demoted)";
+        return navw_collect_images(w, out, cap);
+    }
+
+    // First sight of this class: certify. Order must match EXACTLY, not just the counts --
+    // same count with swapped elements is precisely the silent re-pick this exists to prevent.
+    const int n_arr = navw_collect_images(w, out, cap);
+    API::UObject* t[8] = {};
+    const char* why = "ok";
+    const int n_tree = navw_collect_images_tree(w, t, (cap < 8) ? cap : 8, &why);
+    bool same = (n_tree == n_arr) && (n_arr > 0);
+    for (int i = 0; same && i < n_arr; ++i) same = (t[i] == out[i]);
+    if (s_cache_n < 16) {
+        wcscpy_s(s_cache[s_cache_n].cls, cn);
+        s_cache[s_cache_n].tree_ok = same ? 1 : 0;
+        ++s_cache_n;
+    }
+    // "no images" is its own verdict, not a mismatch: the image-less navpoint BASE classes land
+    // here, and calling them MISMATCH would read as a tree-lane defect in field logs.
+    const char* verdict = same ? "VERIFIED" : ((n_arr == 0 && n_tree == 0) ? "no images" : "MISMATCH");
+    API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: tree lane %s for %s (arr=%d tree=%d why=%s)%s",
+                         verdict, narrow(cn).c_str(), n_arr, n_tree, why,
+                         same ? " - later hosts of this class skip the array walk"
+                              : " - this class stays on the array walk");
+    *lane = same ? "array(certifying)" : "array(mismatch)";
+    return n_arr;
+}
+
+// PRE-CERTIFY the tree lane at mission entry, so the ~10 ms per-class certification (the array
+// walk the verify needs) lands inside the load fade instead of on the first marker of its kind
+// mid-combat. One shot per session: collect every loaded navpoint widget class in one sweep,
+// create a throwaway instance of each, and run it through the same verify-then-trust dispatch a
+// real host uses -- the cache it fills IS the host path's cache. Classes a later mission streams
+// in are not covered (they certify organically, ~10 ms once). Runs on the first tick that has a
+// player controller, which is still inside the load/black window (the controller flips to the
+// mission class before the scene is visible -- the same fact Enter-Mission's polling relies on).
+// ONE UNIT OF WORK PER TICK -- the sweep on one tick, then ONE class certified per tick after it.
+// The first version did all of them in a single tick and measured 217 ms: fine if it lands under
+// the load fade, a hard hitch if the fade has already gone. Paced, the worst frame is one class
+// (~15-20 ms) and the whole pass still finishes inside the first second of a mission, long before
+// a marker can appear. This is the shipping path, so it obeys the never-stall rule the same way
+// the rest of update() does.
+void navw_precertify_tick() {
+    static int          s_state = 0;          // 0 = need the sweep, 1 = certifying, 2 = done
+    static API::UClass* s_found[16] = {};
+    static int          s_n_found = 0, s_next = 0, s_certified = 0;
+    static uint32_t     s_last_tick = ~0u;
+    static double       s_total_ms = 0.0;
+
+    if (s_state == 2) return;
+    if (!g_cfg.nav_world || !g_cfg.navw_tree || !g_cfg.nav_world_icon) { s_state = 2; return; }
+    auto* pc0 = API::get()->get_player_controller(0);
+    if (pc0 == nullptr) return;                       // not in a mission yet -- try next tick
+
+    const uint32_t now_tick = g_ticks.load(std::memory_order_relaxed);
+    if (now_tick == s_last_tick) return;              // at most one unit of work per tick
+    s_last_tick = now_tick;
+
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+
+    if (s_state == 1) {
+        // ---- certify exactly ONE class, then yield the frame.
+        auto* wbl_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetBlueprintLibrary");
+        auto* wbl = (wbl_cls != nullptr) ? wbl_cls->get_class_default_object() : nullptr;
+        if (wbl != nullptr && s_next < s_n_found) {
+            alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+            *reinterpret_cast<void**>(p)      = pc0;
+            *reinterpret_cast<void**>(p + 8)  = s_found[s_next];
+            *reinterpret_cast<void**>(p + 16) = pc0;
+            wbl->call_function(L"Create", p);
+            if (auto* w = *reinterpret_cast<API::UObject**>(p + 24)) {
+                API::UObject* imgs[8] = {};
+                const char* lane = "";
+                navw_collect_images_hybrid(s_found[s_next], w, imgs, 8, &lane);
+                ++s_certified;
+            }
+        }
+        ++s_next;
+        QueryPerformanceCounter(&t1);
+        s_total_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+        if (s_next >= s_n_found || wbl == nullptr) {
+            s_state = 2;
+            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: pre-certified %d/%d navpoint class(es) "
+                                 "at mission entry in %.1f ms total, one per tick - certified kinds "
+                                 "host via the tree lane from their first marker",
+                                 s_certified, s_n_found, s_total_ms);
+        }
+        return;
+    }
+
+    // One sweep for loaded navpoint widget classes -- WidgetBlueprintGeneratedClass objects whose
+    // NAME carries the navpoint taxonomy. Pointers are used within this same tick only. 16 slots:
+    // this game ships ~11 such classes including the image-less bases, and a cap of 8 crowded out
+    // the two kinds that actually host every mission (measured 2026-08-19).
+    // ---- s_state == 0: the class-collection sweep, alone on this tick.
+    // The throwaway instances the certify step creates are never viewport-added or hosted;
+    // unreferenced, they go with the next GC pass, same as a rejected host candidate.
+    if (auto* arr = API::get()->get_uobject_array()) {
+        const int32_t n = arr->get_object_count();
+        for (int32_t i = 0; i < n && s_n_found < 16; ++i) {
+            auto* o = arr->get_object(i);
+            if (o == nullptr) continue;
+            if (class_name_of(o).find(L"WidgetBlueprintGeneratedClass") == std::wstring::npos) continue;
+            const auto* fn = o->get_fname();
+            if (fn == nullptr) continue;
+            const std::wstring nm = fn->to_string();
+            if (nm.find(L"Navpoint") == std::wstring::npos
+                && nm.find(L"TrackedTarget") == std::wstring::npos) continue;
+            if (nm.size() < 2 || nm.compare(nm.size() - 2, 2, L"_C") != 0) continue;
+            s_found[s_n_found++] = reinterpret_cast<API::UClass*>(o);
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    s_total_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+    s_state = (s_n_found > 0) ? 1 : 2;
+    if (s_state == 2) {
+        API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: pre-certify found no navpoint widget "
+                             "classes loaded - marker kinds will certify as they first appear");
+    }
 }
 bool          g_navw_shown = false;         // anything visible last tick (drives one-shot hide)
 std::atomic<float> g_navw_keff{1000.0f};    // measured px-per-tan (independent of navfix's)
@@ -2240,19 +2511,37 @@ bool navw_host_class(API::UObject* comp, int slot, API::UClass* want_class) {
         const std::wstring w(a.begin(), a.end());
         nav_wcls = API::get()->find_uobject<API::UClass>(w.c_str());
         if (nav_wcls == nullptr) {
-            // Bare name: sweep for a widget class whose name matches.
-            if (auto* arr = API::get()->get_uobject_array()) {
-                const int32_t n = arr->get_object_count();
-                for (int32_t k = 0; k < n; ++k) {
-                    auto* o = arr->get_object(k);
-                    if (o == nullptr) continue;
-                    if (class_name_of(o).find(L"WidgetBlueprintGeneratedClass") == std::wstring::npos)
-                        continue;
-                    const auto* fn = o->get_fname();
-                    if (fn != nullptr && fn->to_string().find(w) != std::wstring::npos) {
-                        nav_wcls = reinterpret_cast<API::UClass*>(o);
-                        break;
+            // Bare name: sweep for a widget class whose name matches. NEGATIVE RESULTS ARE
+            // MEMOISED: an unresolvable name (typo, or a patch renamed the class) used to re-pay
+            // this full-array sweep on EVERY re-host, forever -- the same unthrottled
+            // sweep-on-miss hazard flagged for find_ui_manager. A miss is cached against the
+            // configured string and re-armed every 600 ticks (~20 s), so a level that loads the
+            // class later still gets found; a live edit of navworldclass re-arms immediately.
+            // A HIT is deliberately NOT cached: the pointer would dangle across GC/level
+            // changes, and a successful sweep only happens on a re-host, which is rare.
+            static char     s_miss_for[sizeof(g_cfg.nav_world_class)] = {0};
+            static uint32_t s_miss_tick = 0;
+            const uint32_t  now_tick = g_ticks.load(std::memory_order_relaxed);
+            const bool cached_miss = (strcmp(s_miss_for, g_cfg.nav_world_class) == 0)
+                                     && (now_tick - s_miss_tick < 600);
+            if (!cached_miss) {
+                if (auto* arr = API::get()->get_uobject_array()) {
+                    const int32_t n = arr->get_object_count();
+                    for (int32_t k = 0; k < n; ++k) {
+                        auto* o = arr->get_object(k);
+                        if (o == nullptr) continue;
+                        if (class_name_of(o).find(L"WidgetBlueprintGeneratedClass") == std::wstring::npos)
+                            continue;
+                        const auto* fn = o->get_fname();
+                        if (fn != nullptr && fn->to_string().find(w) != std::wstring::npos) {
+                            nav_wcls = reinterpret_cast<API::UClass*>(o);
+                            break;
+                        }
                     }
+                }
+                if (nav_wcls == nullptr) {
+                    strcpy_s(s_miss_for, g_cfg.nav_world_class);
+                    s_miss_tick = now_tick;
                 }
             }
         }
@@ -2264,6 +2553,24 @@ bool navw_host_class(API::UObject* comp, int slot, API::UClass* want_class) {
     }
     if (nav_wcls == nullptr) return false;
     if (slot >= 0 && slot < 8 && g_navw_slot_class[slot] == (void*)nav_wcls) return true;  // already wearing it
+
+    // AT MOST ONE EXPENSIVE RE-HOST PER TICK. A composition change (objective update, slots
+    // re-typed) can re-class several slots in the same tick, and paying widget-Create + subtree
+    // collection for all of them at once is what turned those updates into a single long stall.
+    // Returning false leaves this quad empty for one tick; the placement loop asks again next
+    // tick (the already-wearing fast path above keeps settled slots free), so markers pop in
+    // over consecutive ~30 ms ticks instead of freezing the frame. Checked BEFORE the perf scope
+    // so a deferred call does not record a near-zero sample and dilute the re-host mean.
+    {
+        static uint32_t s_rehost_tick = ~0u;
+        const uint32_t now_tick = g_ticks.load(std::memory_order_relaxed);
+        if (s_rehost_tick == now_tick) return false;
+        s_rehost_tick = now_tick;
+    }
+
+    // Everything below is the expensive path (widget Create + image-child collection); the
+    // fast path above runs every tick and must stay untimed or `n` stops meaning "re-hosts".
+    PerfScope _perf(PERF_NAVHOST);
 
     auto* wbl_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetBlueprintLibrary");
     auto* wbl = (wbl_cls != nullptr) ? wbl_cls->get_class_default_object() : nullptr;
@@ -2283,10 +2590,11 @@ bool navw_host_class(API::UObject* comp, int slot, API::UClass* want_class) {
 
     API::UObject* host = w;
     const char* which = "whole widget";
+    const char* lane = "off";
     int n_imgs = 0;
     if (g_cfg.nav_world_icon) {
         API::UObject* imgs[8] = {};
-        n_imgs = navw_collect_images(w, imgs, 8);
+        n_imgs = navw_collect_images_hybrid(nav_wcls, w, imgs, 8, &lane);
         if (n_imgs > 0) {
             const int pick = (g_cfg.nav_world_img >= 0 && g_cfg.nav_world_img < n_imgs)
                            ? g_cfg.nav_world_img : 0;
@@ -2318,11 +2626,11 @@ bool navw_host_class(API::UObject* comp, int slot, API::UClass* want_class) {
         g_navw_slot_size[slot]  = mult;
     }
     API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: slot %d = %s [kind=%s size x%.2f%s] hosting "
-                         "%s (%s, %d image(s), navworldimg=%d) draw=%.0fpx",
+                         "%s (%s, %d image(s), navworldimg=%d, lane=%s) draw=%.0fpx",
                          slot, narrow(wcn).c_str(), navw_kind_name(kind), mult,
                          (ov > 0.0f) ? " BY navsizeclass" : "",
                          narrow(class_name_of(host)).c_str(), which, n_imgs,
-                         g_cfg.nav_world_img, px);
+                         g_cfg.nav_world_img, lane, px);
     return true;
 }
 
@@ -3518,7 +3826,11 @@ void update() {
         PerfScope _perf(PERF_CFG);
         // Settings-menu bridge FIRST, so a command applied this tick is parsed by the very same
         // load_config below -- the menu's changes land within one poll, like any file edit.
-        const int menu_applied = menu_bridge_tick();
+        int menu_applied = 0;
+        {
+            PerfScope _bridge(PERF_BRIDGE);
+            menu_applied = menu_bridge_tick();
+        }
         load_config();
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
@@ -3573,6 +3885,7 @@ void update() {
         nav_scan_tick();   // BEFORE mem_scan_tick: it composes the values and arms the edge
         mem_scan_tick();
         mem_diff_tick();
+        aim_chain_scan_tick();   // AIMDIG: aimdig=1 with aimdirect Ready -> one chain-dig report
         // The SHIPPING aim write. Separate call from blam_aim_tick() below on purpose: that one is
         // the dev investigation and does not exist in a release build, while this one is the
         // feature. Ordered first so it owns the address unless the diagnostics explicitly claim it.
@@ -4047,6 +4360,7 @@ void update() {
         // meant the widgets were never found and the seated reticule had nothing to host. Same
         // stale proxy as the menu-state bug above, same fix.
         if (!frontend) reticle_rescan(tick);
+        if (!frontend) navw_precertify_tick();
         material_hunt(tick);
         shield_fx_census(tick);
         run_mat_dump();
@@ -6592,6 +6906,8 @@ void update() {
                                     }
 
                                     if (g_cfg.aim_widget) {
+                                        // rescan gate: the pick has a consumer this tick
+                                        g_ret_ensure_seen_tick = g_ticks.load(std::memory_order_relaxed);
                                         reticule_widget_ensure(rig);
                                         reticule_widget_move(target, origin);
                                     } else {
@@ -6827,6 +7143,8 @@ void update() {
             g_ret_scale_mul = (d / ref) * g_cfg.aim_reticule_scale_veh;
 
             if (g_cfg.aim_widget) {
+                // rescan gate: the pick has a consumer this tick (vehicle branch)
+                g_ret_ensure_seen_tick = g_ticks.load(std::memory_order_relaxed);
                 reticule_widget_ensure(pawn_root);
                 reticule_widget_move(target, origin);
             } else {

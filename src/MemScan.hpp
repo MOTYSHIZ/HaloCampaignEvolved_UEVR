@@ -64,12 +64,23 @@ void nav_tls_scan(float wu_x, float wu_y);
 // the markers need -- no reflection, no relocation, no aim. root=0 no-ops.
 void nav_graph_scan(uintptr_t manager_root, float wu_x, float wu_y);
 
+// AIMDIG -- the AimDirect derivation-chain dig. Watches the `aimdig` config key; on 0 -> 1 with
+// the rotator resolved, runs ONE off-thread report: VirtualQuery census of the L2 / quat-source /
+// sim-TLS allocations (whole-allocation spans, pairwise deltas, same-allocation verdicts), a scan
+// of the exe's data sections for static pointers into those allocations (a static root, if one
+// exists), and bounded pointer-graph walks from the sim TLS block and the quat-source object
+// looking for a chain that lands on L2. Everything module-relative in the logs so two sessions
+// (or two builds) are directly comparable. Goal: find the per-launch derivation chain that makes
+// the watchpoint hunt a fallback instead of the primary -- see AimDirect.hpp.
+void aim_chain_scan_tick();
+
 #else
 
 inline void mem_scan_tick() {}
 inline void mem_diff_tick() {}
 inline void nav_tls_scan(float, float) {}
 inline void nav_graph_scan(uintptr_t, float, float) {}
+inline void aim_chain_scan_tick() {}
 
 #endif
 

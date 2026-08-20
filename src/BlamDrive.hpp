@@ -54,6 +54,12 @@ void blam_drive_tick();
 // structures reachable from this root, the same family the control table itself lives in.
 extern std::atomic<uintptr_t> g_sim_tls_block;
 
+// The resolved Blam control record, read-only. Consumed by the AIMDIG probe (MemScan.cpp) to ask
+// whether this record is reachable from the PlayerController by pointer derefs -- the same shape
+// that retired AimDirect's watchpoint hunt. A hit would mean resolution no longer needs the sim
+// thread, i.e. neither the getter hook nor tier 2's TEB walk would be load-bearing for FINDING it.
+uintptr_t blam_control_record();
+
 // A loaded module's `_tls_index`, read from its own PE TLS directory (IMAGE_TLS_DIRECTORY's
 // AddressOfIndex, which the loader has already relocated). EXACT on any build of any variant of the
 // binary: nothing to record, nothing to re-derive after a patch, no signature to maintain.

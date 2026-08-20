@@ -581,6 +581,13 @@ uintptr_t hooked_get_orientation(uintptr_t handle, Vec3f* outA, Vec3f* outB) {
 // The sim's TLS block, for the navpoint hunt's off-thread walker (see BlamDrive.hpp).
 std::atomic<uintptr_t> g_sim_tls_block{0};
 
+// The resolved control record, READ-ONLY, for the AIMDIG probe (dev builds). AimDirect's rotator
+// turned out to be reachable from the PlayerController by pointer derefs, which retired its
+// watchpoint hunt; the open question is whether THIS record is reachable the same way. If it is,
+// resolution stops needing the sim thread -- which is the only reason the getter hook and the
+// TEB-walking tier 2 exist. Read-only on purpose: the resolvers stay the sole writers.
+uintptr_t blam_control_record() { return g_ctl_rec.load(std::memory_order_relaxed); }
+
 // Exported so BlamAim.cpp can use the same definition rather than keep its own RVA. See the note in
 // BlamDrive.hpp for why that matters more than it looks.
 bool sim_tls_index(uintptr_t module_base, uint32_t* out_index, uintptr_t* out_rva) {

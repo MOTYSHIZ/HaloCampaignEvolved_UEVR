@@ -41,6 +41,14 @@ void aim_direct_tick();
 // True once the rotator has been located and is safe to write.
 bool aim_direct_ready();
 
+// Read-only views for the AIMDIG chain dig (MemScan.cpp) and its logs: the resolved rotator, the
+// quaternion source, and the RIP of the game instruction the watch caught writing the chain --
+// module-relative, that RIP is a build-stable code RVA. All zero until located.
+uintptr_t aim_direct_target();
+uintptr_t aim_direct_quat_src();
+uintptr_t aim_direct_writer_rip();
+uintptr_t aim_direct_known_pc();
+
 // Assign the aim. Angles in degrees, the same convention as ControlRotation. Roll is left alone.
 // Returns false if the target is not resolved, so callers can fall back to the stick loop.
 bool aim_direct_set(double pitch_deg, double yaw_deg);

@@ -272,6 +272,10 @@ static void strip_calib_keys(const char* const* keys, size_t count) {
     else                             DeleteFileA(g_calib_path);
 }
 
+// Defined with load_config's change gate further down; the bridge reuses it so both pollers
+// share one definition of "changed".
+uint64_t cfg_file_stamp(const char* path);
+
 int menu_bridge_tick() {
     if (g_data_dir[0] == 0) return 0;
 
@@ -328,19 +332,37 @@ int menu_bridge_tick() {
         DeleteFileA(g_menu_cmd_path);   // consumed -- this is also the script's "done" signal
     }
 
-    // Mirrors, rewritten only when the source changed. A missing source mirrors as EMPTY --
-    // that is load-bearing for halo_vr_calib.cfg, whose deletion (reset) must reach the menu.
-    // All files are a few KB, and this poll already reads every cfg at the same cadence.
+    // Mirrors, rewritten only when the source changed -- and since the v0.3.1 freeze audit,
+    // "changed" is decided by a STAT, not by reading both sides back every poll. The old loop
+    // did 8 synchronous opens (~130 KB, halo_vr_dev.cfg alone is ~56 KB) every ~2 s on the game
+    // thread: exactly the I/O class whose measured 143.9/108.7 ms contention stalls got
+    // load_config its gate (see the DO-NOT-RE-READ note there). Now an unchanged poll costs
+    // four GetFileAttributesEx calls plus four existence checks, no opens.
+    //
+    // Semantics preserved deliberately:
+    //   * A missing SOURCE mirrors as EMPTY -- load-bearing for halo_vr_calib.cfg, whose
+    //     deletion (reset) must reach the menu. cfg_file_stamp() returns 0 for a missing file,
+    //     which differs from any real write time, so the delete itself is a "change".
+    //   * A missing MIRROR is re-created even when the source is unchanged (the dst existence
+    //     check below) -- someone clearing data\ mid-session must not kill the menu until the
+    //     next cfg edit.
+    //   * The dst read-back+compare is gone: on a source change the mirror is simply rewritten.
     struct { const char* src; const char* dst; } mirrors[] = {
         { g_user_ref_path, g_ref_mirror_path },
         { g_user_cfg_path, g_user_mirror_path },
         { g_dev_cfg_path,  g_dev_mirror_path },
         { g_calib_path,    g_calib_mirror_path },
     };
-    std::string src, dst;
-    for (const auto& m : mirrors) {
+    static uint64_t s_mirror_stamp[_countof(mirrors)] = { ~0ull, ~0ull, ~0ull, ~0ull };
+    std::string src;
+    for (size_t i = 0; i < _countof(mirrors); ++i) {
+        const auto& m = mirrors[i];
+        const uint64_t st = cfg_file_stamp(m.src);
+        const bool dst_missing = (GetFileAttributesA(m.dst) == INVALID_FILE_ATTRIBUTES);
+        if (st == s_mirror_stamp[i] && !dst_missing) continue;
         read_text_file(m.src, src);   // failure leaves src empty, which is exactly what we mirror
-        if (!read_text_file(m.dst, dst) || dst != src) write_text_file(m.dst, src);
+        write_text_file(m.dst, src);
+        s_mirror_stamp[i] = st;
     }
 
     // Status for the menu (armed calibration mode), written on change only.
@@ -443,6 +465,7 @@ static bool parse_viewfix_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "navworldsurf")  == 0) { g_cfg.nav_world_surf  = clampf((float)v, 0.0f, 1000.0f); return true; }
     if (_stricmp(key, "navworlddraw")  == 0) { g_cfg.nav_world_draw  = clampf((float)v, 0.0f, 2048.0f); return true; }
     if (_stricmp(key, "navworldicon")  == 0) { g_cfg.nav_world_icon  = (v != 0.0); return true; }
+    if (_stricmp(key, "navwtree")      == 0) { g_cfg.navw_tree       = (v != 0.0); return true; }
     if (_stricmp(key, "navworldrender")== 0) { g_cfg.nav_world_render= (v != 0.0); return true; }
     if (_stricmp(key, "navhideflat")   == 0) { g_cfg.nav_hide_flat   = (v != 0.0); return true; }
     if (_stricmp(key, "navsizeobj")    == 0) { g_cfg.nav_size_obj    = clampf((float)v, 0.01f, 10.0f); return true; }
@@ -609,6 +632,7 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "perflog")       == 0) g_cfg.perf_log        = (v != 0.0);
         else if (_stricmp(key, "aimtrace")      == 0) g_cfg.aim_trace       = (v != 0.0);
         else if (_stricmp(key, "memscan")       == 0) g_cfg.mem_scan        = (v != 0.0);
+        else if (_stricmp(key, "aimdig")        == 0) g_cfg.aim_dig         = (v != 0.0);
         else if (_stricmp(key, "aimwatch")      == 0) g_cfg.aim_watch       = (v != 0.0);
         else if (_stricmp(key, "aimwatchaddr")  == 0) g_cfg.aim_watch_addr  = (uint64_t)strtoull(val, nullptr, 0);
         else if (_stricmp(key, "memscanvals")   == 0) strncpy_s(g_cfg.mem_scan_vals, val, _TRUNCATE);
@@ -620,6 +644,8 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "aimtau")        == 0) g_cfg.aim_tau_s       = clampf((float)v, 0.0f, 2.0f);
         else if (_stricmp(key, "aimdecel")      == 0) g_cfg.aim_decel       = clampf((float)v, 0.0f, 20000.0f);
         else if (_stricmp(key, "aimdirect")     == 0) g_cfg.aim_direct      = (v != 0.0);
+        else if (_stricmp(key, "aimcache")      == 0) g_cfg.aim_cache       = (v != 0.0);
+        else if (_stricmp(key, "aimchain")      == 0) g_cfg.aim_chain       = (v != 0.0);
         else if (_stricmp(key, "dirgrip")     == 0) g_cfg.rig_dir_grip_deg  = clampf((float)v, -180.0f, 180.0f);
         else if (_stricmp(key, "dirgripyaw")  == 0) g_cfg.rig_dir_grip_yaw  = clampf((float)v, -180.0f, 180.0f);
         else if (_stricmp(key, "dirgriproll") == 0) g_cfg.rig_dir_grip_roll = clampf((float)v, -180.0f, 180.0f);

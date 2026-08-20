@@ -4,6 +4,7 @@
 
 #if HALO_VR_DEV
 
+#include "AimDirect.hpp"   // aim_direct_target/quat_src/writer_rip -- the AIMDIG dig's inputs
 #include "BlamDrive.hpp"   // g_sim_tls_block, the TLS-graph walk's root
 #include "Config.hpp"
 #include "uevr/API.hpp"
@@ -604,6 +605,297 @@ void graph_walk_worker(uintptr_t root, float x, float y) {
     g_graph_walking = false;
 }
 
+// ---- AIMDIG: the AimDirect derivation-chain dig (see MemScan.hpp) ------------------------------
+std::atomic<bool> g_aimdig_walking{false};
+bool              g_prev_aimdig = false;
+
+// Whole-ALLOCATION span, not one region: VirtualQuery forward while AllocationBase matches. Blam
+// reserves large blocks and commits pieces, so RegionSize alone under-reports by design.
+bool aimdig_alloc_span(uintptr_t a, uintptr_t* lo, uintptr_t* hi, DWORD* type) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (a == 0 || VirtualQuery((void*)a, &mbi, sizeof(mbi)) == 0) return false;
+    const uintptr_t base = (uintptr_t)mbi.AllocationBase;
+    if (base == 0) return false;
+    uintptr_t cur = base, end = base;
+    for (int guard = 0; guard < 65536; ++guard) {
+        MEMORY_BASIC_INFORMATION m2{};
+        if (VirtualQuery((void*)cur, &m2, sizeof(m2)) == 0) break;
+        if ((uintptr_t)m2.AllocationBase != base) break;
+        end = (uintptr_t)m2.BaseAddress + m2.RegionSize;
+        cur = end;
+    }
+    *lo = base; *hi = end; *type = mbi.Type;
+    return true;
+}
+
+void aimdig_worker(uintptr_t l2, uintptr_t qsrc, uintptr_t tls_block, uintptr_t wrip,
+                   uintptr_t pc_root) {
+    const uintptr_t exe = (uintptr_t)GetModuleHandleA(nullptr);
+    API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: L2=0x%llX quatsrc=0x%llX simTLS=0x%llX "
+                         "writer=dll+0x%llX",
+                         (unsigned long long)l2, (unsigned long long)qsrc,
+                         (unsigned long long)tls_block,
+                         (unsigned long long)(wrip >= exe ? wrip - exe : 0));
+
+    // 1) Allocation census. obj is the quat-sync's base register (source = obj+0x10).
+    struct Item { const char* name; uintptr_t addr; uintptr_t lo, hi; bool ok; };
+    Item items[3] = { {"L2",     l2,                          0, 0, false},
+                      {"obj",    qsrc != 0 ? qsrc - 0x10 : 0, 0, 0, false},
+                      {"simTLS", tls_block,                   0, 0, false} };
+    for (auto& it : items) {
+        DWORD type = 0;
+        it.ok = aimdig_alloc_span(it.addr, &it.lo, &it.hi, &type);
+        if (it.ok) {
+            API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: %s=0x%llX alloc=[0x%llX..0x%llX) "
+                                 "size=0x%llX type=0x%X offset-in-alloc=0x%llX",
+                                 it.name, (unsigned long long)it.addr,
+                                 (unsigned long long)it.lo, (unsigned long long)it.hi,
+                                 (unsigned long long)(it.hi - it.lo), (unsigned)type,
+                                 (unsigned long long)(it.addr - it.lo));
+        } else {
+            API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: %s=0x%llX - no allocation (null or "
+                                 "unreadable)", it.name, (unsigned long long)it.addr);
+        }
+    }
+    if (items[0].ok) {
+        const bool obj_same = items[1].ok && items[1].lo == items[0].lo;
+        const bool tls_same = items[2].ok && items[2].lo == items[0].lo;
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: sameAlloc(L2,obj)=%d sameAlloc(L2,simTLS)=%d "
+                             "L2-simTLS=%+lld L2-obj=%+lld  <-- offsets stable across launches ONLY "
+                             "if the pair shares an allocation or the allocator is deterministic",
+                             obj_same ? 1 : 0, tls_same ? 1 : 0,
+                             items[2].ok ? (long long)(l2 - items[2].addr) : 0ll,
+                             items[1].ok ? (long long)(l2 - items[1].addr) : 0ll);
+    }
+
+    // 2) STATIC ROOTS: exe data sections holding a pointer into L2's or obj's allocation. A hit
+    // here is the jackpot -- module + RVA -> deref -> offset is a per-launch derivation chain
+    // with no hunt, the BlamDrive shape.
+    if (exe != 0 && items[0].ok) {
+        auto* dos = (const IMAGE_DOS_HEADER*)exe;
+        auto* nt  = (const IMAGE_NT_HEADERS64*)(exe + dos->e_lfanew);
+        auto* sec = IMAGE_FIRST_SECTION(nt);
+        int found = 0;
+        std::vector<uint8_t> chunk(0x40000);
+        for (WORD s = 0; s < nt->FileHeader.NumberOfSections && found < 16; ++s) {
+            const auto& sc = sec[s];
+            if (!(sc.Characteristics & IMAGE_SCN_MEM_READ)) continue;
+            if (sc.Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
+            const uintptr_t beg = exe + sc.VirtualAddress;
+            const uintptr_t sz  = sc.Misc.VirtualSize;
+            for (uintptr_t o = 0; o + 8 <= sz && found < 16; o += chunk.size()) {
+                size_t got = 0;
+                const size_t want = (sz - o < chunk.size()) ? (size_t)(sz - o) : chunk.size();
+                if (!rpm(beg + o, chunk.data(), want, &got) || got < 8) continue;
+                for (size_t i = 0; i + 8 <= got && found < 16; i += 8) {
+                    const uint64_t v = *reinterpret_cast<const uint64_t*>(chunk.data() + i);
+                    for (int t = 0; t < 2; ++t) {
+                        if (!items[t].ok || v < items[t].lo || v >= items[t].hi) continue;
+                        ++found;
+                        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: STATIC ROOT dll+0x%llX -> "
+                                             "0x%llX (into %s's alloc; delta to %s = %+lld)",
+                                             (unsigned long long)(beg + o + i - exe),
+                                             (unsigned long long)v, items[t].name, items[t].name,
+                                             (long long)(v - items[t].addr));
+                        break;
+                    }
+                }
+            }
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: static scan done - %d pointer(s) from exe "
+                             "data sections into the L2/obj allocations%s", found,
+                             found == 0 ? " (no static root: the chain must route through TLS or "
+                                          "another heap structure)" : "");
+    }
+
+    // 3) POINTER-GRAPH WALKS: a chain from a re-derivable root that lands on (or just above) L2.
+    // The window reaches below L2 because a chain normally points at the CONTAINING record, not
+    // at the rotator field itself.
+    // packed4: step 4 bytes and accept 4-ALIGNED pointers when enqueueing. Blam's structures are
+    // 4-byte packed, and rejecting `(v & 7)` is precisely the filter that hid the object table from
+    // this project for days (see the note on read_ptr in BlamAim.cpp). UE-side roots stay on the
+    // 8-aligned fast path; only the Blam-targeted walks pay the 2x cost.
+    auto walk = [&](const char* rootname, uintptr_t root, uintptr_t win_lo, uintptr_t win_hi,
+                    uintptr_t target_addr, const char* target, int max_depth, bool packed4 = false) {
+        if (root == 0 || win_lo == 0) return;
+        const int        MAX_DEPTH = max_depth;
+        constexpr size_t MAX_NODES = 60000;
+        constexpr size_t BLOCK     = 0x800;
+        constexpr double TIME_BUDGET_S = 15.0;
+        std::vector<GraphNode> nodes;
+        std::unordered_set<uintptr_t> seen;
+        nodes.reserve(MAX_NODES); seen.reserve(MAX_NODES);
+        nodes.push_back({root, 0, -1, 0});
+        seen.insert(root);
+        std::vector<uint8_t> buf(BLOCK);
+        int hits = 0; size_t scanned = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (size_t n = 0; n < nodes.size() && hits < 8; ++n) {
+            if ((n & 0x3F) == 0) {
+                const double el = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (el > TIME_BUDGET_S) {
+                    API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: %s->%s walk time budget at node %zu",
+                                         rootname, target, n);
+                    break;
+                }
+            }
+            ++scanned;
+            const GraphNode cur = nodes[n];
+            size_t got = 0;
+            if (!rpm(cur.addr, buf.data(), BLOCK, &got) || got < 8) continue;
+            const size_t step = packed4 ? 4u : 8u;
+            for (size_t o = 0; o + 8 <= got; o += step) {
+                uint64_t p = 0;
+                memcpy(&p, buf.data() + o, 8);   // unaligned-safe: o is only 4-aligned in packed4
+                if ((uintptr_t)p >= win_lo && (uintptr_t)p < win_hi) {
+                    ++hits;
+                    char chain[256]; int co = 0;
+                    int stack[9]; int sn = 0;   // fixed: MAX_DEPTH is a runtime bound now
+                    for (int q = (int)n; q > 0 && sn < (int)(sizeof(stack) / sizeof(stack[0]));
+                         q = nodes[q].parent) stack[sn++] = q;
+                    co += sprintf_s(chain + co, sizeof(chain) - co, "%s", rootname);
+                    for (int si = sn - 1; si >= 0; --si) {
+                        co += sprintf_s(chain + co, sizeof(chain) - co, " +0x%X ->",
+                                        (unsigned)nodes[stack[si]].from_off);
+                    }
+                    co += sprintf_s(chain + co, sizeof(chain) - co, " +0x%llX",
+                                    (unsigned long long)o);
+                    API::get()->log_info("[Halo-CampE-UEVR] AIMDIG HIT(%s): %s = 0x%llX "
+                                         "(delta to %s %+lld)", target, chain,
+                                         (unsigned long long)p, target,
+                                         (long long)((uintptr_t)p - target_addr));
+                }
+                const bool enqueueable = packed4
+                    ? (p > 0x10000 && p < 0x7FFFFFFFFFFFull && (p & 3) == 0)
+                    : tls_ptr_plausible(p);
+                if (cur.depth < MAX_DEPTH && enqueueable
+                    && nodes.size() < MAX_NODES && seen.insert((uintptr_t)p).second) {
+                    nodes.push_back({(uintptr_t)p, cur.depth + 1, (int)n, (int32_t)o});
+                }
+            }
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: %s->%s walk done - %d hit(s), scanned %zu of "
+                             "%zu queued (depth<=%d)", rootname, target, hits, scanned, nodes.size(),
+                             MAX_DEPTH);
+    };
+    const uintptr_t objbase_pre = (qsrc != 0) ? qsrc - 0x10 - 0x1C0 : 0;
+    // THE ROOT THAT MATTERS: the PlayerController is a UObject we can fetch through reflection in
+    // microseconds, every launch, with no scan and no hook. If objbase hangs off it within a few
+    // hops, rung 1 is a pure pointer-deref chain. Searched for objbase FIRST (the object is the
+    // real prize -- L2 follows from it by the two hops already proven) and for L2's window second.
+    if (pc_root != 0 && objbase_pre != 0) {
+        walk("PC", pc_root, objbase_pre - 0x40, objbase_pre + 0x40, objbase_pre, "objbase", 4);
+        walk("PC", pc_root, l2 - 0x8000, l2 + 0x1000, l2, "L2win", 4);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: no PlayerController recorded - skipping the "
+                             "PC-rooted walks (the cheapest possible root)");
+    }
+    walk("simTLS", tls_block, l2 - 0x8000, l2 + 0x1000, l2, "L2win", 3);
+    walk("obj", items[1].addr, l2 - 0x8000, l2 + 0x1000, l2, "L2win", 3);
+
+    // THE BLAMDRIVE QUESTION. BlamDrive already resolves this record dynamically, but only from
+    // the SIM THREAD (gs:[0x58]) -- which is the entire reason the getter hook exists, and why the
+    // hookless tier 2 has to enumerate threads and read TEBs. If the record is reachable from the
+    // PlayerController by pointer derefs, resolution stops depending on the sim thread altogether.
+    // The record is 4-BYTE PACKED (Blam structs are), so the window is tight and the walk must not
+    // assume 8-alignment of the value -- it is a pointer we are matching, not a field.
+    const uintptr_t rec = blam_control_record();
+    if (rec != 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: blam control record = 0x%llX (L2-rec = %+lld) "
+                             "- probing whether the UE side can reach it",
+                             (unsigned long long)rec, (long long)(l2 - rec));
+        if (pc_root != 0) {
+            walk("PC", pc_root, rec - 0x400, rec + 0x400, rec, "blamREC", 4, /*packed4=*/true);
+        }
+        // The named UE<->Blam bridge: /Script/BlamSynchronization.BlamUnitComponent. Reflected, so
+        // a hit here is resolvable in microseconds with no scan at all.
+        if (auto* pawn = API::get()->get_local_pawn(0)) {
+            walk("pawn", (uintptr_t)pawn, rec - 0x400, rec + 0x400, rec, "blamREC", 4, true);
+        }
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: no blam control record resolved "
+                             "(blamangles must be on and have resolved) - skipping the BlamDrive probe");
+    }
+
+    // 4) VTABLE CENSUS -- the candidate RESOLVER, measured.
+    //
+    // The dig's finding: the quat-sync's rcx is objbase+0x1C0, and [objbase+0x1C0]+0x20 IS L2.
+    // So the rotator is two fixed struct hops from an object whose CLASS is identified by its
+    // vtable pointer -- and a vtable address is module-relative, i.e. build-stable and
+    // launch-stable, exactly the anchor the heap address could never be. (RTTI would be nicer
+    // still but UE ships /GR-, so the vtable RVA is the identity.)
+    //
+    // This measures whether a resolver built on it would work: how many live instances carry
+    // that vtable, and how many of those reach the SAME L2 the watch found. One instance whose
+    // chain lands on L2 = the hunt can be demoted to a fallback.
+    const uintptr_t objbase = (qsrc != 0) ? qsrc - 0x10 - 0x1C0 : 0;
+    if (objbase != 0 && !IsBadReadPtr((const void*)objbase, 8)) {
+        const uintptr_t vt = *(const uintptr_t*)objbase;
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: objbase=0x%llX vtable=0x%llX (dll+0x%llX) "
+                             "chain objbase+0x1C0 -> +0x20 = 0x%llX (L2 %s)",
+                             (unsigned long long)objbase, (unsigned long long)vt,
+                             (unsigned long long)(vt >= exe ? vt - exe : 0),
+                             (unsigned long long)(*(const uintptr_t*)(objbase + 0x1C0) + 0x20),
+                             (*(const uintptr_t*)(objbase + 0x1C0) + 0x20) == l2 ? "MATCH" : "differs");
+
+        int instances = 0, chain_ok = 0, chain_hits_l2 = 0;
+        uintptr_t first_hit = 0;
+        MEMORY_BASIC_INFORMATION mbi{};
+        uintptr_t a = 0x10000;
+        std::vector<uint8_t> buf(0x10000);
+        const auto t0 = std::chrono::steady_clock::now();
+        while (a < 0x7FFFFFFF0000ull && VirtualQuery((void*)a, &mbi, sizeof(mbi)) != 0) {
+            const uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+            const bool usable = (mbi.State == MEM_COMMIT) && (mbi.Type == MEM_PRIVATE)
+                && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+                && (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY
+                                   | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+            if (usable) {
+                for (uintptr_t o = 0; o < mbi.RegionSize; o += buf.size()) {
+                    const size_t want = (size_t)((mbi.RegionSize - o < buf.size())
+                                                 ? (mbi.RegionSize - o) : buf.size());
+                    size_t got = 0;
+                    if (!rpm((uintptr_t)mbi.BaseAddress + o, buf.data(), want, &got) || got < 8) continue;
+                    for (size_t i = 0; i + 8 <= got; i += 8) {
+                        if (*reinterpret_cast<const uint64_t*>(buf.data() + i) != (uint64_t)vt) continue;
+                        const uintptr_t cand = (uintptr_t)mbi.BaseAddress + o + i;
+                        ++instances;
+                        if (first_hit == 0) first_hit = cand;
+                        uintptr_t inner = 0; size_t g2 = 0;
+                        if (rpm(cand + 0x1C0, &inner, 8, &g2) && g2 == 8 && inner != 0) {
+                            double rot[2] = {0, 0};
+                            if (rpm(inner + 0x20, rot, sizeof(rot), &g2) && g2 == sizeof(rot)
+                                && std::isfinite(rot[0]) && std::isfinite(rot[1])
+                                && std::fabs(rot[0]) <= 360.0 && std::fabs(rot[1]) <= 360.0) {
+                                ++chain_ok;
+                                if (inner + 0x20 == l2) ++chain_hits_l2;
+                            }
+                        }
+                    }
+                }
+            }
+            if (next <= a) break;
+            a = next;
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > 20.0) {
+                API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: vtable census time budget reached");
+                break;
+            }
+        }
+        const double ms = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count() * 1000.0;
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: vtable census - %d instance(s) of dll+0x%llX, "
+                             "%d with a plausible rotator via +0x1C0 -> +0x20, %d landing on THE L2 "
+                             "(first 0x%llX) in %.0f ms  <-- 1 = the hunt can become a fallback",
+                             instances, (unsigned long long)(vt >= exe ? vt - exe : 0),
+                             chain_ok, chain_hits_l2, (unsigned long long)first_hit, ms);
+    }
+
+    API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: report complete - compare these lines across "
+                         "two launches; whatever stays constant is the anchor");
+    g_aimdig_walking = false;
+}
+
 }  // namespace
 
 void nav_graph_scan(uintptr_t manager_root, float wu_x, float wu_y) {
@@ -614,6 +906,23 @@ void nav_graph_scan(uintptr_t manager_root, float wu_x, float wu_y) {
     }
     if (g_graph_walking.exchange(true)) return;
     std::thread(graph_walk_worker, manager_root, wu_x, wu_y).detach();
+}
+
+void aim_chain_scan_tick() {
+    const bool want = g_cfg.aim_dig;
+    if (want == g_prev_aimdig) return;
+    g_prev_aimdig = want;
+    if (!want) return;
+    const uintptr_t l2 = aim_direct_target();
+    if (l2 == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMDIG: aimdirect is not resolved yet - aim with "
+                             "motion until it reports Ready, then set aimdig=1 again");
+        return;
+    }
+    if (g_aimdig_walking.exchange(true)) return;
+    std::thread(aimdig_worker, l2, aim_direct_quat_src(),
+                g_sim_tls_block.load(std::memory_order_relaxed),
+                aim_direct_writer_rip(), aim_direct_known_pc()).detach();
 }
 
 void nav_tls_scan(float wu_x, float wu_y) {

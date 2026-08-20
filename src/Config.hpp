@@ -985,6 +985,14 @@ struct Config {
     // 0 hosts the whole widget, for comparison.
     bool  nav_world_icon  = true;
 
+    // Image-child collection lane. 1 = verify-then-trust: the first host of each marker class
+    // runs the object-array walk AND the reflection tree walk, serves the array result, and
+    // certifies the tree lane only when both return the identical sequence -- after which that
+    // class hosts via the tree walk (microseconds instead of a ~10 ms array pass, i.e. no
+    // one-frame blip). 0 = array walk everywhere: the live A/B, and the drill that proves the
+    // fallback lane still works.
+    bool  navw_tree       = true;
+
     // Marker position source.
     //   2 (DEFAULT) = the OBJECTIVE'S TRUE WORLD POSITION, via the manager chain
     //       (NavpointInstances element -> +0x20/+0x28 -> FVector3f). Settled and live-verified
@@ -1523,6 +1531,11 @@ struct Config {
     uint64_t aim_watch_addr = 0;
 
     bool  mem_scan        = false;
+
+    // AIMDIG (dev builds): 0 -> 1 with aimdirect resolved runs one off-thread derivation-chain
+    // report -- allocation census for L2/obj/simTLS, exe-data static-root scan, pointer-graph
+    // walks from the sim TLS block and the quat-source object toward L2. See MemScan.hpp.
+    bool  aim_dig         = false;
     char  mem_scan_vals[128] = {0};
 
     // Hit cap for one scan. 0 = the built-in default (512). The old hard-coded 64 made every busy
@@ -1813,6 +1826,20 @@ struct Config {
     // not two independent toggles -- see the note on blam_angles. Either alone is a downgrade, and
     // the combination is what the whole aim solution is.
     bool  aim_direct = true;
+
+    // Persist the located rotator (pc-relative offset + absolute VA, keyed to the exe's build
+    // stamp) in halo_vr_aimcache.txt, so a relaunch on an unchanged binary warm-starts through
+    // the normal hint validation instead of paying the full watch hunt. 0 = neither read nor
+    // write the file; deleting the file is always a safe reset. See AimDirect.cpp.
+    bool  aim_cache = true;
+
+    // RUNG 1: resolve the aim rotator by walking the derivation chain from the PlayerController
+    // (PC+0x318 -> +0x3C8 = the owning object, then +0x1C0 -> +0x20 = the rotator) instead of
+    // hunting it with hardware watchpoints. Microseconds, no thread suspension, and it does not
+    // need the player to move first. Every candidate still passes the same before/after-motion
+    // validation, so a moved struct offset falls back to the watch. 0 = skip the chain (the live
+    // A/B, and how the watch path gets exercised). See AimDirect.cpp.
+    bool  aim_chain = true;
 
     // Direction of the hand->aim mapping in the DIRECT path only, per axis. +1 writes exactly the
     // setpoint the steered loop converges to; -1 mirrors the hand's motion about the calibration
