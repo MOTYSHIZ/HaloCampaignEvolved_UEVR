@@ -1,5 +1,45 @@
 # Troubleshooting
 
+## Install
+
+**Nothing the mod does is happening — no motion controls, and changing settings has no effect.**
+
+Before anything else, confirm the plugin actually loaded. Near the top of `log.txt` you should see
+UEVR load it, followed by the mod's own banner:
+
+```
+[PluginLoader] Loaded ...\UnrealVRMod\HaloCampaignEvolved\plugins\halo_vr.dll
+[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v0.3.3  (halo_vr.dll)
+```
+
+If `Loading plugins...` is followed by **no `Loaded` lines at all**, the plugin is not installed, and
+nothing else in this document applies — a profile can look completely correct in the UEVR frontend
+while `plugins\` is empty. Re-run **Import Config** on the release zip, or copy `halo_vr.dll` into
+`%APPDATA%\UnrealVRMod\HaloCampaignEvolved\plugins\` yourself.
+
+Searching `log.txt` for `Halo-CampE-UEVR` is the quickest form of this check: no matches means the
+mod never ran, whatever else the log says.
+
+Do **not** read anything into `[PluginLoader] Created directory for plugins` — UEVR logs that line on
+every launch, including ones where the plugin loads perfectly. It is not evidence of a missing folder.
+
+**I have the Game Pass / Microsoft Store version.**
+
+No renaming is needed. UEVR names the profile folder after the executable with its extension stripped,
+and this game's executable is `HaloCampaignEvolved.exe` in both the `Win64` and `WinGDK` builds — so
+the profile is `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` either way and the release zip imports to
+the right place unmodified.
+
+The advice you may have seen to swap `Win64` for `WinGDK` is real, but it belongs to games whose Game
+Pass executable has a different *name* (`Foo-Win64-Shipping.exe` versus `Foo-WinGDK-Shipping.exe`).
+This game does not. If you want to check for yourself rather than take our word for it: inject once,
+then look at which folder appears under `%APPDATA%\UnrealVRMod\` and make your profile match it.
+
+One caveat worth stating plainly — the `WinGDK` build is **untested by us**. Everything here was
+measured against `Win64`, and it is a genuinely different binary. The mod is built to detect and
+adapt to that rather than assume, but if something misbehaves only on Game Pass, please report it
+with a log; that is information we cannot get any other way.
+
 ## Injection
 
 **The game hangs when I inject.**
