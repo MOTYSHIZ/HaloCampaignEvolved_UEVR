@@ -53,6 +53,9 @@ constexpr float REST_SPEED_MPS = 0.35f;
 ReloadState s_reload = ReloadState::Idle;
 unsigned short s_prev_buttons = 0;
 
+// When the CURRENT state was entered. Only meaningful outside Idle, and only the watchdog reads it.
+long long s_reload_since = 0;
+
 // How long the synthesised reload press is held. Same reasoning as melee_hold_ms: one poll can
 // land between the game's own input samples and be missed entirely.
 constexpr int RELOAD_HOLD_MS = 90;
@@ -72,6 +75,20 @@ void set_state(ReloadState next, const char* why) {
                              state_name(s_reload), state_name(next), why);
     }
     s_reload = next;
+    // Restart the watchdog on EVERY transition, not only on leaving Idle: MAG_HELD -> MAG_OUT
+    // (fumbling the magazine) is real progress and should buy the player the full window again.
+    s_reload_since = now_ticks();
+}
+
+// Give up on a gesture that cannot be finished, and give the trigger back.
+//
+// Runs from reload_update() BEFORE anything that needs a pose, so a tracking dropout on the off
+// hand -- one of the named ways to get stuck -- cannot also disable the escape hatch.
+bool reload_watchdog_expired() {
+    if (s_reload == ReloadState::Idle) return false;
+    if (!(g_cfg.reload_timeout_s > 0.0f)) return false;
+    const long long limit = ms_to_ticks((int)(g_cfg.reload_timeout_s * 1000.0f));
+    return (now_ticks() - s_reload_since) >= limit;
 }
 
 } // namespace
@@ -160,9 +177,25 @@ bool reload_fire_suppressed() {
 
 // The reload half of the tick. Separate from the melee detector because it is a state machine over
 // BUTTONS and ZONES, not a derivative over velocity -- sharing a function would only tangle them.
-static void reload_update(const Vec3& hand_r, const Vec3& head) {
+//
+// The poses are NULLABLE. Both are needed to make progress, but the watchdog below must run even
+// when they are missing -- losing tracking mid-gesture is one of the ways a player gets stuck, so
+// that is the last moment to stop servicing the state machine.
+static void reload_update(const Vec3* hand_r, const Vec3* head) {
     if (!g_cfg.enabled || !g_cfg.reload_vr) {
         if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, "disabled");
+        return;
+    }
+
+    // WATCHDOG FIRST. Logged unconditionally rather than under reload_log, because the symptom it
+    // explains -- the fire trigger going dead -- is one a player will otherwise report as the mod
+    // being broken, and a line they already have beats a setting they have to be told to enable.
+    if (reload_watchdog_expired()) {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] RELOAD TIMED OUT after %.1fs in %s -- gesture never completed, "
+            "returning to IDLE and releasing the fire trigger. (reloadtimeout=0 disables this.)",
+            (double)g_cfg.reload_timeout_s, state_name(s_reload));
+        set_state(ReloadState::Idle, "timed out");
         return;
     }
 
@@ -197,11 +230,11 @@ static void reload_update(const Vec3& hand_r, const Vec3& head) {
             set_state(ReloadState::Idle, "cancelled, mag re-seated");
             break;
         }
-        if (!have_left) break;
+        if (!have_left || head == nullptr) break;
         // Belt zone: below the head, and near the body's vertical axis. Y is up in this space --
         // the same convention quat_forward assumes for the VR frame.
-        const float drop = head.y - hand_l.y;
-        const float dx = hand_l.x - head.x, dz = hand_l.z - head.z;
+        const float drop = head->y - hand_l.y;
+        const float dx = hand_l.x - head->x, dz = hand_l.z - head->z;
         const float horiz = std::sqrt(dx * dx + dz * dz);
         if (grip_held && drop >= g_cfg.reload_belt_drop && horiz <= g_cfg.reload_belt_radius) {
             set_state(ReloadState::MagHeld, "grabbed from belt");
@@ -214,10 +247,10 @@ static void reload_update(const Vec3& hand_r, const Vec3& head) {
             set_state(ReloadState::MagOut, "grip released, dropped it");
             break;
         }
-        if (!have_left) break;
+        if (!have_left || hand_r == nullptr) break;
         // Hand to hand, not hand to weapon: the gun is a separate actor whose grip point moves
         // per weapon, while both controllers are always known.
-        const float ddx = hand_l.x - hand_r.x, ddy = hand_l.y - hand_r.y, ddz = hand_l.z - hand_r.z;
+        const float ddx = hand_l.x - hand_r->x, ddy = hand_l.y - hand_r->y, ddz = hand_l.z - hand_r->z;
         const float join = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
         if (join <= g_cfg.reload_join_dist) {
             g_reload_hold_until.store(now_ticks() + ms_to_ticks(RELOAD_HOLD_MS),
@@ -229,13 +262,10 @@ static void reload_update(const Vec3& hand_r, const Vec3& head) {
     }
 }
 
-void gesture_reset() {
+// Melee-only. Split out so that turning melee off does not also tear down the reload machine --
+// the two features share a tick for pose-reuse reasons, not because they are one feature.
+static void melee_reset() {
     g_melee_hold_until.store(0, std::memory_order_relaxed);
-    // Releasing the reload state is not optional: leaving it in MAG_OUT would keep the trigger
-    // suppressed with no way for the player to notice why. Same rule as the arm hide.
-    g_reload_hold_until.store(0, std::memory_order_relaxed);
-    if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, "gesture reset");
-    s_prev_buttons = 0;
     s_have_prev = false;
     s_vel = Vec3{0.0f, 0.0f, 0.0f};
     s_ext = 0.0f;
@@ -245,22 +275,29 @@ void gesture_reset() {
     s_peak_reach = 0.0f;
 }
 
+void gesture_reset() {
+    melee_reset();
+    // Releasing the reload state is not optional: leaving it in MAG_OUT would keep the trigger
+    // suppressed with no way for the player to notice why. Same rule as the arm hide.
+    g_reload_hold_until.store(0, std::memory_order_relaxed);
+    if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, "gesture reset");
+    s_prev_buttons = 0;
+}
+
 void gesture_update(float dt) {
-    // ---- GATES. Every one of these is a state the player did not ask to melee in.
+    // ---- GLOBAL STAND-DOWN. States the player did not ask to gesture in AT ALL, so both features
+    // go down together and the reload machine is reset (which releases any fire suppression).
     //
     // stick mode covers vehicles, cutscenes and death; calibration means the player is holding
     // the controller still against a frozen reticle and any motion is measurement, not intent.
-    if (!g_cfg.enabled || !g_cfg.melee_swing ||
+    //
+    // melee_swing is deliberately NOT in this list any more. It used to be, which meant turning
+    // melee off silently disabled VR reload and re-reset its state every tick -- two features
+    // share this function only because they share two pose reads.
+    if (!g_cfg.enabled ||
         g_aim_calibrating.load(std::memory_order_relaxed) ||
         g_stick_mode_active.load(std::memory_order_relaxed)) {
         gesture_reset();
-        return;
-    }
-
-    // A stalled or absurd dt turns a stationary hand into a teleport. Drop the history rather
-    // than differentiate across the gap -- the next tick re-seeds cleanly.
-    if (!(dt > 0.0f) || dt > 0.25f) {
-        s_have_prev = false;
         return;
     }
 
@@ -271,8 +308,29 @@ void gesture_update(float dt) {
     // Grip pose, not aim pose. get_aim_pose() is documented in Plugin.cpp as producing
     // teleport-scale travel readings, which is exactly the signal this must not confuse for a
     // strike.
+    //
+    // BOTH poses are fetched before either feature runs, and a failure is no longer an early
+    // return: reload_update() has to be called even when they are missing, because losing tracking
+    // mid-gesture is one of the ways MAG_OUT used to latch and swallow the fire trigger for good.
     Vec3 pos{}; Quat rot{};
-    if (!get_pose(ridx, &pos, &rot, /*use_aim=*/false)) {
+    Vec3 hpos{}; Quat hrot{};
+    const bool have_hand = get_pose(ridx, &pos, &rot, /*use_aim=*/false);
+    const bool have_head = get_pose(API::VR::get_hmd_index(), &hpos, &hrot, /*use_aim=*/false);
+    const bool poses_ok  = have_hand && have_head;
+
+    // Reload runs off the same two poses the melee detector uses, so it costs no extra reads. It is
+    // driven from here rather than from its own tick entry for exactly that reason.
+    reload_update(poses_ok ? &pos : nullptr, poses_ok ? &hpos : nullptr);
+
+    // ---- MELEE ONLY from here down.
+    if (!g_cfg.melee_swing) {
+        melee_reset();
+        return;
+    }
+
+    // A stalled or absurd dt turns a stationary hand into a teleport. Drop the history rather
+    // than differentiate across the gap -- the next tick re-seeds cleanly.
+    if (!(dt > 0.0f) || dt > 0.25f) {
         s_have_prev = false;
         return;
     }
@@ -280,15 +338,10 @@ void gesture_update(float dt) {
     // HEAD-RELATIVE, and the head pose is REQUIRED -- no fail-open here. Without it there is no
     // extension measurement at all, and the previous version's fallback (assume the gate passes)
     // is precisely how it ended up firing on fast aiming.
-    Vec3 hpos{}; Quat hrot{};
-    if (!get_pose(API::VR::get_hmd_index(), &hpos, &hrot, /*use_aim=*/false)) {
+    if (!poses_ok) {
         s_have_prev = false;
         return;
     }
-
-    // Reload runs off the same two poses the melee detector just fetched, so it costs no extra
-    // reads. It is driven from here rather than from its own tick entry for exactly that reason.
-    reload_update(pos, hpos);
 
     // Subtracting the head removes walking, strafing and vehicle motion before any derivative is
     // taken: those move hand and head together, so they vanish from `rel` entirely.

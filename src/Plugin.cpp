@@ -5764,6 +5764,18 @@ void update() {
                                                      : "restored -- our hide released",
                                          (int)g_on_foot_unarmed, (int)g_cfg.hide_arms, (int)g_cfg.show_arms);
                 }
+                // KEEP THE POSE ALIVE BEFORE HIDING IT. UE stops evaluating a hidden mesh's
+                // animation by default, and the weapon rides this mesh's PrimaryWeapon socket --
+                // so without this the gun stops animating the moment the arms go, which reads as
+                // "the weapon has no recoil". Set BEFORE the hide so the mesh is never briefly
+                // invisible under the default tick option.
+                //
+                // Arms.cpp has always done this on the armhide path; this one is on by DEFAULT
+                // (hide_arms, and showarms=0) and never did, which is why the symptom shipped.
+                if (want_hidden && g_cfg.arm_keep_pose) {
+                    rig_set_always_tick_pose(rig_v);
+                    if (auto* sh = shield_shell()) rig_set_always_tick_pose(sh);
+                }
                 rig_set_visible(rig_v, !want_hidden);
                 if (auto* sh = shield_shell()) rig_set_visible(sh, !want_hidden);
 

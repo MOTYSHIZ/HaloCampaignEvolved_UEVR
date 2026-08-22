@@ -185,6 +185,17 @@ bool rig_set_scale(uevr::API::UObject* rig, double s);
 // while the player is unarmed -- see the hide-arms block in Plugin.cpp for when and why.
 bool rig_set_visible(uevr::API::UObject* comp, bool visible);
 
+// KEEP A HIDDEN SKELETAL MESH ANIMATING.
+//
+// EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones = 0. UE defaults to
+// OnlyTickPoseWhenRendered, so anything hidden with rig_set_visible() stops evaluating its pose --
+// and the weapon hangs off this mesh's PrimaryWeapon socket, so a frozen pose is a frozen socket:
+// no recoil, and the gun sits wherever the animation happened to stop.
+//
+// THE CANONICAL COPY. Arms.cpp used to carry its own; a second one is how the two hide paths came
+// to disagree, with only the opt-in path keeping the pose alive.
+bool rig_set_always_tick_pose(uevr::API::UObject* comp);
+
 // World-space equivalents. See the note in Rig.cpp: the relative ROTATION write does not take on
 // this game's first-person mesh, so rigmode 3 drives the world transform instead of composing a
 // relative one against a parent whose result the engine then discards.

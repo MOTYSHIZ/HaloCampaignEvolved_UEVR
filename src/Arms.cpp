@@ -214,21 +214,10 @@ void call_set_visibility(API::UObject* comp, bool visible) {
     comp->call_function(L"SetVisibility", p);
 }
 
-// KEEP THE POSE ALIVE ON A HIDDEN MESH.
-//
-// EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones = 0. The UE default is
-// OnlyTickPoseWhenRendered, so hiding a skeletal mesh can stop its animation evaluating
-// altogether -- and Rig.cpp derives the weapon position from THIS mesh's PrimaryWeapon socket.
-// A frozen pose therefore freezes the socket and the gun drifts to wherever the pose stopped,
-// intermittently, depending on when the hide lands relative to the rig resolving.
-//
-// Applied to skeletal meshes only: the static armour pieces have no pose to tick.
-void call_always_tick_pose(API::UObject* comp) {
-    if (comp == nullptr) return;
-    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-    p[0] = 0;   // AlwaysTickPoseAndRefreshBones
-    comp->call_function(L"SetVisibilityBasedAnimTickOption", p);
-}
+// The pose-keeping call used to be duplicated here. It now lives in Rig.cpp as
+// rig_set_always_tick_pose() -- see Rig.hpp. The duplicate is why the two hide paths diverged:
+// this one kept hidden arms animating and the default one (Plugin.cpp's hide_arms / showarms=0)
+// did not, so the weapon lost its recoil for everyone who never enabled armhide.
 
 // SetHiddenInGame(bool bNewHidden, bool bPropagateToChildren). Same propagation reasoning.
 void call_set_hidden(API::UObject* comp, bool hidden) {
@@ -279,7 +268,7 @@ int sweep_fp_meshes(bool hide) {
             // it must be set at all; doing it first means the mesh is never briefly hidden with
             // the default tick option in force.
             if (hide && g_cfg.arm_keep_pose && cn.find(L"SkeletalMesh") != std::wstring::npos) {
-                call_always_tick_pose(comp);
+                rig_set_always_tick_pose(comp);
             }
             switch (mode) {
                 case 1:  call_set_visibility(comp, !hide);          break;

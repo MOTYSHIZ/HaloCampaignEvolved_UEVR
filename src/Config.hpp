@@ -2450,6 +2450,24 @@ struct Config {
     // loss on the off hand -- and the only exit there is enabled=0 in the file.
     bool  reload_cancel   = false;
 
+    // WATCHDOG on an unfinishable gesture. Seconds in MAG_OUT/MAG_HELD before the machine gives up
+    // and returns to Idle. 0 disables it.
+    //
+    // This closes the hole the comment above names. A tap that never becomes a completed reload --
+    // awkward seating, tracking loss on the off hand, or simply changing your mind mid-firefight --
+    // used to latch MAG_OUT forever, and with reload_suppress_fire on that means bRightTrigger is
+    // zeroed on every poll for the rest of the session. Reported from a live session as "I wasn't
+    // able to shoot after a bit", with the tell that a MOUSE click still fired: mouse input never
+    // passes through our XInput hook, so it is the one path the suppression cannot reach.
+    //
+    // Deliberately NOT a cancel-and-reload: it restores the trigger and says so in the log, and the
+    // player reloads again if they still want to. Firing a reload the player did not ask for, in a
+    // firefight, seconds after they stopped gesturing, would be its own bug.
+    //
+    // 6 s is several times the ~1-2 s a completed gesture takes, so it cannot cut short a reload
+    // that is merely slow.
+    float reload_timeout_s = 6.0f;
+
     // The left grip belongs to US, not to the game.
     //
     // It is the VR interaction button -- magazine grabs now, weapon holding later -- and a button

@@ -564,6 +564,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadjoin")     == 0) { g_cfg.reload_join_dist = clampf((float)v, 0.05f, 1.0f); return true; }
     if (_stricmp(key, "reloadnofire")   == 0) { g_cfg.reload_suppress_fire = (v != 0.0); return true; }
     if (_stricmp(key, "reloadcancel")   == 0) { g_cfg.reload_cancel    = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadtimeout")  == 0) { g_cfg.reload_timeout_s = clampf((float)v, 0.0f, 120.0f); return true; }
     if (_stricmp(key, "grenadefrom")   == 0) { g_cfg.grenade_from    = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "grenadeaction") == 0) { g_cfg.grenade_action  = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "gripexclusive") == 0) { g_cfg.grip_exclusive   = (v != 0.0); return true; }

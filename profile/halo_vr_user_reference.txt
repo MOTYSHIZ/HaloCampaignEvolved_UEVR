@@ -332,10 +332,22 @@
 # and a double-tap silently skipped the whole gesture.
 #
 # The involuntary cases are still covered without it: kill switch, vehicles,
-# cutscenes, death and calibration all reset and release the trigger. What is
-# NOT covered is a gesture you cannot physically complete -- if that happens,
-# enabled=0 is the way out.
+# cutscenes, death and calibration all reset and release the trigger. A gesture
+# you cannot physically complete is covered by reloadtimeout below.
 #reloadcancel=0
+
+# Seconds before an unfinished reload gives up, returns to idle and gives the
+# fire trigger back. 0 disables the watchdog.
+#
+# This is the safety net for a gesture that cannot be completed -- an awkward
+# seating position, tracking loss on your off hand, or simply changing your mind
+# mid-firefight. Without it the trigger stays swallowed until you enter a
+# vehicle or restart, which reads as "I can't shoot any more".
+#
+# It does NOT reload for you; it just gives the trigger back and says so in the
+# log. 6 s is several times a completed gesture, so it will not cut a slow
+# reload short.
+#reloadtimeout=6.0
 
 # Log every state transition -- the tuning instrument for the belt zone and
 # join distance.

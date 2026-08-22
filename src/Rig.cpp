@@ -572,6 +572,17 @@ bool rig_set_visible(API::UObject* comp, bool visible) {
     return true;
 }
 
+// SetVisibilityBasedAnimTickOption(TEnumAsByte<EVisibilityBasedAnimTickOption>). See Rig.hpp for
+// why every hide path has to call this. Harmless on a static mesh -- the call simply does not
+// resolve there -- so callers need not classify the component first.
+bool rig_set_always_tick_pose(API::UObject* comp) {
+    if (comp == nullptr) return false;
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    params[0] = 0;                     // AlwaysTickPoseAndRefreshBones
+    comp->call_function(L"SetVisibilityBasedAnimTickOption", params);
+    return true;
+}
+
 // WORLD-space writes. Same call convention as their relative siblings, different target frame.
 //
 // These exist because the RELATIVE rotation write does not survive on this game's first-person
