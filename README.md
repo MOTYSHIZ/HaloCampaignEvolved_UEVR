@@ -48,9 +48,12 @@ appropriately.
 - A VR headset set to the **OpenXR** runtime — the shipped config selects this for you. OpenVR
   mis-assigns controller bindings; see [Runtime](#runtime-use-openxr) if yours ends up on it.
 - A VR controller pair. Developed against Quest touch controllers over Steam Link, and used on
-  several other setups since. If your controllers are not being seen at all, your `log.txt` will
-  say `using_controllers=0` — that is UEVR never binding them, which happens before this mod gets
-  a say, so start there rather than with mod settings.
+  several other setups since.
+
+> **If motion controls do nothing, press a trigger or a face button once, in game.** UEVR withholds
+> real controller poses until it has seen controller *input* — waving a controller around is not
+> enough to start it. One click is often the whole fix, and it costs nothing to try before anything
+> else on this page.
 
 ## UEVR version
 

@@ -125,7 +125,7 @@
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.3.2"
+#define HALO_VR_VERSION "0.3.3"
 
 using namespace uevr;
 
@@ -4969,6 +4969,40 @@ void update() {
     // an approximate position rather than to nothing.
     const Vec3 rigpos = have_grip ? gpos : cpos;
 
+    // IS THERE A POSITION AT ALL? Rotation and position can arrive independently: a runtime may
+    // report a fully valid orientation while never populating translation, and UEVR passes that
+    // through unchanged. Aim only needs the ROTATION -- it is a direction -- so a position-less
+    // controller can still drive aim perfectly. What it cannot do is place the rig.
+    //
+    // Field evidence (2026-08-18, PSVR2 over ALVR): controller position read exactly (0,0,0) for an
+    // entire session while rotation swung the full range and the aim loop tracked it to err<0.3 deg.
+    // Because `hand` is measured from the standing origin, a zero position resolves to a phantom
+    // hand ~1.5 m away, so the weapon was placed off in space and every rig number in the log was
+    // nonsense. From the player's seat that is indistinguishable from "motion controls don't work",
+    // even though the aim half was working the whole time.
+    //
+    // EXACT zero on all three axes is the signature. Real tracking does not land on the origin
+    // bit-exactly, and requiring a RUN of them means a single odd frame cannot trip this.
+    static uint32_t s_zero_pos_run = 0;
+    static bool     s_pos_dead_logged = false;
+    const bool pos_is_zero = (rigpos.x == 0.0f && rigpos.y == 0.0f && rigpos.z == 0.0f);
+    if (pos_is_zero) { if (s_zero_pos_run < 100000u) ++s_zero_pos_run; }
+    else             { s_zero_pos_run = 0; s_pos_dead_logged = false; }
+
+    // ~2 s at tick rate. Long enough that a transient cannot reach it, short enough to be reported
+    // before the player has finished wondering why the gun is not in their hand.
+    const bool position_dead = (s_zero_pos_run > 120u);
+    if (position_dead && !s_pos_dead_logged) {
+        s_pos_dead_logged = true;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] CONTROLLER POSITION MISSING: the runtime is giving rotation but no "
+            "translation for the aim hand (exact 0,0,0 for %u ticks). Motion AIM still works -- it "
+            "only needs direction -- so the mod keeps driving it, but the weapon rig cannot be "
+            "placed from a position that does not exist, and is held at its neutral instead of "
+            "being flung ~1.5 m away. If your hands are tracked in other VR apps, this is your "
+            "runtime not publishing controller position to this one.", s_zero_pos_run);
+    }
+
     double aim_pitch = 0.0, aim_yaw = 0.0;
     void* pc = nullptr;
     if (!read_control_rotation(&aim_pitch, &aim_yaw, &pc)) {
@@ -6268,14 +6302,19 @@ void update() {
                     hand = Vec3{rigpos.x - so.x, rigpos.y - so.y, rigpos.z - so.z};
                 }
 
-                if (!g_rig_neutral_valid.load() && g_have_ref.load()) {
+                // Never capture a neutral from a position that does not exist -- it would bake the
+                // phantom offset in permanently, and survive the runtime recovering.
+                if (!g_rig_neutral_valid.load() && g_have_ref.load() && !position_dead) {
                     g_rig_neutral_x = hand.x; g_rig_neutral_y = hand.y; g_rig_neutral_z = hand.z;
                     g_rig_neutral_valid = true;
                 }
 
-                if (!g_rig_neutral_valid.load()) {
-                    // No trustworthy neutral yet: hold the rig at origin rather than fling it to
-                    // the clamp. A wrong offset is far more visible than no offset.
+                if (!g_rig_neutral_valid.load() || position_dead) {
+                    // No trustworthy neutral yet, or no position to measure one from: hold the rig
+                    // at origin rather than fling it to the clamp. A wrong offset is far more
+                    // visible than no offset -- and with position missing, EVERY offset is wrong,
+                    // because `hand` then resolves to minus the standing origin. Aim is unaffected:
+                    // it comes from the rotation, which is still live.
                     for_each_rig([&](API::UObject* r) { rig_set_location(r, 0.0, 0.0, 0.0); });
                 } else {
                 // ---- Does our write SURVIVE THE FRAME?

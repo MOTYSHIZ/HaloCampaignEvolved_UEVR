@@ -38,6 +38,29 @@ published in the release notes; if it matches, add an exclusion or build from so
 
 ## In VR
 
+**Motion controls never worked at all — the gun ignores my hand from the moment I load in.**
+
+**Try this first: press a trigger or a face button once, in game.** UEVR withholds real controller
+poses until it has observed controller *input*; waving a controller is not enough to start it. This
+is the single most common cause and it costs nothing to rule out.
+
+If that doesn't do it, `log.txt` can tell you whether poses are arriving at all. Look for a line like:
+
+```
+rig: travel=0.000m rigOff=(0.0,0.0,0.0)cm ...
+```
+
+`travel` is how far your controller moved during that window. **Wave your hands about, then check
+the most recent few:** varying, non-zero numbers mean poses are live and the problem is elsewhere
+(calibration, or the mod standing down — see the vehicle and stick-mode notes below). `0.000`
+throughout, or the *same* number repeated exactly, means the poses are frozen and nothing the mod
+does downstream can help.
+
+One thing **not** to read too much into: a `using_controllers=0` line. On the OpenXR runtime that
+flag is only refreshed when a UEVR *action* fires, so it can read 0 on a perfectly healthy setup
+where nothing has pressed anything yet. It is not proof your controllers are unbound, and it is not
+worth reinstalling over. The `travel` number above is the reliable signal.
+
 **My hands suddenly freeze (3DoF) but buttons still work — pressing something fixes it.**
 Two known causes:
 1. UEVR's motion-controls inactivity timeout. The mod raises it to its maximum (100 s) at startup,
