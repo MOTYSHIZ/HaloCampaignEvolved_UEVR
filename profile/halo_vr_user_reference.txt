@@ -169,6 +169,322 @@
 # How far the trigger must be squeezed to toggle the scope.
 #scopethresh=0.55
 
+
+# ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
+# Contributed by blindcowboy24 (PR #7). Everything here is OFF or neutral by default -- copy a
+# line into halo_vr_user.cfg and uncomment it to turn a feature on.
+
+# ---------------------------------------------------------------- MELEE BY SWING
+# Swing the aim hand and the game melees. Detection runs on the game thread and
+# publishes a deadline; the XInput hook only compares a clock against it, so the
+# controller poll path stays free of any real work.
+#
+# WHY SPEED AND NOT ROTATION. The false positive to beat is a fast aim turn: the
+# hand moves quickly but you meant to look, not hit. A turn is mostly rotation
+# about the wrist with little travel; a strike is mostly travel. So the trigger
+# is metres per second of controller movement, not degrees per second.
+#
+# Never fires in stick mode (vehicles, cutscenes, death) or during calibration.
+#meleeswing=1
+
+# Controller speed that counts as a strike, m/s. Conservative on purpose: a
+# missed melee costs one swing, a spurious one shoves at the wrong moment.
+#meleespeed=1.50
+
+# How much of the motion must lie along your view direction, 0..1, measured as
+# |dot(velocity, hmd_forward)| so a backhand counts too. 0 disables the check.
+# This is what rejects the sideways sweep of a turn.
+#meleefwd=0.0
+
+# Rate the arm must be EXTENDING at, m/s -- d/dt of head-to-hand distance.
+# THIS is the discriminator. A thrust grows it fast; an aim turn orbits the body
+# at constant radius so it reads ~0; walking moves head and hand together, ~0.
+#meleeext=1.50
+
+# How far the hand must be from the head when it fires, metres. Stops a fast
+# twitch near the chest counting as a punch -- the arm has to actually be out.
+# Relaxed hand ~0.30-0.40, committed thrust past 0.60.
+#meleereach=0.30
+
+# Sanity ceiling on relative speed, m/s. The first live session logged a 26 m/s
+# "swing", which no arm produces -- a tracking discontinuity. Above this the
+# velocity history is dropped rather than fired on, because the next sample
+# after a teleport is derived from the same bad position.
+#meleemaxspeed=12.0
+# Sanity ceiling on reach, metres. After a 97 m/s spike, head-to-hand distance
+# read 2.45-2.51 m for several samples -- the velocity guard caught the jump but
+# the POSITION stayed wrong. No human arm is this long.
+#meleemaxreach=1.20
+
+# Velocity smoothing time constant, ms. Long enough to kill tracking noise,
+# short enough not to blunt the leading edge of a real strike.
+#meleetau=20
+
+# Refractory period after a melee fires, ms. Halo's melee animation is not
+# interruptible, so one swing crossing the threshold on several consecutive
+# ticks must still produce exactly one press.
+#meleecooldown=500
+
+# How long the synthetic button is held, ms. A single poll can land between the
+# game's own input samples and be missed, so the press spans several.
+#meleehold=80
+
+# Pad mask ORed in to melee. 0x0080 = RTHUMB (right stick click), this profile's
+# melee. Confirm against your own mapping with mapbtnlog=1 before changing it.
+#meleemask=0x0080
+
+# Prints every swing's peak speed and whether it fired -- the tuning instrument
+# for meleespeed and meleefwd. Set it, swing a dozen times, read the log, turn
+# it off.
+
+# ---------------------------------------------------------------- TWO-ARM RECON
+# Dumps the first-person skeleton -- every bone with its parent -- and reports
+# which bone functions this build actually exposes. Read-only: nothing is
+# written to the game, no bone is hidden, no transform is touched.
+#
+# Fires on the RISING EDGE (0 -> 1), so leaving it set does not re-dump every
+# time the config reloads. To dump again, set it back to 0, wait ~2 s, set 1.
+#
+# Set it while standing in NORMAL GAMEPLAY WITH A WEAPON DRAWN. The rig does not
+# exist in menus, in vehicles, during cutscenes, or for about 5 seconds after a
+# level load, and the dump will just report "no rig component".
+#
+# This is the instrument that decides whether independent left/right arms are
+# buildable. Results go to the UEVR log as BONEDUMP lines.
+
+# ---------------------------------------------------------------- LEFT ARM HIDE
+# Hides the left arm chain, so an independently tracked left hand can replace
+# it. Fully reversible -- set back to 0 and the arm comes straight back.
+#
+# The bone dump established this is possible: HideBoneByName and
+# UnHideBoneByName are both PRESENT, and Shoulder_L is the single root of all
+# 34 left bones (hiding a bone hides its children). Weapon_M hangs off Chest_M
+# rather than either wrist, so the gun is NOT dragged along with the arm.
+#
+# Right now this exists as PROOF, not as a feature: present in the reflection
+# table is not the same as working on this mesh. Rig.cpp documents a relative
+# rotation write that is present and silently does nothing, which is the whole
+# reason rigmode 3 exists. Verify before anything gets built on top.
+#armhide=0
+
+# Which bone to hide:
+#   Shoulder_L  the entire arm
+#   Elbow_L     forearm and hand, upper arm stays
+#   Wrist_L     just the hand
+#armhidebone=Shoulder_L
+
+# Apply to every first-person skeletal mesh, not just the arms. ON by default:
+# the dump found THREE carrying this pose -- BPC_FP_SkeletalMesh_C,
+# BPC_FP_TranslucentSkeletalMesh_C (the shield shell, which runs its own
+# instance of the same anim blueprint) and BPC_FP_ShadowSkeletalMesh_C. Hiding
+# only the arms leaves a floating shield limb and an arm-shaped shadow.
+# Set 0 only to isolate which mesh is which while testing.
+#armhideall=1
+
+# ---------------------------------------------------------------- VR RELOAD
+# Two-stage reload. Press reload to DROP the mag -- the game is NOT told to
+# reload yet -- then physically fetch a fresh one from your belt and bring it
+# to the gun. The game's reload fires at the moment the mag goes in.
+#
+# Halo's reload is one atomic animation with no magazine object to manipulate,
+# so the physicality cannot come from the game. It comes from step one taking
+# the gun away: while the mag is out the trigger is dead and you have to do
+# something about it.
+#
+#   IDLE     -- press reload      --> MAG_OUT   (fire suppressed)
+#   MAG_OUT  -- left hand at belt + grip --> MAG_HELD
+#   MAG_OUT  -- press reload again --> IDLE     (cancel, mag re-seats)
+#   MAG_HELD -- release grip      --> MAG_OUT   (dropped it)
+#   MAG_HELD -- hand to the gun   --> reload fires, back to IDLE
+#
+# No timeout: it holds indefinitely. But it always releases on the kill switch,
+# in vehicles/cutscenes/death, and during calibration.
+#reloadvr=0
+
+# UNCONFIRMED MASKS -- verify both with mapbtnlog=1 before trusting them. This
+# profile's mapping is not obvious (mapfrom=0x2000 -> mapto=0x0100,
+# mapmenuback=0x4000), and a wrong mask means reload never starts or steals a
+# button you needed.
+# 0x4000 = X, this game's reload.
+#reloadmask=0x4000
+# Left grip -- what you hold to keep hold of the magazine.
+#reloadgrip=0x0100
+
+# BELT ZONE, measured from your head (the only body reference VR gives us).
+# How far BELOW head height the hand must be, metres.
+#reloadbeltdrop=0.55
+# ...and how close to your body's vertical axis, metres. A hand dropped at your
+# side counts; one flung out sideways does not.
+#reloadbeltrad=0.50
+
+# How close the left hand must come to the aim hand to seat the mag, metres.
+# Hand-to-hand, not hand-to-weapon: the gun is a separate actor whose grip
+# point moves per weapon, while both controllers are always known.
+#reloadjoin=0.30
+
+# Swallow the trigger while the mag is out. This is what gives it stakes --
+# 0 makes the whole gesture cosmetic.
+#reloadnofire=1
+
+# Pressing reload again while the mag is out re-seats it and aborts. OFF,
+# because that is not how VR reloading works -- Onward, Pavlov, H3VR: once the
+# mag is out you deal with it. A cancel is a menu concept, not a physical one,
+# and a double-tap silently skipped the whole gesture.
+#
+# The involuntary cases are still covered without it: kill switch, vehicles,
+# cutscenes, death and calibration all reset and release the trigger. What is
+# NOT covered is a gesture you cannot physically complete -- if that happens,
+# enabled=0 is the way out.
+#reloadcancel=0
+
+# Log every state transition -- the tuning instrument for the belt zone and
+# join distance.
+
+# HOW to hide. HideBoneByName reported success on all three meshes and changed
+# nothing visible, so per-bone hiding may simply be inert on this build -- the
+# same silent no-op Rig.cpp records for the relative rotation write.
+#
+#   0 = HideBoneByName        per-bone. Keeps the right arm. What we want if it works.
+#   1 = SetVisibility(false)  whole component. Takes BOTH arms.
+#   2 = SetHiddenInGame(true) whole component, different path to the same thing.
+#
+# Modes 1 and 2 are blunt, but they are the route to genuinely independent
+# hands: SetBoneTransformByName is ABSENT on this build, so the game's arms
+# cannot be posed at all. The only way to two free arms is to remove the
+# game's pair and attach our own to the controllers. Both pass
+# bPropagateToChildren=false, so the weapon actor stays where it is.
+#armhidemode=2
+
+# ---------------------------------------------------------------- OUR OWN HANDS
+# With the game's first-person meshes hidden there is nothing on screen but a
+# floating gun. These are the replacement: spawned meshes attached to the motion
+# controllers through UObjectHook, the same mechanism the weapon rig uses.
+#
+# Spawned rather than borrowed because the bone dump closed every other route --
+# SetBoneTransformByName is ABSENT on this build, so the game's own hand bones
+# cannot be posed at all.
+#
+# The default mesh is an engine primitive. It is a placeholder and looks like
+# one: Halo ships no standalone hand asset we can borrow. Point handmesh at
+# something better if you find one.
+#handsvr=0
+
+# Object path to a StaticMesh, e.g.
+#   handmesh=StaticMesh /Engine/BasicShapes/Sphere.Sphere
+# Empty falls back to an engine sphere.
+#handmesh=
+
+# Uniform scale. The engine sphere is 100 cm radius, hence the small number.
+#handscale=0.06
+
+# Offset from the controller, centimetres, in the controller's own frame. The
+# tracked point sits behind and below a real palm, so a mesh at the raw pose
+# floats off the wrist.
+#handoffx=0.0
+#handoffy=0.0
+#handoffz=0.0
+
+# Also show a mesh on the AIM hand. Off by default -- the weapon already tracks
+# that controller, so a second object there mostly intersects the gun.
+#handshowaim=0
+
+# ---------------------------------------------------------------- THE MAGAZINE
+# Visible only while the reload state machine has one in your hand. Hidden
+# rather than destroyed between reloads: spawning a component per reload would
+# churn objects on the game thread for nothing.
+#magshow=1
+#magmesh=
+#magscale=0.04
+#magoffx=0.0
+#magoffy=0.0
+#magoffz=0.0
+
+# How long to hold the reload button before it stops being a reload and becomes
+# the game's own action, milliseconds.
+#
+# Both buttons this feature borrows already have jobs. The reload button is ALSO
+# Interact and Enter Vehicle -- swallowing it unconditionally cost a whole
+# chapter of vehicles -- and the left grip is Throw Grenade, so every magazine
+# grab was lobbing a frag.
+#
+#   TAP  the reload button -> VR reload starts, the game never sees it
+#   HOLD the reload button -> passes through, Interact / Enter Vehicle as normal
+#
+# The grip is only swallowed while a magazine is expected or in hand, so
+# grenades work normally whenever you are not mid-reload.
+#reloadhold=500
+
+# The left grip belongs to US, not the game. It is the VR interaction button --
+# magazine grabs now, weapon holding later -- and a button that throws a grenade
+# when you reach for something cannot carry physical interactions.
+#
+# With this on THE GAME NEVER SEES THE GRIP, so grenades need rehoming below.
+# Set 0 for the narrower rule: grip swallowed only mid-reload.
+#gripexclusive=1
+
+# GRENADE, moved off the grip. Pure remap: press grenadefrom, the plugin injects
+# grenadeaction in its place.
+#
+# BOTH MASKS MUST BE MEASURED, not guessed. Controller buttons and XInput masks
+# do not line up here -- your right controller B reports as 0x4000, which the
+# game labels X. Set mapbtnlog=1, press your LEFT controller X, and read the
+# mask; that is grenadefrom. grenadeaction should be whatever the grip used to
+# report, since that is the mask the game already treats as throw.
+#
+# 0 disables the remap.
+#grenadefrom=0x0000
+#grenadeaction=0x0100
+
+# Force hidden skeletal meshes to keep evaluating their pose.
+#
+# UE defaults to OnlyTickPoseWhenRendered, so a HIDDEN mesh can stop animating
+# entirely -- and the weapon rig positions the gun from this mesh's
+# PrimaryWeapon SOCKET. A frozen pose therefore means a frozen socket and a gun
+# parked wherever the animation stopped, showing up intermittently depending on
+# when the hide lands relative to the rig resolving.
+#
+# Set 0 to test whether the arm hide is what is moving your weapon.
+#armkeeppose=1
+
+# ---------------------------------------------------------------- PER-WEAPON OFFSETS
+# One calibration cannot fit a pistol, an assault rifle and a rocket launcher --
+# they do not share a grip geometry. These adjust the calibrated base PER
+# WEAPON, so pose-match calibration still does the work and you only add an
+# entry where a specific weapon disagrees.
+#
+# A weapon with no entry behaves exactly as it does now, so turning this on
+# changes nothing until you tune something.
+#wpnoffsets=0
+
+# Logs which weapon you are holding and which entry matched. Turn it on once to
+# harvest the class names, then off.
+
+# wpnoff=<match>,<dx>,<dy>,<dz>,<dgrip>,<dyaw>,<droll>
+#
+#   match   substring of the weapon actor class -- "AssaultRifle" matches
+#           BP_AssaultRifle_WeaponActor_C. First match wins, so put specific
+#           entries above general ones.
+#   dx/dy/dz        centimetres, ADDED to offx/offy/offz
+#   dgrip/dyaw/droll  degrees, ADDED to grip/gripyaw/griproll
+#
+# Trailing values are optional: "wpnoff=Pistol,1.5" only nudges X.
+# Repeatable, up to 24 entries. Examples, commented out:
+#
+# wpnoff=Pistol,0.0,0.0,-2.0
+# wpnoff=AssaultRifle,0.0,0.0,1.5,-3.0
+# wpnoff=RocketLauncher,0.0,-1.0,3.0
+
+# PER-WEAPON CAPTURE KEY. Same gesture as the global calibration on END: hold
+# it, the weapon freezes, line your controller up with where it should sit,
+# release. The only difference is the destination -- this stores a DELTA for
+# the weapon in your hands and leaves the global calibration alone.
+#
+# Captures are written to halo_vr_weapons.cfg, which the plugin owns and
+# rewrites in full. Hand-written wpnoff lines stay here in halo_vr.cfg and keep
+# their comments; both files feed the same table.
+#
+#   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
+#wpncalibkey=0x2D
 # ===================================== SUPPORT DIAGNOSTICS ======================================
 # Leave these at their defaults unless troubleshooting asks for them.
 #

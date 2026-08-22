@@ -50,7 +50,10 @@ if ($missing.Count -gt 0) {
 # on upgrade (UEVR's Import Config merges file-by-file), so shipping one would clobber every
 # player's kept settings -- their absence from the zip is exactly what makes settings survive
 # updates and "delete halo_vr_user.cfg" mean "back to shipped defaults".
-$forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg') |
+# halo_vr_weapons.cfg joined this list with PR #7: the plugin REWRITES it in full on every
+# per-weapon capture, so shipping one would replace a player's captured weapon deltas wholesale.
+$forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg',
+                'halo_vr_weapons.cfg') |
     Where-Object { Test-Path (Join-Path $stage $_) }
 if ($forbidden.Count -gt 0) {
     throw ("Release payload contains user-owned files -- must not ship: {0}" -f ($forbidden -join ', '))

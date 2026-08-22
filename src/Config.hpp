@@ -32,6 +32,15 @@ namespace halo {
 // Defaults are overridden at runtime by halo_vr.cfg next to the UEVR profile (see load_config
 // below), which is re-read every ~2 s -- so a headset session can tune, or hit the kill switch,
 // without a rebuild or a restart.
+// One per-weapon adjustment. DELTAS on the calibrated base, not replacements -- see
+// WeaponOffset.hpp for why.
+struct WeaponAdjust {
+    char  match[64] = "";      // substring of the weapon actor class, e.g. "AssaultRifle"
+    float d_x = 0.0f, d_y = 0.0f, d_z = 0.0f;              // centimetres
+    float d_grip = 0.0f, d_grip_yaw = 0.0f, d_grip_roll = 0.0f;  // degrees
+};
+constexpr int kMaxWeaponAdjust = 24;
+
 struct Config {
     bool  enabled      = true;
     bool  drive_pitch  = true;
@@ -426,6 +435,59 @@ struct Config {
     float piv_y        = 0.0f;
     float piv_z        = 0.0f;
     bool  piv_auto     = true;
+    // Per-tick weapon-to-rig separation logging. OFF by default: two reflected calls per tick.
+    bool  wpn_diag     = false;
+    // Store a per-weapon ROLL delta. ON: weapon models really are authored at different rolls,
+    // and the Magnum needs several degrees the assault rifle does not.
+    //
+    // This was briefly defaulted OFF on the reasoning that the pose-match gesture cannot measure
+    // roll -- a gun is near-symmetric about its own barrel, so overlaying a frozen one shows you
+    // little. That reasoning was built on a bad statistic: the "8 deg of scatter" was measured
+    // across captures taken against DIFFERENT BASES, and a delta is by definition relative to its
+    // base, so those numbers were never comparable. Within a single session the spread is about
+    // +/-2 deg, and a real per-weapon difference of ~7 deg sits well clear of it.
+    //
+    // The gesture IS the noisiest on this axis though, so a single capture can land a couple of
+    // degrees out. Roll is easy to judge on a gun in your hand and hard to judge by overlay, so
+    // prefer nudging it live (scripts/vr.ps1 wroll <weapon> <deg>) over re-capturing and hoping.
+    bool  wpn_roll     = true;
+    // Does the END calibration write griproll? NO.
+    //
+    // Roll is the one axis the pose-match gesture cannot see -- a gun is near-symmetric about its
+    // own barrel -- so what END records is wherever the wrist happened to be. It is also global on
+    // this title and best set by eye down the iron sights, which takes a couple of minutes and is
+    // then correct for every weapon. Letting a gesture overwrite that is losing a good value to a
+    // bad measurement; it happened twice in one session before this flag existed.
+    // END still fits position, pitch and yaw, which it measures well.
+    // DEFAULT 1 = END fits roll, the long-standing behaviour. Set 0 to hold roll across the
+    // gesture; the solve does that as a rotation about the forward axis, not a scalar swap.
+    bool  calib_roll   = true;
+    // STATIC ROLL, in degrees. -999 = off.
+    //
+    // Lives in halo_vr.cfg, which the gestures never write -- halo_vr_calib.cfg is the machine
+    // owned one. Re-applied every tick after the base and the per-weapon delta, so it is the last
+    // word: END and HOME may still record whatever they like and it simply does not matter.
+    //
+    // Roll is the one axis the pose-match cannot measure (a gun is near-symmetric about its
+    // barrel) and it is global on this title, so pinning it to a value set by eye down the sights
+    // is strictly better than re-deriving it from a gesture that cannot see it.
+    float roll_static  = -999.0f;
+    // Log where the spawned hand/magazine components actually are in world space, once a second.
+    bool  hands_diag   = false;
+    // Cancel the socket's ROTATION as well as its offset.
+    //
+    // The weapon is socketed onto the mesh, so what you see is mesh_rotation * socket_rotation.
+    // We drive the first term; the second is the engine's and differs between the two mesh
+    // instances this title loads -- measured identity on one, (p3.7 y-4.2 r-1.8) on the other,
+    // with the pitch matching the observed per-session grip shift to a tenth of a degree.
+    // rigsocket already cancels the socket's translation, which is why position stopped drifting
+    // while orientation kept flipping. This is the other half.
+    bool  rig_sock_rot = false;
+    // Cancel the MEASURED weapon-to-component separation instead of the pinned piv_* constant.
+    // The weapon is socketed onto the rig mesh, so that separation is the only term standing
+    // between placing the MESH and placing the WEAPON -- and piv_* is a guess at it that a
+    // respawn invalidates. Falls back to piv_* whenever no weapon is in hand.
+    bool  rig_socket   = false;
 
     // WHICH socket is the pivot. You rotate your controller about your WRIST, so the pivot wants to
     // be the in-game hand -- which is not necessarily where the weapon mounts. `PrimaryWeapon` is
@@ -2154,6 +2216,318 @@ struct Config {
     // the pass with a tiny aperture, so the image stays essentially in focus.
     float scope_dof        = 0.0f;        // f-stop; 0 = leave DOF alone
     float scope_dof_focus  = 100000.0f;   // focal distance, cm -- far, so nothing blurs
+    // ---- MELEE BY SWING --------------------------------------------------------------------
+    // Swing the aim hand and the game melees. The detector runs on the GAME THREAD tick and
+    // publishes a deadline; the XInput hook only compares a clock against it (see Gesture.hpp),
+    // which is the same produce-at-tick / consume-at-poll split the rest of this plugin uses.
+    //
+    // WHY LINEAR SPEED AND NOT ANGULAR. The obvious false positive is a fast aim turn: the hand
+    // is moving quickly but the player means to look, not hit. A turn is mostly ROTATION about
+    // the wrist/elbow with little travel, while a strike is mostly TRANSLATION. So the trigger
+    // is metres-per-second of controller travel, not deg/s -- g_setpoint_rate_dps already
+    // measures the angular rate and is deliberately NOT what gates this.
+    //
+    // Poses are in METRES (see xdist_m, added directly to a pose position in MotionAimControl),
+    // so melee_speed is genuinely m/s and not an abstract unit.
+    bool  melee_swing     = true;
+
+    // ---- WHAT COUNTS AS A STRIKE: ARM EXTENSION, NOT SPEED.
+    //
+    // The first version gated on world-space hand speed plus |dot(vel, hmd_fwd)| and fired on fast
+    // aiming. Measured, the reason is structural: when you turn, your HEAD TURNS WITH YOUR HAND,
+    // so hand velocity stays aligned with the view forward it is being compared against. Logged
+    // false positives sat at along=0.46-0.57 -- squarely inside a gate meant to exclude them.
+    //
+    // Head-to-hand DISTANCE has none of that failure mode, because it is a scalar and therefore
+    // invariant to rotation:
+    //   * a thrust      -- distance grows fast, and ends large
+    //   * an aim turn   -- the hand orbits the body at roughly constant radius, so ~0
+    //   * walking       -- head and hand travel together, so ~0
+    // Measuring the hand RELATIVE TO THE HEAD also removes whole-body motion for free.
+    //
+    // All distances in metres (poses are metres -- see xdist_m).
+
+    // Minimum RELATIVE speed, m/s: hand velocity with the head's own motion subtracted out. A
+    // floor, not the discriminator -- melee_ext below is what actually distinguishes a strike.
+    float melee_speed     = 1.50f;
+
+    // Rate the arm must be EXTENDING at, m/s -- d/dt of head-to-hand distance. THE test, and
+    // measurement says it is a very clean one. Over a logged session, ordinary play motion topped
+    // out at ext=0.80 while deliberate swings ran 2.24 to 4.51 -- a gap with nothing in it. 1.50
+    // sits in that gap, comfortably clear of both sides.
+    float melee_ext       = 1.50f;
+
+    // How far the hand must be from the head when it fires, metres. A floor, not the test.
+    //
+    // WHY IT IS LOW. Reach is evaluated the instant extension crosses the threshold, which is
+    // MID-SWING while the arm is still travelling -- not at full stretch. Real swings measured
+    // 0.37 to 0.57 at that moment despite finishing much further out, and a 0.50 floor rejected
+    // three of five genuine strikes. This only needs to exclude a twitch made with the hand
+    // tucked against the chest.
+    float melee_reach     = 0.30f;
+
+    // Sanity ceiling on relative speed, m/s. Sessions logged 26 m/s and 97 m/s "swings", which no
+    // arm produces -- those are tracking discontinuities. Above this the velocity history is
+    // dropped rather than fired on, because the sample after a teleport is garbage too.
+    float melee_max_speed = 12.0f;
+
+    // Sanity ceiling on reach, metres. After the 97 m/s spike above, head-to-hand distance read
+    // 2.45-2.51 m for several consecutive samples -- the velocity guard caught the jump but the
+    // POSITION stayed wrong, so a position check is needed as well as a rate one. No human arm is
+    // this long; anything beyond it means tracking is lying about where the hand is.
+    float melee_max_reach = 1.20f;
+
+    // Legacy forward-alignment gate, |dot(vel_dir, hmd_fwd)|, 0..1. DEFAULTS OFF: it is the check
+    // that proved unsound above. Kept because it is harmless when zero and someone may want it.
+    float melee_fwd       = 0.0f;
+
+    // Velocity smoothing time constant, ms. Tracking noise at 90 Hz is enough to spike a raw
+    // per-tick derivative; this is short enough not to blunt a real strike's leading edge.
+    float melee_tau_ms    = 20.0f;
+
+    // Refractory period after a fired melee, ms. Halo's melee animation is not interruptible, so
+    // a second trigger inside it is always spurious -- one swing crossing the threshold on
+    // several consecutive ticks must still be ONE press.
+    int   melee_cooldown_ms = 500;
+
+    // How long the synthetic button is held, ms. A single poll can land between the game's own
+    // input samples and be missed entirely, so the press is held across several.
+    int   melee_hold_ms   = 80;
+
+    // Pad mask ORed in to melee. 0x0080 = RTHUMB, which is this profile's melee (right stick
+    // click). Confirm against your own mapping with mapbtnlog=1 before changing it.
+    int   melee_mask      = 0x0080;
+
+    // Log every swing's peak speed and whether it fired. This is the tuning instrument for
+    // melee_speed and melee_fwd -- expect to set it once, swing a dozen times, and turn it off.
+    bool  melee_log       = false;
+
+    // ---- TWO-ARM RECON ---------------------------------------------------------------------
+    // Dump the first-person skeleton -- every bone with its parent -- and report which bone
+    // functions this build actually exposes. Read-only; nothing is written to the game.
+    //
+    // Fires on the RISING EDGE, so leaving it set does not re-dump every config reload. Set it
+    // while standing in gameplay with a weapon drawn: the rig does not exist in menus, in
+    // vehicles, or for ~5 s after a level load.
+    //
+    // This is the instrument that decides whether independent arms are buildable at all. See
+    // Arms.hpp for what the answer gates.
+    bool  bone_dump       = false;
+
+    // ---- LEFT ARM HIDE ---------------------------------------------------------------------
+    // Hide the left arm chain, so an independently tracked left hand can replace it.
+    //
+    // The bone dump established that this is possible: HideBoneByName and UnHideBoneByName are
+    // both PRESENT, and Shoulder_L is the single root of all 34 left bones (hiding a bone hides
+    // its children). Weapon_M hangs off Chest_M rather than either wrist, so the gun is not
+    // dragged along with the arm.
+    //
+    // WHAT THIS IS FOR RIGHT NOW. Present in the reflection table is not the same as working on
+    // this mesh -- Rig.cpp documents a relative-rotation write that is present and silently does
+    // nothing, which is the whole reason rigmode 3 exists. So this toggle exists first as PROOF,
+    // before anything is built on top of it. Fully reversible: setting it back to 0 unhides.
+    bool  arm_hide        = false;
+
+    // Which bone to hide. Shoulder_L takes the whole arm; Elbow_L leaves the upper arm in place
+    // and takes forearm downwards; Wrist_L takes just the hand. Configurable because which one
+    // looks right is a judgement to make in the headset, not from a bone list.
+    char  arm_hide_bone[64] = "Shoulder_L";
+
+    // HOW to hide. HideBoneByName reported success on all three meshes and changed nothing
+    // visible, so per-bone hiding may simply be inert here -- the same silent no-op Rig.cpp
+    // records for the relative rotation write.
+    //
+    //   0 = HideBoneByName            per-bone, keeps the right arm. What we want if it works.
+    //   1 = SetVisibility(false)      whole component. Takes BOTH arms.
+    //   2 = SetHiddenInGame(true)     whole component, different path to the same thing.
+    //
+    // Modes 1 and 2 are blunt, but they are the route to genuinely independent hands: with
+    // SetBoneTransformByName absent we cannot pose the game's arms, so the only way to two free
+    // arms is to remove the game's pair and attach our own to the controllers. Both pass
+    // bPropagateToChildren=false, so the weapon actor socket-attached to this mesh stays put.
+    int   arm_hide_mode   = 2;
+
+    // Apply to every first-person skeletal mesh, not just the arms.
+    //
+    // ON BY DEFAULT because the dump found THREE that carry this pose:
+    // BPC_FP_SkeletalMesh_C, BPC_FP_TranslucentSkeletalMesh_C (the shield shell, which Rig.cpp
+    // records as running its own instance of the same anim blueprint) and
+    // BPC_FP_ShadowSkeletalMesh_C. Hiding the bone on the arms alone leaves a floating shield
+    // limb and an arm-shaped shadow. Set 0 only to isolate which mesh is which while testing.
+    bool  arm_hide_all    = true;
+
+    // Force hidden skeletal meshes to keep evaluating their pose.
+    //
+    // UE defaults to OnlyTickPoseWhenRendered, so a hidden mesh can stop animating entirely --
+    // and Rig.cpp positions the weapon from this mesh's PrimaryWeapon SOCKET. A frozen pose means
+    // a frozen socket and a gun parked wherever the animation stopped, appearing intermittently
+    // depending on when the hide lands relative to the rig resolving.
+    //
+    // Set 0 to test whether the arm hide is what is moving your weapon.
+    bool  arm_keep_pose   = true;
+
+    // ---- PER-WEAPON OFFSETS ------------------------------------------------------------------
+    // One calibration cannot fit a pistol, an assault rifle and a rocket launcher: they do not
+    // share a grip geometry. These adjust the calibrated base per weapon, so the pose-match
+    // calibration still does the work and an entry is only needed where a weapon disagrees.
+    //
+    // A weapon with no entry behaves exactly as it does today, so enabling this changes nothing
+    // until something is tuned.
+    bool  wpn_offsets     = false;
+
+    // Per-weapon CAPTURE key, a Windows virtual-key code. Same gesture as the global calibration
+    // on calib_key (END): hold it, the weapon freezes, line your controller up with it, release.
+    // Only the destination differs -- this one stores a delta for the weapon in hand instead of
+    // rewriting the global calibration.
+    //   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
+    //
+    // ⚠️ INSERT, NOT HOME. PR #7 shipped this as 0x24, which is kill_key -- the mod's KILL
+    // SWITCH. Both are polled with GetAsyncKeyState in the same block, so HOME would have
+    // captured a weapon delta AND toggled the kill switch on the same press. The collision was
+    // invisible in the fork rather than introduced by the rebase: kill_key was already 0x24 on
+    // the branch point too, so the clash shipped in PR #7 as authored and simply went unchecked.
+    // Keep new hotkeys off the reserved set: 0x21 mode, 0x22 aim-calib, 0x23 calib,
+    // 0x24 KILL, 0x2E scope-calib.
+    int   wpn_calib_key   = 0x2D;
+    bool  wpn_calib_pending = false;
+
+    // The calibrated base, captured by WeaponOffset on each config reload. Published here so the
+    // capture can measure a DELTA against it: g_cfg's live values already carry this weapon's
+    // existing adjustment, so differencing against those would shrink toward zero on every
+    // recalibration.
+    float wpn_base_grip = 0.0f, wpn_base_grip_yaw = 0.0f, wpn_base_grip_roll = 0.0f;
+    float wpn_base_off_x = 0.0f, wpn_base_off_y = 0.0f, wpn_base_off_z = 0.0f;
+    bool  wpn_log         = false;
+    WeaponAdjust wpn[kMaxWeaponAdjust];
+    int   wpn_count       = 0;
+
+    // ---- VR RELOAD -------------------------------------------------------------------------
+    // Two-stage reload: press reload to drop the mag, then physically fetch a fresh one from your
+    // belt and bring it to the gun. See the state machine in Gesture.hpp for why the game's own
+    // reload is DEFERRED rather than driven -- Halo's reload is one atomic animation with no
+    // magazine object to manipulate, so the physicality has to come from making you earn it.
+    bool  reload_vr       = false;
+
+    // Pad mask that STARTS the reload. Default 0x4000 = X, this game's reload.
+    //
+    // UNCONFIRMED -- verify with mapbtnlog=1 before trusting it. This profile's mapping is not
+    // obvious (mapfrom=0x2000 -> mapto=0x0100, mapmenuback=0x4000), and a wrong mask here means
+    // the reload either never starts or hijacks a button you needed.
+    int   reload_mask     = 0x4000;
+
+    // Pad mask for the left GRIP -- what you hold to keep hold of the magazine. Also unconfirmed.
+    int   reload_grip_mask = 0x0100;
+
+    // BELT ZONE, measured from the head because that is the only body reference VR gives us.
+    // Hand must be at least this far BELOW head height, in metres.
+    float reload_belt_drop = 0.55f;
+
+    // ...and within this horizontal radius of the head, so a hand dropped straight down at your
+    // side counts but one flung out sideways does not.
+    float reload_belt_radius = 0.50f;
+
+    // INSERT: how close the left hand must come to the aim hand to seat the magazine, metres.
+    // Hand-to-hand rather than hand-to-weapon: the gun is a separate actor whose grip point moves
+    // per weapon, while the two controllers are always both known.
+    float reload_join_dist = 0.30f;
+
+    // Swallow the trigger while the magazine is out. THIS is what gives the gesture stakes -- you
+    // are genuinely defenceless until you finish. Off means the reload is cosmetic.
+    bool  reload_suppress_fire = true;
+
+    // Pressing reload again while the mag is out re-seats it and aborts.
+    //
+    // OFF, because that is not how VR reloading works. Onward, Pavlov, H3VR: once the magazine is
+    // out you deal with it -- there is no take-backs button, because a cancel is a menu concept
+    // and this is a physical action. Leaving it on also meant a double-tap silently skipped the
+    // entire gesture, which reads as an exploit even though no ammo is gained by it.
+    //
+    // It was originally on as a safety hatch against a stuck MAG_OUT leaving the trigger dead in
+    // a headset. Six-for-six on the first live session made that argument much weaker, and the
+    // involuntary cases are covered anyway: the kill switch, stick mode (vehicles, cutscenes,
+    // death) and calibration all reset to Idle and release the suppression. What is NOT covered
+    // is a gesture the player simply cannot complete -- an awkward seating position, tracking
+    // loss on the off hand -- and the only exit there is enabled=0 in the file.
+    bool  reload_cancel   = false;
+
+    // The left grip belongs to US, not to the game.
+    //
+    // It is the VR interaction button -- magazine grabs now, weapon holding later -- and a button
+    // that throws a grenade when you reach for something cannot carry physical interactions. With
+    // this on the game never sees the grip at all, which means GRENADES HAVE NO BINDING until one
+    // is given to them elsewhere. That is a deliberate trade, not an oversight.
+    //
+    // Set 0 for the narrower behaviour: grip swallowed only while a magazine is expected or held,
+    // grenades working the rest of the time.
+    bool  grip_exclusive  = true;
+
+    // GRENADE, moved off the grip.
+    //
+    // With grip_exclusive the game never sees the grip, so grenades need a home. This is a pure
+    // remap: press the button named by grenade_from, and the plugin injects grenade_action in its
+    // place.
+    //
+    // BOTH MASKS ARE UNCONFIRMED. Controller buttons and XInput masks do not line up on this
+    // profile -- the right controller B reports as 0x4000, which the game labels X -- so these
+    // must be measured with mapbtnlog=1 rather than reasoned about. grenade_from should be
+    // whatever your LEFT controller X reports; grenade_action should be whatever the grip used to
+    // report, since that is the mask the game already reads as throw.
+    //
+    // grenade_from = 0 disables the remap entirely.
+    int   grenade_from    = 0x0000;
+    int   grenade_action  = 0x0100;
+
+    // How long the reload button must be held before it stops being a reload and becomes the
+    // game's own action, milliseconds.
+    //
+    // Both buttons this feature borrows already have jobs. The reload button is ALSO Interact and
+    // Enter Vehicle; a full playthrough with it swallowed unconditionally meant no vehicles and no
+    // interaction for the whole chapter. Tap starts the VR reload, hold passes through -- and past
+    // the threshold the press is released to the game, so it arrives slightly late rather than
+    // never.
+    int   reload_hold_ms  = 500;
+
+    // Log every state transition. The tuning instrument for the belt zone and join distance.
+    bool  reload_log      = false;
+
+    // ---- OUR OWN HANDS -----------------------------------------------------------------------
+    // With the game's first-person meshes hidden there is nothing on screen but a floating gun.
+    // These are the replacement: spawned StaticMeshComponents attached to the motion controllers
+    // through UObjectHook, the same mechanism Rig.cpp uses for the weapon.
+    //
+    // Spawned rather than borrowed because the bone dump closed every other route:
+    // SetBoneTransformByName is ABSENT, so the game's hand bones cannot be posed, and both arms
+    // share one mesh driven by one anim blueprint.
+    bool  hands_vr        = false;
+
+    // Mesh for a hand. Empty falls back to an engine primitive (a small sphere), which is a
+    // placeholder and looks like one -- Halo ships no standalone hand asset we can borrow.
+    char  hand_mesh_path[192] = "";
+
+    // Uniform scale. The engine sphere is 100 cm radius, hence the very small default.
+    float hand_scale      = 0.06f;
+
+    // Offset from the controller, centimetres, in the controller's own frame. The tracked point
+    // sits behind and below where a real palm is, so a hand mesh placed at the raw pose floats
+    // off the wrist.
+    float hand_off_x      = 0.0f;
+    float hand_off_y      = 0.0f;
+    float hand_off_z      = 0.0f;
+
+    // Show a mesh on the AIM hand too. Off by default: the weapon already tracks that controller,
+    // so a second object there mostly intersects the gun.
+    bool  hand_show_aim   = false;
+
+    // ---- THE MAGAZINE ------------------------------------------------------------------------
+    // Visible only while the reload state machine has one in your hand. Hidden rather than
+    // destroyed between reloads -- spawning a component per reload would churn objects on the
+    // game thread for nothing, and a component we keep is one we can still clean up.
+    bool  mag_show        = true;
+    char  mag_mesh_path[192] = "";
+    float mag_scale       = 0.04f;
+    float mag_off_x       = 0.0f;
+    float mag_off_y       = 0.0f;
+    float mag_off_z       = 0.0f;
 };
 
 extern Config g_cfg;
@@ -2170,6 +2544,15 @@ extern char     g_calib_path_right[MAX_PATH];
 enum { CALIB_HAND_RIGHT = 0, CALIB_HAND_LEFT_LOADED = 1, CALIB_HAND_LEFT_SEEDED = 2 };
 int select_calib_for_hand();
 extern uint32_t g_cfg_check_tick;
+
+// Incremented ONLY by a load_config() that parsed the main file successfully and therefore
+// restored the calibrated values from disk.
+//
+// g_cfg_check_tick is NOT a substitute: it advances on every ~2 s attempt, including the early
+// return taken when halo_vr.cfg fails to parse (a momentary file lock while editing is enough).
+// Anything that needs to know "g_cfg now holds clean on-disk values" must watch THIS, because on
+// the early-return path it does not.
+extern uint32_t g_cfg_load_gen;
 extern bool     g_pivot_from_calib;
 // TRUE when an aim offset loaded WITHOUT an explicit aimcalibver stamp, so its schema is inferred
 // rather than known. Set by load_config(); the tick reports it once (this file makes no API calls).
