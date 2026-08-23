@@ -572,14 +572,52 @@ bool rig_set_visible(API::UObject* comp, bool visible) {
     return true;
 }
 
-// SetVisibilityBasedAnimTickOption(TEnumAsByte<EVisibilityBasedAnimTickOption>). See Rig.hpp for
-// why every hide path has to call this. Harmless on a static mesh -- the call simply does not
-// resolve there -- so callers need not classify the component first.
+// KEEP A HIDDEN SKELETAL MESH ANIMATING -- WRITTEN AS A PROPERTY, NOT CALLED AS A FUNCTION.
+//
+// SetVisibilityBasedAnimTickOption DOES NOT EXIST as a UFUNCTION on this build. The bone dump
+// probes it by name and reports "-- absent" (measured in-session 2026-08-23), and
+// call_function() on a name that does not resolve fails SILENTLY. So the previous version of
+// this helper reported success while doing nothing whatsoever: every hide path believed it had
+// kept the pose alive, the mesh kept UE default OnlyTickPoseWhenRendered, the PrimaryWeapon
+// socket froze the instant the arms were hidden, and the weapon lost its recoil. armkeeppose
+// had never worked on this title in any build, including the fork it arrived in.
+//
+// This is the failure mode the project already names elsewhere -- a call that "fails QUIETLY
+// with a plausible answer". The lesson it cost is the reason for the logging below.
+//
+// The underlying UPROPERTY is still reachable by reflection. It is a
+// TEnumAsByte<EVisibilityBasedAnimTickOption>, i.e. one byte, where 0 =
+// AlwaysTickPoseAndRefreshBones. Same idiom as read_byte_prop() in Plugin.cpp.
+//
+// RETURNS FALSE and says so once when the property cannot be resolved, and confirms success
+// once when it can. An unobservable no-op is exactly what hid this for the life of the feature,
+// so this call is never allowed to be silent in either direction again.
 bool rig_set_always_tick_pose(API::UObject* comp) {
     if (comp == nullptr) return false;
-    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
-    params[0] = 0;                     // AlwaysTickPoseAndRefreshBones
-    comp->call_function(L"SetVisibilityBasedAnimTickOption", params);
+    auto* cls  = comp->get_class();
+    auto* prop = (cls != nullptr) ? cls->find_property(L"VisibilityBasedAnimTickOption") : nullptr;
+    if (prop == nullptr) {
+        // Static meshes legitimately have no such property, so this is only interesting for a
+        // SKELETAL mesh -- which is the only kind the callers pass. One line, once.
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE: VisibilityBasedAnimTickOption did not "
+                                 "resolve -- hidden arms will FREEZE their pose, so the weapon "
+                                 "loses recoil and its socket stops moving. armkeeppose cannot "
+                                 "work on this build; use a hide that leaves the mesh visible.");
+        }
+        return false;
+    }
+    *(reinterpret_cast<uint8_t*>(comp) + prop->get_offset()) = 0;   // AlwaysTickPoseAndRefreshBones
+    static bool s_ok_logged = false;
+    if (!s_ok_logged) {
+        s_ok_logged = true;
+        API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE: VisibilityBasedAnimTickOption resolved at "
+                             "offset 0x%X and set to AlwaysTickPoseAndRefreshBones -- hidden arms "
+                             "keep animating, so the weapon keeps its recoil.",
+                             (unsigned)prop->get_offset());
+    }
     return true;
 }
 

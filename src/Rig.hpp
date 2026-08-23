@@ -193,7 +193,11 @@ bool rig_set_visible(uevr::API::UObject* comp, bool visible);
 // no recoil, and the gun sits wherever the animation happened to stop.
 //
 // THE CANONICAL COPY. Arms.cpp used to carry its own; a second one is how the two hide paths came
-// to disagree, with only the opt-in path keeping the pose alive.
+// to disagree. Note that collapsing them fixed the DUPLICATION but not the behaviour -- both
+// copies called a UFUNCTION this build does not have. See Rig.cpp: it is a PROPERTY WRITE now,
+// and it RETURNS FALSE (and logs, once) when the property cannot be resolved. Do not turn it
+// back into a call_function, and do not let it return true unconditionally: an unobservable
+// no-op is what hid this for the whole life of the feature.
 bool rig_set_always_tick_pose(uevr::API::UObject* comp);
 
 // World-space equivalents. See the note in Rig.cpp: the relative ROTATION write does not take on
