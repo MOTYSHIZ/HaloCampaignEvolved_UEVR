@@ -1376,6 +1376,46 @@ struct Config {
     // out or looks washed. Forced to 1.0 automatically when the exposure-compensated VREditor
     // material is in use (that one preserves authored colour at unit tint).
     float aim_widget_gain  = 5.0f;
+
+    // ---- COMPOSITOR RETICULE (XrLayer.cpp) ----------------------------------------------------
+    //
+    // The two settings above are a CONSTANT fighting a VARYING term, which is why the pair is a
+    // "compromise" rather than a fit. An OpenXR quad layer is composited after the whole post
+    // chain, so exposure and tonemapping never reach it -- immune rather than compensating.
+    //
+    // DEV/RESEARCH ONLY, DEFAULT OFF, and it belongs in halo_vr_dev.cfg rather than the player
+    // catalog. Stage 1 draws a reticule WE generate: bright and exposure-proof, but STATIC -- no
+    // firing bloom, no reload state, no hit marker, because that animation belongs to the game's
+    // own widget and only stage 2 (presenting the widget's render target) brings it back. It draws
+    // ALONGSIDE the in-scene reticule, never instead of it. Full doctrine in XrLayer.hpp.
+    bool  xr_layer = false;
+    // SPACE LADDER -- a diagnostic, not a preference. Whether UEVR's get_pose() reports in the same
+    // space get_stage_space() names is an assumption we have not measured, and each mode fails in a
+    // different, recognisable way. 0 = stage space, raw HMD pose. 1 = stage space with the
+    // recentre correction UEVR applies to its own quads. 2 = view space (head-locked; WRONG for a
+    // reticule on purpose -- if 2 draws and 0/1 do not, the pose math is the only thing left).
+    // Start at 2 when nothing appears at all. See build_pose() for what each answer means.
+    int   xr_layer_space = 0;
+    // MULTIPLIER on the in-scene widget's own world size, not a length. 1.0 = exactly the size of
+    // the hosted crosshair (aim_widget_draw x aim_widget_scale, with the same 1/distance apparent-size
+    // compensation), so the two agree by construction and keep agreeing when either is retuned.
+    //
+    // It was an absolute 0.06 m and came out ~8x too small in headset -- 0.06 m is ~7.9 UE cm at this
+    // world scale against the widget's 61.4. A number that has to be dialled in until two things look
+    // alike silently stops matching the moment either side moves.
+    float xr_layer_size = 1.0f;
+    // UE centimetres per VR metre. 0 = derive from UEVR's VR_WorldScale.
+    // RECON-NEEDED: the DIRECTION of the VR_WorldScale relationship is inferred, not measured, and
+    // a wrong factor does not look broken -- it looks like a reticule at the wrong depth, which
+    // reads as a tuning problem and sends the investigation elsewhere. Sweep this over a decade in
+    // headset once, then write the answer into ue_cm_per_metre() as a measurement.
+    float xr_layer_cm_per_m = 0.0f;
+    float xr_layer_alpha = 1.0f;
+    // Colour, 0..1 linear. Bright cyan by default -- near Halo's authored crosshair but pushed up,
+    // since the entire point is that nothing downstream will dim it.
+    float xr_layer_cr = 0.35f, xr_layer_cg = 0.95f, xr_layer_cb = 1.00f;
+    bool  xr_layer_log = false;
+
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
     float rig_clamp    = 0.0f;
@@ -1553,6 +1593,41 @@ struct Config {
     // Log every XInput button-mask change, so the Quest->XInput mapping can be READ rather than
     // assumed. Off by default; it is noisy.
     bool  map_btn_log     = false;
+
+    // ---- ACTION BINDS (the in-game "Halo VR Controls" panel) --------------------------------
+    //
+    // Each of these names a MOD ACTION and holds the SOURCE button the player presses for it.
+    // The DESTINATION is not repeated here -- it is whatever field already owns that action
+    // (maprstickdown for crouch, meleemask, reloadmask, grenadeaction), so there is exactly one
+    // place that knows what the game reads for each action and these only say who triggers it.
+    //
+    // 0 = KEEP THE BUILT-IN MECHANISM, which is why 0 is the shipped value for all of them: the
+    // stick gestures and the swing/reload gestures are the designed experience, and a bind is an
+    // ADDITION for players whose controller or comfort needs one, never a replacement that has
+    // to be configured before the mod works.
+    //
+    // WHY A SOURCE MASK AND NOT A NAME. The physical-button -> XInput-mask mapping is NOT stable
+    // across runtimes: on Quest the right controller's B reports as 0x4000, which XInput (and
+    // this file, and the menu's dropdown) calls "X". A mask is the only unambiguous form, which
+    // is also why the menu's primary way to set one is CAPTURE (press the button, we record what
+    // arrived) rather than a dropdown -- see bind_capture_key below. Nothing here should ever be
+    // guessed; measure with mapbtnlog=1 or let the capture do it.
+    //
+    // Applied BEFORE mapfrom/mapto, so a bind wins over the generic rebind if both name the same
+    // mask. That is a conflict the menu warns about rather than a feature -- first match wins is
+    // a tie-break, not a layering scheme.
+    int   bind_crouch     = 0x0000;   // -> injects maprstickdown's mask (0 = right stick down)
+    int   bind_melee      = 0x0000;   // -> injects meleemask          (0 = swing gesture only)
+    int   bind_reload     = 0x0000;   // -> injects reloadmask         (0 = reload gesture only)
+    int   bind_scope      = 0x0000;   // -> toggles the VR scope       (0 = left trigger)
+    int   bind_dpad_shift = 0x0000;   // -> holds the d-pad shift      (0 = right stick up)
+
+    // How long an armed capture waits for a press before giving up, milliseconds.
+    //
+    // A capture EATS the press it records, so an arm that never expires is a booby trap: the
+    // player gets distracted, plays on, and the next button they touch is silently swallowed and
+    // rebound. Bounded instead, and the menu reports the armed state on the way back in.
+    int   bind_capture_ms = 20000;
 
     // ---- FRAME-TIME INSTRUMENTATION --------------------------------------------------------
     // Time the PERIODIC work in update() and report max/mean per site every ~600 ticks.
@@ -2373,7 +2448,16 @@ struct Config {
     //
     // A weapon with no entry behaves exactly as it does today, so enabling this changes nothing
     // until something is tuned.
-    bool  wpn_offsets     = false;
+    //
+    // SHIPS ON (2026-08-23). Safe to default on precisely because of the line above: the base is
+    // applied by ASSIGNMENT and a weapon with no entry lands exactly on the calibration, so with
+    // an empty table this is a no-op. What it buys by being on is that the INSERT capture key is
+    // live for everyone -- a player who finds one weapon sitting wrong can fix that weapon alone,
+    // without a hidden setting to discover first.
+    //
+    // Cost measured in-session: weapon_offset 0.004 ms mean / 0.064 ms max against a 0.2-0.5 ms
+    // tick. It is not a full-array sweep -- one class-name read on the held weapon per tick.
+    bool  wpn_offsets     = true;
 
     // Per-weapon CAPTURE key, a Windows virtual-key code. Same gesture as the global calibration
     // on calib_key (END): hold it, the weapon freezes, line your controller up with it, release.
@@ -2614,6 +2698,26 @@ extern char g_status_path[MAX_PATH];
 // bridge (calib:pose / calib:aim / calib:off commands) and by the trigger edges in Plugin.cpp;
 // the update() gesture block treats an armed mode as a held calibration key.
 extern std::atomic<int> g_menu_calib_mode;
+
+// ---- BIND CAPTURE ("press the button you want").
+//
+// Same shape as the armed calibration above, and for the same reason: with UEVR's overlay open
+// the VR mod zeroes the pad upstream, so NO controller input reaches this plugin while the menu
+// is on screen. A listen-for-a-press widget inside the menu is therefore impossible -- the menu
+// can only ARM, and the player closes it and presses the button.
+//
+// Ownership is split so no lock is needed. The BRIDGE (game thread, ~2 s poll) owns the key name
+// and only touches it while disarmed; the XINPUT HOOK owns the captured mask and disarms itself.
+//   bridge: writes g_bind_capture_key, then stores 1 to g_bind_capture (release)
+//   hook:   sees armed, records the first NEW button bit into g_bind_captured, stores 0 (release)
+//   bridge: sees g_bind_captured != 0, writes `<key>=0xNNNN` into halo_vr_user.cfg, clears it
+// The hook does no file I/O -- writing a cfg from an input callback is exactly the stall class
+// the load_config gate exists to avoid.
+extern std::atomic<int>      g_bind_capture;     // 0 = idle, 1 = armed
+extern std::atomic<int>      g_bind_captured;    // mask the hook caught, 0 = nothing yet
+extern std::atomic<uint64_t> g_bind_capture_deadline;   // GetTickCount64 expiry, 0 = none
+extern char g_bind_capture_key[32];              // cfg key the capture writes to
+
 // Consume menu commands + refresh the data\ mirrors. Returns how many commands were applied.
 int menu_bridge_tick();
 

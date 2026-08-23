@@ -42,6 +42,31 @@
 #mapfrom=0x2000
 #mapto=0x0100
 
+# ---- Action binds. Put one of the mod's own actions on a button of your choice.
+#
+# EASIEST WAY: the in-game "Halo VR Controls" panel. Press Rebind, close the menu, press the
+# button -- it records what your controller actually sent. Worth doing rather than typing a
+# value here, because button names differ between runtimes: on Quest the right controller's B
+# arrives as "X". A wrong mask silently unbinds an action and looks like a broken mod.
+#
+# 0 = keep the built-in mechanism (noted per line). These ship unbound on purpose: the stick and
+# gesture controls are the designed experience, and a bind is an addition, never a prerequisite.
+# Crouch. 0 = right stick DOWN.
+#bindcrouch=0x0000
+# Melee. 0 = the swing gesture only.
+#bindmelee=0x0000
+# Reload. 0 = the magazine gesture only.
+#bindreload=0x0000
+# Scope toggle. 0 = left trigger. Binding a button KEEPS the trigger working as well.
+#bindscope=0x0000
+# Hold to turn the left stick into the d-pad. 0 = right stick UP. A bound button REPLACES the
+# stick gesture (rather than adding to it), so binding this is also how you turn that gesture off.
+#binddpadshift=0x0000
+# How long an armed rebind waits for a press before giving up, milliseconds. It expires on
+# purpose: a capture EATS the press it records, so an arm that never timed out would sit there
+# and silently swallow whatever you pressed next.
+#bindcapturems=20000
+
 # ---- Menus. In menus, this button acts as Back (the remaps above pause automatically while
 # a menu is open).
 #mapmenuback=0x4000
@@ -466,7 +491,7 @@
 #
 # A weapon with no entry behaves exactly as it does now, so turning this on
 # changes nothing until you tune something.
-#wpnoffsets=0
+#wpnoffsets=1
 
 # Logs which weapon you are holding and which entry matched. Turn it on once to
 # harvest the class names, then off.
