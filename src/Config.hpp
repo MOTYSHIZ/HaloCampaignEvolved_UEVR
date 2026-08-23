@@ -482,12 +482,20 @@ struct Config {
     // with the pitch matching the observed per-session grip shift to a tenth of a degree.
     // rigsocket already cancels the socket's translation, which is why position stopped drifting
     // while orientation kept flipping. This is the other half.
-    bool  rig_sock_rot = false;
+    // SHIPS ON (2026-08-23), together with rig_socket below -- they are two halves of one fix and
+    // splitting them was an error on our side, not his design.
+    bool  rig_sock_rot = true;
     // Cancel the MEASURED weapon-to-component separation instead of the pinned piv_* constant.
     // The weapon is socketed onto the rig mesh, so that separation is the only term standing
     // between placing the MESH and placing the WEAPON -- and piv_* is a guess at it that a
     // respawn invalidates. Falls back to piv_* whenever no weapon is in hand.
-    bool  rig_socket   = false;
+    //
+    // SHIPS ON. The pinned piv_* is only pinned to YOUR machine after a calibration
+    // (g_pivot_from_calib); before that it is whatever the SHIPPED halo_vr.cfg carries -- one
+    // contributor machine, measured once, applied to everyone. Reading the live component fits
+    // the instance actually in front of the player, with no calibration required. Measured cost
+    // 0.004 ms mean against a 0.24 ms tick (~1.6%), which is the price of not shipping a guess.
+    bool  rig_socket   = true;
 
     // WHICH socket is the pivot. You rotate your controller about your WRIST, so the pivot wants to
     // be the in-game hand -- which is not necessarily where the weapon mounts. `PrimaryWeapon` is
@@ -1641,6 +1649,25 @@ struct Config {
     // debugging should not pay for them. Turn on to diagnose a stutter report from someone whose
     // machine reproduces it and ours does not.
     bool  perf_log        = false;
+
+    // ---- WIDGET-SWEEP SLICE BUDGET, in milliseconds of one game-thread tick.
+    //
+    // reticle_rescan() walks the whole UObject array looking for the HUD reticle, the navpoint
+    // layer and menu candidates. That walk costs one cache miss per object and the object array is
+    // a HIGH-WATER MARK that only grows for the life of the session, so its cost climbs with
+    // playtime no matter how the inner loop is written: 83.9 ms, optimised to 29.8 ms in
+    // 2026-08-12, measured back at 55.3 ms on 2026-08-23 with the optimisation fully intact.
+    // A 55 ms game-thread stall in VR is a dropped frame, which is a nausea event.
+    //
+    // So the walk is spread over consecutive ticks, at most this many milliseconds per tick, and
+    // its results are published atomically when a pass finishes. Total CPU is unchanged; what
+    // changes is that none of it lands in one frame.
+    //
+    // 0 disables slicing and does the whole array in a single tick -- the pre-2026-08-23
+    // behaviour, kept so this can be A/B'd in a headset without a rebuild, the same way rigfast=0
+    // A/Bs resolve_rig's fast path. Raising it above ~4 costs frames again; lowering it below
+    // ~0.5 makes a pass take long enough that a fresh reticle binds noticeably late after a load.
+    float ret_sweep_ms    = 2.0f;
 
     // AIM TRACE. 0->1 arms a recording of the aim loop; 1->0 writes it to halo_vr_trace_NNN.csv
     // beside this config. Exists so the aim law can be tuned by measurement instead of by feel:
