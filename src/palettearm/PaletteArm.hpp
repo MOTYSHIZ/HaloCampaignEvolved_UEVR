@@ -31,4 +31,24 @@ bool palettearm_parse_key(const char* key, double value);
 // One line of status for the support diagnostics: resolution, install state, call count.
 const char* palettearm_status();
 
+// Has this route given up for the session?
+//
+// True after either terminal failure: the builder could not be resolved in a LOADED simulation
+// module (deterministic -- the same scan fails identically every tick), or the hook installed and
+// the watchdog then proved it is never called. ArmDriver.cpp reads this and falls back to the UE
+// route, because the alternative is far worse than it sounds: with the palette route selected and
+// broken, the UE route is also standing down, so the weapon is not controller-attached and the
+// arms are stock. That state is strictly worse than never having enabled the palette route, and
+// nothing recovers from it on its own.
+//
+// Latched in a session-local static, deliberately NOT written back to g_cfg: load_config() resets
+// the whole struct every ~2 s, so a config field cannot carry a runtime decision -- the file value
+// would come straight back and this would become a retry-and-log loop. BlamDrive.cpp records the
+// same trap.
+bool palettearm_unavailable();
+
+// Clear the give-up latch and try again. Called by the arbiter when the armdriver key CHANGES, so
+// toggling the key away and back re-arms the route without restarting the game.
+void palettearm_retry();
+
 } // namespace halo

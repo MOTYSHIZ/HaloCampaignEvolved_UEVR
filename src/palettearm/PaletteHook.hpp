@@ -34,17 +34,30 @@ struct PaletteAccess {
 // no reflection, no logging beyond a rate-limited line.
 using PaletteDriveFn = bool (*)(const PaletteAccess& access);
 
-// Resolve the builder and install the detour. Idempotent -- a second call while installed is a
-// no-op and says so.
+// The outcome of trying to install. Three states, not a bool, because "not yet" and "never" want
+// completely different responses from the caller and a bool cannot tell them apart.
+enum class HookInstall {
+    // Installed. The detour is live -- though see palettehook_call_count(): still not "running".
+    Installed,
+    // HaloSimulation_tag_release.dll is not loaded yet. Normal at the main menu and during a load.
+    // KEEP CALLING; nothing is wrong.
+    WaitingForModule,
+    // The module is loaded and the builder could not be found in it, or the hook refused to
+    // install. This is DETERMINISTIC -- the same scan over the same image will fail identically
+    // every tick, so retrying is pure waste and the caller should give up and fall back.
+    Failed,
+};
+
+// Resolve the builder and install the detour. Idempotent -- a second call while installed returns
+// Installed and does nothing.
 //
 // Resolution is a cascade, not a constant (the project's addrcascade doctrine):
 //   1. signature scan of HaloSimulation_tag_release.dll, which must match EXACTLY ONCE
 //   2. the recorded RVA, accepted only if the signature bytes are actually there
-//   3. nothing -- log loudly and stay off
+//   3. nothing -- log loudly and return Failed
 //
-// Returns false if the hook did not install. A false return is a working state, not an error: the
-// arms simply stay stock.
-bool palettehook_install(PaletteDriveFn drive);
+// Not installing is a working state, not an error: the arms stay stock and the caller falls back.
+HookInstall palettehook_install(PaletteDriveFn drive);
 
 // Remove the detour, if installed.
 void palettehook_uninstall();

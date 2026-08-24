@@ -73,6 +73,10 @@ std::atomic_bool s_tracking_ready{false};
 
 char s_status[256] = "palettearm: off";
 
+// The give-up latch. See palettearm_unavailable() in the header for why this is a static and
+// not a config field.
+bool s_unavailable = false;
+
 // ---- THE DRIVE, run inside the detour ----------------------------------------------------------
 
 bool drive_palette(const pa::PaletteAccess& access) {
@@ -216,6 +220,15 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 
+bool palettearm_unavailable() { return s_unavailable; }
+
+void palettearm_retry() {
+    if (!s_unavailable) return;
+    s_unavailable = false;
+    API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: re-armed by an armdriver change -- "
+                         "will try to resolve the first-person weapon builder again");
+}
+
 void palettearm_release() {
     pa::palettehook_uninstall();
     s_two_hand.reset();
@@ -227,9 +240,17 @@ void palettearm_update(float delta_seconds) {
     if (!arm_driver_owns(ArmDriverMode::Palette)) return;
 
     if (!pa::palettehook_installed()) {
-        // Retry every tick until the simulation DLL is loaded. Cheap: a GetModuleHandleA and an
-        // early return until it is there.
-        if (!pa::palettehook_install(&drive_palette)) {
+        // WaitingForModule is retried every tick and costs a GetModuleHandleA. Failed is
+        // terminal on purpose: the scan is deterministic over a loaded image, so a second
+        // attempt cannot succeed where the first did not, and retrying would only spam.
+        const pa::HookInstall outcome = pa::palettehook_install(&drive_palette);
+        if (outcome == pa::HookInstall::Failed) {
+            s_unavailable = true;
+            API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: giving up for this session -- "
+                                 "falling back to the UE arm driver. Set armdriver to something "
+                                 "else and back to 2 to retry.");
+        }
+        if (outcome != pa::HookInstall::Installed) {
             std::snprintf(s_status, sizeof(s_status), "palettearm: not installed (%s)",
                           pa::palettehook_resolution());
             return;
@@ -275,7 +296,9 @@ void palettearm_update(float delta_seconds) {
             std::memory_order_acquire))) {
         API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: the hook installed but has NEVER been "
                              "called. The resolved address (%s) is not the first-person weapon "
-                             "builder on this build.", pa::palettehook_resolution());
+                             "builder on this build. Falling back to the UE arm driver.",
+                             pa::palettehook_resolution());
+        s_unavailable = true;
     }
 
     std::snprintf(s_status, sizeof(s_status), "palettearm: %s, %llu calls, 2h=%s blend=%.2f",

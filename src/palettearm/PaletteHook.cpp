@@ -183,15 +183,18 @@ bool palettehook_watchdog_tick(bool gameplay_active) {
     return s_watchdog.tick(palettehook_installed() && gameplay_active, happened);
 }
 
-bool palettehook_install(PaletteDriveFn drive) {
-    if (palettehook_installed()) return true;
-    if (drive == nullptr) return false;
+HookInstall palettehook_install(PaletteDriveFn drive) {
+    if (palettehook_installed()) return HookInstall::Installed;
+    if (drive == nullptr) return HookInstall::Failed;
 
     HMODULE sim = GetModuleHandleA("HaloSimulation_tag_release.dll");
     if (sim == nullptr) {
+        // Not an error. The simulation DLL is not loaded at the main menu or mid-load, and the
+        // caller is expected to keep asking -- condemning the feature here would kill it on
+        // every launch before gameplay ever started.
         std::snprintf(s_resolution, sizeof(s_resolution),
-                      "HaloSimulation_tag_release.dll is not loaded");
-        return false;
+                      "waiting: HaloSimulation_tag_release.dll is not loaded yet");
+        return HookInstall::WaitingForModule;
     }
     s_sim_base = reinterpret_cast<uint8_t*>(sim);
 
@@ -242,7 +245,7 @@ bool palettehook_install(PaletteDriveFn drive) {
                           (unsigned long long)scan.matches,
                           (unsigned long long)FP_WEAPON_BUILD_RVA);
             API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: %s Arms stay stock.", s_resolution);
-            return false;
+            return HookInstall::Failed;
         }
     }
 
@@ -254,7 +257,7 @@ bool palettehook_install(PaletteDriveFn drive) {
         s_drive = nullptr;
         API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: register_inline_hook FAILED (id=%d) on "
                              "0x%llX -- arms stay stock", id, (unsigned long long)target);
-        return false;
+        return HookInstall::Failed;
     }
 
     s_hook_id = id;
@@ -262,7 +265,7 @@ bool palettehook_install(PaletteDriveFn drive) {
     API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: hook installed on 0x%llX via %s (id=%d). "
                          "INSTALLED IS NOT RUNNING -- watch for the first-call line.",
                          (unsigned long long)target, s_resolution, id);
-    return true;
+    return HookInstall::Installed;
 }
 
 void palettehook_uninstall() {

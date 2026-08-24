@@ -17,6 +17,11 @@ namespace {
 ArmDriverMode s_active = ArmDriverMode::Off;
 bool          s_announced = false;
 
+// The raw config value we last saw, so a CHANGE can be detected. A change is the signal to
+// re-arm a route that gave up: writing armdriver again (2 -> 1 -> 2) retries without a game
+// restart. Initialised out of range so the first tick always counts as a change.
+int           s_last_cfg = -1;
+
 } // namespace
 
 const char* arm_driver_name(ArmDriverMode mode) {
@@ -39,6 +44,30 @@ ArmDriverMode arm_driver_mode() {
     }
 }
 
+namespace {
+
+// The mode that will actually run, which is not always the one asked for.
+//
+// WHY THE FALLBACK EXISTS. Selecting the palette route stands the UE route DOWN -- no spawned
+// hands, no arm hiding, and Rig.cpp releases the weapon's controller attachment. If the palette
+// route then cannot install its hook, nothing is driving the arms OR holding the weapon, and
+// the player is left worse off than if they had never enabled it, with no way back except
+// editing a config file. Falling back is not politeness; it is the difference between an
+// experiment that fails safe and one that breaks the game for whoever tried it.
+//
+// Note this is checked EVERY tick, not only on a config change: the palette route can fail
+// LATE. The watchdog only decides the hook is dead after enough gameplay has passed for a call
+// to have been possible, which is minutes after the mode was selected.
+ArmDriverMode effective_mode() {
+    const ArmDriverMode wanted = arm_driver_mode();
+    if (wanted == ArmDriverMode::Palette && palettearm_unavailable()) {
+        return ArmDriverMode::UeRig;
+    }
+    return wanted;
+}
+
+} // namespace
+
 bool arm_driver_owns(ArmDriverMode mode) {
     // Deliberately reads s_active, NOT the config. Between the config changing and arbitrate()
     // running, the outgoing driver is still the one holding the handles -- answering from the
@@ -58,7 +87,14 @@ void arm_driver_release_all(const char* why) {
 }
 
 void arm_driver_arbitrate() {
-    const ArmDriverMode wanted = arm_driver_mode();
+    // A change to the key re-arms a route that gave up, BEFORE the effective mode is computed --
+    // otherwise the latch would still be set and the retry would be swallowed on the same tick.
+    if (g_cfg.arm_driver != s_last_cfg) {
+        s_last_cfg = g_cfg.arm_driver;
+        palettearm_retry();
+    }
+
+    const ArmDriverMode wanted = effective_mode();
 
     if (!s_announced) {
         API::get()->log_info("[Halo-CampE-UEVR] ARMDRIVER: %s", arm_driver_name(wanted));
@@ -73,8 +109,18 @@ void arm_driver_arbitrate() {
     // winner holds nothing stale, which is false after a level load or a failed frame -- and the
     // cost of an extra release on a mode change, which happens by hand a few times a session, is
     // nothing.
-    API::get()->log_info("[Halo-CampE-UEVR] ARMDRIVER: %s -> %s",
-                         arm_driver_name(s_active), arm_driver_name(wanted));
+    // Name the REQUESTED mode too when they differ, so a fallback reads as a fallback in the log
+    // rather than as the user's setting being silently ignored.
+    const ArmDriverMode requested = arm_driver_mode();
+    if (requested != wanted) {
+        API::get()->log_info("[Halo-CampE-UEVR] ARMDRIVER: %s -> %s (FELL BACK; %s was requested "
+                             "but is unavailable this session)",
+                             arm_driver_name(s_active), arm_driver_name(wanted),
+                             arm_driver_name(requested));
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] ARMDRIVER: %s -> %s",
+                             arm_driver_name(s_active), arm_driver_name(wanted));
+    }
     arm_driver_release_all(nullptr);
 
     // Only now does the incoming driver start answering true.
