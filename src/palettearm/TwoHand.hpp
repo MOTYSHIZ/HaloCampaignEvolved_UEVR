@@ -31,10 +31,35 @@ struct TwoHandTuning {
 
     // Seconds for the influence to fade fully in or out.
     float blend_seconds = 0.15f;
+
+    // How many METRES one unit of the positions you pass in represents.
+    //
+    // The zone above is authored in metres because that is what a person can reason about in a
+    // headset, but the poses could arrive in any unit. 1.0 for OpenXR metres; kMetresPerBlamUnit
+    // if you are feeding palette-space positions.
+    //
+    // THIS EXISTS BECAUSE GETTING IT WRONG IS INVISIBLE. The first version of the caller fed raw
+    // OpenXR metres into a hard-coded Blam conversion, so a real 30 cm reach was measured as
+    // 0.91 m -- outside the zone, every time. Nothing errors, nothing logs; the support hand
+    // simply never latches and the feature reads as unimplemented.
+    float units_to_metres = 1.0f;
 };
 
-// Everything the hold needs to know about this frame. All poses in ONE consistent frame -- the
-// caller composes them; this does not know what space it is handed.
+// Everything the hold needs to know about this frame.
+//
+// ⚠️ ONE FRAME, AND update() AND effective_basis() MUST SHARE IT. The maths is dots, crosses and
+// normalises, so it does not care WHICH frame -- but it is not told, and it cannot check. Two
+// specific ways that bites:
+//
+//   * Axes. Positions in OpenXR axes with a basis in Blam axes gives a dot product between two
+//     conventions. It produces a finite, plausible, entirely meaningless number.
+//   * The ease-out. update() remembers the last good hand-to-hand direction so a mid-hold
+//     tracking drop can fade out along it instead of snapping. That remembered vector is in
+//     whatever frame update() was fed, and effective_basis() uses it directly -- so calling the
+//     two in different frames corrupts exactly the recovery path that is hardest to notice
+//     going wrong.
+//
+// Scale is the one part that IS declared: see TwoHandTuning::units_to_metres.
 struct TwoHandInput {
     Vec3 aim_grip_position{};       // the weapon hand
     Mat3 aim_basis{};               // its orientation; forward is the aim ray

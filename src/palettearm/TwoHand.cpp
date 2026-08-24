@@ -19,11 +19,15 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
     if (input.gameplay_active && input.support_tracked && valid_basis(input.aim_basis)) {
         // Is the support hand on the barrel? Project the hand-to-hand vector onto the aim ray and
         // measure how far along it lies and how far off the line it sits.
+        // Everything here is in the CALLER'S frame and the caller's unit; only the comparison
+        // against the zone is in metres. Keeping the projection in native units and converting
+        // once at the end is what stops the scale factor being applied twice (it was, once).
         const Vec3  aim_forward = normalized(input.aim_basis.forward);
         const Vec3  hand_line   = input.support_grip_position - input.aim_grip_position;
-        const float along       = dot(hand_line, aim_forward) * kMetresPerBlamUnit;
-        const Vec3  perpendicular = hand_line - aim_forward * (along / kMetresPerBlamUnit);
-        const float lateral     = length(perpendicular) * kMetresPerBlamUnit;
+        const float along_units = dot(hand_line, aim_forward);
+        const Vec3  perpendicular = hand_line - aim_forward * along_units;
+        const float along   = along_units * tuning.units_to_metres;
+        const float lateral = length(perpendicular) * tuning.units_to_metres;
 
         in_zone = std::isfinite(along) && std::isfinite(lateral) &&
                   along > tuning.zone_min_along_m &&

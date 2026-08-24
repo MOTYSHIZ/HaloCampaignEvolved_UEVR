@@ -34,10 +34,26 @@ namespace pa = ::halo::palettearm;
 
 pa::Vec3 xr_to_blam(const pa::Vec3& v) { return {-v.z, -v.x, v.y}; }
 
+// forward/left/up in OPENXR axes. XR forward is -Z and Blam "left" is XR -X, so this is where
+// the axis roles are assigned; xr_to_blam below only relabels components.
+pa::Mat3 xr_rotation_to_xr_basis(const pa::Quat& q) {
+    return {pa::rotate(q, {0.0f, 0.0f, -1.0f}),
+            pa::rotate(q, {-1.0f, 0.0f, 0.0f}),
+            pa::rotate(q, {0.0f, 1.0f, 0.0f})};
+}
+
+// Relabel a whole basis from OpenXR axes into Blam axes.
+//
+// This is a proper rotation (the signed permutation (x,y,z) -> (-z,-x,y) has determinant +1),
+// so it preserves cross products -- which is what makes it legitimate to run the two-hand blend
+// in XR space and relabel the RESULT, rather than relabelling the inputs first. Blending then
+// relabelling and relabelling then blending give the same answer.
+pa::Mat3 blam_basis_from_xr_basis(const pa::Mat3& m) {
+    return {xr_to_blam(m.forward), xr_to_blam(m.left), xr_to_blam(m.up)};
+}
+
 pa::Mat3 xr_rotation_to_blam_basis(const pa::Quat& q) {
-    return {xr_to_blam(pa::rotate(q, {0.0f, 0.0f, -1.0f})),   // XR forward is -Z
-            xr_to_blam(pa::rotate(q, {-1.0f, 0.0f, 0.0f})),   // Blam "left" is XR -X
-            xr_to_blam(pa::rotate(q, {0.0f, 1.0f, 0.0f}))};
+    return blam_basis_from_xr_basis(xr_rotation_to_xr_basis(q));
 }
 
 // Our Math.hpp Vec3/Quat -> this folder's. Two frames, two types, one conversion point; see the
@@ -107,7 +123,6 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // a second code path -- the same reasoning Hands.cpp uses.
     const bool aim_is_right = !g_cfg.aim_left_hand;
 
-    const pa::Mat3 aim_basis_one_hand = xr_rotation_to_blam_basis(tracking.aim_aim_rotation);
     const pa::Vec3 aim_grip_blam =
         root_position + pa::transform_vector(root_basis,
             xr_to_blam(tracking.aim_grip_position - tracking.hmd_position) / pa::kMetresPerBlamUnit);
@@ -117,9 +132,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
 
     // ONE basis feeds everything. See palettearm\README.md: a second copy of this blend drifts,
     // and the symptom is shots that miss where the barrel is pointing.
-    const pa::Mat3 aim_basis = s_two_hand.effective_basis(
-        aim_basis_one_hand, aim_grip_blam, support_grip_blam,
+    //
+    // Run in OPENXR SPACE, in raw metres -- the same frame and unit palettearm_update() feeds
+    // TwoHandHold::update(). The two calls share remembered state (the ease-out direction), so
+    // they must share a frame; see the warning on TwoHandInput. Only the RESULT is relabelled
+    // into Blam axes, which is exact because the relabel is a proper rotation.
+    const pa::Mat3 blended_xr = s_two_hand.effective_basis(
+        xr_rotation_to_xr_basis(tracking.aim_aim_rotation),
+        tracking.aim_grip_position, tracking.support_grip_position,
         tracking.support_valid, s_two_hand_tuning);
+    const pa::Mat3 aim_basis = blam_basis_from_xr_basis(blended_xr);
     if (!pa::valid_basis(aim_basis)) return false;
 
     const pa::ArmNodes& aim_arm     = pa::arm_nodes(aim_is_right);
@@ -265,7 +287,9 @@ void palettearm_update(float delta_seconds) {
     if (s_tracking_ready.load(std::memory_order_acquire)) {
         const TrackingSnapshot t = s_tracking;
         input.aim_grip_position     = t.aim_grip_position;
-        input.aim_basis             = xr_rotation_to_blam_basis(t.aim_aim_rotation);
+        // XR-space basis to match the RAW XR positions on either side of it. Feeding a Blam
+        // basis here alongside OpenXR positions is the bug this pairing exists to prevent.
+        input.aim_basis             = xr_rotation_to_xr_basis(t.aim_aim_rotation);
         input.support_grip_position = t.support_grip_position;
         input.support_tracked       = t.support_valid;
         input.gameplay_active       = true;
