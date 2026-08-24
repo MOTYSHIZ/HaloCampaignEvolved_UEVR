@@ -1,5 +1,6 @@
 #include "Rig.hpp"
 #include "Config.hpp"
+#include "ArmDriver.hpp"  // the palette driver owns the weapon too; do not attach under it
 #include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
 
 #include <cstdio>
@@ -674,6 +675,12 @@ std::atomic<float> g_rigw_parent_yaw{0.0f};
 API::UObject* g_attach_obj = nullptr;
 
 void attach_apply(API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm) {
+    // EXCLUSIVITY. Under the palette arm driver the weapon is posed through palette nodes
+    // 7/8/22, so a UObjectHook controller attachment here would be a SECOND thing moving the
+    // same gun -- the two-arm-drivers rule applies to the weapon, not just the arms. Release
+    // rather than merely skipping: a previously-attached rig stays pinned to the controller
+    // forever otherwise, and nothing else would know to let go of it.
+    if (!arm_driver_owns(ArmDriverMode::UeRig)) { attach_release(rig, "palette driver owns the weapon"); return; }
     if (rig == nullptr) return;
     // Target changed under us -- drop the old one first, or it stays pinned to the controller
     // forever with no reference left to release it by.

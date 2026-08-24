@@ -2430,6 +2430,20 @@ struct Config {
     // before anything is built on top of it. Fully reversible: setting it back to 0 unhides.
     bool  arm_hide        = false;
 
+    // WHICH ARM DRIVER RUNS -- exactly one, ever. See ArmDriver.hpp for why this is one enum and
+    // not two independent switches.
+    //
+    //   0 = off      the game's stock first-person rig, untouched
+    //   1 = UeRig    Rig.cpp + Arms.cpp + Hands.cpp -- UE reflection, the route this project built
+    //   2 = Palette  src\palettearm\ -- the Blam node palette, ported from elliotttate's project
+    //
+    // DEFAULT 1: the shipped behaviour is exactly what it was before the palette route existed.
+    // Mode 2 has NEVER been verified against a running game -- its offset chain was measured on
+    // someone else's copy of the simulation DLL -- so it is opt-in, and it exists to be A/B'd in a
+    // headset against mode 1. Switching is live: the arbiter tears the outgoing driver down before
+    // the incoming one gets a frame, so it is safe to flip mid-session while wearing the headset.
+    int   arm_driver      = 1;
+
     // Which bone to hide. Shoulder_L takes the whole arm; Elbow_L leaves the upper arm in place
     // and takes forearm downwards; Wrist_L takes just the hand. Configurable because which one
     // looks right is a judgement to make in the headset, not from a bone list.

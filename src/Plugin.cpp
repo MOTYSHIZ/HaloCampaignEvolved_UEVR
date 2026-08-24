@@ -115,6 +115,7 @@
 #include "Gesture.hpp"
 
 // Two independent arms: recon for now (skeleton dump + bone-function probe).
+#include "ArmDriver.hpp"
 #include "Arms.hpp"
 
 // Per-weapon grip/offset deltas on top of the calibration.
@@ -125,6 +126,8 @@
 
 // Our own controller-attached hands, and the reload magazine.
 #include "Hands.hpp"
+// The alternative arm driver. ArmDriver.hpp decides which of the two runs; only one ever does.
+#include "palettearm/PaletteArm.hpp"
 #include "BlamAim.hpp"
 #include "BlamDrive.hpp"
 #include "HitTrace.hpp"
@@ -507,12 +510,12 @@ std::atomic<float> g_last_dt{0.033f};   // engine tick delta, for smooth turn
 // the others should be read against.
 enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_SHELL, PERF_TRACE, PERF_BRIDGE,
                 PERF_NAVHOST, PERF_GEST, PERF_ARMS, PERF_HANDS, PERF_WPNOFF, PERF_SOCK,
-                PERF_TICK, PERF_COUNT };
+                PERF_PALARM, PERF_TICK, PERF_COUNT };
 const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   ",
                                             "resolve_shell ", "reticule_trace", "menu_bridge   ",
                                             "navw_rehost   ", "gesture_update", "arms_update   ",
                                             "hands_update  ", "weapon_offset ", "socket_sample ",
-                                            "TICK (all)    " };
+                                            "palettearm    ", "TICK (all)    " };
 
 struct PerfStat {
     double   max_ms = 0.0;
@@ -7801,11 +7804,25 @@ public:
         // AFTER update(): the config reload and the stick-mode / calibration flags the detector
         // gates on are both refreshed in there, so running first would decide on stale state.
         { PerfScope _perf(PERF_GEST);  gesture_update(delta); }
-        // Same ordering reason: the rig handle arms_update() reads is resolved inside update().
-        { PerfScope _perf(PERF_ARMS);  arms_update(); }
-        // AFTER arms_update(): the hands only make sense once the game's own meshes are hidden,
-        // and hands_update() reads the reload state that gesture_update() has just advanced.
-        { PerfScope _perf(PERF_HANDS); hands_update(); }
+
+        // WHICH ARM DRIVER OWNS THE ARMS THIS FRAME. Must run before either driver: it is what
+        // releases the outgoing one on a mode change, and a driver no longer being called cannot
+        // release itself. See ArmDriver.hpp -- two drivers on one set of arms is a hard rule.
+        arm_driver_arbitrate();
+
+        if (arm_driver_owns(ArmDriverMode::UeRig)) {
+            // Same ordering reason as gesture_update: the rig handle arms_update() reads is
+            // resolved inside update().
+            { PerfScope _perf(PERF_ARMS);  arms_update(); }
+            // AFTER arms_update(): the hands only make sense once the game's own meshes are
+            // hidden, and hands_update() reads the reload state gesture_update() just advanced.
+            { PerfScope _perf(PERF_HANDS); hands_update(); }
+        } else if (arm_driver_owns(ArmDriverMode::Palette)) {
+            // The tick half only: install/remove the hook, capture poses, advance the two-hand
+            // latch. The palette itself is rewritten later, on the game's own thread, inside the
+            // detour -- which is exactly why this site must stay cheap.
+            { PerfScope _perf(PERF_PALARM); palettearm_update(delta); }
+        }
     }
 
     // VIEW LOCK -- the enforcement point. This callback owns the rotation that is actually used

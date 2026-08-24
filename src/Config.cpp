@@ -2,6 +2,8 @@
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
 #include "WeaponCalib.hpp"
+// palettearm_parse_key(): the palette arm driver owns its own keys, in its own folder.
+#include "palettearm/PaletteArm.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -545,6 +547,12 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "bonedump")       == 0) { g_cfg.bone_dump      = (v != 0.0); return true; }
     if (_stricmp(key, "armhide")        == 0) { g_cfg.arm_hide       = (v != 0.0); return true; }
     if (_stricmp(key, "armhideall")     == 0) { g_cfg.arm_hide_all   = (v != 0.0); return true; }
+    // Clamped to the enum's range rather than passed through: an out-of-range value here would
+    // silently mean "off", and losing both arm drivers to a typo is not a failure anyone would
+    // connect back to this key.
+    if (_stricmp(key, "armdriver")      == 0) { g_cfg.arm_driver     = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    // One chain link for the whole palettearm family -- same C1061 reasoning as parse_scope_key().
+    if (palettearm_parse_key(key, v))         { return true; }
     if (_stricmp(key, "wpncalibkey")   == 0) { g_cfg.wpn_calib_key   = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "wpnoffsets")    == 0) { g_cfg.wpn_offsets     = (v != 0.0); return true; }
     if (_stricmp(key, "wpnlog")        == 0) { g_cfg.wpn_log         = (v != 0.0); return true; }
