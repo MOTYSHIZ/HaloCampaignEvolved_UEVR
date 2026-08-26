@@ -1,4 +1,5 @@
 #include "Config.hpp"
+#include "WeaponCalib.hpp"
 #include "Math.hpp"
 
 #include <cstdio>
@@ -8,6 +9,7 @@
 
 namespace halo {
 Config g_cfg{};
+uint32_t g_cfg_load_gen = 0;
 
 // Every smoothing setting used to be a fraction of the gap closed PER CALL, which is not a filter
 // setting so much as a filter setting entangled with the frame rate -- the same number smoothed
@@ -406,6 +408,230 @@ void write_default_config() {
 // MSVC C1061 (blocks nested too deeply) has now bitten this file TWICE: one long else-if chain
 // overflows, and merely moving keys to a second chain just moves the overflow. Returning early
 // flattens the nesting instead of relocating it -- put new blam keys here.
+// Melee-by-swing keys. Split into their own function for the same reason parse_config_key_2
+// exists at all: MSVC's else-if chains in this file are already at the size where adding to them
+// starts costing compile time for no readability.
+// wpnoff=<match>,<dx>,<dy>,<dz>,<dgrip>,<dyaw>,<droll>
+//
+// One line per weapon, repeatable. Parsed positionally with everything after the match optional,
+// so a line that only nudges X is "wpnoff=Pistol,1.5" rather than six trailing zeroes.
+static bool parse_weapon_offset(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.wpn_count >= kMaxWeaponAdjust) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+
+    // Trim trailing whitespace, including the CR this CRLF file leaves on every value.
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    char* ctx = nullptr;
+    char* tok = strtok_s(buf, ",", &ctx);
+    if (tok == nullptr || tok[0] == 0) return true;
+
+    WeaponAdjust w{};
+    strncpy_s(w.match, sizeof(w.match), tok, _TRUNCATE);
+
+    float* fields[] = { &w.d_x, &w.d_y, &w.d_z, &w.d_grip, &w.d_grip_yaw, &w.d_grip_roll };
+    for (int i = 0; i < 6; ++i) {
+        tok = strtok_s(nullptr, ",", &ctx);
+        if (tok == nullptr) break;
+        *fields[i] = (float)atof(tok);
+    }
+
+    g_cfg.wpn[g_cfg.wpn_count++] = w;
+    return true;
+}
+
+// wpnfix=<match>,qx,qy,qz,qw,tx,ty,tz -- the palette path's per-weapon rigid delta.
+static bool parse_weapon_fix(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.wpnfix_count >= kMaxWeaponAdjust) return true;
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    char* ctx = nullptr;
+    char* tok = strtok_s(buf, ",", &ctx);
+    if (tok == nullptr || tok[0] == 0) return true;
+
+    WeaponFix w{};
+    strncpy_s(w.match, sizeof(w.match), tok, _TRUNCATE);
+    float* fields[] = { &w.q[0], &w.q[1], &w.q[2], &w.q[3], &w.t[0], &w.t[1], &w.t[2] };
+    int n = 0;
+    for (; n < 7; ++n) {
+        tok = strtok_s(nullptr, ",", &ctx);
+        if (tok == nullptr) break;
+        *fields[n] = (float)atof(tok);
+    }
+    if (n < 4) return true;   // no usable rotation: ignore the line rather than apply garbage
+    g_cfg.wpnfix[g_cfg.wpnfix_count++] = w;
+    return true;
+}
+
+// ---- WEAPON-POSITIONING / TWO-HAND KEY FAMILY. Hoisted for the same C1061 reason as
+// parse_scope_key: every else-if in the main chain counts toward MSVC's block-nesting
+// limit, and this family is large.
+static bool parse_melee_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
+    if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleeext")       == 0) { g_cfg.melee_ext      = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleereach")     == 0) { g_cfg.melee_reach    = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleemaxspeed")  == 0) { g_cfg.melee_max_speed = clampf((float)v, 1.0f, 100.0f); return true; }
+    if (_stricmp(key, "meleemaxreach")  == 0) { g_cfg.melee_max_reach = clampf((float)v, 0.3f, 5.0f); return true; }
+    if (_stricmp(key, "meleefwd")       == 0) { g_cfg.melee_fwd      = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "meleetau")       == 0) { g_cfg.melee_tau_ms   = clampf((float)v, 1.0f, 500.0f); return true; }
+    if (_stricmp(key, "meleecooldown")  == 0) { g_cfg.melee_cooldown_ms = (int)clampf((float)v, 0.0f, 5000.0f); return true; }
+    if (_stricmp(key, "meleehold")      == 0) { g_cfg.melee_hold_ms  = (int)clampf((float)v, 8.0f, 1000.0f); return true; }
+    if (_stricmp(key, "meleeaimmode")   == 0) { g_cfg.melee_aim_mode = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    // base 0 so the mask can be written 0x0080 (readable) or 128 (not), as elsewhere in this file.
+    if (_stricmp(key, "meleemask")      == 0) { g_cfg.melee_mask     = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "meleelog")       == 0) { g_cfg.melee_log      = (v != 0.0); return true; }
+    // The reload FIELDS shipped upstream without their parse keys, so reloadvr=1 in the file
+    // silently left reload_vr at its default false -- "reload doesnt work" with zero log lines,
+    // because the state machine stood down at its own gate. Fields without keys are dead weight;
+    // here are the keys.
+    if (_stricmp(key, "reloadvr")       == 0) { g_cfg.reload_vr = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadmask")     == 0) { g_cfg.reload_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "reloadbeltdrop") == 0) { g_cfg.reload_belt_drop = clampf((float)v, 0.0f, 1.5f); return true; }
+    if (_stricmp(key, "reloadbeltrad")  == 0) { g_cfg.reload_belt_radius = clampf((float)v, 0.05f, 1.5f); return true; }
+    if (_stricmp(key, "reloadjoin")     == 0) { g_cfg.reload_join_dist = clampf((float)v, 0.05f, 1.0f); return true; }
+    if (_stricmp(key, "reloadlift")     == 0) { g_cfg.reload_lift = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "reloadwellfwd")  == 0) { g_cfg.reload_well_fwd = clampf((float)v, 0.0f, 0.6f); return true; }
+    if (_stricmp(key, "reloadhold")     == 0) { g_cfg.reload_hold_ms = (int)clampf((float)v, 60.0f, 2000.0f); return true; }
+    if (_stricmp(key, "reloadlog")      == 0) { g_cfg.reload_log     = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadnofire")   == 0) { g_cfg.reload_suppress_fire = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadcancel")   == 0) { g_cfg.reload_cancel  = (v != 0.0); return true; }
+    if (_stricmp(key, "gripexclusive")  == 0) { g_cfg.grip_exclusive = (v != 0.0); return true; }
+    if (_stricmp(key, "grenadefrom")    == 0) { g_cfg.grenade_from   = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "grenadeaction")  == 0) { g_cfg.grenade_action = (int)strtol(val, nullptr, 0); return true; }
+    return false;
+}
+
+static bool parse_holster_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "holster")        == 0) { g_cfg.holster_enabled = (v != 0.0); return true; }
+    if (_stricmp(key, "holsterradius")  == 0) { g_cfg.holster_radius  = clampf((float)v, 0.05f, 0.5f); return true; }
+    if (_stricmp(key, "holstergradius") == 0) { g_cfg.holster_gradius = clampf((float)v, 0.03f, 0.5f); return true; }
+    if (_stricmp(key, "holsterrs")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rs[0], &g_cfg.holster_rs[1], &g_cfg.holster_rs[2]); return true; }
+    if (_stricmp(key, "holsterls")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_ls[0], &g_cfg.holster_ls[1], &g_cfg.holster_ls[2]); return true; }
+    if (_stricmp(key, "holsterrh")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rh[0], &g_cfg.holster_rh[1], &g_cfg.holster_rh[2]); return true; }
+    if (_stricmp(key, "holsterlc")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_lc[0], &g_cfg.holster_lc[1], &g_cfg.holster_lc[2]); return true; }
+    if (_stricmp(key, "holsterrc")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rc[0], &g_cfg.holster_rc[1], &g_cfg.holster_rc[2]); return true; }
+    if (_stricmp(key, "holstergswitchmask") == 0) { g_cfg.holster_gswitch_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holstermeleevetoms") == 0) { g_cfg.holster_melee_veto_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "holstermeleemargin") == 0) { g_cfg.holster_melee_margin = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holstermarkers") == 0) { g_cfg.holster_markers = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "holstermarkerscale") == 0) { g_cfg.holster_marker_scale = clampf((float)v, 0.02f, 0.5f); return true; }
+    if (_stricmp(key, "holsteraimhold") == 0) { g_cfg.holster_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }
+    if (_stricmp(key, "holsteryawdead") == 0) { g_cfg.holster_yaw_dead = clampf((float)v, 0.0f, 180.0f); return true; }
+    if (_stricmp(key, "holsteryawrate") == 0) { g_cfg.holster_yaw_rate = clampf((float)v, 0.0f, 360.0f); return true; }
+    if (_stricmp(key, "holsterneckdown") == 0) { g_cfg.holster_neck_down = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holsterneckback") == 0) { g_cfg.holster_neck_back = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holsterswapmask")  == 0) { g_cfg.holster_swap_mask  = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterstealbtns") == 0) { g_cfg.holster_steal_buttons = (int)v; return true; }
+    if (_stricmp(key, "holsterthrowmask") == 0) { g_cfg.holster_throw_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterpressms")   == 0) { g_cfg.holster_press_ms   = (int)clampf((float)v, 30.0f, 500.0f); return true; }
+    if (_stricmp(key, "holsterthrowspeed") == 0) { g_cfg.holster_throw_speed = clampf((float)v, 0.2f, 6.0f); return true; }
+    if (_stricmp(key, "holsterhaptic")  == 0) { g_cfg.holster_haptic  = (v != 0.0); return true; }
+    if (_stricmp(key, "holsterlog")     == 0) { g_cfg.holster_log     = (v != 0.0); return true; }
+    return false;
+}
+
+static bool parse_weaponvr_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "wpncalibkey")   == 0) { g_cfg.wpn_calib_key   = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "wpnoffsets")    == 0) { g_cfg.wpn_offsets     = (v != 0.0); return true; }
+    if (_stricmp(key, "wpnroll")        == 0) { g_cfg.wpn_roll        = (v != 0.0); return true; }
+    if (_stricmp(key, "armhide")        == 0) { g_cfg.arm_hide       = (v != 0.0); return true; }
+    if (_stricmp(key, "armhidemode")    == 0) { g_cfg.arm_hide_mode  = (int)v; return true; }
+    if (_stricmp(key, "bonedump")       == 0) { g_cfg.bone_dump      = (v != 0.0); return true; }
+    if (_stricmp(key, "armhideall")     == 0) { g_cfg.arm_hide_all   = (v != 0.0); return true; }
+    if (_stricmp(key, "armkeeppose")   == 0) { g_cfg.arm_keep_pose   = (v != 0.0); return true; }
+    if (_stricmp(key, "armhidebone")    == 0) {
+        strncpy_s(g_cfg.arm_hide_bone, sizeof(g_cfg.arm_hide_bone), val, _TRUNCATE);
+        return true;
+    }
+    if (_stricmp(key, "wpnlog")        == 0) { g_cfg.wpn_log         = (v != 0.0); return true; }
+    // calibroll=0 pins the grip's roll across a calibration: the line-up gesture cannot measure
+    // twist about the barrel, so re-fitting it from the gesture only launders noise into roll.
+    if (_stricmp(key, "calibroll")     == 0) { g_cfg.calib_roll      = (v != 0.0); return true; }
+    if (_stricmp(key, "wpnoff")        == 0) { return parse_weapon_offset(val); }
+    if (_stricmp(key, "wpnfix")        == 0) { return parse_weapon_fix(val); }
+    // base 0 so masks can be written 0x0100 (readable) or 256 (not), as elsewhere in this file.
+    // The GRIP mask: consumed by the two-hand hold's latch. (The reload gesture shares this same
+    // physical grip in a later feature; the key keeps its name for that reason.)
+    if (_stricmp(key, "reloadgrip")     == 0) { g_cfg.reload_grip_mask = (int)strtol(val, nullptr, 0); return true; }
+    // Two-handed hold. In THIS chain rather than the else-if one further down, which is already at
+    // the MSVC nested-block limit; these early returns do not nest.
+    if (_stricmp(key, "twohand")        == 0) { g_cfg.two_hand           = (v != 0.0); return true; }
+    if (_stricmp(key, "twohandmin")     == 0) { g_cfg.two_hand_min_m     = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "twohandmax")     == 0) { g_cfg.two_hand_max_m     = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "twohandrad")     == 0) { g_cfg.two_hand_radius_m  = clampf((float)v, 0.01f, 1.0f); return true; }
+    if (_stricmp(key, "twohandagreemin")== 0) { g_cfg.two_hand_agree_min = clampf((float)v, -1.0f, 1.0f); return true; }
+    if (_stricmp(key, "twohandagreefull")==0) { g_cfg.two_hand_agree_full= clampf((float)v, -1.0f, 1.0f); return true; }
+    if (_stricmp(key, "twohandblendms") == 0) { g_cfg.two_hand_blend_ms  = clampf((float)v, 1.0f, 2000.0f); return true; }
+    if (_stricmp(key, "twohandhaptic")  == 0) { g_cfg.two_hand_haptic    = (v != 0.0); return true; }
+    if (_stricmp(key, "twohandlog")     == 0) { g_cfg.two_hand_log       = (v != 0.0); return true; }
+    if (_stricmp(key, "palettescan")    == 0) { g_cfg.palette_scan       = (int)v; return true; }
+    if (_stricmp(key, "palettepoke")    == 0) { g_cfg.palette_poke       = (int)v; return true; }
+    if (_stricmp(key, "palettepokenode")==0) { g_cfg.palette_poke_node   = (int)v; return true; }
+    if (_stricmp(key, "palettepokeamt") == 0) { g_cfg.palette_poke_amt   = clampf((float)v, -10.0f, 10.0f); return true; }
+    if (_stricmp(key, "palettewatch")   == 0) { g_cfg.palette_watch      = (int)v; return true; }
+    if (_stricmp(key, "palettehook")    == 0) { g_cfg.palette_hook       = (int)v; return true; }
+    if (_stricmp(key, "palettehooktest")==0) { g_cfg.palette_hook_test   = (int)v; return true; }
+    if (_stricmp(key, "palettewpn")     == 0) { g_cfg.palette_weapon      = (v != 0.0); return true; }
+    if (_stricmp(key, "palettewpnoffx") == 0) { g_cfg.palette_weapon_off_x = clampf((float)v,-200.0f,200.0f); return true; }
+    if (_stricmp(key, "palettewpnoffy") == 0) { g_cfg.palette_weapon_off_y = clampf((float)v,-200.0f,200.0f); return true; }
+    if (_stricmp(key, "palettewpnoffz") == 0) { g_cfg.palette_weapon_off_z = clampf((float)v,-200.0f,200.0f); return true; }
+    if (_stricmp(key, "palettewpnscale")== 0) { g_cfg.palette_weapon_scale = clampf((float)v, 0.05f, 20.0f); return true; }
+    if (_stricmp(key, "palettecalibkey")== 0) { g_cfg.palette_calib_key = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
+    if (_stricmp(key, "palettebarrellock") == 0) { g_cfg.palette_barrel_lock = (v != 0.0); return true; }
+    if (_stricmp(key, "paletterolltrim")   == 0) { g_cfg.palette_roll_trim = clampf((float)v, -180.0f, 180.0f); return true; }
+    if (_stricmp(key, "fpscalefix")         == 0) { g_cfg.fp_scale_fix = (v != 0.0); return true; }
+    if (_stricmp(key, "pinuevrframe")       == 0) { g_cfg.pin_uevr_frame = (v != 0.0); return true; }
+    if (_stricmp(key, "palettewpnlockgain")  == 0) return true;
+    if (_stricmp(key, "palettewpnlockpitch") == 0) return true;
+    if (_stricmp(key, "palettewpnlockcorr")  == 0) return true;
+    if (_stricmp(key, "palettewpnsweep")     == 0) return true;
+    if (_stricmp(key, "palettewpnfix")       == 0) return true;
+    if (_stricmp(key, "palettewpnfixframe")  == 0) return true;
+    if (_stricmp(key, "gripfix") == 0) {
+        // 7 comma-separated floats: quaternion x,y,z,w then translation x,y,z in metres,
+        // controller frame. Written by the Page Up gesture; see Config::grip_fix.
+        const char* s = val; int n = 0;
+        while (n < 7 && s != nullptr && *s != 0) {
+            g_cfg.grip_fix[n++] = (float)atof(s);
+            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
+        }
+        g_cfg.grip_fix_valid = (n == 7); return true;
+    }
+    if (_stricmp(key, "aimfix") == 0) {
+        // 4 comma-separated floats: quaternion x,y,z,w in the aim source pose's frame. A
+        // measurement from the calibration file; see Config::aim_fix.
+        const char* s = val; int n = 0;
+        while (n < 4 && s != nullptr && *s != 0) {
+            g_cfg.aim_fix[n++] = (float)atof(s);
+            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
+        }
+        g_cfg.aim_fix_valid = (n == 4); return true;
+    }
+    if (_stricmp(key, "lgripfix") == 0) {
+        // 7 comma-separated floats, same layout as gripfix, LEFT controller frame. Round-tripped
+        // only -- see Config::lgrip_fix.
+        const char* s = val; int n = 0;
+        while (n < 7 && s != nullptr && *s != 0) {
+            g_cfg.lgrip_fix[n++] = (float)atof(s);
+            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
+        }
+        g_cfg.lgrip_fix_valid = (n == 7); return true;
+    }
+    if (_stricmp(key, "rollstatic")     == 0) { g_cfg.roll_static = clampf((float)v, -999.0f, 180.0f); return true; }
+    return false;
+}
+
 static bool parse_blam_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "blampitch")   == 0) { g_cfg.blam_pitch_off = (float)v; return true; }
     if (_stricmp(key, "blamdump")    == 0) { g_cfg.blam_dump      = (int)v; return true; }
@@ -491,6 +717,9 @@ static bool parse_viewfix_key(const char* key, const char* val, double v) {
 }
 
 void parse_config_key_2(const char* key, const char* val, double v) {
+        if (parse_melee_key(key, val, v)) return;
+        if (parse_holster_key(key, val, v)) return;
+        if (parse_weaponvr_key(key, val, v)) return;
         if (parse_blam_key(key, val, v)) return;
         if (parse_viewfix_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
@@ -970,12 +1199,17 @@ void load_config() {
     // Walked from kConfigFiles rather than listed again, so this can never fall out of step with
     // the change-detection gate at the top -- see the warning there.
     for (int i = 1; i < kConfigFileCount; ++i) parse_config_file(kConfigFiles[i]);
+    // Captured per-weapon deltas (halo_vr_weapons.cfg), after the hand-written ones so a
+    // capture for a weapon that also has a manual entry replaces it in the matcher rather
+    // than sitting behind it.
+    wpn_calib_load();
 
     // An offset with no version stamp is AMBIGUOUS, and guessing wrong is a constant, invisible yaw
     // error that then gets written back to disk. Raised here, reported by the tick -- this file has
     // no UEVR API dependency and is worth keeping that way.
     g_calib_stamp_ambiguous =
         g_cfg.aim_off_valid && g_cfg.aim_calib_ver < 2 && g_cfg.calib_relative;
+    ++g_cfg_load_gen;
 }
 
 // Point g_calib_path at the file for the configured hand, and load it.
@@ -1048,10 +1282,49 @@ void write_calib_file() {
         // certifies values the gesture never actually rebased -- which is how an untouched
         // absolute aimoffyaw got stamped v2 by a mesh calibration.
         g_cfg.calib_ver,
-        g_cfg.grip_deg, g_cfg.grip_yaw, g_cfg.grip_roll,
+        // The PRE-DELTA base when WeaponOffset owns the live values: with per-weapon offsets on,
+        // grip/off carry the current weapon's delta, and persisting those bakes one weapon's
+        // adjustment into the global calibration. wpn_base_* is what the config supplied before
+        // any delta, republished by WeaponOffset on every apply.
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_grip      : g_cfg.grip_deg,
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_grip_yaw  : g_cfg.grip_yaw,
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_grip_roll : g_cfg.grip_roll,
         g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll,
         g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z,
-        g_cfg.off_x, g_cfg.off_y, g_cfg.off_z);
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_off_x : g_cfg.off_x,
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_off_y : g_cfg.off_y,
+        g_cfg.wpn_offsets ? g_cfg.wpn_base_off_z : g_cfg.off_z);
+
+    if (g_cfg.grip_fix_valid) {
+        fprintf(f,
+            "# Rigid grip offset for the PALETTE weapon (Page Up freeze-and-align). Quaternion\r\n"
+            "# x,y,z,w then translation x,y,z in METRES, controller frame. Applied upstream to the\r\n"
+            "# controller pose; repeated captures compose. A measurement -- do not hand-edit.\r\n"
+            "gripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.grip_fix[0], g_cfg.grip_fix[1], g_cfg.grip_fix[2], g_cfg.grip_fix[3],
+            g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]);
+    }
+
+    // Round-tripped measurements. This file is shared with builds whose gestures WRITE these
+    // lines; a writer that drops fields it does not own destroys a measurement someone made in
+    // a headset. Persist exactly what was loaded.
+    if (g_cfg.lgrip_fix_valid) {
+        fprintf(f,
+            "# Rigid LEFT-hand offset for the arms (Insert freeze-and-align). Same layout as gripfix,\r\n"
+            "# left controller frame. A measurement -- do not hand-edit.\r\n"
+            "lgripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.lgrip_fix[0], g_cfg.lgrip_fix[1], g_cfg.lgrip_fix[2], g_cfg.lgrip_fix[3],
+            g_cfg.lgrip_fix[4], g_cfg.lgrip_fix[5], g_cfg.lgrip_fix[6]);
+    }
+    if (g_cfg.aim_fix_valid) {
+        fprintf(f,
+            "# RIGID hand-to-aim mapping (Page Down). Quaternion x,y,z,w in the aim source pose's\r\n"
+            "# frame, applied to the pose before the forward vector is taken, so it rolls with the\r\n"
+            "# wrist like the gun does. Supersedes aimoffyaw/aimoffpitch. A measurement -- do not\r\n"
+            "# hand-edit.\r\n"
+            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
+    }
 
     if (g_cfg.aim_off_valid) {
         fprintf(f,

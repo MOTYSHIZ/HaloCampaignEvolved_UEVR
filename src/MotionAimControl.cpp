@@ -31,6 +31,9 @@
 #include "uevr/API.hpp"
 #include "MotionAimControl.hpp"
 #include "Config.hpp"
+#include "TwoHand.hpp"
+
+#include <chrono>
 #include "Math.hpp"
 #include "UeObject.hpp"
 #include "AimTrace.hpp"
@@ -315,6 +318,12 @@ float shape(float err_deg, float dt) {
 // calibrated aim pose, the sightline through xdist (so hand TRANSLATION moves aim, not just
 // rotation), and the snap-turn offset. Everything it touches is either a UEVR API read (internally
 // locked) or an atomic, so it is callable from the XInput hook as well as the tick.
+Quat apply_aim_fix(const Quat& q_src) {
+    if (!g_cfg.aim_fix_valid) return q_src;
+    const Quat f{g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]};
+    return quat_mul(q_src, f);
+}
+
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
     if (ridx < 0) return false;
@@ -322,7 +331,12 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
-    Vec3 fwd = quat_forward(cq);
+    // apply_aim_fix: the calibration file's controller-frame correction. The rendered weapon
+    // pose (BlamPalette) routes through the same function, so the ray and the barrel agree by
+    // construction -- applying it to only one of them was measured at ~8 deg of barrel-off-ray,
+    // zero at a level wrist and full at a rolled one (the correction is fixed in the
+    // controller's frame, so wrist roll sweeps its direction).
+    Vec3 fwd = quat_forward(apply_aim_fix(cq));
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -357,11 +371,19 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            fwd = quat_forward(gq);
+            fwd = quat_forward(apply_aim_fix(gq));
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
     }
+
+    // ---- THE TWO-HANDED HOLD, here and deliberately: after the source pose is chosen, before
+    // the sightline. Every consumer of aim -- the control law, the direct drive, the reticle,
+    // the rendered weapon pose -- takes its direction from this one derivation, so blending at
+    // this point keeps them agreeing by construction. The palette applies the SAME rotation to
+    // the weapon pose (two_hand_delta); blending only one of the pair was field-observed as the
+    // gun turning two-handed while the shots kept following the single hand.
+    two_hand_blend(&fwd);
 
     Vec3 origin{};
     const bool have_origin = aim_sightline_origin(&origin);
@@ -437,6 +459,43 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
     return true;
 }
 
+std::atomic<long long> g_melee_aim_hold_until{0};
+std::atomic<float>     g_melee_aim_ctrl_yaw{0.0f};
+std::atomic<float>     g_melee_aim_ctrl_pitch{0.0f};
+
+// ---- MELEE AIM HOLD, applied to the CONTROLLER ANGLES rather than to the setpoint.
+//
+// Every consumer -- every aim path derives from these two numbers --
+// derives its aim from these two numbers. Substituting here means one definition of the hold, and
+// it stays correct whatever the aim_direct sign knobs are set to, which overriding the published
+// setpoint would not.
+//
+// Full hold until the deadline, then a linear blend back to the live hand over melee_aim_ramp_ms.
+// The blend exists so the reticule returns rather than teleports; the hand has travelled a long way
+// by then and an instant handback would be a visible snap in the opposite direction.
+static void apply_melee_aim_hold(float* cy, float* cp) {
+    const long long until = g_melee_aim_hold_until.load(std::memory_order_relaxed);
+    if (until == 0) return;
+    const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const long long ramp = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(g_cfg.melee_aim_ramp_ms > 0 ? g_cfg.melee_aim_ramp_ms : 1)).count();
+    if (now >= until + ramp) {
+        // Expired. Clear it so the common case is a single relaxed load of zero.
+        g_melee_aim_hold_until.store(0, std::memory_order_relaxed);
+        return;
+    }
+    float w = 1.0f;
+    if (now > until) w = 1.0f - (float)(now - until) / (float)ramp;
+    if (w < 0.0f) w = 0.0f;
+    if (w > 1.0f) w = 1.0f;
+    const float fy = g_melee_aim_ctrl_yaw.load(std::memory_order_relaxed);
+    const float fp = g_melee_aim_ctrl_pitch.load(std::memory_order_relaxed);
+    // wrap180 on the yaw term so the blend takes the short way round rather than the long one.
+    *cy = *cy + wrap180(fy - *cy) * w;
+    *cp = *cp + (fp - *cp) * w;
+}
+
+
 // The aim setpoint, sampled now. See the header for why a consumer would want this instead of
 // g_desired_yaw. The body is deliberately identical to the setpoint arithmetic in
 // aim_control_law() below -- the hand's rotation since calibration, added to the aim captured at
@@ -447,6 +506,7 @@ bool desired_aim_now(float* out_yaw, float* out_pitch) {
                                              : API::VR::get_right_controller_index();
     float cy = 0.0f, cp = 0.0f;
     if (!derive_ctrl_angles(&cy, &cp, ridx)) return false;
+    apply_melee_aim_hold(&cy, &cp);
     *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
     *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
     return true;
@@ -482,6 +542,10 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                      float* out_rx, float* out_ry) {
     // The hand's rotation SINCE CALIBRATION, kept as its own term because the direct-write path
     // needs to be able to mirror it independently of the reference it is added to.
+    // A gesture hold in flight pins these to its own target (see apply_melee_aim_hold). Applied
+    // to the INPUTS so everything below inherits it without knowing a gesture exists.
+    apply_melee_aim_hold(&ctrl_yaw, &ctrl_pitch);
+
     const float dctrl_yaw   = wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
     const float dctrl_pitch = wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
 

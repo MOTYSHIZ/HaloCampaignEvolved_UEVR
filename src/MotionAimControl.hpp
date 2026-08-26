@@ -15,6 +15,24 @@
 
 namespace halo {
 
+// The controller-frame aim correction (Config::aim_fix, from the calibration file), applied to
+// every pose-derived direction that must agree with the calibrated trims. It exists as ONE
+// function so the rendered weapon pose (BlamPalette) and the two-hand support pose route through
+// the same rotation: gripfix was SOLVED on a chain carrying this correction, and consuming it
+// without the correction was measured at 8.4 degrees of barrel error, correlated 0.908 with
+// sin(wrist roll) -- the gun sitting differently at every wrist angle. Identity while no aimfix
+// line has been loaded.
+Quat apply_aim_fix(const Quat& q_src);
+
+// ---- GESTURE AIM HOLD. A physical gesture (today: the grenade throw; melee joins in a later
+// feature) can pin the aim to a direction of its own for a bounded window -- the game acts along
+// the AIM, and during a throw the aim is the flailing hand itself. The gesture stores the target
+// as CONTROLLER-equivalent angles plus a deadline; the aim derivation substitutes them while the
+// deadline holds, then blends back over the ramp so the reticle returns instead of teleporting.
+extern std::atomic<long long> g_melee_aim_hold_until;   // 0 = no hold in effect
+extern std::atomic<float>     g_melee_aim_ctrl_yaw;
+extern std::atomic<float>     g_melee_aim_ctrl_pitch;
+
 // Where ControlRotation sits on the PlayerController. RESOLVED AT RUNTIME, with the measured value
 // below as both the fallback and the expectation.
 //

@@ -107,4 +107,11 @@ void blam_drive_offthread_write();
 // blam_drive_tick() must run BEFORE blam_aim_tick() so that on a 0->non-zero transition this file
 // removes its hook in the same frame the diagnostics install theirs.
 
+// Unit state read from the player's unit object on the sim thread (see publish_unit_state):
+// grenade type (0 frag / 1 plasma), pouch counts, whether the read is live, and whether the unit
+// has a parent object (vehicle seat / turret). Consumed by the holsters.
+extern std::atomic<int>  g_unit_gtype, g_unit_gfrag, g_unit_gplasma;
+extern std::atomic<bool> g_unit_gvalid;
+extern std::atomic<bool> g_unit_mounted;
+
 } // namespace halo

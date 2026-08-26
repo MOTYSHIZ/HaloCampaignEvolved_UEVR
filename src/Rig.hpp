@@ -177,4 +177,12 @@ bool marker_alive(BorrowedMarker& m);
 void park_marker(BorrowedMarker& m, const Vec3& p);
 void release_marker(BorrowedMarker& m, const char* label);
 
+// The WORLD position of a socket on the rig, in cm. Where derive_pivot answers "where is the grip
+// relative to the component", this answers "where did the grip actually END UP" -- which is the
+// only honest way to score a palette write, because it is read back from the posed skeleton rather
+// than computed from the values we hoped we wrote. Reflected call: GAME THREAD ONLY.
+bool rig_socket_world(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out);
+// The socket's WORLD rotation (pitch, yaw, roll degrees) from the posed skeleton.
+bool rig_socket_world_rot(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out_pyr);
+
 } // namespace halo

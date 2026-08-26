@@ -19,6 +19,11 @@
 using namespace uevr;
 
 namespace halo {
+
+std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
+std::atomic<bool> g_unit_gvalid{false};
+std::atomic<bool> g_unit_mounted{false};
+
 namespace {
 
 // The orientation getter, dll+0x5A6AD0. Hooked purely to get onto the sim thread -- its return
@@ -151,6 +156,7 @@ GetOrientFn g_original = nullptr;
 int         g_hook_id  = -1;
 uintptr_t   g_sim_base = 0;
 uint32_t    g_tls_index = 0;
+
 
 // The resolved control record. Re-resolved when it goes bad AND on a slow timer -- see the
 // re-resolve note in blam_drive_tick(). Steady state is a null check on a hot path.
@@ -920,6 +926,109 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     }
 }
 
+// UNIT OBJECT DUMP (Config::blam_unit_dump). The record's +0x80 is our unit datum; the game's own
+// walk (seen at dll+0x279BEA: tls+0x20 -> [..] -> +0x50 -> entry idx*24 -> +0x10) yields the object.
+// Every N calls, log the delivered left stick beside every non-zero float in [-1.5,1.5] of the
+// object's first blam_unit_dump_len bytes -- the biped's throttle is whatever tracks the stick.
+uintptr_t resolve_unit_object(uintptr_t rec_base, uint32_t* out_idx) {
+    const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+    uintptr_t block = 0, ctx = 0, ctx2 = 0, table = 0, obj = 0;
+    if (tls_array == 0) return 0;
+    if (!read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) || block == 0) return 0;
+    if (IsBadReadPtr((const void*)(rec_base + 0x80), 4)) return 0;
+    const uint32_t datum = *(const uint32_t*)(rec_base + 0x80);
+    if (datum == 0xFFFFFFFFu) return 0;
+    const uint32_t idx = datum & 0xFFFFu;
+    if (out_idx) *out_idx = datum;
+    if (!read_ptr(block + 0x20, &ctx) || ctx == 0) return 0;
+    (void)ctx2;
+    if (!read_ptr(ctx + 0x50, &table) || table == 0) return 0;
+    if (!read_ptr(table + (uintptr_t)idx * 24 + 0x10, &obj) || obj == 0) return 0;
+    return obj;
+}
+
+// Resolve ANY object datum through the same table walk. SIM THREAD ONLY (gs:[0x58]).
+// Found 2026-08-20: the biped's +0x0C holds its parent object's datum while mounted (the
+// Warthog's unit) and 0xFFFFFFFF on foot -- this is the door into vehicle state.
+uintptr_t resolve_object_by_datum(uint32_t datum) {
+    const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+    uintptr_t block = 0, ctx = 0, table = 0, obj = 0;
+    if (tls_array == 0 || datum == 0xFFFFFFFFu) return 0;
+    if (!read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) || block == 0) return 0;
+    if (!read_ptr(block + 0x20, &ctx) || ctx == 0) return 0;
+    if (!read_ptr(ctx + 0x50, &table) || table == 0) return 0;
+    if (!read_ptr(table + (uintptr_t)(datum & 0xFFFFu) * 24 + 0x10, &obj) || obj == 0) return 0;
+    return obj;
+}
+
+
+// ---- UNIT STATE FOR THE HOLSTERS, published per sim call. SIM THREAD ONLY (the resolve walks
+// gs:[0x58]). Mounted: the biped's +0x0C parent datum != 0xFFFFFFFF (a vehicle seat or turret) --
+// gates the holster button steal, which must never eat the buttons a seat needs. Grenades: type
+// at +0x380, frag count +0x382, plasma count +0x383 -- the game auto-switches type when one runs
+// out, which is exactly what a plugin-side belief would lose; reading the object is the truth.
+void publish_unit_state(uintptr_t rec_base) {
+    uint32_t datum = 0;
+    const uintptr_t obj = resolve_unit_object(rec_base, &datum);
+    {
+        static uint32_t s_last_datum = 0xDEADBEEFu;
+        if (datum != s_last_datum && !IsBadReadPtr((const void*)(rec_base + 0x70), 0x20)) {
+            s_last_datum = datum;
+            const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);
+            // The datum slot read zero all session while play was live, so either the offset or
+            // the RECORD is wrong for this resolve path. Probe the same slot in the neighbouring
+            // records: the one holding a plausible datum identifies the live slot directly.
+            uint32_t nb[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                const uintptr_t r2 = rec_base + (uintptr_t)k * 0x198;
+                if (!IsBadReadPtr((const void*)(r2 + 0x80), 4)) nb[k] = *(const uint32_t*)(r2 + 0x80);
+            }
+            API::get()->log_info("[Halo-CampE-UEVR] UNITREC: rec 0x%llX rec+0x70..0x8C=[%08X %08X %08X %08X %08X %08X %08X %08X] -> datum 0x%08X | +0x80 of records 0..3 = [%08X %08X %08X %08X]",
+                                 (unsigned long long)rec_base,
+                                 rw[0], rw[1], rw[2], rw[3], rw[4], rw[5], rw[6], rw[7], datum,
+                                 nb[0], nb[1], nb[2], nb[3]);
+        }
+    }
+    // Datum 0x00000000 is NOT a unit (measured: it resolves table slot 0, a garbage object whose
+    // +0x0C read as "mounted" -- which disabled the button steal -- and whose counts read zero,
+    // refusing every pouch). Only a plausible datum publishes; anything else stands the state
+    // down so the consumers run on their safe defaults (not mounted, counts unknown).
+    if (obj == 0 || datum == 0 || (datum & 0xFFFFu) == 0) {
+        g_unit_gvalid.store(false, std::memory_order_relaxed);
+        g_unit_mounted.store(false, std::memory_order_relaxed);
+        return;
+    }
+    g_unit_mounted.store(!IsBadReadPtr((const void*)(obj + 0x0C), 4)
+                         && *(const uint32_t*)(obj + 0x0C) != 0xFFFFFFFFu,
+                         std::memory_order_relaxed);
+    // EVIDENCE, once per resolved object: the pouches read "frag 0 plasma 0" on a unit that
+    // demonstrably had grenades, so either this is the wrong object or the offsets do not hold
+    // on this path. Print the datum, the object, and the raw bytes -- the next session decides.
+    {
+        static uintptr_t s_said_obj = 0;
+        if (obj != s_said_obj && !IsBadReadPtr((const void*)(obj + 0x380), 8)) {
+            s_said_obj = obj;
+            const uint8_t* u8 = (const uint8_t*)obj;
+            const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);
+            API::get()->log_info("[Halo-CampE-UEVR] UNITSTATE: rec 0x%llX rec+0x70..0x8C=[%08X %08X %08X %08X %08X %08X %08X %08X] datum 0x%08X obj 0x%llX bytes@0x380=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+                                 (unsigned long long)rec_base,
+                                 rw[0], rw[1], rw[2], rw[3], rw[4], rw[5], rw[6], rw[7],
+                                 datum, (unsigned long long)obj,
+                                 u8[0x380], u8[0x381], u8[0x382], u8[0x383],
+                                 u8[0x384], u8[0x385], u8[0x386], u8[0x387]);
+        }
+    }
+    if (!IsBadReadPtr((const void*)(obj + 0x380), 4)) {
+        const uint8_t* u8 = (const uint8_t*)obj;
+        g_unit_gtype.store((int)u8[0x380], std::memory_order_relaxed);
+        g_unit_gfrag.store((int)u8[0x382], std::memory_order_relaxed);
+        g_unit_gplasma.store((int)u8[0x383], std::memory_order_relaxed);
+        g_unit_gvalid.store(true, std::memory_order_relaxed);
+    } else {
+        g_unit_gvalid.store(false, std::memory_order_relaxed);
+    }
+}
+
 static void drive_angles_impl(bool off_thread) {
     if (g_cfg.blam_angles == 0) return;
 
@@ -987,6 +1096,17 @@ static void drive_angles_impl(bool off_thread) {
     }
     if (IsBadWritePtr((void*)rec, 8)) return;
 
+    // Holster inputs (mounted, grenade type/counts), published beside the write. Sim thread only:
+    // the unit resolve walks gs:[0x58], which reads zero from any other thread -- the off-thread
+    // TEB path skips it and the atomics simply hold.
+    //
+    // REBASED: rec points AT the yaw field (resolve returns record + OFF_CTL_YAW; fp[0]/fp[1]
+    // below write through it directly), but the unit resolve walks offsets from the RECORD START.
+    // Passing rec unrebased shifted every read by 0x94 -- the datum slot read from the middle of
+    // the record and came back zero for a whole session, which is what stranded the grenade
+    // pouches on the belief fallback and let the type belief invert against the game.
+    if (!off_thread) publish_unit_state(rec - OFF_CTL_YAW);
+
     float* fp = (float*)rec;
 #if HALO_VR_DEV
     // Sampled BEFORE our write: this is what the record holds after whatever last touched it, which
@@ -1039,6 +1159,7 @@ static void drive_angles_impl(bool off_thread) {
     g_last_written_y = ry; g_last_written_p = rp; g_have_written = true;
 #endif
 }
+
 
 // TIER 1 entry: called from the hook, on the sim thread, ~2600 times a second.
 void drive_control_angles() { drive_angles_impl(/*off_thread=*/false); }
