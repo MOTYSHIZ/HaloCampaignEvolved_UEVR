@@ -6,9 +6,23 @@
 //                  xrlayer_capture_source(). Reads g_cfg, writes the pose snapshot, runs the
 //                  watchdog, owns the D3D12 OBJECT LIFETIMES, and -- since 2026-08-23 -- owns the
 //                  one copy that reads an engine-owned resource. Never calls OpenXR.
-//   SUBMIT THREAD  hooked_end_frame(). Reads the snapshot, owns every OpenXR call and the copy into
+//   SUBMIT THREAD  produce_layers(). Reads the snapshot, owns every OpenXR call and the copy into
 //                  the swapchain image. Never calls UE reflection, never allocates on the steady
 //                  path, and NEVER touches a resource this plugin did not create.
+//
+// ATTACHMENT -- HOW produce_layers() GETS CALLED. Two rungs, chosen in resolve_openxr(), reported
+// as tier= in the state line. The per-frame work is identical on both; only the plumbing differs.
+//
+//   tier=apilayer  THE SHIPPING ROUTE. Our own OpenXR API layer (built in apilayer/, registered by
+//                  scripts/Register-XrApiLayer.ps1) is loaded into the process by the loader and
+//                  calls bridge_end_frame(); the layer does the copy, the call-through and the
+//                  fail-open retry. No PDB, no signature, no recorded address, and NOTHING HERE TO
+//                  ROT when UEVR or the game updates. XrLayerBridge.hpp is our side of it.
+//
+//   tier=pdb       DEV FALLBACK. An inline hook on xrEndFrame, whose address comes from symbols in
+//                  UEVRBackend.pdb. Exact, correct, and CANNOT REACH PLAYERS -- a player install
+//                  has no PDB, so this rung resolves nothing and the feature latches off. That is
+//                  the whole reason the layer above exists; see XrLayerAttach.hpp.
 //
 // The two share the pose snapshot (seqlock), the config mirror (per-field atomics), and one atomic
 // texture pointer that is only ever g_owned or nullptr. Each has its own command list, allocators
@@ -35,6 +49,10 @@
 #define XR_USE_GRAPHICS_API_D3D12
 #include "thirdparty/openxr/openxr.h"
 #include "thirdparty/openxr/openxr_platform.h"
+
+// The SHIPPING attachment. Included after the OpenXR headers on purpose: XrLayerAbi.h pulls in the
+// same vendored copy, and both sides of the ABI must see one set of struct layouts.
+#include "XrLayerBridge.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -91,6 +109,29 @@ struct XrFns {
 };
 XrFns g_xr;
 
+// WHICH RUNG WON. Recorded rather than inferred: the two tiers reach the compositor by completely
+// different routes -- one appends inside our own inline hook, the other hands quads to a layer that
+// appends them for us -- and a log that does not say which is in play cannot be read after the fact.
+XrAttachTier g_tier = XrAttachTier::None;
+
+// Set by resolve_openxr() when it returns false for a TIMING reason rather than a failure. The
+// difference decides whether the caller waits or latches Failed, and getting it wrong turns "the
+// session has not started yet" into "this feature is broken for the rest of the run".
+bool g_resolve_waiting = false;
+
+// True once the API layer has accepted our end-frame callback. The hook rung has g_hook_id; this is
+// its counterpart, and remove_hook() must clear whichever one is set.
+bool g_bridge_cb = false;
+
+const char* tier_name(XrAttachTier t) {
+    switch (t) {
+        case XrAttachTier::ApiLayer:     return "apilayer";
+        case XrAttachTier::BackendPdb:   return "pdb";
+        case XrAttachTier::LoaderExport: return "loader";
+        default:                         return "none";
+    }
+}
+
 // EVERY entry point comes from the SAME loader instance, and it must be the one UEVR uses.
 //
 // This is not only about the hook. The XrSession the plugin API hands us belongs to the loader
@@ -100,7 +141,82 @@ XrFns g_xr;
 // it only ever looked like a hook problem because the hook never fired to expose the rest.
 bool resolve_openxr() {
     if (g_xr.ok) return true;
-    if (!xrattach_ready()) return false;          // PDB still loading on the worker
+    g_resolve_waiting = false;
+
+    // ---- THE SHIPPING RUNG, ASKED FIRST: our own OpenXR API layer -----------------------------
+    //
+    // Asked before the PDB for the reason XrLayerAttach.hpp spells out at length: the PDB tier is
+    // exact, correct, and CANNOT REACH PLAYERS, because UEVRBackend.pdb exists only in a UEVR
+    // checkout. A player install resolves nothing, the feature latches off, and it does so while
+    // shipping enabled -- which is the worst shape a failure can take. The layer needs no PDB, no
+    // signature and no recorded address; the loader hands it the chain for free.
+    //
+    // get_proc() resolves BELOW our layer on the SAME chain the session came from, so the handle
+    // and the calls belong to one loader instance BY CONSTRUCTION. That is the exact correctness
+    // argument this module lost the first time round, when the session came from UEVR and the
+    // entry points came from openxr_loader.dll.
+    if (const HaloVrLayerApi* api = xrbridge_api()) {
+        // THE INSTANCE MAY NOT EXIST YET, AND THAT IS NOT A FAILURE. api->get_proc() answers null
+        // for every name until the layer has seen xrCreateInstance, so resolving now would fail the
+        // whole tier for a timing reason and latch us onto the PDB for the rest of the session --
+        // on a player machine, onto nothing at all. Wait instead; the caller retries every tick.
+        if (api->get_instance() == XR_NULL_HANDLE) {
+            static uint32_t waited  = 0;
+            static bool     gave_up = false;
+            if (!gave_up && ++waited >= 900) {          // ~10 s at the game-thread tick rate
+                gave_up = true;
+                logf("the API layer is loaded but no OpenXR instance has appeared in ~10 s. That is "
+                     "not what a working layer looks like; falling through to the PDB tier so a dev "
+                     "checkout still has a route. Layer status: %s", xrbridge_status());
+            }
+            if (!gave_up) {
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    logf("API layer present -- waiting for the OpenXR instance before resolving "
+                         "entry points through it. %s", xrbridge_status());
+                }
+                g_resolve_waiting = true;
+                return false;
+            }
+        } else {
+            auto lget = [&](const char* name) -> void* {
+                void* f = (void*)api->get_proc(name);
+                if (f == nullptr) logf("the API layer could not resolve %s", name);
+                return f;
+            };
+            XrFns f{};
+            f.enumerate_formats = (PFN_xrEnumerateSwapchainFormats)lget("xrEnumerateSwapchainFormats");
+            f.create_swapchain  = (PFN_xrCreateSwapchain)          lget("xrCreateSwapchain");
+            f.destroy_swapchain = (PFN_xrDestroySwapchain)         lget("xrDestroySwapchain");
+            f.enumerate_images  = (PFN_xrEnumerateSwapchainImages) lget("xrEnumerateSwapchainImages");
+            f.acquire_image     = (PFN_xrAcquireSwapchainImage)    lget("xrAcquireSwapchainImage");
+            f.wait_image        = (PFN_xrWaitSwapchainImage)       lget("xrWaitSwapchainImage");
+            f.release_image     = (PFN_xrReleaseSwapchainImage)    lget("xrReleaseSwapchainImage");
+            // Optional here for the same reason as below: losing these costs the measured layer
+            // budget and nothing else.
+            f.get_system        = (PFN_xrGetSystem)                lget("xrGetSystem");
+            f.get_system_props  = (PFN_xrGetSystemProperties)      lget("xrGetSystemProperties");
+
+            // NOTE WHAT IS DELIBERATELY NOT REQUIRED: xrEndFrame. On this rung the LAYER owns that
+            // call and we never make it, so demanding it would fail the shipping route over a
+            // function it does not use. The hook rung below still requires it, because there it IS
+            // the hook. end_frame stays null here, and hooked_end_frame is never installed.
+            if (f.enumerate_formats && f.create_swapchain && f.destroy_swapchain &&
+                f.enumerate_images && f.acquire_image && f.wait_image && f.release_image) {
+                g_xr    = f;
+                g_xr.ok = true;
+                g_tier  = XrAttachTier::ApiLayer;
+                logf("entry points resolved through the API LAYER -- no PDB, no signature, no "
+                     "recorded address. %s", xrbridge_status());
+                return true;
+            }
+            logf("the API layer is present and has an instance, but did not resolve the swapchain "
+                 "entry points. Falling through to the PDB tier.");
+        }
+    }
+
+    if (!xrattach_ready()) { g_resolve_waiting = true; return false; }   // PDB still loading
 
     XrAttachTier tier = XrAttachTier::None;
     XrAttachTier first_tier = XrAttachTier::None;
@@ -151,8 +267,11 @@ bool resolve_openxr() {
         return false;
     }
 
-    logf("entry points resolved from UEVRBackend.pdb -- xrEndFrame @ %p", (void*)g_xr.end_frame);
+    logf("entry points resolved from UEVRBackend.pdb -- xrEndFrame @ %p. THIS IS THE DEV RUNG: a "
+         "player install has no PDB, so a release that reaches here has no compositor overlay. "
+         "Register the API layer to get the shipping route.", (void*)g_xr.end_frame);
     g_xr.ok = true;
+    g_tier  = XrAttachTier::BackendPdb;
     return true;
 }
 
@@ -1755,6 +1874,22 @@ bool bring_up(const Mirror& m) {
     }
 
     g_session = session;
+
+    // CROSS-CHECK THE HANDLE ON THE LAYER RUNG. produce_layers() gates on session == g_session, so
+    // a disagreement here would not surface as an error -- it would be the overlay silently never
+    // drawing, on every frame, with every other diagnostic reading healthy. The two handles come
+    // from different places (UEVR's plugin API, and the layer's own xrCreateSession) and are
+    // expected to be the same value; nothing downstream can tell you when they are not.
+    if (g_tier == XrAttachTier::ApiLayer) {
+        const HaloVrLayerApi* api = xrbridge_api();
+        const XrSession ls = (api != nullptr && api->get_session != nullptr)
+                                 ? api->get_session() : XR_NULL_HANDLE;
+        if (ls != XR_NULL_HANDLE && ls != session) {
+            logf("SESSION MISMATCH: UEVR reports %p, the API layer reports %p. Using UEVR's -- if "
+                 "the overlay never appears, this is why.", (void*)session, (void*)ls);
+        }
+    }
+
     g_device  = (ID3D12Device*)p->renderer->device;
     g_queue   = (ID3D12CommandQueue*)p->renderer->command_queue;
 
@@ -1818,27 +1953,43 @@ XrCompositionLayerQuad g_quads[XRLAYER_SLOTS]{};
 // -- it is derived from another slot's pose rather than owning a slot of its own.
 XrCompositionLayerQuad g_scope_ret_quad{};
 
-XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrameEndInfo* info) {
-    // Fail-open on every path below: anything unexpected forwards the call untouched.
-    if (g_end_frame_orig == nullptr) return XR_ERROR_RUNTIME_FAILURE;
-    if (info == nullptr) return g_end_frame_orig(session, info);
+// PRODUCE OUR LAYERS FOR THIS FRAME. SUBMIT THREAD. Returns how many pointers it wrote into
+// `out`, at most `out_capacity`; 0 means "nothing to add" and is the fail-open answer at every
+// gate below.
+//
+// THIS IS THE WHOLE OF THE PER-FRAME WORK, AND BOTH ATTACHMENT RUNGS SHARE IT. What differs is
+// only who does the appending afterwards:
+//
+//   layer rung -- bridge_end_frame() hands these straight back to the API layer, which does the
+//                 copy, the call-through and the fail-open retry itself (see XrLayerAbi.h).
+//   hook rung  -- hooked_end_frame() copies UEVR's layers, appends ours, calls through, and
+//                 retries clean if the runtime refuses.
+//
+// Splitting it this way is not tidiness. Two copies of these gates would drift, and the ones that
+// would drift silently are exactly the ones deciding whether a wrong marker is shown.
+//
+// THE POINTERS WRITTEN HERE MUST OUTLIVE THE RETURN -- both callers forward them to the runtime
+// after this returns. That is why g_quads and g_scope_ret_quad are static and not locals.
+uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
+                        const XrCompositionLayerBaseHeader** out, uint32_t out_capacity) {
+    if (info == nullptr || out == nullptr) return 0;
 
     const Mirror m = mirror_load();
-    if (!m.enabled) return g_end_frame_orig(session, info);
+    if (!m.enabled) return 0;
 
     const State st = g_state.load(std::memory_order_relaxed);
-    if (st == State::Failed || st == State::Off) return g_end_frame_orig(session, info);
+    if (st == State::Failed || st == State::Off) return 0;
 
     // Bring-up is NOT done here -- see bring_up() on the game thread. Until it succeeds we are only
     // a pass-through.
-    if (st != State::Armed) return g_end_frame_orig(session, info);
-    if (session != g_session) return g_end_frame_orig(session, info);
+    if (st != State::Armed) return 0;
+    if (session != g_session) return 0;
 
     Frame fr{};
-    if (!read_snapshot(&fr)) return g_end_frame_orig(session, info);
+    if (!read_snapshot(&fr)) return 0;
 
     const XrSpace space = (m.space == 2) ? g_view_space : g_stage_space;
-    if (space == XR_NULL_HANDLE) return g_end_frame_orig(session, info);
+    if (space == XR_NULL_HANDLE) return 0;
 
     // ============================================================================================
     // WHICH SLOTS ARE DRAWABLE, and how many of them fit
@@ -1902,7 +2053,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         draw[n_draw].prio = sn.prio;
         ++n_draw;
     }
-    if (n_draw == 0) return g_end_frame_orig(session, info);
+    if (n_draw == 0) return 0;
 
     // ---- the ring fall-back counter, on the EDGE only ----
     //
@@ -1948,12 +2099,21 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // one is exactly the invention this block exists to avoid. The real ceiling came from
     // xrGetSystemProperties at bring-up (see query_max_layers), and what UEVR has already put in
     // this frame is read from info->layerCount every time rather than guessed.
-    constexpr uint32_t MAX_LAYERS = 32;
-    if (info->layerCount >= MAX_LAYERS) return g_end_frame_orig(session, info);
+    // `out_capacity` is the caller's room for OUR layers and nothing more -- the hook rung passes
+    // what is left of its 32-entry array after UEVR's own layers, the API-layer rung passes
+    // HALOVR_LAYER_MAX_EXTRA_LAYERS. It is NOT a budget, and reading it as one is the invention
+    // this block exists to avoid. The real ceiling came from xrGetSystemProperties at bring-up
+    // (see query_max_layers), and what UEVR has already put in this frame is read from
+    // info->layerCount every time rather than guessed.
+    //
+    // Tested HERE rather than at the top of the function on purpose: the freshness gates and the
+    // ring fall-back counter above have already run, and they must keep running on a frame we end
+    // up adding nothing to, or ringfalls and g_showing_ring stop tracking reality.
+    if (out_capacity == 0) return 0;
 
     uint32_t budget = our_layer_budget(info->layerCount, m.budget);
-    if (budget > MAX_LAYERS - info->layerCount) budget = MAX_LAYERS - info->layerCount;
-    if (budget == 0) return g_end_frame_orig(session, info);   // forward untouched, nothing acquired
+    if (budget > out_capacity) budget = out_capacity;
+    if (budget == 0) return 0;   // nothing acquired, so nothing to release
 
     // DROP ORDER: priority first (0 = the reticule, never dropped), then LARGEST APPARENT SIZE
     // first, so what goes is the furthest/smallest -- one comparison expressing both. Insertion
@@ -1978,7 +2138,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // ---- acquire / wait / blit / release ----
     uint32_t idx = 0;
     XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(g_xr.acquire_image(g_swapchain, &ai, &idx))) return g_end_frame_orig(session, info);
+    if (XR_FAILED(g_xr.acquire_image(g_swapchain, &ai, &idx))) return 0;
 
     // TIMEOUT IS A SUCCESS CODE. XR_TIMEOUT_EXPIRED is non-negative, so XR_FAILED() does not catch
     // it -- testing with XR_FAILED here would sail past a wait that never completed and write into
@@ -1997,7 +2157,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         g_xr.release_image(g_swapchain, &ri);
         static uint32_t waits = 0;
         if (waits < 5) { ++waits; logf("xrWaitSwapchainImage did not complete -- overlay skipped this frame"); }
-        return g_end_frame_orig(session, info);
+        return 0;
     }
 
     // A colour/alpha edge rewrites the staging buffer IN PLACE, so the GPU must be done reading it.
@@ -2042,9 +2202,9 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // on this stack, that SteamVR DROPS eye-visibility quad pairs from normal presentation -- they
     // only appear when the dashboard flattens app layers. A per-eye disparity pair would therefore
     // work on some runtimes and silently render nothing on the one most of our users are on.
-    const XrCompositionLayerBaseHeader* layers[MAX_LAYERS];
-    for (uint32_t i = 0; i < info->layerCount; ++i) layers[i] = info->layers[i];
-    uint32_t n_layers = info->layerCount;
+    // OURS ONLY. Copying UEVR's own layers alongside them belongs to the caller, because only the
+    // caller knows whether it or the API layer is going to do the appending.
+    uint32_t n_ours = 0;
 
     // APPENDED IN REVERSE OF THE DROP ORDER, so the thing least willing to be dropped ends up LAST
     // -- and last is topmost. The reticule therefore draws over the markers, which is the right way
@@ -2063,7 +2223,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         q.subImage.imageArrayIndex  = 0;
         q.pose = fr.slot[s].pose;
         q.size = {fr.slot[s].size_m, fr.slot[s].size_m};
-        layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&q;
+        out[n_ours++] = (const XrCompositionLayerBaseHeader*)&q;
     }
 
     // ---- SCOPE PANE RETICULE -------------------------------------------------------------------
@@ -2074,7 +2234,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     //
     // Guarded on every precondition rather than assumed, because this runs on the submit thread:
     // feature on, pane actually drawn this frame, reticule cell exists, and room in the array.
-    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 && n_layers < MAX_LAYERS) {
+    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 && n_ours < out_capacity) {
         bool pane_drawn = false;
         for (uint32_t k = 0; k < n_use; ++k) {
             if (draw[k].slot == XRLAYER_SLOT_PANE) { pane_drawn = true; break; }
@@ -2179,12 +2339,49 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
                 }
             }
 
-            layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&g_scope_ret_quad;
+            out[n_ours++] = (const XrCompositionLayerBaseHeader*)&g_scope_ret_quad;
         }
     }
 
+    return n_ours;
+}
+
+// ---- RUNG 1: the API layer. THE SHIPPING ROUTE -----------------------------------------------
+//
+// Registered with the layer through set_end_frame_callback(). The layer calls this from inside its
+// own xrEndFrame -- the same thread and the same moment the inline hook used, so nothing above
+// needed rethinking; only the way it is reached has changed.
+//
+// Every clause of the contract in XrLayerAbi.h is honoured by construction: `info` is never
+// touched, never more than `cap` pointers are written, the pointers are static, and nothing here
+// calls back into the layer. The copy, the call-through and the fail-open retry are its job.
+XRAPI_ATTR uint32_t XRAPI_CALL bridge_end_frame(XrSession session, const XrFrameEndInfo* info,
+                                                const XrCompositionLayerBaseHeader** out,
+                                                uint32_t cap, void* /*user*/) {
+    return produce_layers(session, info, out, cap);
+}
+
+// ---- RUNG 2: our own inline hook on xrEndFrame. DEV ONLY, needs UEVRBackend.pdb ---------------
+XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrameEndInfo* info) {
+    // Fail-open on every path below: anything unexpected forwards the call untouched.
+    if (g_end_frame_orig == nullptr) return XR_ERROR_RUNTIME_FAILURE;
+    if (info == nullptr) return g_end_frame_orig(session, info);
+
+    // The local array bound, and nothing more: room for UEVR's layers plus ours.
+    constexpr uint32_t MAX_LAYERS = 32;
+    const uint32_t room = (info->layerCount >= MAX_LAYERS) ? 0u : (MAX_LAYERS - info->layerCount);
+
+    const XrCompositionLayerBaseHeader* ours[MAX_LAYERS];
+    const uint32_t n = produce_layers(session, info, ours, room);
+    if (n == 0) return g_end_frame_orig(session, info);
+
+    const XrCompositionLayerBaseHeader* layers[MAX_LAYERS];
+    for (uint32_t i = 0; i < info->layerCount; ++i) layers[i] = info->layers[i];
+    // OURS LAST, therefore topmost -- the same ordering the API layer applies on its own rung.
+    for (uint32_t i = 0; i < n; ++i) layers[info->layerCount + i] = ours[i];
+
     XrFrameEndInfo patched = *info;
-    patched.layerCount = n_layers;
+    patched.layerCount = info->layerCount + n;
     patched.layers     = layers;
 
     const XrResult r = g_end_frame_orig(session, &patched);
@@ -2203,6 +2400,13 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
 bool install_hook() {
     if (g_hook_id >= 0) return true;
     if (!resolve_openxr()) return false;
+    if (g_tier != XrAttachTier::BackendPdb) {
+        // Belt and braces: nothing should reach the hook on another rung, and if something does,
+        // register_inline_hook would happily install at whatever g_xr.end_frame holds. On the layer
+        // rung that field is deliberately null.
+        logf("refusing to install the inline hook on tier %s", tier_name(g_tier));
+        return false;
+    }
 
     auto* p = API::get()->param();
     if (p == nullptr || p->functions == nullptr || p->functions->register_inline_hook == nullptr) {
@@ -2229,7 +2433,48 @@ bool install_hook() {
     return true;
 }
 
+// Register our producer with the API layer. No hook, no PDB, no address -- this is the whole of
+// the shipping attachment.
+bool install_bridge_callback() {
+    if (g_bridge_cb) return true;
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr || api->set_end_frame_callback == nullptr) return false;
+    if (api->set_end_frame_callback(&bridge_end_frame, nullptr) != 1) {
+        logf("the API layer REFUSED the end-frame callback -- %s", xrbridge_status());
+        return false;
+    }
+    g_bridge_cb = true;
+    logf("end-frame callback registered with the API layer. REGISTERED IS NOT RUNNING: the layer "
+         "counts its own frames, and the watchdog below reads those rather than trusting this line.");
+    return true;
+}
+
+// WAITING IS NOT FAILING, and conflating them is what would make the layer rung unusable: the
+// OpenXR instance appears some way into startup, so a caller that latched Failed on the first
+// "not yet" would turn every session into a permanent refusal. Only a hard no latches.
+enum class Attach { Waiting, Ok, Failed };
+
+Attach attach_submit_path() {
+    if (g_hook_id >= 0 || g_bridge_cb) return Attach::Ok;
+    if (!resolve_openxr()) return g_resolve_waiting ? Attach::Waiting : Attach::Failed;
+    if (g_tier == XrAttachTier::ApiLayer) {
+        return install_bridge_callback() ? Attach::Ok : Attach::Failed;
+    }
+    return install_hook() ? Attach::Ok : Attach::Failed;
+}
+
 void remove_hook() {
+    if (g_bridge_cb) {
+        // Clearing BLOCKS until any in-flight call has returned (XrLayerAbi.h spells out the
+        // handshake), which is exactly what makes destroying the swapchain on the caller's next
+        // line safe. The inline hook below offers no such guarantee -- this rung is the stronger
+        // of the two on teardown, not merely the more portable one.
+        const HaloVrLayerApi* api = xrbridge_api();
+        if (api != nullptr && api->set_end_frame_callback != nullptr) {
+            api->set_end_frame_callback(nullptr, nullptr);
+        }
+        g_bridge_cb = false;
+    }
     if (g_hook_id >= 0) {
         auto* p = API::get()->param();
         if (p != nullptr && p->functions != nullptr && p->functions->unregister_inline_hook != nullptr) {
@@ -2753,21 +2998,30 @@ void xrlayer_tick() {
             }
             return;
         }
-        // Kick the PDB load onto its own thread and come back next tick. Loading ~142 MB of symbols
-        // on the game thread would not be a stutter, it would be a fault -- the same reason MemScan
-        // runs on a worker. Costs one bool test per tick until it lands.
-        xrattach_begin_async();
-        if (!xrattach_ready()) {
-            static bool said = false;
-            if (!said) { said = true; logf("resolving UEVR's OpenXR entry points (loading symbols off-thread)..."); }
-            return;
+        // THE PDB IS FOR THE FALLBACK RUNG ONLY. When our API layer is in the process the entry
+        // points come from it, so loading ~142 MB of symbols would be pure cost -- and on a player
+        // install there is no UEVRBackend.pdb to load at all, which is the entire reason the layer
+        // exists. Probing the layer first is one GetModuleHandleW.
+        if (!xrbridge_available()) {
+            // Kick the PDB load onto its own thread and come back next tick. Loading ~142 MB of
+            // symbols on the game thread would not be a stutter, it would be a fault -- the same
+            // reason MemScan runs on a worker. Costs one bool test per tick until it lands.
+            xrattach_begin_async();
+            if (!xrattach_ready()) {
+                static bool said = false;
+                if (!said) { said = true; logf("resolving UEVR's OpenXR entry points (loading symbols off-thread)..."); }
+                return;
+            }
         }
-        if (!install_hook()) {
+        const Attach a = attach_submit_path();
+        if (a == Attach::Waiting) return;      // not yet is not never -- retried next tick
+        if (a == Attach::Failed) {
             g_state.store(State::Failed, std::memory_order_relaxed);
             return;
         }
         g_state.store(State::Pending, std::memory_order_relaxed);
-        logf("hook in place; waiting for the session to bring up the swapchain (space mode %d)", m.space);
+        logf("submit path attached via %s; waiting for the session to bring up the swapchain "
+             "(space mode %d)", tier_name(g_tier), m.space);
     }
 
     // Bring-up on the GAME THREAD, retried each tick until the session exists. Only a hard refusal
@@ -2789,7 +3043,23 @@ void xrlayer_tick() {
     // than from the first moment the call could occur condemns a healthy address -- addrcascade's
     // README records that failing exactly here, alarming 11 seconds before gameplay even started.
     // The call is only possible once the state is Armed and the runtime is presenting.
-    const uint32_t submitted = g_layers_submitted.exchange(0, std::memory_order_relaxed);
+    // WHERE `submitted` COMES FROM DEPENDS ON THE RUNG, and on the layer rung its number is the
+    // better one. We do the appending on the hook rung, so our own counter is authoritative there.
+    // On the layer rung the LAYER does the appending, the call-through AND the fail-open retry --
+    // so our producer returning a count only says we OFFERED quads. layers_appended() is the only
+    // thing that knows the runtime accepted a frame with them in it, and counting our offers
+    // instead would report the overlay live while every frame was being rejected.
+    uint32_t submitted;
+    if (g_tier == XrAttachTier::ApiLayer) {
+        const HaloVrLayerApi* api = xrbridge_api();
+        const uint64_t n = (api != nullptr && api->layers_appended != nullptr)
+                               ? api->layers_appended() : 0;
+        static uint64_t prev = 0;
+        submitted = (n >= prev) ? (uint32_t)(n - prev) : 0;
+        prev = n;
+    } else {
+        submitted = g_layers_submitted.exchange(0, std::memory_order_relaxed);
+    }
     const State now = g_state.load(std::memory_order_relaxed);
 
     // PENDING COUNTS, NOT JUST ARMED. This gate was Armed-only, and that made the watchdog
@@ -2807,14 +3077,35 @@ void xrlayer_tick() {
     // This caller ticks at the game-thread rate (~32 Hz); 96 ticks is ~3 s of frames that should
     // have happened and did not.
     static addrcascade::HookWatchdog watchdog{96};
-    if (watchdog.tick(possible, submitted > 0)) {
+    const bool alarm = watchdog.tick(possible, submitted > 0);
+    if (alarm && g_tier == XrAttachTier::ApiLayer) {
+        // THE LAYER RUNG SPLITS THE DIAGNOSIS FOR FREE, and the split is the useful half: it can
+        // say whether the layer is being called AT ALL, which the hook rung could only infer.
+        const HaloVrLayerApi* api = xrbridge_api();
+        const unsigned long long seen =
+            (api != nullptr && api->frames_seen != nullptr) ? api->frames_seen() : 0ull;
+        if (seen == 0) {
+            logf("WATCHDOG: the API layer accepted our callback but its xrEndFrame has NOT run once "
+                 "in ~3 s of live frames (frames_seen=0). The layer is loaded but is not on the "
+                 "chain this application submits through -- a second OpenXR runtime, or a layer "
+                 "ordered after the one UEVR calls. Layer marked not-live; the in-scene reticule is "
+                 "unaffected. Layer status: %s", xrbridge_status());
+        } else {
+            logf("WATCHDOG: the API layer IS running (frames_seen=%llu) but nothing of ours has "
+                 "reached the runtime in ~3 s. That is OUR end, not the attachment: either "
+                 "produce_layers is gating everything out (read the dark-reason line above) or the "
+                 "runtime is rejecting the frame with our quads in it. Layer status: %s",
+                 seen, xrbridge_status());
+        }
+    } else if (alarm) {
         logf("WATCHDOG: the xrEndFrame hook installed but has NOT been called once in ~3 s of live "
              "frames. MEASURED CAUSE (2026-08-23): UEVR STATICALLY LINKS the OpenXR loader into "
              "UEVRBackend.dll -- `dumpbin /imports` shows no openxr_loader.dll import at all -- so "
              "the loader export we hook is not on any path UEVR calls, even though openxr_loader.dll "
              "is loaded in the process by something else. Hooking that export can never work here. "
-             "The fix is an OpenXR API LAYER, which the statically-linked loader still loads. Layer "
-             "marked not-live; the in-scene reticule is unaffected.");
+             "The fix is an OpenXR API LAYER, which the statically-linked loader still loads -- it "
+             "is built in apilayer/ and registered with Register-XrApiLayer.ps1. Layer marked "
+             "not-live; the in-scene reticule is unaffected.");
     }
     g_live.store(possible && submitted > 0, std::memory_order_relaxed);
 
@@ -2838,9 +3129,10 @@ void xrlayer_tick() {
         uint32_t mask = 0;
         for (int s = 0; s < XRLAYER_SLOTS; ++s) if (xrlayer_slot_ready(s)) mask |= (1u << s);
 
-        logf("state=%d live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u ringfalls=%u "
-             "held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s",
-             (int)g_state.load(std::memory_order_relaxed), (int)g_live.load(), submitted,
+        logf("state=%d tier=%s live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u "
+             "ringfalls=%u held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s",
+             (int)g_state.load(std::memory_order_relaxed), tier_name(g_tier),
+             (int)g_live.load(), submitted,
              g_cm_per_m.load(std::memory_order_relaxed),
              g_showing_ring.load(std::memory_order_relaxed)
                  ? "ring"
