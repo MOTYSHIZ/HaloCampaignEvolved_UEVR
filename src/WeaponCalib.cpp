@@ -33,7 +33,12 @@ std::atomic<bool> s_held{false};
 // g_calib_finish are edges latched by the poll, not states sampled later.
 std::atomic<bool> s_pending{false};
 
+} // namespace
+
 // A short, stable key for the weapon in hand.
+//
+// EXTERNAL LINKAGE, not file-local: Holster.cpp renders the magazine for the weapon actually in
+// hand and needs this key too, so it is declared in WeaponCalib.hpp rather than kept private.
 //
 // The full class is BP_<name>_WeaponActor_C. Storing the whole decorated string would work, but
 // the substring matcher in WeaponOffset.cpp wants something a human can also type by hand into
@@ -53,7 +58,6 @@ std::string weapon_key() {
     return n;
 }
 
-} // namespace
 
 bool wpn_calib_held() { return s_held.load(std::memory_order_relaxed); }
 

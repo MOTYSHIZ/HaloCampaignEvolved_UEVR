@@ -528,6 +528,46 @@ static bool parse_weapon_offset(const char* val) {
     return true;
 }
 
+// Holster / grenade-pouch keys (blindcowboy24 PR-1, taken alone). Early-return parser for the
+// same C1061 reason as its siblings above.
+static bool parse_holster_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "holster")        == 0) { g_cfg.holster_enabled = (v != 0.0); return true; }
+    if (_stricmp(key, "holsterradius")  == 0) { g_cfg.holster_radius  = clampf((float)v, 0.05f, 0.5f); return true; }
+    if (_stricmp(key, "holstergradius") == 0) { g_cfg.holster_gradius = clampf((float)v, 0.03f, 0.5f); return true; }
+    if (_stricmp(key, "holsterrs")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rs[0], &g_cfg.holster_rs[1], &g_cfg.holster_rs[2]); return true; }
+    if (_stricmp(key, "holsterls")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_ls[0], &g_cfg.holster_ls[1], &g_cfg.holster_ls[2]); return true; }
+    if (_stricmp(key, "holsterrh")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rh[0], &g_cfg.holster_rh[1], &g_cfg.holster_rh[2]); return true; }
+    if (_stricmp(key, "holsterlc")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_lc[0], &g_cfg.holster_lc[1], &g_cfg.holster_lc[2]); return true; }
+    if (_stricmp(key, "holsterrc")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.holster_rc[0], &g_cfg.holster_rc[1], &g_cfg.holster_rc[2]); return true; }
+    if (_stricmp(key, "holstergswitchmask") == 0) { g_cfg.holster_gswitch_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holstermeleevetoms") == 0) { g_cfg.holster_melee_veto_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "holstermeleemargin") == 0) { g_cfg.holster_melee_margin = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holstermarkers") == 0) { g_cfg.holster_markers = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "holstermarkerscale") == 0) { g_cfg.holster_marker_scale = clampf((float)v, 0.02f, 0.5f); return true; }
+    if (_stricmp(key, "holsteraimhold") == 0) { g_cfg.holster_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }
+    if (_stricmp(key, "holsteryawdead") == 0) { g_cfg.holster_yaw_dead = clampf((float)v, 0.0f, 180.0f); return true; }
+    if (_stricmp(key, "holsteryawrate") == 0) { g_cfg.holster_yaw_rate = clampf((float)v, 0.0f, 360.0f); return true; }
+    if (_stricmp(key, "holsterneckdown") == 0) { g_cfg.holster_neck_down = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holsterneckback") == 0) { g_cfg.holster_neck_back = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "holsterswapmask")  == 0) { g_cfg.holster_swap_mask  = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterstealbtns") == 0) { g_cfg.holster_steal_buttons = (int)v; return true; }
+    if (_stricmp(key, "holstergrenhand") == 0) { g_cfg.holster_gren_hand = (int)v; return true; }
+    if (_stricmp(key, "holsterthrowmask") == 0) { g_cfg.holster_throw_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterpressms")   == 0) { g_cfg.holster_press_ms   = (int)clampf((float)v, 30.0f, 500.0f); return true; }
+    if (_stricmp(key, "holsterthrowspeed") == 0) { g_cfg.holster_throw_speed = clampf((float)v, 0.2f, 6.0f); return true; }
+    if (_stricmp(key, "holsterhaptic")  == 0) { g_cfg.holster_haptic  = (v != 0.0); return true; }
+    if (_stricmp(key, "holsterlog")     == 0) { g_cfg.holster_log     = (v != 0.0); return true; }
+    // The visible magazine rides the same marker machinery as the pouches, so its keys come
+    // across with the holster set rather than with the reload gesture (which is NOT ported here).
+    if (_stricmp(key, "reloadmag")      == 0) { g_cfg.reload_mag = (int)v; return true; }
+    if (_stricmp(key, "reloadmagoff")   == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_off[0], &g_cfg.reload_mag_off[1], &g_cfg.reload_mag_off[2]); return true; }
+    if (_stricmp(key, "reloadmagrad")   == 0) { g_cfg.reload_mag_radius = clampf((float)v, 0.05f, 0.5f); return true; }
+    if (_stricmp(key, "reloadmagscale") == 0) { g_cfg.reload_mag_scale = clampf((float)v, 0.05f, 20.0f); return true; }
+    return false;
+}
+
 static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
     if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
@@ -594,6 +634,7 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_blam_key(key, val, v)) return;
         if (parse_viewfix_key(key, val, v)) return;
         if (parse_melee_key(key, val, v)) return;
+        if (parse_holster_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);
         else if (_stricmp(key, "huddump")    == 0) g_cfg.hud_dump      = (v != 0.0);

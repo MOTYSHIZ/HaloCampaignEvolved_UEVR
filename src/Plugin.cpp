@@ -113,6 +113,8 @@
 
 // Motion gestures: swing to melee. Detection on the tick, injection in the XInput hook.
 #include "Gesture.hpp"
+#include "Holster.hpp"
+#include "Markers.hpp"
 
 // Two independent arms: recon for now (skeleton dump + bone-function probe).
 #include "Arms.hpp"
@@ -507,12 +509,12 @@ std::atomic<float> g_last_dt{0.033f};   // engine tick delta, for smooth turn
 // the others should be read against.
 enum PerfSite { PERF_CFG = 0, PERF_RETICLE, PERF_RIG, PERF_SHELL, PERF_TRACE, PERF_BRIDGE,
                 PERF_NAVHOST, PERF_GEST, PERF_ARMS, PERF_HANDS, PERF_WPNOFF, PERF_SOCK,
-                PERF_TICK, PERF_COUNT };
+                PERF_HOLSTER, PERF_TICK, PERF_COUNT };
 const char* const kPerfName[PERF_COUNT] = { "load_config   ", "reticle_rescan", "resolve_rig   ",
                                             "resolve_shell ", "reticule_trace", "menu_bridge   ",
                                             "navw_rehost   ", "gesture_update", "arms_update   ",
                                             "hands_update  ", "weapon_offset ", "socket_sample ",
-                                            "TICK (all)    " };
+                                            "holster_update", "TICK (all)    " };
 
 struct PerfStat {
     double   max_ms = 0.0;
@@ -7806,6 +7808,11 @@ public:
         // AFTER arms_update(): the hands only make sense once the game's own meshes are hidden,
         // and hands_update() reads the reload state that gesture_update() has just advanced.
         { PerfScope _perf(PERF_HANDS); hands_update(); }
+        // AFTER gesture_update(): holster reads reload_state() to know whether to render the
+        // magazine, and stands its melee detector down near a holster zone. Reset in menus so a
+        // grip held across a pause cannot leave a grenade stuck to the hand.
+        { PerfScope _perf(PERF_HOLSTER);
+          if (g_in_menu.load()) holster_reset(); else holster_update(delta); }
     }
 
     // VIEW LOCK -- the enforcement point. This callback owns the rotation that is actually used
@@ -7840,6 +7847,14 @@ public:
                 px = position->x; py = position->y; pz = position->z;
             }
             g_view_pos_x = px; g_view_pos_y = py; g_view_pos_z = pz;
+            // Publish the rendered camera and base yaw for the holster body frame. Markers.cpp
+            // converts room-space zones to world space with exactly these three positions plus
+            // g_view_base_yaw, so if they go stale every shoulder/hip zone sits at the wrong
+            // bearing -- which reads in headset as "the holsters are behind me".
+            halo::g_cam_x.store(px, std::memory_order_relaxed);
+            halo::g_cam_y.store(py, std::memory_order_relaxed);
+            halo::g_cam_z.store(pz, std::memory_order_relaxed);
+            g_view_base_yaw.store(g_dbg_view_out.load(std::memory_order_relaxed), std::memory_order_relaxed);
             g_have_view_pos = true;
 
             // THE SHOT-ORIGIN HALF of the eye offset. This callback runs BEFORE UEVR applies the
@@ -8361,6 +8376,33 @@ public:
         if (scope_handle_lt(state->Gamepad.bLeftTrigger, g_in_menu.load(), g_stick_mode.load())) {
             state->Gamepad.bLeftTrigger = 0;
         }
+        // ---- HOLSTERS: TAKE THE BUTTONS WE SYNTHESISE, BEFORE WE SYNTHESISE THEM.
+        //
+        // The swap / throw / grenade-switch masks are real game buttons. Holster.cpp decides when
+        // they should fire from a body-frame gesture, so the physical press must not ALSO reach the
+        // game -- otherwise reaching for a shoulder both stows the weapon and does whatever that
+        // button natively does. Stolen here, re-injected below, so ours is the only one that lands.
+        //
+        // His version also stole the grip while two-handed aiming could use it. That is NOT ported:
+        // TwoHand came with the palette positioning hook and is deliberately left out of this
+        // extraction, so the grip keeps its native meaning here.
+        //
+        // Gated on g_stick_mode rather than his g_unit_mounted (which belongs to his vehicle work
+        // and does not exist in this tree). Stick mode already covers vehicles, cutscenes and death.
+        if (g_cfg.holster_steal_buttons != 0 && g_cfg.holster_enabled
+            && !g_in_menu.load(std::memory_order_relaxed)
+            && !g_stick_mode.load(std::memory_order_relaxed)) {
+            const WORD steal = (WORD)((WORD)g_cfg.holster_swap_mask
+                                    | (WORD)g_cfg.holster_throw_mask
+                                    | (WORD)g_cfg.holster_gswitch_mask);
+            const WORD before = state->Gamepad.wButtons;
+            state->Gamepad.wButtons &= (WORD)~steal;
+            if (g_cfg.map_btn_log && before != state->Gamepad.wButtons) {
+                API::get()->log_info("[Halo-CampE-UEVR] HOLSTER STEAL: 0x%04X -> 0x%04X (removed 0x%04X)",
+                                     (unsigned)before, (unsigned)state->Gamepad.wButtons,
+                                     (unsigned)(WORD)(before & steal));
+            }
+        }
         // ---- MELEE BY SWING. One atomic load and a clock read; the decision was made on the
         // game thread (see Gesture.cpp). Placed after the rebind block for the same reason the
         // crouch mask is: a synthetic press must reach the game as itself, not get remapped.
@@ -8371,6 +8413,13 @@ public:
         if (g_cfg.melee_mask != 0 && melee_press_active()) {
             state->Gamepad.wButtons |= (WORD)g_cfg.melee_mask;
         }
+        // ...and put ours back. After the steal, so the steal cannot eat our own synthetic press.
+        if (g_cfg.holster_swap_mask != 0 && holster_swap_press_active())
+            state->Gamepad.wButtons |= (WORD)g_cfg.holster_swap_mask;
+        if (g_cfg.holster_throw_mask != 0 && holster_throw_press_active())
+            state->Gamepad.wButtons |= (WORD)g_cfg.holster_throw_mask;
+        if (g_cfg.holster_gswitch_mask != 0 && holster_gswitch_press_active())
+            state->Gamepad.wButtons |= (WORD)g_cfg.holster_gswitch_mask;
 
         // ---- VR RELOAD.
         //
@@ -8379,7 +8428,7 @@ public:
         // synthesised press, which must survive that suppression -- it fires at the instant the
         // state machine returns to Idle, so it is not suppressed by its own condition, but doing
         // it in the other order would still be fragile to a future edit.
-        if (reload_fire_suppressed()) {
+        if (reload_fire_suppressed() || holster_fire_suppressed()) {
             // Both paths: Halo reads fire from the analog trigger, but a pad or a remap can put it
             // on a button, and swallowing only one of the two leaves a hole.
             state->Gamepad.bRightTrigger = 0;

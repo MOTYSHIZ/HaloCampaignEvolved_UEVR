@@ -1392,4 +1392,20 @@ void blam_drive_tick() {
                          via, id, g_tls_index);
 }
 
+
+// ---- GRENADE STATE: DECLARED, DELIBERATELY NOT POPULATED IN THIS TREE.
+//
+// Holster.cpp links against these to draw the chest pouches. In blindcowboy24 PR-1 they are
+// filled from raw offsets into the Blam unit object (u8[0x380/0x382/0x383]) -- hardcoded struct
+// offsets carrying no ADDR-HYGIENE marker and no addrcascade guard. That plumbing was NOT taken
+// with this extraction, which is the WEAPON SWITCHING only.
+//
+// g_unit_gvalid therefore stays false for ever, and that is the fail-closed answer: Holster.cpp
+// reads it as "counts unknown", so the pouches stay empty rather than inventing a grenade.
+// Populate these from a GUARDED offset and the pouches light up with no other change.
+//
+// At namespace-halo scope on purpose -- inside the anonymous namespace above they would be
+// file-local and Holster.obj would not link.
+std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
+std::atomic<bool> g_unit_gvalid{false};
 }  // namespace halo

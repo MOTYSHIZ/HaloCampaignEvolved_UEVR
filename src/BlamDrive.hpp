@@ -107,4 +107,18 @@ void blam_drive_offthread_write();
 // blam_drive_tick() must run BEFORE blam_aim_tick() so that on a 0->non-zero transition this file
 // removes its hook in the same frame the diagnostics install theirs.
 
+
+// ---- GRENADE STATE FROM THE BLAM UNIT OBJECT -- DECLARED, NOT POPULATED IN THIS TREE.
+//
+// Holster.cpp reads these to draw the chest pouches and gate a grab. In blindcowboy24's PR they
+// are filled from raw offsets into the unit object (u8[0x380/0x382/0x383]) -- hardcoded struct
+// offsets with no ADDR-HYGIENE marker and no addrcascade guard, which is the class of constant
+// this project requires a paper trail for. That plumbing is deliberately NOT part of this
+// extraction: we took the WEAPON SWITCHING, not the grenades.
+//
+// g_unit_gvalid stays FALSE for ever here, which is the fail-closed answer -- Holster.cpp treats
+// it as "counts unknown" and the pouches stay empty rather than inventing a grenade. If the
+// grenade feature is ported later, populate these and the pouches light up with no other change.
+extern std::atomic<int>  g_unit_gtype, g_unit_gfrag, g_unit_gplasma;
+extern std::atomic<bool> g_unit_gvalid;
 } // namespace halo

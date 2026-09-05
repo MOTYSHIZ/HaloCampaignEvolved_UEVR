@@ -228,4 +228,15 @@ bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
 // sites call this; see the definition for why an unleashed head cannot use the standing origin.
 bool aim_sightline_origin(Vec3* out);
 
+
+// ---- MELEE AIM HOLD -- DECLARED, NOT POPULATED IN THIS TREE.
+//
+// Holster.cpp clears these when a holster action vetoes a melee. In blindcowboy24's PR they are
+// written by his aim-along-the-swing melee work, which is a separate feature from the holsters
+// and was not taken with this extraction. Left at zero: holster_melee_veto() still stands the
+// swing detector down near a shoulder (that is local to Holster.cpp), and clearing an already-
+// zero hold is a no-op. Populate these if the swing-aimed melee is ported later.
+extern std::atomic<float>     g_melee_aim_ctrl_yaw;
+extern std::atomic<float>     g_melee_aim_ctrl_pitch;
+extern std::atomic<long long> g_melee_aim_hold_until;   // 0 = no hold in effect
 } // namespace halo
