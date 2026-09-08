@@ -38,6 +38,8 @@
 
 #pragma once
 
+#include <string>
+
 // API.hpp, NOT Plugin.hpp -- see UeObject.hpp.
 #include "uevr/API.hpp"
 
@@ -61,6 +63,9 @@ bool calib_hold_active();
 
 // Poll the per-weapon key. Called from the same block that polls calib_key, so both gestures are
 // edge-detected on one thread rather than two.
+// The held weapon's short key ("FP_Magnum"), implemented in WeaponCalib.cpp. Declared here for
+// Holster.cpp, which renders the magazine for the weapon actually in hand.
+std::string weapon_key();
 void wpn_calib_poll();
 
 // Called at the point the solve has finished and g_cfg holds the freshly fitted values. Returns

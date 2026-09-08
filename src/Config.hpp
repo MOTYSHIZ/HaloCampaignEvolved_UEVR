@@ -4111,6 +4111,144 @@ struct Config {
     float mag_off_x       = 0.0f;
     float mag_off_y       = 0.0f;
     float mag_off_z       = 0.0f;
+
+    // ===== FROM blindcowboy24 PR-1, TAKEN ALONE =====================================
+    // Over-the-shoulder weapon switching (stow / draw / exchange) and the grenade pouches that
+    // share its body frame. Extracted WITHOUT the palette weapon-positioning hook, two-handed
+    // aiming or the VR reload from that PR -- Holster.cpp depends on none of them; its only
+    // cross-subsystem calls are markers_hide_all() and reload_state()/weapon_key(), all of which
+    // this tree already has.
+    // ---- HOLSTERS (Holster.hpp). Head-frame offsets in METRES: x right, y up, z BACK.
+    bool  holster_enabled = true;
+    float holster_radius  = 0.16f;
+    // GRENADE POUCHES. Measured 2026-08-24: of 15 grip presses that caught nothing, FOURTEEN were
+    // within 16 cm of a pouch and eleven within 12 cm, against a catch radius of 7 cm. They were
+    // near misses, not wild reaches -- the hand was arriving at the right place and the sphere was
+    // too small to be there. The frag-side misses centre 7.7 cm BEHIND the pouch, which is larger
+    // than the entire old radius: the hand sweeps in from the front, and by the time the grip is
+    // actually pressed it has settled back against the chest.
+    //
+    // 0.13 catches 12 of the 15 recorded misses and absorbs that 7.7 cm bias without moving the
+    // centre, so the reaches that already worked keep working. It stays clear of the right hip
+    // slot too (centres 0.329 apart, 0.13 + 0.16 = 0.29), and where the two pouches now overlap
+    // slightly at the sternum the nearest centre wins, which is just "whichever side you are on".
+    float holster_gradius = 0.13f;
+    float holster_rs[3] = { 0.20f, -0.10f,  0.22f};   // right shoulder (behind)
+    float holster_ls[3] = {-0.20f, -0.10f,  0.22f};   // left shoulder (behind)
+    float holster_rh[3] = { 0.22f, -0.65f,  0.05f};   // right hip
+    float holster_lc[3] = {-0.12f, -0.30f, -0.12f};   // left chest (in front): FRAG
+    float holster_rc[3] = { 0.12f, -0.30f, -0.12f};   // right chest (in front): PLASMA
+    int   holster_gswitch_mask = 0;                   // "Switch Grenade" pad mask; 0 = not wired yet
+    int   holster_melee_veto_ms = 400;                // no melee this long after a holster action
+    // ---- HOW FAR OUTSIDE A HOLSTER ZONE STILL VETOES A MELEE.
+    //
+    // Was 0.10, giving a veto sphere of holster_radius + 0.10 = 0.26 m around EACH of the five
+    // zones, which is a large part of the space a punch travels through.
+    //
+    // The first session's 16 vetoes looked like the veto doing its job, because ten of them sat
+    // between a "grenade armed" and a "HOLSTER THROW" -- the detector firing on grenade throws,
+    // correctly suppressed. That reading was right about those ten and wrong as a verdict on the
+    // rule: the grenades were masking it. The next session threw NO grenades, and all ten vetoes
+    // were proximity, against 24 fired -- 29% of qualifying strikes killed, every one with genuine
+    // strike kinematics (speed 2.74-5.46, ext 1.89-3.98). They sat at 0.147 to 0.256 m from a zone.
+    //
+    // 0.00 keeps the veto at holster_radius itself, so a hand actually INSIDE a zone still cannot
+    // melee, and saves nine of those ten. What the margin was really protecting is the DRAW -- a
+    // weapon coming out of a slot is a fast extension away from the head, indistinguishable from a
+    // strike -- and a draw is already covered by holster_melee_veto_ms, which runs from the grip
+    // press that started it. The margin was a second, much blunter guard on the same event.
+    float holster_melee_margin  = 0.00f;
+
+    // ---- GRENADE VISUALS. From the headset: "it's hard to tell when I actually grab it". Three spheres,
+    // spawned with the wheel-marker recipe: one on each chest pouch so the grab target is visible,
+    // and one ON THE HAND while a grenade is armed, so a successful grab is unmissable. Spheres
+    // for now -- real grenade meshes need their asset names, which grenademeshdump discovers.
+    //   holstermarkers: 0 off, 1 = pouches appear as the hand approaches (default), 2 = always on.
+    int   holster_markers = 1;
+    float holster_marker_scale = 0.08f;   // sphere diameter in engine scale (~8 cm)
+
+    // ---- THE THROW GOES WHERE YOU THREW IT. Same disease, same cure as melee: the game lobs the
+    // grenade along the AIM, and the aim during a throw is the flailing hand itself. On a fired
+    // throw the aim is pinned to the SWING'S OWN DIRECTION -- sampled at the velocity peak, the
+    // same instant the throw gate reads -- for this many ms, through the identical hold machinery
+    // the melee uses. 0 disables (grenade flies wherever the aim happens to point, old behaviour).
+    // 350 covers the 120 ms synthetic press plus the game's wind-up; how long the game actually
+    // needs is NOT measured -- raise this first if grenades fly off-line.
+    int   holster_aim_hold_ms = 350;
+
+    // Gesture aim-hold shape (shared with later gesture features): how long the pinned aim holds
+    // past the gesture, and the ramp back to the live hand so the reticle returns, not teleports.
+    int   melee_aim_hold_ms = 250;
+    int   melee_aim_ramp_ms = 150;
+
+    // ---- THE ZONES HANG ON A TORSO, NOT ON THE HEAD. From the headset: turn your head
+    // right and the plasma pouch is inside your body -- because the zones rotated one-to-one with
+    // head yaw, as if the player were a 2D square. The standard VR fix (and what body-holster
+    // games actually ship) is a lagged body yaw with a leash: the body stays put while the head
+    // looks around inside a dead zone, gets DRAGGED once the head passes the limit (gear is never
+    // fully behind you), and re-centres slowly toward where you face, so a sustained turn brings
+    // the gear around while a glance moves nothing.
+    //   holsteryawdead: half-width of the free-look cone, degrees.
+    //   holsteryawrate: recentre speed, deg/s (0 = only the drag moves the body).
+    float holster_yaw_dead = 45.0f;
+    float holster_yaw_rate = 10.0f;
+
+    // ---- NECK PIVOT (torso tier 1). The zones used to hang off the head's POSITION, and the
+    // head's position arcs ~20 cm forward when you nod -- the eyes rotate about the neck, the
+    // chest does not, so looking down dragged the pouches forward off the body. The anchor is now
+    // a computed NECK point (head position + this offset rotated by the full head orientation),
+    // lifted back to head height in the BODY frame -- for a level head the zones land exactly
+    // where they always did, and a nod moves them barely at all. Metres; both 0 = old behaviour.
+    float holster_neck_down = 0.15f;   // eyes to neck pivot, straight down in the head frame
+    float holster_neck_back = 0.08f;   // ...and slightly behind the eyes
+
+    // With holsters on, the PHYSICAL buttons for weapon swap / grenade switch / grenade throw are
+    // swallowed (the gesture system owns those actions; a stray Y press must not swap). Synthetic
+    // holster presses are injected AFTER the mask, so they still work. Menus and stick mode keep
+    // the buttons -- Y navigates UI, and stick mode has no holsters to replace it.
+    int   holster_steal_buttons = 1;
+    // WHICH HAND WORKS THE GRENADE POUCHES. 2 = BOTH (default): either grip grabs, and the
+    // behaviour follows the hand that is carrying -- in the OFF hand the gun stays live and
+    // visible in the aim hand (the natural two-handed carry); in the AIM hand the weapon hides
+    // and fire suppresses while the grenade shares it (the original single-hand behaviour).
+    // 1 = off hand only; 0 = aim hand only. Weapon-swap holsters stay on the aim hand
+    // regardless -- only the pouches are handed.
+    int   holster_gren_hand = 2;
+
+    int   holster_swap_mask  = 0x8000;                // Y = switch weapon on the default pad map
+    int   holster_throw_mask = 0x0100;                // LB = throw grenade (grenade_action)
+    int   holster_press_ms   = 120;
+    float holster_throw_speed = 1.2f;                 // m/s forward at release
+    bool  holster_haptic = true;
+    bool  holster_log    = false;
+
+    // ---- THE VISIBLE MAGAZINE (reloadmag). The belt grab used to be a half-metre invisible ring
+    // around the waist: reach anywhere low and squeeze. With this on, dropping the mag SPAWNS a
+    // magazine mesh at a fixed point on the belt, and the grab must take THAT -- the fetch hand
+    // within reloadmagrad of the mag itself. While carried, the mesh rides the fetch hand until it
+    // seats. The mesh is the game's own (resolved from the loaded-object list, same recipe as the
+    // grenade pouch markers); the resolve log prints every magazine-ish StaticMesh it finds, which
+    // is also the asset survey the per-weapon-mag step needs. Falls back to the frag grenade mesh
+    // rather than an invisible point -- a stand-in you can see beats a shape you cannot.
+    // The point and the grab test live in the HOLSTER's body frame (torso leash, neck pivot), so
+    // the mag hangs on your hip exactly as the pouches do; with holster=0 the frame does not run
+    // and the grab silently falls back to the legacy ring.
+    // HIDE THE WEAPON'S OWN MAGAZINE while the VR reload has it out. The gun keeping its mag
+    // during MAG_OUT was reported from the field as "the magazine still appears to be in the
+    // rifle" -- the game ships the mag as its own component on the weapon actor, so it can be
+    // hidden for real. Substring of the component's class or object name; magdump surveys the
+    // held weapon's components one-shot on value change (dev instrument, harmless in release).
+    bool  mag_hide = true;
+    char  mag_hide_name[64] = "Magazine";
+    int   mag_dump = 0;
+
+    int   reload_mag = 1;
+    // Body-frame belt point (x right, y up, z back, metres) -- default mirrors holsterrh onto the
+    // LEFT hip, the fetch hand's side.
+    float reload_mag_off[3] = {-0.22f, -0.65f, 0.05f};
+    float reload_mag_radius = 0.15f;
+    // World scale on the mag mesh. 1.0 = the asset's authored size.
+    float reload_mag_scale = 1.0f;
 };
 
 extern Config g_cfg;

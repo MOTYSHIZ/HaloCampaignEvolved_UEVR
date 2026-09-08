@@ -40,6 +40,9 @@ std::atomic<bool> s_pending{false};
 
 // A short, stable key for the weapon in hand.
 //
+// EXTERNAL LINKAGE, not file-local: Holster.cpp renders the magazine for the weapon actually in
+// hand and needs this key too, so it is declared in WeaponCalib.hpp rather than kept private.
+//
 // The full class is BP_<name>_WeaponActor_C. Storing the whole decorated string would work, but
 // the substring matcher in WeaponOffset.cpp wants something a human can also type by hand into
 // halo_vr_user.cfg, and "AssaultRifle" is that. Strip the known prefix and suffix; if the shape is
