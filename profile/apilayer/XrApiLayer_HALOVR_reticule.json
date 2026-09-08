@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.0.0",
+    "api_layer": {
+        "name": "XR_APILAYER_HALOVR_reticule",
+        "library_path": "./XrApiLayer_HALOVR_reticule.dll",
+        "api_version": "1.0",
+        "implementation_version": "1",
+        "description": "Halo: Campaign Evolved VR -- submits the aim reticule as an OpenXR composition layer. Inert in every process except the game.",
+        "disable_environment": "HALOVR_LAYER_DISABLE"
+    }
+}

@@ -40,6 +40,36 @@ extern std::atomic<float> g_ctrl_travel_max;
 extern std::atomic<float> g_dbg_rig_x, g_dbg_rig_y, g_dbg_rig_z, g_dbg_rig_roll;
 extern std::atomic<bool>  g_rig_wrote_once;
 extern std::atomic<float> g_rig_survive_drift;
+
+// WEAPON-TO-RIG SEPARATION, the one measurement that tells the two post-death hypotheses apart.
+//
+// The weapon is a separate ACTOR socketed onto the rig mesh, so where it ends up is
+//     weapon_world = rig_component_world + socket_offset(animated pose)
+// Our placement only controls the first term. Logging the DIFFERENCE therefore splits the cases:
+// if it holds steady across a respawn the rig is being placed correctly and the socket moved
+// under us; if it jumps, the placement itself is wrong. Every other number in the rig log varies
+// with hand position, which is why none of them could answer this.
+extern std::atomic<float> g_dbg_wpn_dx, g_dbg_wpn_dy, g_dbg_wpn_dz;
+extern std::atomic<bool>  g_dbg_wpn_ok;
+// Bumped whenever the component RelativeLocation is composed against a different parent than last
+// tick. A new parent silently reinterprets every offset we write.
+extern std::atomic<int>   g_dbg_parent_changes;
+
+// The socket expressed in the MESH's own frame: position and rotation. Both are fixed properties
+// of the skeleton, so unlike the world-space separation they should not vary as you aim -- which
+// makes them the right things to compare across a respawn. The world separation says THAT the
+// geometry changed; these say WHICH part of it did.
+extern std::atomic<float> g_dbg_sock_x, g_dbg_sock_y, g_dbg_sock_z;
+extern std::atomic<float> g_dbg_sock_p, g_dbg_sock_yw, g_dbg_sock_r;
+extern std::atomic<bool>  g_dbg_sock_ok;
+
+// WHERE THE GUN ACTUALLY ENDED UP, in controller-local cm -- ground truth for "is the weapon where
+// the calibration says it is". Built from two LIVE engine reads (the weapon actor and the rig's
+// parent) plus the controller pose; it consumes none of the values we wrote, so it cannot come out
+// right by construction the way a check against our own output would.
+// Compare with off_x/off_y/off_z: equal means correct, and the difference IS the placement error.
+extern std::atomic<float> g_dbg_Lact_x, g_dbg_Lact_y, g_dbg_Lact_z;
+extern std::atomic<bool>  g_dbg_Lact_ok;
 extern std::atomic<float> g_dbg_pos_x, g_dbg_pos_y, g_dbg_pos_z;
 extern std::atomic<void*> g_rig_component;
 extern uevr::API::UObject* g_rig_parent;
@@ -114,6 +144,10 @@ uevr::API::UObject* rig_tracked_component();
 // is a separate actor, so ignoring the pawn does not cover it.
 uevr::API::UObject* fp_weapon_actor();
 
+// The weapon's own root component -- the thing to pin when attaching the GUN rather than the arms.
+// Null whenever no weapon is in hand, which the caller must treat as "release, do not fall back".
+uevr::API::UObject* fp_weapon_root();
+
 // ---- first-person shield shell ---------------------------------------------------------------
 // BPC_FP_TranslucentSkeletalMesh_C: the translucent energy skin that lights up when shields flare
 // or break and when the overshield is active. A SIBLING of the arms rig, running its own instance
@@ -151,6 +185,21 @@ bool rig_set_scale(uevr::API::UObject* rig, double s);
 // while the player is unarmed -- see the hide-arms block in Plugin.cpp for when and why.
 bool rig_set_visible(uevr::API::UObject* comp, bool visible);
 
+// KEEP A HIDDEN SKELETAL MESH ANIMATING.
+//
+// EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones = 0. UE defaults to
+// OnlyTickPoseWhenRendered, so anything hidden with rig_set_visible() stops evaluating its pose --
+// and the weapon hangs off this mesh's PrimaryWeapon socket, so a frozen pose is a frozen socket:
+// no recoil, and the gun sits wherever the animation happened to stop.
+//
+// THE CANONICAL COPY. Arms.cpp used to carry its own; a second one is how the two hide paths came
+// to disagree. Note that collapsing them fixed the DUPLICATION but not the behaviour -- both
+// copies called a UFUNCTION this build does not have. See Rig.cpp: it is a PROPERTY WRITE now,
+// and it RETURNS FALSE (and logs, once) when the property cannot be resolved. Do not turn it
+// back into a call_function, and do not let it return true unconditionally: an unobservable
+// no-op is what hid this for the whole life of the feature.
+bool rig_set_always_tick_pose(uevr::API::UObject* comp);
+
 // World-space equivalents. See the note in Rig.cpp: the relative ROTATION write does not take on
 // this game's first-person mesh, so rigmode 3 drives the world transform instead of composing a
 // relative one against a parent whose result the engine then discards.
@@ -158,6 +207,14 @@ bool rig_set_world_rotation(uevr::API::UObject* rig, double pitch, double yaw, d
 bool rig_set_world_location(uevr::API::UObject* rig, double x, double y, double z);
 
 bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
+
+// A named SOCKET's world location on a mesh component. Exposed for the scope's space-switch
+// handshake, which must not take its KeepWorld conversion while the bone is mid-animation.
+//
+// Use this rather than K2_GetComponentLocation with a socket name: GetSocketLocation(None) quietly
+// returns the COMPONENT'S OWN location, so a mis-built FName makes every lookup succeed with the
+// wrong answer. The implementation builds the FName correctly; see its comment.
+bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3* out);
 
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);

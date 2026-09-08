@@ -21,11 +21,15 @@
 // by Plugin.cpp. See UeObject.hpp.
 #include "uevr/API.hpp"
 #include "Reticule.hpp"
+#include "Scope.hpp"   // g_scope_active -- the zoom-fit gate
 #include "Config.hpp"
 #include "Math.hpp"
 #include "UeObject.hpp"
+#include "DevTools.hpp"   // HALO_VR_DEV -- the vsco state line below is diagnostics only
+#include "XrLayer.hpp"    // xrlayer_live() -- the hide's actual driver, reported alongside the bit
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -96,14 +100,141 @@ API::UObject* load_asset_by_path(const char* path) {
 
 // Find a material by path, loading it from disk if necessary. Accepts either a bare object path or
 // one prefixed with a class name, and tries the classes a material can actually be.
+// The optional exposure-compensated material widget_quad_begin prefers. ONE definition, shared with
+// reticule_prime_material_cache(), because the negative-result cache in find_or_load_material keys on
+// the EXACT path string -- a second literal that drifted by one character would prime a cache entry
+// the real request never hits, and the stall would come back with the warmup looking like it ran.
+constexpr char kVREditorPassThroughPath[] =
+    "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
+    "WidgetVRPassThrough_Translucent_OneSided";
+
 API::UObject* find_or_load_material(const std::string& object_path) {
+    // ---- THE ABSENT CACHE IS CHECKED FIRST -- ABOVE THE find_uobject PROBES, NOT BELOW THEM.
+    //
+    // CORRECTED 2026-08-25 BY MEASUREMENT. The previous version checked this cache only in front of
+    // the blocking load and let the three find_uobject probes run every time, on the stated
+    // reasoning that "they are a cheap hash lookup". THAT REASONING IS WRONG, and it is why the
+    // ~500 ms per-quad hitch survived the frontend warm-up that was supposed to end it.
+    //
+    // UEVR's sdk::find_uobject is a CACHE ON HIT AND A FULL LINEAR SCAN ON MISS
+    // (UESDK/src/sdk/UObjectArray.cpp): a miss walks every entry of FUObjectArray and builds
+    // object->get_full_name() -- a fresh wstring, outer chain walked -- for each one, to compare
+    // against the requested name. With ~294k live objects mid-mission that is ~150-180 ms PER MISS,
+    // and this function issues THREE of them (MaterialInstanceConstant/Material/
+    // MaterialInstanceDynamic) for a path that is absent on every stock install. 3 x ~170 ms is the
+    // 449-549 ms that the 2026-08-25 10:25-10:27 log charged to "unattributed" at reticule creation
+    // and to navworld_tick at each new marker slot -- six hitches, one per widget quad created,
+    // with NO LoadAsset_Blocking line anywhere near them.
+    //
+    // The blocking load was only ever the second half of the cost, and it is now the cheap half:
+    // the same log shows the frontend prime completing its LoadAsset_Blocking in 87 ms, because at
+    // the frontend the object array is a fraction of its mid-mission size. So the whole discovery
+    // -- probes AND load -- is now paid once, by reticule_prime_material_cache() at the frontend,
+    // where both halves are cheap and nobody is playing.
+    //
+    // THE TRADE, STATED: a path proven absent stays absent for the session, so a pak mounted
+    // mid-session would not be picked up until a restart. This title mounts its paks at startup and
+    // the prime self-gates on engine content being queryable, so the window that trade closes does
+    // not exist here -- and the alternative is a ~500 ms game-thread stall per widget quad, which
+    // in VR is nausea, not a blemish. Game-thread only (both callers run inside update()), so the
+    // statics need no synchronisation.
+    constexpr int kMaxAbsent = 8;
+    static std::string s_absent[kMaxAbsent];
+    static int         s_absent_n = 0;
+    for (int i = 0; i < s_absent_n; ++i)
+        if (s_absent[i] == object_path) return nullptr;       // already proven absent this session
+
+    // PHASE TIMING, PERMANENT AND SELF-ANNOUNCING (the "announce deliberate cost" rule). Three
+    // steady_clock reads on a path that runs a handful of times per session, and a line that a
+    // healthy build never prints. This cost has now hidden THREE times on this project -- as an
+    // unscoped object-array sweep, as an unattributed blocking load, and as these probes -- each
+    // time because nothing said out loud how long it took. It says so now.
+    const auto t0 = std::chrono::steady_clock::now();
+
     const std::wstring w(object_path.begin(), object_path.end());
     static const wchar_t* kPrefixes[] = { L"MaterialInstanceConstant ", L"Material ",
                                           L"MaterialInstanceDynamic " };
+    API::UObject* found = nullptr;
     for (const wchar_t* pre : kPrefixes) {
-        if (auto* m = API::get()->find_uobject<API::UObject>((std::wstring(pre) + w).c_str())) return m;
+        if (auto* m = API::get()->find_uobject<API::UObject>((std::wstring(pre) + w).c_str())) {
+            found = m;
+            break;
+        }
     }
-    return load_asset_by_path(object_path.c_str());
+    const auto t1 = std::chrono::steady_clock::now();
+
+    // Only a path NOTHING already resident answers reaches the synchronous package load.
+    if (found == nullptr) found = load_asset_by_path(object_path.c_str());
+    const auto t2 = std::chrono::steady_clock::now();
+
+    const double probe_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double load_ms  = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    if (probe_ms + load_ms > 50.0) {
+        API::get()->log_info("[Halo-CampE-UEVR] PERF: material lookup '%s' STALLED the game thread "
+                             "%.1f ms (find_uobject probes %.1f ms, blocking load %.1f ms) -> %s. "
+                             "Each probe MISS is a full object-array walk; this should only ever "
+                             "happen once per path, at the frontend prime.",
+                             object_path.c_str(), probe_ms + load_ms, probe_ms, load_ms,
+                             found != nullptr ? "found" : "ABSENT (cached, will not be retried)");
+    }
+
+    if (found == nullptr && s_absent_n < kMaxAbsent) s_absent[s_absent_n++] = object_path;
+    return found;
+}
+
+// Pay the one-time material discovery OFF the gameplay path. See Reticule.hpp.
+void reticule_prime_material_cache() {
+    static bool s_done = false;
+    if (s_done) return;
+
+    // GATE ON ENGINE CONTENT BEING QUERYABLE, so that a load which FAILS means the asset is
+    // genuinely absent and not merely that the object system was not ready yet. The stock Widget3D
+    // pass-through is always cooked; until find_uobject can see it, LoadAsset_Blocking is not safe to
+    // trust. Without this gate an early false-"absent" would poison the negative cache for a player
+    // who actually has the optional HaloCEReticleColor pak -- turning a mitigation into a regression.
+    //
+    // THROTTLED, because this probe is NOT free while it is failing (2026-08-25). A find_uobject
+    // MISS is a full walk of the object array building get_full_name() per entry -- the same
+    // property that made the material probes below a ~500 ms stall. Unthrottled, a gate that
+    // returns "not yet" was paying that walk on EVERY tick until engine content came up. Once every
+    // 30 ticks (~1 s) bounds it, and priming a second later at the frontend costs nobody anything.
+    {
+        static int s_gate_countdown = 0;
+        if (s_gate_countdown > 0) { --s_gate_countdown; return; }
+        if (API::get()->find_uobject<API::UObject>(
+                L"MaterialInstanceConstant /Engine/EngineMaterials/Widget3DPassThrough_Translucent."
+                L"Widget3DPassThrough_Translucent") == nullptr) {
+            s_gate_countdown = 30;   // engine content not up yet -- ask again in ~1 s, not next tick
+            return;
+        }
+    }
+
+    s_done = true;
+
+    // PERF DEBT, ANNOUNCED (per the eng-vault "announce-deliberate-cost" rule): this is a deliberate
+    // one-time game-thread stall, placed HERE on purpose. widget_quad_begin needs the optional
+    // VREditor material at creation, and discovering its ABSENCE on a stock install costs BOTH
+    // halves of find_or_load_material -- three find_uobject probe MISSES (each a full object-array
+    // walk) and then a synchronous LoadAsset_Blocking pak scan. Paying that at reticule/marker
+    // creation is what the field felt as a level-start stall and, measured on 2026-08-25, as a
+    // ~500 ms hitch at every new navpoint marker slot. Doing it once at the frontend -- engine up,
+    // no mission running, object array still small, nobody playing through it -- moves the cost off
+    // the gameplay path AND makes it far smaller (87 ms measured for the load half at the frontend
+    // versus ~500 ms mid-mission). The absent cache then makes every later widget_quad_begin free.
+    //
+    // This is a MITIGATION, not the end state. The real fix is an ASYNC load so even this one never
+    // blocks the game thread (peer note 2026-08-24); until that exists, this is the cheap win. Logged
+    // loudly so it is never a mystery in a profile and never mistaken for "already fixed".
+    API::get()->log_info("[Halo-CampE-UEVR] PERF: priming widget material cache off the gameplay "
+                         "path -- a one-time blocking discovery follows IF the optional VREditor "
+                         "material is absent (stock install): three full object-array probe walks "
+                         "plus a synchronous pak scan. This is deliberate and belongs here, not at "
+                         "level start. TODO: make this async so it never blocks at all.");
+    auto* m = find_or_load_material(kVREditorPassThroughPath);
+    API::get()->log_info("[Halo-CampE-UEVR] PERF: widget material cache primed -- %s. "
+                         "Widget-quad creation will not block from here.",
+                         m != nullptr ? "present (optional pak mounted)"
+                                      : "absent, stock fallback cached -- no per-creation stall");
 }
 
 // Load an image file from disk as a UTexture2D via UKismetRenderingLibrary::ImportFileAsTexture2D.
@@ -508,9 +639,7 @@ API::UObject* widget_quad_begin(API::UObject* owner, int blend_mode, bool* out_e
     // unlit but still multiplied by the scene's PRE-EXPOSURE, so authored colours tonemap to
     // near-black in bright scenes. The optional HaloCEReticleColor LogicMod pak supplies it;
     // without that pak this resolves null and the stock MIC keeps prior behaviour.
-    API::UObject* mic = find_or_load_material(
-        "/Engine/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided."
-        "WidgetVRPassThrough_Translucent_OneSided");
+    API::UObject* mic = find_or_load_material(kVREditorPassThroughPath);
     const bool compensated = (mic != nullptr);
     if (mic == nullptr) {
         mic = API::get()->find_uobject<API::UObject>(
@@ -584,6 +713,455 @@ bool g_ret_widget_failed = false;
 // EyeAdaptationInverse pass). That material preserves the authored colours at unit tint; the stock
 // pass needs an emissive gain instead. Set when the material is chosen, consumed by the tint.
 bool g_ret_widget_exposure_compensated = false;
+
+// Defined further down; declared here because the scene-hidden latch below drives the hide THROUGH
+// it (alpha), rather than writing the component directly.
+void apply_widget_tint(uevr::API::UObject* comp, bool force);
+
+// ---- SCENE-HIDDEN LATCH (xrlayerhidews) ------------------------------------------------------
+//
+// HIDDEN-IN-GAME, NOT INVISIBLE, AND THE DIFFERENCE IS THE ENTIRE POINT.
+//
+// The compositor reticule (XrLayer/XrSource) presents THIS component's render target. So the
+// widget must keep ticking and keep drawing -- that is where the art and the firing/reload
+// animation come from. SetVisibility(false) would stop the component updating and freeze the
+// layer on whatever frame it last drew, which would look like it worked right up until you fired.
+// SetHiddenInGame(false->true) drops only the SCENE PROXY: the widget renders to its target
+// exactly as before, it simply is not composited into the world.
+//
+// Never set from the config directly -- see the call site, which requires the layer to be PROVEN
+// live first. Hiding the only crosshair a player has, because a feature silently failed, is the
+// one outcome this whole module is built to avoid.
+std::atomic<bool> g_ws_scene_hidden{false};
+// How many times the reticule's widget component has been (re)bound. A weapon swap, a death or
+// an area transition destroys the pawn the component is outered to, so this counts the events
+// that hand mode 3 a FRESH, unflagged widget. Reported on every hide/restore transition so the
+// two can be correlated in the log instead of in someone's head.
+std::atomic<uint32_t> g_ret_rehosts{0};
+
+int read_bitfield_bool(uevr::API::UObject* obj, const wchar_t* name) {
+    if (obj == nullptr) return -1;
+    auto* cls = obj->get_class();
+    if (cls == nullptr) return -1;
+    auto* prop = cls->find_property(name);
+    if (prop == nullptr) return -1;
+    auto* bp   = static_cast<uevr::API::FBoolProperty*>(prop);
+    auto* byte = reinterpret_cast<uint8_t*>(obj) + bp->get_offset();
+    const uint8_t mask = bp->get_field_mask() ? bp->get_field_mask() : 0xFFu;
+    return ((*byte & mask) != 0) ? 1 : 0;
+}
+
+// Write one bitfield bool by its FBoolProperty mask. Returns 1/0 as read back, -1 if absent.
+// Read-back rather than assumed, because a packed bool written through the wrong mask silently
+// lands on a neighbour and reports success.
+int set_bitfield_bool(uevr::API::UObject* obj, const wchar_t* name, bool on) {
+    if (obj == nullptr) return -1;
+    auto* cls = obj->get_class();
+    if (cls == nullptr) return -1;
+    auto* prop = cls->find_property(name);
+    if (prop == nullptr) return -1;
+    auto* bp   = static_cast<uevr::API::FBoolProperty*>(prop);
+    auto* byte = reinterpret_cast<uint8_t*>(obj) + bp->get_offset();
+    const uint8_t mask = bp->get_field_mask() ? bp->get_field_mask() : 0xFFu;
+    *byte = on ? (uint8_t)(*byte | mask) : (uint8_t)(*byte & ~mask);
+    return ((*byte & mask) != 0) ? 1 : 0;
+}
+
+// MODE 3 NEEDS BOTH FLAGS, and bVisibleInSceneCaptureOnly alone is NOT enough.
+//
+// WHAT MODE 3 ACTUALLY DOES, corrected 2026-08-30 after three in-headset rounds. The earlier text
+// here claimed the flag hid the widget until a capture ran; that was inferred from the shape of the
+// reports, and the final round disproved it: with vsco set and read back true, the scope INACTIVE,
+// and the layer live, the widget was still plainly visible in the main view.
+//
+// So the honest description is: bVisibleInSceneCaptureOnly does NOT hide a UWidgetComponent from the
+// main view at all. What it does do is get the widget drawn into a SceneCapture, which is the half
+// we actually need -- it is what puts a reticule in the scope pane.
+//
+// Mode 3 is therefore "show it in the capture, and accept that it also shows in the main view".
+// The double is the PRICE of the pane reticule, not a bug to be fixed by adding more flags -- see
+// reticule_set_capture_only for what happened when one was added.
+//
+// The alpha is restored on un-hide, so switching modes at runtime cannot strand the widget invisible.
+// MODE 4's other half. bOwnerNoSee is evaluated against the VIEW's ViewActor: in the main view that
+// is the player's view target -- our pawn, which outers this widget -- so the component is skipped;
+// a SceneCaptureComponent2D does not set a ViewActor, so the capture still draws it. That is exactly
+// the split mode 3 was supposed to provide and measurably does not.
+//
+// SetOwnerNoSee is on the probed function list for this build (see Arms.cpp), unlike the socket
+// rotation calls -- but call_function on an absent UFUNCTION fails SILENTLY here, so the caller
+// reads the property back rather than trusting the call. Returns the read-back bit, or -1 if the
+// property could not be read at all.
+int reticule_set_owner_no_see(uevr::API::UObject* wid, bool on) {
+    if (wid == nullptr) return -1;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    p[0] = on ? 1 : 0;
+    wid->call_function(L"SetOwnerNoSee", p);
+    return read_bitfield_bool(wid, L"bOwnerNoSee");
+}
+
+// TELL THE RENDERER THE BIT CHANGED. THIS IS WHY THE DOUBLE RETICULE SURVIVED A CORRECT WRITE.
+//
+// set_bitfield_bool() writes the UPROPERTY byte directly. That is the right way to READ or POKE a
+// value, but bVisibleInSceneCaptureOnly is consumed by the SCENE PROXY, which is built once and
+// then cached: a raw memory write marks no render state dirty, so the proxy keeps drawing with
+// whatever the flag was when it was created. UPrimitiveComponent's own setters exist precisely to
+// pair the write with MarkRenderStateDirty(), and we were doing only half of that.
+//
+// The result is a bug that reads as impossible from the log: bit=1, want=1, widget live, layer
+// live, no rehost -- and the world reticule still drawn in the main view. Measured in a headset
+// 2026-09-06 with the RETDEV line: `bit=1 want=1 off=609 mask=0x80 live=1 rehosts=1`, doubling on
+// screen the whole time. It also explains every confusing thing about this flag's history:
+//   * why it works when applied EARLY -- the proxy is built after the write, so it reads the new
+//     value and no refresh is needed;
+//   * why DYING AND TAKING A CHECKPOINT RELOAD cured it -- that rebuilds the proxy;
+//   * why the 08-30 and 09-06 "vsco does not hide from the main view" measurements were wrong.
+//     They were not wrong about the flag. They were reading a stale proxy, and a read-back of the
+//     byte agreed with them every time, because the byte WAS set.
+//
+// MarkRenderStateDirty() is not a UFUNCTION, so it cannot be called through reflection. Toggling
+// visibility is: USceneComponent::SetVisibility() marks the render state dirty on change, so
+// off-then-on inside one tick destroys and recreates the proxy, which then reads the new flag.
+// Both calls land before the frame renders, so there is no visible flicker.
+//
+// bPropagateToChildren = false, for the same reason Arms.cpp passes false: never move state onto
+// anything parented to this component.
+//
+// CHANGE-GATED BY ITS CALLERS, NOT BY ITSELF. Every reticule_set_capture_only() call site already
+// fires only on a transition (the re-assert's `have == want` early-out, and the mode 3/4 handlers),
+// so this costs two engine calls a handful of times per level -- never per tick. If a per-tick
+// caller is ever added, gate it there; two SetVisibility calls every frame would be a real cost.
+void vsco_force_render_refresh(uevr::API::UObject* wid) {
+    if (wid == nullptr) return;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    p[0] = 0; p[1] = 0;   // SetVisibility(false, bPropagateToChildren=false)
+    wid->call_function(L"SetVisibility", p);
+    p[0] = 1; p[1] = 0;   // ...and straight back on, same tick
+    wid->call_function(L"SetVisibility", p);
+}
+
+void reticule_set_capture_only(uevr::API::UObject* wid, bool on, int* out_vsco, int* out_mainp) {
+    const int v = set_bitfield_bool(wid, L"bVisibleInSceneCaptureOnly", on);
+    // The write above only changes MEMORY. Without this the scene proxy never learns, and the
+    // world reticule keeps drawing in the main view with the bit reading correct. See above.
+    if (v >= 0) vsco_force_render_refresh(wid);
+
+    // bRenderInMainPass IS DELIBERATELY NOT WRITTEN. Writing it KILLS THE PANE RETICULE: the
+    // SceneCapture honours it, so the one place we want the widget is the one place it disappears
+    // from. That half was measured 2026-08-30 and still stands -- do not re-add it.
+    //
+    // ** CORRECTED 2026-09-06: THE OTHER HALF OF THAT MEASUREMENT WAS WRONG. **
+    //
+    // This block used to also claim "vsco alone -> widget still visible in the MAIN view (the flag
+    // does not govern a UWidgetComponent's main-view draw at all)", and concluded mode 3 was a
+    // capture-only HINT whose leak into the main view was an accepted cost. That is false, and it
+    // cost two sessions: an agent read it, believed the behaviour was unreachable, and went off to
+    // build the compositor scope pane as an alternative route to something mode 3 already did.
+    //
+    // CONFIRMED TWICE IN A HEADSET, independently, with vsco set and bRenderInMainPass NOT written:
+    //   unscoped, main view ............ reticule NOT visible
+    //   scoped, main view around scope . NOT visible
+    //   scoped, through the scope ...... VISIBLE
+    // (log preserved: _Builds\_logs\log.ANOMALY-REPRODUCED-20260906-154556.txt, plus a second
+    // confirmation from the scope-pane lane after it restored the re-assert host it had removed.)
+    //
+    // WHY THE ORIGINAL MEASUREMENT WAS WRONG, because this is the trap and it recurred the same day:
+    // A NEGATIVE RESULT ABOUT A FLAG IS ONLY AS GOOD AS THE MACHINERY KEEPING THE FLAG APPLIED.
+    // vsco is a single bool written once; anything that rebuilds or re-hosts the widget clears it,
+    // and it stays clear until something re-applies it. Both false measurements -- 08-30's and a
+    // repeat on 09-06 -- were taken while the re-assert was not running (see the note below: it
+    // needs BOTH hosts, and 09-06's repeat had the late one removed). The flag was read back as
+    // `true` in both cases, which is exactly what makes this convincing and wrong: the write landed,
+    // and something later in the same frame undid it.
+    //
+    // Corollary worth carrying: the HIDDEN/restored transition log is NOT a proxy for what is on
+    // screen. The session that reproduced the working behaviour logged TWO restores, and sessions
+    // with hundreds of tick faults logged none.
+    if (out_vsco)  *out_vsco  = v;
+    if (out_mainp) *out_mainp = -1;   // not written -- never report a value we did not set
+}
+
+// MODE 3'S PER-TICK RE-ASSERT. Modes 1 and 2 get this for free -- alpha is re-applied by
+// apply_widget_tint and scale by reticule_widget_move, both every tick -- which is why a missed or
+// clobbered write repairs itself within a frame. A bool written once does not, so it needs its own
+// host, and without one a single missed write is permanent (that is exactly what the first-load
+// report was).
+//
+// Cheap by construction: one property lookup and a masked byte compare, and it WRITES ONLY WHEN THE
+// BIT DISAGREES, so the steady state costs a read. Safe to call unconditionally every tick.
+// THE vsco BIT'S LAYOUT, cached from a healthy reflection resolve. -1 = not yet known.
+int32_t s_vsco_offset = -1;
+uint8_t s_vsco_mask   = 0;
+// The raw re-assert writes the bit with NO reflection (that is its whole purpose -- it runs while
+// reflection is paused after a fault), so it cannot call vsco_force_render_refresh() itself: that
+// needs two UFUNCTION calls. It raises this instead, and the reflection-side re-assert spends it on
+// the next healthy tick. Without this hand-off a repair made during a fault window would set the
+// byte and leave the scene proxy stale -- the exact bug this refresh exists to close, reintroduced
+// on the one path that most needs it.
+std::atomic<bool> s_vsco_refresh_pending{false};
+
+// RE-APPLY THE HIDE WITHOUT TOUCHING REFLECTION.
+//
+// WHY THIS EXISTS: after a tick fault the plugin pauses ALL reflection for ~1 s, and a tick that
+// faults aborts outright -- both skip every re-assert host inside update(). A widget rebuild in
+// either window leaves bVisibleInSceneCaptureOnly clear with nothing to restore it, and the
+// world-space reticule reappears in the main view. That is the doubling the scope-pane lane
+// correlated with the fault storm.
+//
+// WHY IT IS SAFE TO RUN WHEN REFLECTION IS NOT: it makes no reflection call. It validates the
+// widget through the OBJECT ARRAY (uobject_live -- an index lookup, it never dereferences the
+// object) and then does one masked byte read and, only on disagreement, one masked byte write at
+// a class-level offset resolved earlier while reflection was healthy.
+//
+// THE RISK, STATED PLAINLY because it was raised as an objection and accepted deliberately by
+// the user: this writes into a UObject during a window in which something ELSE is dereferencing
+// null through UEVR's reflection. uobject_live() proves the pointer still occupies its array
+// slot, which is the strongest cheap evidence available that the object is alive -- but it is
+// not proof the layout is what we cached. If a crash ever lands INSIDE this function, this
+// comment is the first place to look, and reverting to the reflection path is the fallback.
+void reticule_mode3_reassert_raw() {
+    if (g_cfg.xr_layer_hide_ws != 3 && g_cfg.xr_layer_hide_ws != 4) return;
+#if HALO_VR_DEV
+    // RETDEV state line, ~2 s. THE DOUBLE-RETICULE REPORT NEEDS THIS AND NOTHING ELSE PRINTS IT.
+    //
+    // The re-assert below writes ONLY when the bit disagrees, so a session in which the bit reads
+    // CORRECT and the player still sees the world reticule in the main view produces no log line
+    // at all. That is exactly what the 2026-09-06 first-load report looked like from this side:
+    // zero re-assert fires, the HIDDEN transition logged once and never flapped, and the player
+    // saw the doubling for a whole life anyway. That silence has two very different causes and
+    // this line is what separates them:
+    //   bit=1 while the doubling is ON SCREEN -> the write LANDED but the scene proxy never picked
+    //     it up. A raw masked byte write marks no render state dirty, so the proxy keeps rendering
+    //     with the old flag until something else rebuilds it -- which is why dying and taking a
+    //     checkpoint reload cleared it. The fix would then be a proxy refresh, not another write.
+    //   bit=0 (or off=-1 / wid=null) -> the write never happened, and this says which gate stopped
+    //     it: the layout was never resolved, or the widget handle is empty.
+    // Costs one masked read every 64 ticks and is absent from a player build.
+    {
+        static uint32_t s_t = 0;
+        if ((s_t++ % 64) == 0) {
+            auto* w = g_ret_widget_comp.ptr;
+            int bit = -1;
+            if (s_vsco_offset >= 0 && w != nullptr) {
+                static int32_t s_dbg_idx = -1;
+                if (uobject_live(w, &s_dbg_idx))
+                    bit = ((*(reinterpret_cast<uint8_t*>(w) + s_vsco_offset)) & s_vsco_mask) != 0;
+            }
+            uevr::API::get()->log_info(
+                "[Halo-CampE-UEVR] RETDEV vsco: bit=%d want=%d off=%d mask=0x%02X wid=%p live=%d "
+                "rehosts=%u hidews=%d -- bit==want while the world reticule is still visible means "
+                "the scene proxy is stale, not the write.",
+                bit, (int)g_ws_scene_hidden.load(std::memory_order_relaxed), (int)s_vsco_offset,
+                (unsigned)s_vsco_mask, (void*)w, (int)xrlayer_live(),
+                g_ret_rehosts.load(std::memory_order_relaxed), (int)g_cfg.xr_layer_hide_ws);
+        }
+    }
+#endif
+    if (s_vsco_offset < 0) return;                 // never resolved; nothing safe to write
+    auto* wid = g_ret_widget_comp.ptr;
+    if (wid == nullptr) return;
+    static int32_t s_idx = -1;
+    if (!uobject_live(wid, &s_idx)) return;        // array lookup only -- no dereference
+
+    auto* byte = reinterpret_cast<uint8_t*>(wid) + s_vsco_offset;
+    const bool want = g_ws_scene_hidden.load(std::memory_order_relaxed);
+    const bool have = (*byte & s_vsco_mask) != 0;
+    if (have == want) return;                      // steady state costs one read
+    *byte = want ? (uint8_t)(*byte | s_vsco_mask)
+                 : (uint8_t)(*byte & (uint8_t)~s_vsco_mask);
+    // The byte is right; the SCENE PROXY still is not. Hand the refresh to the reflection side --
+    // see s_vsco_refresh_pending. Doing it here would mean UFUNCTION calls during the very window
+    // in which reflection is unsafe.
+    s_vsco_refresh_pending.store(true, std::memory_order_relaxed);
+    static uint32_t s_said = 0;
+    if (s_said < 5) {
+        ++s_said;
+        uevr::API::get()->log_info(
+            "[Halo-CampE-UEVR] reticule: vsco re-applied WITHOUT reflection (want=%d) -- the "
+            "widget was rebuilt while reflection was paused or a tick had faulted. First %u "
+            "only; this is the repair that keeps the world reticule out of the main view.",
+            (int)want, 5u);
+    }
+}
+
+void reticule_mode3_reassert() {
+    if (g_cfg.xr_layer_hide_ws != 3 && g_cfg.xr_layer_hide_ws != 4) return;
+
+    // MODE 4's SECOND FLAG NEEDS THE SAME REPAIR AS THE FIRST. bOwnerNoSee is written once per
+    // transition, so a widget the game re-hosts comes back with it clear -- the identical hole that
+    // made mode 3 flap. Cheap: a masked read, and a write only when the bit disagrees.
+    if (g_cfg.xr_layer_hide_ws == 4) {
+        if (auto* w = g_ret_widget_comp.get_checked(L"WidgetComponent")) {
+            const bool want_ons = g_ws_scene_hidden.load(std::memory_order_relaxed);
+            const int  have_ons = read_bitfield_bool(w, L"bOwnerNoSee");
+            if (have_ons >= 0 && (have_ons != 0) != want_ons) {
+                reticule_set_owner_no_see(w, want_ons);
+            }
+        }
+    }
+    auto* wid = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    if (wid == nullptr) return;
+    // SPEND A REFRESH THE RAW PATH DEFERRED. This must sit ABOVE the `have == want` early-out
+    // below: the raw re-assert has already made the byte agree, so that check returns and every
+    // line after it is skipped -- which is precisely how a repair made during a fault window would
+    // otherwise leave the proxy stale forever.
+    if (s_vsco_refresh_pending.exchange(false, std::memory_order_relaxed)) {
+        vsco_force_render_refresh(wid);
+    }
+    auto* cls = wid->get_class();
+    if (cls == nullptr) return;
+    auto* prop = cls->find_property(L"bVisibleInSceneCaptureOnly");
+    if (prop == nullptr) return;
+    auto* bp   = static_cast<uevr::API::FBoolProperty*>(prop);
+    // CACHE THE LAYOUT WHILE REFLECTION IS HEALTHY. It is class-level, so it is the same for
+    // every widget of this class and for the life of the process. reticule_mode3_reassert_raw()
+    // below uses it to re-apply the bit with NO reflection at all, which is what lets the repair
+    // run while reflection is paused after a fault. Written here rather than in a separate
+    // resolve step so it can only ever hold values the normal path has already validated.
+    s_vsco_offset = (int32_t)bp->get_offset();
+    s_vsco_mask   = bp->get_field_mask() ? bp->get_field_mask() : 0xFFu;
+    auto* byte = reinterpret_cast<uint8_t*>(wid) + bp->get_offset();
+    const uint8_t mask = s_vsco_mask;
+    const bool want = g_ws_scene_hidden.load(std::memory_order_relaxed);
+    const bool have = (*byte & mask) != 0;
+    // Only vsco is ours now -- bRenderInMainPass is left alone (see reticule_set_capture_only),
+    // so requiring it to agree would rewrite the pair every tick and re-break the pane.
+    if (have == want) return;
+    reticule_set_capture_only(wid, want, nullptr, nullptr);
+}
+
+void reticule_widget_set_scene_hidden(bool hidden) {
+    if (g_ws_scene_hidden.load(std::memory_order_relaxed) == hidden) return;   // on CHANGE only
+
+    auto* wid = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    if (wid == nullptr) return;   // nothing bound yet -- do NOT latch; retry on the next change
+
+    // THE STORE HAPPENS AFTER THE WIDGET CHECK, and that ordering is the whole fix for a bug
+    // reported 2026-08-30: "when I first load in, I can see the reticule in main view".
+    //
+    // It used to store FIRST. At startup the layer goes live BEFORE the reticule widget is bound,
+    // so this ran with hidden=true, recorded "hidden", then bailed at the null widget having written
+    // nothing. Every later call then saw no CHANGE and returned immediately -- the state said hidden
+    // while the widget had never been touched, and it stayed visible until something forced a
+    // second transition (dying and respawning, which re-hosts the widget and toggles live off/on --
+    // exactly what the report describes as fixing it).
+    //
+    // Modes 1 and 2 survived this because their value is re-asserted every tick by another host
+    // (apply_widget_tint for alpha, reticule_widget_move for scale), so the missed write was
+    // repaired within a frame. Mode 3 writes a bool ONCE and had no such host, which is what made a
+    // latent ordering bug into a visible one. Mode 3 now re-asserts too -- see
+    // reticule_mode3_reassert() -- but the ordering is fixed here as well, because a state flag that
+    // records an action that did not happen is wrong for every mode, cured or not.
+    g_ws_scene_hidden.store(hidden, std::memory_order_relaxed);
+
+    // ---- HIDE BY ALPHA, NOT BY VISIBILITY -----------------------------------------------
+    //
+    // SetHiddenInGame(true) FREEZES the compositor layer, measured in a headset twice. The widget
+    // stops redrawing its render target once the engine stops rendering the component, so the layer
+    // -- which presents that target -- holds whatever frame it last drew.
+    //
+    // TickWhenOffscreen is NOT the gate, and believing it was cost a build: this component has had
+    // it set since creation (see SetTickWhenOffscreen in widget_quad_begin), so the "fix" that set
+    // it here was a no-op and the freeze was unchanged. Whatever UWidgetComponent actually keys its
+    // redraw on, being hidden defeats it even with that flag on. Do not re-litigate this by
+    // reasoning about engine internals we cannot read -- it has now been tested.
+    //
+    // So do not hide it at all. Leave the component fully visible and RENDERED, and multiply its
+    // colour to zero. Every visibility- or render-time-based gate stays satisfied because as far as
+    // the engine is concerned nothing changed; the quad simply contributes no pixels.
+    //
+    // The cost is honest and small: one draw call and a translucency pass for a 256x256 quad that
+    // outputs nothing. That is the price of the widget continuing to animate, which is the entire
+    // reason the layer has real art.
+    //
+    // The alpha is applied by apply_widget_tint(), which already re-asserts itself whenever the
+    // component rebuilds its material behind our back. Piggy-backing on that is what makes the hide
+    // survive a SetDrawSize; a one-shot write here would silently revert exactly as the tint did.
+    // Mode 1 drives alpha through apply_widget_tint; mode 2 drives scale in reticule_widget_move.
+    // Both are re-asserted every tick by their host, which is what makes either survive the
+    // component rebuilding its material or transform behind our back.
+    // ---- MODE 3: HIDE FROM THE MAIN VIEW ONLY, STAY VISIBLE TO SCENE CAPTURES ----------------
+    //
+    // WHY THIS MODE EXISTS. Modes 1 and 2 hide the in-scene reticule from EVERYTHING that renders
+    // the world -- including the weapon scope's SceneCaptureComponent2D. So with the compositor
+    // reticule on, the zoom pane lost its crosshair, and it could not simply be given the layer's
+    // one: a composition layer is submitted at xrEndFrame, AFTER the engine has finished the frame,
+    // so a capture that runs inside the engine can never see it. The two layers do not compose.
+    //
+    // bVisibleInSceneCaptureOnly is UPrimitiveComponent's own answer to exactly this: the component
+    // is skipped in the main pass and drawn in scene captures. The main view therefore keeps the
+    // compositor reticule alone (no doubling, and the emissive-bloom win is preserved), while the
+    // scope pane gets the REAL world-space reticule at the REAL traced hit point -- which is the
+    // part a reticule drawn at the pane's centre could not honestly promise, because centre only
+    // equals impact if the capture is perfectly aim-aligned.
+    //
+    // IT IS A PACKED BITFIELD. Writing the byte would clobber every neighbouring flag in the same
+    // word (bHiddenInSceneCapture and bRenderInMainPass live there too), so the FBoolProperty's own
+    // field mask does the work -- the same way Scope.cpp sets the bOverride_ flags.
+    //
+    // THE RISK THIS MODE IS ON TRIAL FOR, stated so the next reader does not have to rediscover it:
+    // SetHiddenInGame froze the widget's render target, which is why modes 1 and 2 exist at all. If
+    // being skipped in the main pass defeats whatever UWidgetComponent keys its redraw on, the
+    // layer's source goes stale and this mode is strictly worse than mode 1. That is a MEASUREMENT,
+    // not an argument: watch the layer's held= age and whether the art still swaps on weapon change.
+    // MODE 4: mode 3's capture-only hint PLUS bOwnerNoSee, which is the flag that actually removes
+    // the widget from the main view. Kept as a separate mode rather than folded into 3 so the two can
+    // be compared in a headset without a rebuild, and so a build where SetOwnerNoSee turns out to be
+    // absent degrades to exactly mode 3's behaviour rather than to nothing.
+    if (g_cfg.xr_layer_hide_ws == 4) {
+        int vsco = -1, mainp = -1;
+        reticule_set_capture_only(wid, hidden, &vsco, &mainp);
+        const int ons = reticule_set_owner_no_see(wid, hidden);
+        uevr::API::get()->log_info(
+            "[Halo-CampE-UEVR] reticule: in-scene widget %s the main pass (mode 4: "
+            "bVisibleInSceneCaptureOnly=%s bOwnerNoSee=%s, read back). bOwnerNoSee is the half that "
+            "hides it from the MAIN VIEW; the scene capture has no ViewActor so the scope pane still "
+            "sees it. %s",
+            hidden ? "HIDDEN from" : "restored to",
+            vsco < 0 ? "ABSENT" : (vsco ? "true" : "false"),
+            ons  < 0 ? "ABSENT[SetOwnerNoSee did not resolve -- this is mode 3 behaviour]"
+                     : (ons ? "true" : "false"),
+            (ons < 0) ? "Falling back to mode 3's effect." : "");
+    } else if (g_cfg.xr_layer_hide_ws == 3) {
+        int vsco = -1, mainp = -1;
+        reticule_set_capture_only(wid, hidden, &vsco, &mainp);
+        // Mode 3 does NOT touch alpha or scale, so restore whatever those were: switching modes at
+        // runtime must not leave the widget both flagged AND alpha-zeroed.
+        apply_widget_tint(wid, /*force=*/true);
+        // WHY THIS TRANSITION HAPPENED, not just that it did.
+        //
+        // g_ws_scene_hidden follows (hide_ws != 0 && xrlayer_live()), so a transition BACK to
+        // visible means the LAYER dropped out of live -- there is no other input. Printing live
+        // and the re-host count separates the two candidate causes of "the world-space reticule
+        // is showing in my main view": a layer that keeps dropping, versus a widget re-host that
+        // outran the re-assert. One failing session logged 17 of these against a working
+        // session's 5, and nothing recorded which kind they were.
+        //
+        // bRenderInMainPass reads ABSENT ON PURPOSE -- reticule_set_capture_only deliberately
+        // does not write it (writing it made the SCOPE pane lose its reticule). The old text
+        // here claimed "BOTH are required", which is wrong and cost a session: it reads as a
+        // failure to apply half the fix when it is the fix working as designed.
+        uevr::API::get()->log_info(
+            "[Halo-CampE-UEVR] reticule: in-scene widget %s (mode 3: "
+            "bVisibleInSceneCaptureOnly=%s bRenderInMainPass=%s[not written by design], "
+            "read back) | rehosts=%u -- in mode 3 `restored` IS xrlayer_live() going false, "
+            "since hidden = (hide_ws != 0 && live) and hide_ws is 3 here. The SCOPE CAPTURE "
+            "still sees the widget either way.",
+            hidden ? "HIDDEN from the main pass" : "restored to the main pass",
+            vsco  < 0 ? "ABSENT" : (vsco  ? "true" : "false"),
+            mainp < 0 ? "ABSENT" : (mainp ? "true" : "false"),
+            g_ret_rehosts.load(std::memory_order_relaxed));
+        return;
+    }
+
+    apply_widget_tint(wid, /*force=*/true);
+    uevr::API::get()->log_info("[Halo-CampE-UEVR] reticule: in-scene widget %s (alpha %s; component "
+                               "stays rendered so it keeps redrawing its target for the layer)",
+                               hidden ? "HIDDEN" : "restored",
+                               hidden ? (g_cfg.xr_layer_hide_ws == 2 ? "mode 2: sub-pixel scale"
+                                                                     : "mode 1: alpha -> 0")
+                                      : "restored");
+}
 
 // Mirrors the early-out in reticule_widget_ensure() below EXACTLY -- if that gate changes, change
 // this with it, or the scan feeding it will stop while it is still waiting for a widget.
@@ -947,6 +1525,7 @@ void reticule_widget_ensure(API::UObject* rig) {
     }
 
     g_ret_widget_comp.set(comp);
+    g_ret_rehosts.fetch_add(1, std::memory_order_relaxed);
 
     // READ BACK WHAT ACTUALLY TOOK, from the component's own memory at offsets taken from the live
     // type schema. CurrentDrawSize is the one that matters most: DrawSize is the REQUEST,
@@ -1108,7 +1687,10 @@ void apply_widget_tint(API::UObject* comp, bool force) {
     const float gain = g_ret_widget_exposure_compensated ? 1.0f
                                                          : g_cfg.aim_widget_gain;
     const float rgb   = gain * g_cfg.aim_widget_tint;
-    const float alpha = g_cfg.aim_widget_alpha;
+    // HIDE BY ALPHA, NOT BY VISIBILITY -- see reticule_widget_set_scene_hidden.
+    const bool hide_alpha = g_ws_scene_hidden.load(std::memory_order_relaxed) &&
+                            g_cfg.xr_layer_hide_ws == 1;
+    const float alpha = hide_alpha ? 0.0f : g_cfg.aim_widget_alpha;
 
     // VERIFY AGAINST THE COMPONENT, never against a cache of what we last wrote.
     //
@@ -1231,6 +1813,24 @@ void reticule_widget_finish() {
 // Position at the aim point and rotate to face the viewer. `origin` is the ray start, which is
 // close enough to the eye for the facing to read correctly and avoids needing the HMD pose here.
 void reticule_widget_move(const Vec3& target, const Vec3& origin) {
+    // MODE 3/4's RE-ASSERT RUNS IN BOTH PLACES, DELIBERATELY.
+    //
+    // It is ALSO called unconditionally from update(), because this function is not per-tick: both of
+    // its call sites sit behind a successful aim pick, so a tick whose pick fails skipped the repair
+    // entirely -- and a failed pick and a widget re-host share their causes (a scope transition, a
+    // pawn rebuild). That hole is real and the unconditional host closes it.
+    //
+    // But removing it from HERE was a mistake, caught by the session that owns the compositor lane
+    // (2026-09-06). This call site runs LATE in the tick, after the reticule's own update and after
+    // anything that rebuilds the widget's material or transform behind our back; the update() one
+    // runs early. A flag re-applied only early can be clobbered later in the same frame by exactly
+    // the rebuild it exists to survive. Their working mode-3 reproduction depended on the late
+    // re-application, so dropping it risked regressing a configuration that was measured good.
+    //
+    // Calling it twice costs a masked bit compare on the steady path and writes only on disagreement,
+    // so the duplicate is close to free and strictly safer than choosing one host over the other.
+    reticule_mode3_reassert();
+
     // Validated through the object array, never by dereferencing the cached pointer: the component
     // is outered to the pawn, which is destroyed on death and area transitions.
     auto* comp = g_ret_widget_comp.get_checked(L"WidgetComponent");
@@ -1329,7 +1929,63 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
     // construction, and FinishAddComponent overwrites it.
     { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
       // Distance-compensated, same as the mesh ring above.
-      const float sc = g_cfg.aim_widget_scale * g_ret_scale_mul.load();
+      // MODE 2 (scale-hide): shrink the quad to sub-pixel instead of touching visibility.
+      //
+      // The component stays visible, in the frustum and RENDERED -- so whatever gate stops an
+      // unrendered UWidgetComponent redrawing its target never trips -- but it covers no pixels.
+      // A different mechanism from mode 1 (alpha) on purpose: if the redraw gate turns out to be
+      // material-related, alpha fails and this still works, and vice versa.
+      //
+      // It MUST stay in the frustum. Moving it behind the camera would cull it, which means not
+      // rendered, which is the freeze all over again. Shrinking in place cannot do that -- though
+      // if the renderer culls it by screen size, raise xrlayerhidescale until it survives.
+      float sc = g_cfg.aim_widget_scale * g_ret_scale_mul.load();
+      if (g_ws_scene_hidden.load(std::memory_order_relaxed) && g_cfg.xr_layer_hide_ws == 2) {
+          sc *= g_cfg.xr_layer_hide_scale;
+      }
+
+      // ---- ZOOM FIT: shrink the world reticule so it looks right INSIDE THE SCOPE PANE ---------
+      //
+      // Reported 2026-08-30: "the reticle is a bit large in the zoom pane". It is, and by a factor
+      // we can compute rather than guess. The reticule is a world object sized to look constant in
+      // the MAIN view; the pane shows a capture rendered at scope_base_fov / scope_zoom (70/16 =
+      // ~4.4 deg), then displays that image on a quad subtending roughly 2*atan(w/2 / d). Anything
+      // in the capture is therefore magnified by (pane angular width / capture FOV) relative to
+      // being looked at directly -- about 3x at the shipped numbers, which is exactly "a bit large".
+      //
+      // THIS IS ONLY SAFE IN MODE 3, and that is why it is gated on it. In modes 0/1/2 the same
+      // widget is what the player sees in the main view (or is the thing being hidden), so shrinking
+      // it would shrink the main-view reticule. In mode 3 the widget is bVisibleInSceneCaptureOnly
+      // -- the main view is showing the compositor quad instead -- so its size affects the pane and
+      // NOTHING else. The fix is free precisely because of the mode it rides on.
+      //
+      // Auto by default, with xrlayerzoomfit as a trim on top, because the derivation assumes the
+      // pane distance is the mount offset and that the capture fills the quad. Both are true today
+      // and neither is guaranteed, so the computed factor is LOGGED and the trim exists to correct
+      // it without a rebuild.
+      if (g_cfg.xr_layer_hide_ws == 3 && g_scope_active.load(std::memory_order_relaxed)
+          && g_ws_scene_hidden.load(std::memory_order_relaxed)) {
+          const float cap_fov = (g_cfg.scope_zoom > 1.0f) ? (g_cfg.scope_base_fov / g_cfg.scope_zoom)
+                                                          : g_cfg.scope_base_fov;
+          const float d_cm = std::sqrt(g_cfg.scope_layer_fwd   * g_cfg.scope_layer_fwd +
+                                       g_cfg.scope_layer_right * g_cfg.scope_layer_right +
+                                       g_cfg.scope_layer_up    * g_cfg.scope_layer_up);
+          if (cap_fov > 0.01f && d_cm > 1.0f && g_cfg.scope_layer_width > 0.01f) {
+              const float pane_deg = 2.0f * std::atan((g_cfg.scope_layer_width * 0.5f) / d_cm)
+                                          * (180.0f / 3.14159265f);
+              const float fit = cap_fov / pane_deg;             // <1 shrinks, which is the expected way
+              sc *= fit * g_cfg.xr_layer_zoom_fit;
+              static float s_said = 0.0f;
+              if (std::fabs(fit - s_said) > 0.01f) {
+                  s_said = fit;
+                  uevr::API::get()->log_info(
+                      "[Halo-CampE-UEVR] reticule ZOOM FIT: capture %.2f deg on a %.1f deg pane -> "
+                      "world reticule x%.3f (trim xrlayerzoomfit=%.2f). Mode 3 only: the widget is "
+                      "capture-only, so this changes the PANE and not the main view.",
+                      cap_fov, pane_deg, fit, g_cfg.xr_layer_zoom_fit);
+              }
+          }
+      }
       auto* d = reinterpret_cast<double*>(p); d[0] = sc; d[1] = sc; d[2] = sc;
       comp->call_function(L"SetWorldScale3D", p); }
 }
@@ -1387,6 +2043,15 @@ bool reticule_force_visible(Vec3* out_pos, int* out_have) {
         // second argument as false, which is what we want -- neither component has children.
         { alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
           q[0] = 1; c->call_function(L"SetVisibility", q); }
+        // NOTE: the scene-hidden latch is NOT applied here any more -- hiding is done with alpha
+        // (see reticule_widget_set_scene_hidden), precisely so this function can keep forcing both
+        // components visible without fighting it.
+        //
+        // Without this the latch would lose a fight it never knew it was in: this function runs
+        // every tick on the seated path and unconditionally un-hid both components, so hiding the
+        // in-scene crosshair would appear to work for one frame and then flicker back forever.
+        // VISIBILITY stays TRUE either way -- see reticule_widget_set_scene_hidden for why that
+        // distinction is the whole trick.
         { alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
           q[0] = 0; c->call_function(L"SetHiddenInGame", q); }
     }

@@ -27,7 +27,26 @@ $dll    = Join-Path $outDir 'halo_vr.dll'
 
 # Every .cpp under src\ is compiled - add a file, it builds, no script edit needed.
 # (UEVR's own plugin targets glob the same way; see cmake.toml in a praydog/UEVR checkout.)
+#
+# THIS IS WHY THE OPENXR API LAYER LIVES IN apilayer\ AND NOT UNDER src\. The layer is a SECOND,
+# SEPARATE DLL: it is loaded by the OpenXR loader rather than by UEVR, it has its own DllMain and
+# its own required export, and it runs in processes where halo_vr.dll is not present at all. A
+# recursive glob would quietly compile it into the plugin, where its DllMain and exports would be
+# merged into ours - which builds fine and produces a layer that no loader can ever load, and a
+# plugin carrying code that has no business in it. Build it with scripts\build-apilayer.ps1.
 $srcFiles = @(Get-ChildItem $srcDir -Filter *.cpp -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
+
+# The structural rule above is invisible the moment someone moves a file, so assert it rather than
+# trusting the folder layout. This catches the layer being relocated under src\ - by a merge, a
+# refactor, or someone tidying - at build time, in one line, instead of at the far end of a release.
+$layerSrc = @($srcFiles | Where-Object {
+    Select-String -LiteralPath $_.FullName -Pattern 'xrNegotiateLoaderApiLayerInterface' -Quiet
+})
+if ($layerSrc.Count -gt 0) {
+    throw ("OpenXR API LAYER source found under src\ and would be compiled into halo_vr.dll: {0}`n" -f
+              (($layerSrc | ForEach-Object { $_.FullName.Replace("$repo\", '') }) -join ', ')) +
+          'The layer is a separate DLL. Move it back under apilayer\src\ and build it with scripts\build-apilayer.ps1.'
+}
 
 if (-not $SdkPath) { throw 'Set -SdkPath or $env:UEVR_SDK to a praydog/UEVR checkout (see COMPILING.md).' }
 $incDir = Join-Path $SdkPath 'include'
@@ -51,7 +70,7 @@ $clArgs = @(
     $srcArgs,
     "/Fe:`"$dll`"",
     "/Fo:`"$outDir/`"",
-    '/link', 'user32.lib'
+    '/link', 'user32.lib', 'gdi32.lib'
 ) -join ' '
 
 Write-Host ("Compiling halo_vr ({0} source file{1})..." -f $srcFiles.Count, $(if($srcFiles.Count -eq 1){''}else{'s'})) -ForegroundColor Cyan

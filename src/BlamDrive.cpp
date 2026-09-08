@@ -1019,7 +1019,15 @@ static void drive_angles_impl(bool off_thread) {
     aim_converge_apply(&yaw, &pitch);
 
     // YAW SIGN. desired_aim_now() returns UE-convention degrees, but this record stores BLAM yaw,
-    // which is its negation -- the game derives the aim as (cos p * cos y, -cos p * sin y, sin p).
+    // which is its negation: writing (yaw 1.50, pitch 0.30) produced the aim vector
+    // (0.0676, -0.9529, 0.2955) == (cos p * cos y, -cos p * sin y, sin p).
+    //
+    // READ THAT AS A BOUNDARY CONVERSION, NOT AS BLAM'S INTERNAL MATH. The vector above was
+    // observed in the UE frame, so the negation is the UE<->Blam handedness flip landing at this
+    // seam -- it is NOT evidence that Blam builds forward with -sin(yaw). Sibling Blam titles
+    // build it with +sin(yaw) and are consistent with this (cross-checked against the MCC/Reach
+    // work 2026-08-20, which transcribes that engine's own atan2 conversion instead). A port to
+    // another Blam title must re-derive the sign at ITS host seam rather than copying this one.
     //
     // Confirmed live in co-op, and the failure was diagnostic in itself: with no flip the LOCAL
     // view was correct (direct drive owns that independently) while the HOST saw yaw mirrored --
@@ -1392,4 +1400,20 @@ void blam_drive_tick() {
                          via, id, g_tls_index);
 }
 
+
+// ---- GRENADE STATE: DECLARED, DELIBERATELY NOT POPULATED IN THIS TREE.
+//
+// Holster.cpp links against these to draw the chest pouches. In blindcowboy24 PR-1 they are
+// filled from raw offsets into the Blam unit object (u8[0x380/0x382/0x383]) -- hardcoded struct
+// offsets carrying no ADDR-HYGIENE marker and no addrcascade guard. That plumbing was NOT taken
+// with this extraction, which is the WEAPON SWITCHING only.
+//
+// g_unit_gvalid therefore stays false for ever, and that is the fail-closed answer: Holster.cpp
+// reads it as "counts unknown", so the pouches stay empty rather than inventing a grenade.
+// Populate these from a GUARDED offset and the pouches light up with no other change.
+//
+// At namespace-halo scope on purpose -- inside the anonymous namespace above they would be
+// file-local and Holster.obj would not link.
+std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
+std::atomic<bool> g_unit_gvalid{false};
 }  // namespace halo

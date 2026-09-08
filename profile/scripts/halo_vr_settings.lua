@@ -5,7 +5,7 @@
 --                            halo_vr_user.cfg, so changes survive updates and apply in ~2 s.
 --   "Halo VR DEV Settings"   the internal/research knobs from halo_vr_dev.cfg. Big warning:
 --                            these can break things; updates overwrite that file on purpose.
---   "Halo VR Calibration"    buttons for the two calibration gestures + resets to the shipped
+--   "Halo VR Calibration"    buttons for the three calibration gestures + resets to the shipped
 --                            fit. Arming a gesture hands the finish to the TRIGGERS (see below).
 --
 -- HOW IT TALKS TO THE MOD. UEVR sandboxes script file access to <profile>/data/, so this
@@ -14,12 +14,15 @@
 --   data/halo_vr_user_mirror.cfg     mirrored halo_vr_user.cfg                            READ
 --   data/halo_vr_dev_mirror.cfg      mirrored halo_vr_dev.cfg (catalog + active overrides) READ
 --   data/halo_vr_calib_mirror.cfg    mirrored halo_vr_calib.cfg (empty = shipped fit)     READ
---   data/halo_vr_status.txt          plugin status (armed calibration mode)               READ
+--   data/halo_vr_status.txt          plugin status (armed calibration mode; handready)     READ
 --   data/halo_vr_menu_set.txt        command file this script WRITES; the plugin applies it:
---                                      key=value / -key            -> halo_vr_user.cfg
---                                      dev:key=value / dev:-key    -> halo_vr_dev.cfg
---                                      calib:pose|aim|off          -> arm/disarm calibration
---                                      calibreset:pose|aim|all     -> strip/delete calib file
+--                                      key=value / -key             -> halo_vr_user.cfg
+--                                      dev:key=value / dev:-key     -> halo_vr_dev.cfg
+--                                      calib:pose|aim|hand|off      -> arm/disarm calibration
+--                                      calibreset:pose|aim|hand|scope|all
+--                                                                   -> strip/delete calib file
+--                                      calibreset:wpnscope          -> drop the EQUIPPED weapon's
+--                                                                      scope trim (weapons cfg)
 -- If the catalog mirror is missing, the plugin is not loaded/current -- the menu says so.
 
 local REF_FILE    = "halo_vr_user_reference.txt"
@@ -35,6 +38,12 @@ local POSE_KEYS = { "calibver", "grip", "gripyaw", "griproll", "dirgrip", "dirgr
                     "dirgriproll", "diroffx", "diroffy", "diroffz", "offx", "offy", "offz",
                     "pivauto", "pivx", "pivy", "pivz" }
 local AIM_KEYS  = { "aimcalibver", "aimoffyaw", "aimoffpitch" }
+local HAND_KEYS = { "handfixver", "handfix" }
+-- The Delete-key scope placement block. Must match SCOPE_CALIB_KEYS in Config.cpp -- scopemount
+-- included: it is what selects the frame the other six are expressed in, so a reset that left it
+-- behind would be worse than no reset at all.
+local SCOPE_KEYS = { "scopemount", "scopedist", "scoperight", "scopeup",
+                     "scoperotp", "scoperoty", "scoperotr" }
 
 -- Players never see raw codes: key-binding and button settings render as named dropdowns, and
 -- the file keeps the numeric form. {value, display name} pairs.
@@ -79,6 +88,14 @@ local HINTS = {
     mapto          = { t = "btn" },
     mapbtnlog      = { t = "bool" },
     mapmenuback    = { t = "btn" },
+    -- Action binds. Shown here too (as dropdowns) so the catalog stays complete, but the
+    -- Controls panel's capture is the way these are meant to be set -- see the note there.
+    bindcrouch     = { t = "btn" },
+    bindmelee      = { t = "btn" },
+    bindreload     = { t = "btn" },
+    bindscope      = { t = "btn" },
+    binddpadshift  = { t = "btn" },
+    bindcapturems  = { t = "slider", min = 2000, max = 120000, int = true },
     menusuppress   = { t = "bool" },
     menudetect     = { t = "bool" },
     calibkey       = { t = "key" },
@@ -138,6 +155,16 @@ local pending_dev  = {}
 local once_cmds    = {}    -- one-shot commands (calib arm/reset), flushed on next write
 local editbuf     = {}     -- "layer:key" -> in-progress text for text/hex fields
 local calib_mode  = 0      -- plugin-reported armed calibration mode
+local scope_arm   = 0      -- plugin-reported per-weapon scope trim armed (1 = waiting for a capture)
+local scope_base_arm = 0   -- plugin-reported BASE (global-fit) scope calibration armed
+                           -- DECLARE IT HERE. Assigned in the status read and consumed by the
+                           -- button; without a local it becomes a global assignment, which this
+                           -- script's environment rejects -- and a raised error takes the WHOLE
+                           -- panel down, not just this row. That is what "nothing shows in
+                           -- Script UI" looks like (2026-09-06).
+local hand_ready  = 0      -- plugin-reported: can the support-hand gesture do anything right now
+local bind_capture = 0     -- plugin-reported armed bind capture (1 = waiting for a press)
+local bind_key     = ""    -- which cfg key that capture will write
 local frame       = 0
 
 local function trim(s)
@@ -258,6 +285,22 @@ local function refresh()
     end
     local status = fs.read(STATUS_FILE)
     calib_mode = tonumber(status:match("calibmode=(%d+)") or "0") or 0
+    -- The plugin is the authority on this too: the arm is CONSUMED by the capture, so a button
+    -- tracking its own click would keep claiming "armed" after the gesture had already spent it.
+    scope_arm  = tonumber(status:match("scopearm=(%d+)") or "0") or 0
+    -- Same reasoning as scope_arm: the plugin CONSUMES this on capture, so the panel reads it
+    -- back rather than trusting its own click. Absent (older plugin) reads 0, which simply shows
+    -- the unarmed label instead of claiming a state the plugin does not have.
+    scope_base_arm = tonumber(status:match("scopebasearm=(%d+)") or "0") or 0
+    -- The plugin is the authority on the armed state, not our own click: an arm expires on a
+    -- timeout we never see, and a capture completes while the menu is closed. Reading it back
+    -- is what stops the panel from claiming "armed" at a plugin that has long since moved on.
+    bind_capture = tonumber(status:match("bindcapture=(%d+)") or "0") or 0
+    bind_key     = status:match("bindkey=([%w_]*)") or ""
+    -- Absent (an older plugin) reads as 0, which shows the "not available" note rather than
+    -- offering a button that would arm a mode nothing looks at. Failing toward the explanation is
+    -- the right way round for a mismatch the player did not cause.
+    hand_ready   = tonumber(status:match("handready=(%d+)") or "0") or 0
 end
 
 -- current value as a STRING: queued, else the file's override, else the catalog default
@@ -530,11 +573,15 @@ local function draw_calib()
     print_text_block("NOTE: the keys only register while the GAME WINDOW IS FOCUSED (background " ..
                      "keystrokes are deliberately ignored -- click the game window first).")
     imgui.spacing()
+    print_text_block("The SUPPORT HAND calibration below has no key at all -- its button IS the " ..
+                     "gesture. Everything after arming is the same as the other two.")
+    imgui.spacing()
     print_text_block("No keyboard in reach? The buttons below arm the same gestures:")
     print_text_block("  1. Press a Calibrate button, then CLOSE this menu -- controller input " ..
                      "does not reach the game (or the mod) while the UEVR menu is open.\n" ..
                      "  2. Align: pose match = hold your controller on the on-screen weapon; " ..
-                     "aim ray = point your controller at the frozen reticle.\n" ..
+                     "aim ray = point your controller at the frozen reticle; support hand = put " ..
+                     "your real off hand where the frozen one is.\n" ..
                      "  3. RIGHT trigger = save & finish. LEFT trigger = save & re-arm on " ..
                      "release, for consecutive passes. Triggers will not fire your weapon while " ..
                      "armed.")
@@ -542,9 +589,13 @@ local function draw_calib()
                      "distracted, check back here for the ARMED banner.")
     imgui.spacing()
 
+    local ARMED_NAME = {
+        [1] = "WEAPON POSE (hold controller on the weapon)",
+        [2] = "AIM RAY (point at the frozen reticle)",
+        [3] = "SUPPORT HAND (put your real hand where the frozen one is)",
+    }
     if calib_mode ~= 0 then
-        print_text_block(">>> ARMED: " .. (calib_mode == 1 and "WEAPON POSE (hold controller on the weapon)"
-                                                            or "AIM RAY (point at the frozen reticle)") ..
+        print_text_block(">>> ARMED: " .. (ARMED_NAME[calib_mode] or "UNKNOWN") ..
                          "\n>>> Close this menu, align, then use the triggers.")
         if imgui.button("Cancel calibration mode") then fire("calib:off") end
         imgui.spacing()
@@ -553,7 +604,8 @@ local function draw_calib()
     if imgui.button("Use shipped calibration for EVERYTHING") then fire("calibreset:all") end
     if imgui.is_item_hovered() then
         imgui.set_tooltip("Deletes halo_vr_calib.cfg (this hand) -- the shipped Quest Touch fit\n" ..
-                          "applies again within ~2 s. Your own fit is gone; recalibrate to redo it.")
+                          "applies again within ~2 s. That is ALL THREE gestures at once: weapon\n" ..
+                          "pose, aim ray and support hand. Recalibrate to redo them.")
     end
     imgui.spacing()
 
@@ -586,11 +638,330 @@ local function draw_calib()
         end
     end
     imgui.pop_id()
+
+    -- ---- PER-WEAPON SCOPE TRIM. Arms the NEXT scope calibration to land in the held weapon's own
+    -- trim instead of the global fit, so a sniper can sit differently from a pistol without
+    -- re-fitting everything. The gesture itself is the ordinary scope calibration: this button only
+    -- chooses where the answer is stored, which is why it reads "arm" rather than "calibrate".
+    --
+    -- Deliberately NOT a calib: mode like the three above -- the scope pane has its own hold in
+    -- Scope.cpp, and duplicating that here would give two things to keep in agreement.
+    imgui.push_id("calwpnscope")
+    -- ARMED STATE COMES FROM THE PLUGIN, not from our own click -- the capture consumes the arm, so
+    -- a locally-tracked flag would keep saying "armed" after the gesture had spent it.
+    -- ImGuiCol_Button = 21, read from the imgui the injected UEVR build actually ships. Colour is
+    -- packed ABGR (0xAABBGGRR), so 0xFF2288DD is an amber that reads as "waiting on you".
+    local armed = (scope_arm == 1)
+    if armed then imgui.push_style_color(21, 0xFF2288DD) end
+    local label = armed and "ARMED -- now do the scope calibration" or "Arm per-weapon scope trim"
+    if imgui.button(label) then fire(armed and "calib:wpnscopeoff" or "calib:wpnscope") end
+    if armed then imgui.pop_style_color(1) end
+    if imgui.is_item_hovered() then
+        if armed then
+            imgui.set_tooltip("Armed. The scope pane is being held VISIBLE so you can work --\n" ..
+                              "raise the scope, hold the scope calibration key, move the pane where\n" ..
+                              "you want it, then release. The result is stored for THIS weapon only.\n" ..
+                              "Click again to cancel and go back to setting the global fit.")
+        else
+            imgui.set_tooltip("Store the next scope calibration as a trim for the weapon in your hands,\n" ..
+                              "leaving every other weapon on the global fit.\n" ..
+                              "While armed the pane stays visible even without the trigger, so two-handed\n" ..
+                              "aiming will not keep closing it mid-calibration.\n" ..
+                              "A weapon with no trim uses the global fit exactly as it does now.")
+        end
+    end
+    if armed then
+        imgui.same_line()
+        imgui.text_colored("<-- pane held open", 0xFF2288DD)
+    end
+    -- RESET THIS WEAPON'S TRIM. Shown UNCONDITIONALLY, unlike the 'x' rows built on
+    -- any_key_active(): those read the calibration FILE, and per-weapon trims do not live there --
+    -- they are rows in the machine-owned halo_vr_weapons.cfg, keyed by a weapon the menu cannot
+    -- see. Rather than guess, the plugin answers: with nothing to clear it logs why and does
+    -- nothing, which is the same outcome as a hidden button and does not require the menu to
+    -- track weapon state it has no access to.
+    imgui.same_line()
+    if imgui.small_button("x") then fire("calibreset:wpnscope") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Clear the scope trim for the weapon IN YOUR HANDS RIGHT NOW ->\n" ..
+                          "back to the global fit. Other weapons keep theirs.\n" ..
+                          "Takes effect immediately, no reload. If that weapon has no trim\n" ..
+                          "(or nothing is equipped) this does nothing and says so in the log.")
+    end
+    imgui.pop_id()
+    -- ---- BASE (GLOBAL) SCOPE CALIBRATION ------------------------------------------------------
+    -- Its own button rather than "just press the key": the key alone no longer holds the pane open
+    -- (the pane closes with the scope), so there was nothing on screen to place. Arming is what
+    -- keeps it visible. The capture DESTINATION is unchanged -- with the per-weapon arm clear a
+    -- capture has always written the global fit -- so this adds a way in, not a new write path.
+    imgui.push_id("scopebase")
+    local base_armed = (scope_base_arm == 1)
+    if base_armed then imgui.push_style_color(21, 0xFF2288DD) end
+    local base_label = base_armed and "ARMED -- now do the BASE scope calibration"
+                                   or "Arm BASE scope calibration (all weapons)"
+    if imgui.button(base_label) then
+        fire(base_armed and "calib:scopebaseoff" or "calib:scopebase")
+    end
+    if base_armed then imgui.pop_style_color(1) end
+    if imgui.is_item_hovered() then
+        if base_armed then
+            imgui.set_tooltip("Armed. Hold the scope calibration key, move the pane where you\n" ..
+                              "want it, then release. The result becomes the GLOBAL fit that\n" ..
+                              "every weapon starts from. Click again to cancel.")
+        else
+            imgui.set_tooltip("Set the GLOBAL scope fit -- what every weapon starts from.\n" ..
+                              "Per-weapon trims are offsets ON TOP of this, so changing it moves\n" ..
+                              "every weapon without a trim, and shifts the ones that have one by\n" ..
+                              "the same amount.\n" ..
+                              "While armed the pane stays visible even without the trigger.")
+        end
+    end
+    if base_armed then
+        imgui.same_line()
+        imgui.text_colored("<-- pane held open", 0xFF2288DD)
+    end
+    -- RESET THE GLOBAL FIT. Same 'x' idiom as the pose and aim rows above, and shown on the same
+    -- condition: only when a stored calibration is actually overriding the built-in fit, so the
+    -- control never appears offering to undo something that is not there.
+    if any_key_active(SCOPE_KEYS) then
+        imgui.same_line()
+        if imgui.small_button("x") then fire("calibreset:scope") end
+        if imgui.is_item_hovered() then
+            imgui.set_tooltip("Your global scope placement is active. Remove it -> back to the\n" ..
+                              "shipped fit. Per-weapon trims are kept; they are offsets on top of\n" ..
+                              "this, so they follow the fit back.")
+        end
+    end
+    imgui.pop_id()
+
+
+    -- ---- SUPPORT HAND. No keyboard equivalent: this one is menu-armed only, so the button is the
+    -- gesture rather than a convenience alternative to a key. Everything after arming is identical
+    -- to the two above, triggers included, which is the whole reason it was built this way.
+    -- hand_ready: 0 = the running arm driver does not pose the support hand at all, so this row is
+    -- HIDDEN (showing a permanently dead control to everyone on the default configuration is worse
+    -- than not mentioning the feature); 1 = configured but nothing posed yet; 2 = ready.
+    --
+    -- A stored fix forces the row back regardless, so "I cannot undo it from here" never happens:
+    -- the calibration outlives the driver that made it, and the reset must outlive it too.
+    local have_hand = any_key_active(HAND_KEYS)
+    if hand_ready ~= 0 or have_hand then
+        imgui.push_id("calhand")
+        if hand_ready == 2 then
+            if imgui.button("Calibrate support hand (menu only)") then fire("calib:hand") end
+            if imgui.is_item_hovered() then
+                imgui.set_tooltip("Where your OFF hand sits inside its controller -- the left hand,\n" ..
+                                  "unless you have set aimhand=left. The hand freezes in place; put\n" ..
+                                  "your real hand where it is, then save with the trigger.\n\n" ..
+                                  "One capture covers every weapon and every session. Repeat\n" ..
+                                  "captures refine it rather than starting over, so short passes\n" ..
+                                  "are fine. Keep your AIM hand still while you align.")
+            end
+        elseif hand_ready == 1 then
+            imgui.text("Calibrate support hand: nothing posed yet")
+            if imgui.is_item_hovered() then
+                imgui.set_tooltip("The arm driver is set up for it, but it has not posed your\n" ..
+                                  "support hand yet -- get into a mission with a weapon in hand\n" ..
+                                  "and controllers tracking. There is nothing to freeze at the\n" ..
+                                  "main menu.")
+            end
+        else
+            imgui.text("Support-hand calibration (stored, not active)")
+            if imgui.is_item_hovered() then
+                imgui.set_tooltip("You have a saved support-hand calibration, but the arm driver\n" ..
+                                  "currently running does not use it. It is doing nothing; the 'x'\n" ..
+                                  "removes it.")
+            end
+        end
+        if have_hand then
+            imgui.same_line()
+            if imgui.small_button("x") then fire("calibreset:hand") end
+            if imgui.is_item_hovered() then
+                imgui.set_tooltip("Your support-hand calibration is active. Remove it -> the hand\n" ..
+                                  "goes back on the plain controller pose (the built-in default).")
+            end
+        end
+        imgui.pop_id()
+    end
+end
+
+-- ---------------------------------------------------------------- controls / rebinding panel
+--
+-- WHY THIS IS NOT A DROPDOWN-ONLY PANEL. The physical-button -> XInput-mask mapping is not stable
+-- across runtimes: on Quest the right controller's B arrives as 0x4000, which XInput (and the
+-- BTN_NAMES list above) calls "X". So a player picking "B" from a list can silently bind the
+-- wrong button, and the failure is invisible until a combat action does nothing. CAPTURE is the
+-- primary path -- press the button, the plugin records what actually arrived -- and the dropdown
+-- stays as the fallback for anyone who already knows their masks.
+--
+-- WHY CAPTURE NEEDS THE MENU CLOSED. With UEVR's overlay open the VR mod zeroes the pad upstream,
+-- so no controller input reaches the plugin at all. The menu can only ARM; the player closes it
+-- and presses. Exactly the flow the Calibration panel already uses, for exactly the same reason.
+local BIND_ROWS = {
+    { key = "bindcrouch",    name = "Crouch",           def = "0x0000",
+      note = "Unbound = crouch is on RIGHT STICK DOWN (the shipped default)." },
+    { key = "bindmelee",     name = "Melee",            def = "0x0000",
+      note = "Unbound = melee is the SWING gesture only." },
+    { key = "bindreload",    name = "Reload",           def = "0x0000",
+      note = "Unbound = reload is the magazine GESTURE only." },
+    { key = "bindscope",     name = "Scope toggle",     def = "0x0000",
+      note = "Unbound = the scope is on the LEFT TRIGGER. Binding a button keeps the trigger too." },
+    { key = "binddpadshift", name = "D-pad shift",      def = "0x0000",
+      note = "Hold to turn the left stick into the d-pad (grenades / weapon switch).\n" ..
+             "Unbound = the shift is RIGHT STICK UP. Binding a button REPLACES the stick gesture." },
+    { key = "mapfrom",       name = "Rebind: from",     def = "0x2000",
+      note = "Press this button..." },
+    { key = "mapto",         name = "Rebind: to",       def = "0x0100",
+      note = "...and the game receives this one instead. Shipped: the crouch button becomes\n" ..
+             "equipment (LB), since crouch moved onto the right stick." },
+    { key = "mapmenuback",   name = "Menu: Back",       def = "0x4000",
+      note = "Acts as Back while a menu is open. Gameplay binds pause automatically there." },
+    { key = "grenadefrom",   name = "Grenade",          def = "0x0000",
+      note = "The left grip belongs to the mod (magazine grabs), so grenades need a button.\n" ..
+             "Unbound = grenades have NO binding unless the grip is shared (gripexclusive=0)." },
+}
+
+-- Catalog lookup, so this panel shows the same defaults and tooltips as the main settings list
+-- rather than a second copy that can drift out of step with the shipped catalog.
+local function find_entry(key)
+    if user_catalog == nil then return nil end
+    for _, section in ipairs(user_catalog) do
+        for _, e in ipairs(section.keys) do
+            if e.key == key then return e end
+        end
+    end
+    return nil
+end
+
+-- Returns exactly ONE value. The parentheses are load-bearing: effective() returns
+-- (value, overridden), and a bare `return effective(...)` forwards BOTH -- which then arrive as
+-- tonumber(value, overridden) at any call site that does not assign to a single local, and Lua
+-- reads that boolean as the numeric base. Truncating here rather than at each caller means a
+-- future call site cannot reintroduce it.
+local function bind_value(row)
+    local entry = find_entry(row.key)
+    if entry ~= nil then return (effective(entry, "user")) end
+    -- Catalog missing this key (older plugin, or a data\ mirror not yet refreshed): fall back to
+    -- the live override, then to this row's own default, so the panel still works.
+    local p = pending_user[row.key]
+    if p ~= nil and p ~= false then return p end
+    local o = user_over[row.key]
+    if o ~= nil then return o end
+    return row.def
+end
+
+local function mask_label(v)
+    local n = tonumber(v)
+    if n == nil then return tostring(v) .. " (unreadable)" end
+    n = math.floor(n)
+    if n == 0 then return "not bound" end
+    local nm = named_lookup(BTN_NAMES, n)
+    if nm ~= nil then return string.format("%s  (0x%04X)", nm, n) end
+    return string.format("0x%04X  (no standard name)", n)
+end
+
+local function draw_controls()
+    print_text_block("Bind the mod's own actions to whatever buttons suit you. Changes save to " ..
+                     "halo_vr_user.cfg and survive updates.")
+    imgui.spacing()
+    print_text_block("HOW TO REBIND:\n" ..
+                     "  1. Press Rebind on a row.\n" ..
+                     "  2. CLOSE THIS MENU -- controller input does not reach the mod while the " ..
+                     "UEVR overlay is open, so nothing can be captured until you do.\n" ..
+                     "  3. Press the button you want. It is recorded and does NOT fire in game.\n" ..
+                     "  4. Reopen this menu to see it. An arm you never use expires on its own.")
+    print_text_block("Captured rather than picked from a list on purpose: button names differ " ..
+                     "between runtimes (on Quest the right controller's B arrives as 'X'), so " ..
+                     "capturing what your controller really sends is the only reliable way.")
+    imgui.spacing()
+
+    if bind_capture ~= 0 then
+        local waiting = bind_key
+        for _, row in ipairs(BIND_ROWS) do
+            if row.key == bind_key then waiting = row.name end
+        end
+        print_text_block(">>> ARMED: waiting for a button for \"" .. tostring(waiting) .. "\".\n" ..
+                         ">>> CLOSE THIS MENU, then press the button you want.")
+        if imgui.button("Cancel rebind") then
+            fire("bind:capture=off")
+            bind_capture = 0
+        end
+        imgui.spacing()
+    end
+
+    -- Conflict scan. Two actions on one mask is not illegal (the apply order is defined), but it
+    -- is almost always a mistake, and it is invisible in a per-row view -- which is exactly the
+    -- kind of silent wrong binding this whole panel exists to prevent.
+    local seen, clash = {}, {}
+    for _, row in ipairs(BIND_ROWS) do
+        if row.key ~= "mapto" then   -- a destination, not a source: sharing a mask is normal
+            local n = tonumber(bind_value(row))
+            if n ~= nil and n ~= 0 then
+                n = math.floor(n)
+                if seen[n] ~= nil then
+                    clash[n] = true
+                else
+                    seen[n] = row.name
+                end
+            end
+        end
+    end
+
+    for _, row in ipairs(BIND_ROWS) do
+        imgui.push_id("bind:" .. row.key)
+        local cur = bind_value(row)
+        local n = tonumber(cur)
+        local warn = (n ~= nil and clash[math.floor(n)]) and "   [!] shared with another action" or ""
+        imgui.text(string.format("%-16s %s%s", row.name, mask_label(cur), warn))
+        if imgui.is_item_hovered() then
+            local entry = find_entry(row.key)
+            local tip = row.note
+            if entry ~= nil and entry.desc ~= nil and entry.desc ~= "" then tip = entry.desc end
+            imgui.set_tooltip(tip .. "\n\ncfg key: " .. row.key)
+        end
+
+        if imgui.small_button("Rebind") then
+            fire("bind:capture=" .. row.key)
+            bind_capture = 1
+            bind_key = row.key
+        end
+        if imgui.is_item_hovered() then
+            imgui.set_tooltip("Arm capture for " .. row.name ..
+                              ".\nClose this menu, then press the button you want.")
+        end
+
+        imgui.same_line()
+        if imgui.small_button("Unbind") then queue("user", row.key, "0x0000") end
+        if imgui.is_item_hovered() then
+            imgui.set_tooltip("Set this action to no button.\n" .. row.note)
+        end
+
+        if user_over[row.key] ~= nil or pending_user[row.key] ~= nil then
+            imgui.same_line()
+            if imgui.small_button("default") then queue("user", row.key, false) end
+            if imgui.is_item_hovered() then
+                imgui.set_tooltip("Back to the shipped binding (" .. mask_label(row.def) .. ")")
+            end
+        end
+        imgui.spacing()
+        imgui.pop_id()
+    end
+
+    imgui.spacing()
+    print_text_block("Not sure what your controller sends? Turn on 'mapbtnlog' under Support " ..
+                     "Diagnostics and every press is written to the UEVR log by mask.")
 end
 
 uevr.sdk.callbacks.on_draw_ui(function()
     local ok, err = pcall(function()
         refresh()
+        -- Controls first: it is the panel a player comes looking for, and the one with a flow
+        -- (arm -> close -> press) that should not be buried under two catalogs.
+        if imgui.collapsing_header("Halo VR Controls (rebinding)") then
+            imgui.indent(4)
+            draw_controls()
+            imgui.unindent(4)
+        end
         if imgui.collapsing_header("Halo VR User Settings") then
             imgui.indent(4)
             draw_user()

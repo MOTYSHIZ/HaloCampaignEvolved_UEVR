@@ -93,4 +93,24 @@ struct TrackedObject {
     bool empty() const { return ptr == nullptr; }
 };
 
+// IS THIS RAW POINTER STILL THE OBJECT WE ADOPTED?
+//
+// TrackedObject is the right answer wherever a handle can be stored, and 40 sites use it. This
+// is the same check for the handful of places that hold a RAW pointer because it is read from
+// dozens of call sites and threading a handle through all of them would be the larger change.
+//
+// WHY IT IS THE ONLY CHECK THAT WORKS. Measured 2026-09-04: a level teardown frees a component,
+// its memory is handed to the next allocation, and the stale pointer then passes IsBadReadPtr
+// AND a reflected class-name test -- because something that really is a component now lives
+// there. Handing it to UEVR faults inside UEVR (0xC0000005 reading a live-looking heap
+// address), so the crash never names us. The object array slot is the identity: if it no
+// longer holds our pointer, the object we adopted is gone whatever occupies that address now.
+//
+// COST. Resolving the index is one walk of the ~296k object array, so it happens ONLY when the
+// pointer changes; steady-state verification is a single indexed compare. A per-tick walk is
+// the exact cost this project was bitten by in the find_uobject miss, and must not come back.
+//
+// Fails OPEN when the array is unavailable: unverifiable is not the same as known-dead.
+bool uobject_live(uevr::API::UObject* p, int32_t* cached_index);
+
 } // namespace halo

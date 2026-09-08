@@ -73,6 +73,32 @@ void reticule_mesh_move(const Vec3& p);
 // the widget reticule uses -- the stock Widget3D material tonemaps to near-black in bright scenes.
 uevr::API::UObject* find_or_load_material(const std::string& object_path);
 
+// Pay the one-time optional-material discovery OFF the gameplay path.
+//
+// widget_quad_begin() asks find_or_load_material() for the optional exposure-compensated VREditor
+// material at creation. On a stock install that material is absent, and discovering the absence is
+// expensive TWICE OVER: three find_uobject probe MISSES (each a full walk of the ~294k-entry object
+// array, building get_full_name() per entry -- ~150-180 ms apiece mid-mission) and then a
+// SYNCHRONOUS package load (LoadAsset_Blocking scans every mounted pak and finds nothing).
+//
+// CORRECTED 2026-08-25: the earlier text here named only the blocking load, and the absent cache
+// therefore covered only the blocking load. The probes kept running, so every widget quad still
+// stalled ~450-550 ms after the warm-up was supposed to have ended it -- measured as six hitches in
+// one session, one per quad created (reticule + five navpoint marker slots), with no
+// LoadAsset_Blocking anywhere near them. The cache now guards the WHOLE function.
+//
+// The cache pays the discovery at most ONCE per session -- but "once" used to land on the first
+// reticule/marker CREATION, i.e. at level start, which is exactly where the player felt it (up to
+// ~9 quads = ~9 discoveries before the cache was warm, per the 2026-08-23 finding and its
+// independent 2026-08-24 confirmation).
+//
+// Calling this at the FRONTEND -- engine up, paks mounted, no mission running -- warms the cache
+// before any quad is created, so widget_quad_begin never blocks during gameplay. One-shot; cheap to
+// call every tick until it fires (it self-gates on engine content being queryable so it cannot cache
+// a false "absent" from an unready object system). It is a mitigation; an async load is the end
+// state.
+void reticule_prime_material_cache();
+
 // ---- WORLD-SPACE WIDGET QUAD -- THE ONE COPY OF THIS RECIPE ------------------------------------
 //
 // Building a UWidgetComponent that actually renders in world space on this title is a sequence of
@@ -109,6 +135,23 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin);
 // no crosshair. Safe and cheap to call when nothing is bound (every handle is re-validated first).
 void reticule_widget_release();
 
+// Drop the hosted widget out of the SCENE while leaving it ticking and rendering to its target,
+// so the compositor layer can be evaluated on its own. Not SetVisibility -- that would stop the
+// widget updating and freeze the layer's texture. On-change only; safe to call every tick.
+void reticule_widget_set_scene_hidden(bool hidden);
+
+// Mode 3's per-tick REPAIR: force bVisibleInSceneCaptureOnly to agree with g_ws_scene_hidden.
+// Needed because reticule_widget_set_scene_hidden is change-only on that latch, so a widget the
+// game RE-HOSTS comes back with the bit clear and nothing writes it again. No-op unless
+// xr_layer_hide_ws == 3; then one property lookup and a masked byte compare, writing only on
+// disagreement -- so call it unconditionally, from a host that runs whether or not the aim pick
+// succeeded. It previously hung off reticule_widget_move(), which is gated behind a successful
+// pick and is therefore skipped at exactly the moments a re-host happens.
+void reticule_mode3_reassert();
+// Re-applies the mode 3/4 hide using a CACHED property offset and no reflection at all, so it
+// can run while reflection is paused after a fault. Call it ABOVE the pause gate in update().
+void reticule_mode3_reassert_raw();
+
 // The widget class the config asks us to host.
 std::wstring wanted_widget_class();
 
@@ -126,5 +169,12 @@ bool reticle_widget_needs_pick();
 void reticle_arm_stray_check();              // one-shot window, armed when a widget is hosted
 bool reticle_stray_check_due(uint32_t tick); // is that window open?
 void reticle_collapse_strays();              // hide every scanned reticle that is not ours
+
+// A solid-colour render target, created and explicitly CLEARED (CreateRenderTarget2D +
+// ClearRenderTarget2D). Exported because the scope's dev probe needs a texture that is guaranteed
+// to sample: the engine's WhiteSquareTexture resolves to a live UObject but renders BLACK on this
+// cooked build, while a render target of this kind is the exact object type the scope pane already
+// proves samples correctly.
+uevr::API::UObject* make_color_rt(float r, float g, float b, float a, int size);
 
 } // namespace halo

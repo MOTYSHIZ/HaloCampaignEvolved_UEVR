@@ -32,6 +32,95 @@ namespace halo {
 // Defaults are overridden at runtime by halo_vr.cfg next to the UEVR profile (see load_config
 // below), which is re-read every ~2 s -- so a headset session can tune, or hit the kill switch,
 // without a rebuild or a restart.
+// One per-weapon adjustment. DELTAS on the calibrated base, not replacements -- see
+// WeaponOffset.hpp for why.
+struct WeaponAdjust {
+    char  match[64] = "";      // substring of the weapon actor class, e.g. "AssaultRifle"
+    float d_x = 0.0f, d_y = 0.0f, d_z = 0.0f;              // centimetres
+    float d_grip = 0.0f, d_grip_yaw = 0.0f, d_grip_roll = 0.0f;  // degrees
+};
+constexpr int kMaxWeaponAdjust = 24;
+
+// One per-weapon SCOPE trim. Deltas on the global scope fit, not replacements -- see
+// ScopeOffset.hpp. d_zoom is a PLAIN MULTIPLIER: 1.5 = 1.5x the global magnification. ZERO means
+// UNSET rather than 0x -- the parser is positional, so a line naming only a weapon leaves every
+// field at 0, and nobody can want 0x zoom, so that spelling is free to mean "leave it alone".
+struct ScopeAdjust {
+    char  match[64] = "";        // substring of the weapon actor class, e.g. "FP_SniperRifle"
+    float d_zoom  = 0.0f;        // plain multiplier; 0 = unset, 1.0 = unchanged
+    float d_dist  = 0.0f, d_right = 0.0f, d_up = 0.0f;      // centimetres
+    float d_rot_p = 0.0f, d_rot_y = 0.0f, d_rot_r = 0.0f;   // degrees
+};
+constexpr int kMaxScopeAdjust = 24;
+
+// One per-weapon RIGID DELTA for the PALETTE weapon carry (src\palettearm\PaletteArm.cpp).
+//
+// WHY A SECOND TYPE AND NOT MORE WeaponAdjust FIELDS. WeaponAdjust adjusts the RIG path's fitted
+// grip/mount -- degrees and centimetres added to grip_deg/off_x -- and the palette path consumes
+// none of those. The palette carries the weapon branch by putting the AUTHORED marker node onto the
+// controller, so what it needs is a rigid transform in the controller's own frame: a rotation and a
+// translation, and no notion of a "calibrated base" to be a delta against. Sharing one struct would
+// mean six fields that mean nothing on either half depending on which driver is running.
+//
+// ⚠️ THE FRAME IS OURS, NOT PR #1's, AND THE SHIPPED VALUES WERE CONVERTED INTO IT.
+// blindcowboy24's wpnfix lines are a UE-convention quaternion (X forward / Y RIGHT / Z up) with
+// UE-axis metres; ours are Blam axes (X forward / Y LEFT / Z up), the basis everything in
+// src\palettearm\ works in. Relabelling Y is a REFLECTION, not a rotation, so it reverses the sense
+// of a turn as well as flipping an axis: the conversion is q -> (-qx, qy, -qz, qw) and
+// t -> (tx, -ty, tz). Copying his numbers across unconverted is a mirrored trim, and that is what
+// kWeaponFixSchema and the per-file wpnfixver stamp exist to stop. See PaletteArm.cpp's weapon-fix
+// block for the exact composition, and profile\halo_vr.cfg for the converted shipped values.
+struct WeaponFix {
+    char  match[64] = "";      // substring of the weapon actor class, e.g. "FP_AssaultRifle"
+    float q[4] = {0.0f, 0.0f, 0.0f, 1.0f};   // x,y,z,w -- RIGHT-multiplied onto the trimmed pose
+    float t[3] = {0.0f, 0.0f, 0.0f};         // METRES, in that same pose's frame
+    // Did this entry come from the player's own capture file, or from the shipped baseline?
+    //
+    // Load-bearing, not bookkeeping. The table merges both tiers, and the capture writer rewrites
+    // its file IN FULL -- so without this it would copy the shipped baseline into the player's file
+    // on the first capture, where the copy would outlive the value it was copied from and quietly
+    // defeat every future update to the baseline.
+    bool  captured = false;
+};
+
+// Bumped whenever the meaning of a WeaponFix changes. Every file that carries wpnfix lines must
+// stamp its own wpnfixver BEFORE them; lines under any other stamp are DROPPED AT PARSE, not
+// believed. The failure a rigid delta from a foreign frame produces is a weapon hanging in the
+// wrong place with nothing in the log -- and blindcowboy24's PR #1 writes wpnfix lines in a
+// different frame with no stamp at all, so this is a file that exists rather than a hypothetical.
+constexpr int kWeaponFixSchema = 1;
+
+// Same idea, same reasoning, for the SUPPORT-HAND rigid fix (`handfix` in halo_vr_calib.cfg): the
+// stamp is file-borne and a line under any other stamp is dropped at parse. One number, not two --
+// the hand fix has a single writer and a single reader, so there is no second tier to version.
+constexpr int kHandFixSchema = 1;
+
+// ---- THE ONE PER-WEAPON LOOKUP -----------------------------------------------------------------
+//
+// PRECEDENCE: THE LAST MATCHING ENTRY WINS, because the config files are parsed weakest-first and
+// this is the only rule that keeps the table's meaning the same as every other key's. In load order
+// (kConfigFiles in Config.cpp):
+//
+//     halo_vr.cfg          SHIPPED per-weapon baseline        <- weakest
+//     halo_vr_user.cfg     the player's hand-written overrides
+//     halo_vr_dev.cfg      deliberate temporary experiments
+//     halo_vr_calib.cfg    the global calibration gestures
+//     halo_vr_weapons.cfg  THE IN-GAME CAPTURE                <- strongest, and user-owned
+//
+// So: a weapon the player has captured uses THEIR value; a weapon they have not uses the shipped
+// one; a weapon in neither table gets no delta at all and lands exactly where the plain palette
+// carry puts it. Deleting halo_vr_weapons.cfg therefore reverts every weapon to the shipped fit --
+// the same "delete the file, get the shipped calibration back" contract as halo_vr_calib.cfg.
+//
+// ⚠️ NOTE THE INVERSION relative to wpnoff, which sits beside it in the same files: wpnoff takes the
+// FIRST match, so its specific entries go ABOVE general ones. wpnfix takes the LAST, so within one
+// file a specific entry goes BELOW. They differ because wpnoff has only ever had one tier.
+//
+// Takes the raw actor class name (e.g. "BP_FP_AssaultRifle_WeaponActor_C") so the per-tick caller
+// can pass weapon_offset_current_class() -- a pointer read -- rather than paying for reflection.
+// Returns nullptr when nothing matches.
+const WeaponFix* weapon_fix_for(const char* class_name);
+
 struct Config {
     bool  enabled      = true;
     bool  drive_pitch  = true;
@@ -426,6 +515,67 @@ struct Config {
     float piv_y        = 0.0f;
     float piv_z        = 0.0f;
     bool  piv_auto     = true;
+    // Per-tick weapon-to-rig separation logging. OFF by default: two reflected calls per tick.
+    bool  wpn_diag     = false;
+    // Store a per-weapon ROLL delta. ON: weapon models really are authored at different rolls,
+    // and the Magnum needs several degrees the assault rifle does not.
+    //
+    // This was briefly defaulted OFF on the reasoning that the pose-match gesture cannot measure
+    // roll -- a gun is near-symmetric about its own barrel, so overlaying a frozen one shows you
+    // little. That reasoning was built on a bad statistic: the "8 deg of scatter" was measured
+    // across captures taken against DIFFERENT BASES, and a delta is by definition relative to its
+    // base, so those numbers were never comparable. Within a single session the spread is about
+    // +/-2 deg, and a real per-weapon difference of ~7 deg sits well clear of it.
+    //
+    // The gesture IS the noisiest on this axis though, so a single capture can land a couple of
+    // degrees out. Roll is easy to judge on a gun in your hand and hard to judge by overlay, so
+    // prefer nudging it live (scripts/vr.ps1 wroll <weapon> <deg>) over re-capturing and hoping.
+    bool  wpn_roll     = true;
+    // Does the END calibration write griproll? NO.
+    //
+    // Roll is the one axis the pose-match gesture cannot see -- a gun is near-symmetric about its
+    // own barrel -- so what END records is wherever the wrist happened to be. It is also global on
+    // this title and best set by eye down the iron sights, which takes a couple of minutes and is
+    // then correct for every weapon. Letting a gesture overwrite that is losing a good value to a
+    // bad measurement; it happened twice in one session before this flag existed.
+    // END still fits position, pitch and yaw, which it measures well.
+    // DEFAULT 1 = END fits roll, the long-standing behaviour. Set 0 to hold roll across the
+    // gesture; the solve does that as a rotation about the forward axis, not a scalar swap.
+    bool  calib_roll   = true;
+    // STATIC ROLL, in degrees. -999 = off.
+    //
+    // Lives in halo_vr.cfg, which the gestures never write -- halo_vr_calib.cfg is the machine
+    // owned one. Re-applied every tick after the base and the per-weapon delta, so it is the last
+    // word: END and HOME may still record whatever they like and it simply does not matter.
+    //
+    // Roll is the one axis the pose-match cannot measure (a gun is near-symmetric about its
+    // barrel) and it is global on this title, so pinning it to a value set by eye down the sights
+    // is strictly better than re-deriving it from a gesture that cannot see it.
+    float roll_static  = -999.0f;
+    // Log where the spawned hand/magazine components actually are in world space, once a second.
+    bool  hands_diag   = false;
+    // Cancel the socket's ROTATION as well as its offset.
+    //
+    // The weapon is socketed onto the mesh, so what you see is mesh_rotation * socket_rotation.
+    // We drive the first term; the second is the engine's and differs between the two mesh
+    // instances this title loads -- measured identity on one, (p3.7 y-4.2 r-1.8) on the other,
+    // with the pitch matching the observed per-session grip shift to a tenth of a degree.
+    // rigsocket already cancels the socket's translation, which is why position stopped drifting
+    // while orientation kept flipping. This is the other half.
+    // SHIPS ON (2026-08-23), together with rig_socket below -- they are two halves of one fix and
+    // splitting them was an error on our side, not his design.
+    bool  rig_sock_rot = true;
+    // Cancel the MEASURED weapon-to-component separation instead of the pinned piv_* constant.
+    // The weapon is socketed onto the rig mesh, so that separation is the only term standing
+    // between placing the MESH and placing the WEAPON -- and piv_* is a guess at it that a
+    // respawn invalidates. Falls back to piv_* whenever no weapon is in hand.
+    //
+    // SHIPS ON. The pinned piv_* is only pinned to YOUR machine after a calibration
+    // (g_pivot_from_calib); before that it is whatever the SHIPPED halo_vr.cfg carries -- one
+    // contributor machine, measured once, applied to everyone. Reading the live component fits
+    // the instance actually in front of the player, with no calibration required. Measured cost
+    // 0.004 ms mean against a 0.24 ms tick (~1.6%), which is the price of not shipping a guess.
+    bool  rig_socket   = true;
 
     // WHICH socket is the pivot. You rotate your controller about your WRIST, so the pivot wants to
     // be the in-game hand -- which is not necessarily where the weapon mounts. `PrimaryWeapon` is
@@ -774,6 +924,35 @@ struct Config {
     // note above warns about, arriving through the default rather than through the gesture.
     int   calib_ver     = 1;   // stamped 2 ONLY by the mesh calibration; gates gripyaw
     int   aim_calib_ver = 1;   // stamped 2 ONLY by the aim calibration;  gates aimoffyaw
+
+    // ---- THE SUPPORT-HAND FIX (the "calibrate my off hand to my controller" gesture) ------------
+    //
+    // A rigid transform in the SUPPORT controller's OWN frame, applied to that controller's pose
+    // before the palette arm driver builds a wrist target from it -- so it reads as "rotate/shift
+    // the hand ON my controller", not "move it about the camera". Exactly the shape WeaponFix has
+    // and for the same reason: the rotation right-multiplies, and the translation is carried by the
+    // untrimmed basis, which is what makes the pair one rigid attachment rather than two knobs that
+    // interact. src\palettearm\PaletteArm.cpp applies it and solves it.
+    //
+    // IDENTITY IS THE SHIPPED CONFIGURATION, and deliberately: unlike the weapon fit there is no
+    // measured baseline to ship, because the quantity being calibrated is where a PERSON'S hand
+    // sits inside their own controller. No shipped file sets these; a capture writes them to
+    // halo_vr_calib.cfg, and deleting that file puts the hand back on the plain controller pose.
+    //
+    // WHICH HAND: the SUPPORT hand, i.e. the one that is not aiming -- the LEFT hand in the shipped
+    // right-handed configuration, the right hand under aimhand=left. Not "the left controller":
+    // the aim hand's placement is owned by the weapon calibration (the arm IKs to the controller
+    // precisely because the gun is calibrated to it), so a second rigid trim there would fight it.
+    //
+    // METRES for the translation, matching WeaponFix and every other player-visible distance that
+    // is not a cm-suffixed setting. The palette works in Blam units; the conversion is at use.
+    float hand_fix_q[4]  = {0.0f, 0.0f, 0.0f, 1.0f};   // x,y,z,w -- identity
+    float hand_fix_t[3]  = {0.0f, 0.0f, 0.0f};         // metres, in the support controller's frame
+    // FALSE = "no capture exists", which is NOT the same as an identity transform that was
+    // measured. write_calib_file() emits the block only when this is set, so a player who has never
+    // run the gesture keeps a calib file with no handfix line in it -- and the menu can tell the
+    // two apart well enough to show (or hide) its reset button.
+    bool  hand_fix_valid = false;
     // cm of rig movement per metre of hand movement.
     //
     // MUST INCLUDE UEVR's WORLD SCALE. 100 is only correct at world scale 1.0; the accompanying
@@ -1006,6 +1185,21 @@ struct Config {
     // the plugin API); every slot is validated, so a wrong stride skips rather than corrupts.
     // 0x78 was measured from the anatomy dumps (screen-pos signature at absolute 0x50 and 0xC8).
     int   nav_world_stride = 0x78;
+
+    // BUG 2 (phantom markers): draw only navpoints the GAME's own HUD is showing. The compositor
+    // lane resolves straight from the manager map and used to draw every entry with a valid world
+    // position -- including ones the game had collapsed, which surfaced as objective/item markers
+    // floating over walls while the live enemy marks were correct. This gate reads each entry's
+    // live widget (element+0x08) and honours its reflected Slate Visibility; it FAILS OPEN, so it
+    // can only ever suppress a marker it can positively prove the game hid.
+    //   1 (default) = gate on reflected UWidget::Visibility (hide Collapsed/Hidden).
+    //   0           = off: draw every resolved entry (the pre-fix behaviour, for A/B).
+    int   nav_world_visgate  = 3;
+    // STOPGAP kind filter, a fallback for the day the visibility flag cannot be resolved -- NOT
+    // the primary gate. 0 (default) = draw all kinds. Otherwise a bitmask of NavwKind bits to
+    // ALLOW: 1<<0 other, 1<<1 objective, 1<<2 ally, 1<<3 enemy, 1<<4 item. e.g. 0x0C = enemy+ally
+    // only (drops objective + item, the two phantom-prone kinds), 0x08 = enemy only.
+    int   nav_world_kindmask = 0;
 
     // DEV: the waypoint-position hunt (see nav_scan_tick). 1/2/3 = scan for the CURRENT view
     // position under a unit hypothesis (cm / Blam wu / m); 0 between steps re-arms the scanner.
@@ -1314,6 +1508,348 @@ struct Config {
     // out or looks washed. Forced to 1.0 automatically when the exposure-compensated VREditor
     // material is in use (that one preserves authored colour at unit tint).
     float aim_widget_gain  = 5.0f;
+
+    // ---- COMPOSITOR RETICULE (XrLayer.cpp) ----------------------------------------------------
+    //
+    // The two settings above are a CONSTANT fighting a VARYING term, which is why the pair is a
+    // "compromise" rather than a fit. An OpenXR quad layer is composited after the whole post
+    // chain, so exposure and tonemapping never reach it -- immune rather than compensating.
+    //
+    // DEV/RESEARCH ONLY, DEFAULT OFF, and it belongs in halo_vr_dev.cfg rather than the player
+    // catalog. Stage 1 draws a reticule WE generate: bright and exposure-proof, but STATIC -- no
+    // firing bloom, no reload state, no hit marker, because that animation belongs to the game's
+    // own widget and only stage 2 (presenting the widget's render target) brings it back. It draws
+    // ALONGSIDE the in-scene reticule, never instead of it. Full doctrine in XrLayer.hpp.
+    // CANONICAL AS OF 2026-08-23, after the feature was proven end to end in a headset: real Halo
+    // reticule art, animating, bright, exposure-proof, tracking through rotation and roll, and
+    // surviving level changes. The struct initialiser IS the configuration -- no shipped file sets
+    // it -- so this line is the statement that the feature is on by default.
+    //
+    // HONEST CAVEAT: the current attachment resolves UEVR's statically-linked xrEndFrame out of
+    // UEVRBackend.pdb, and only a UEVR checkout has that PDB. On a player install the resolve fails,
+    // the module latches off with a log line, and the in-scene reticule is untouched -- so this
+    // default is meaningful for DEV builds and inert for players until the API-layer attachment
+    // exists. It is safe to ship on because it fails closed, not because it works there.
+    bool  xr_layer = true;
+    // SPACE LADDER -- a diagnostic, not a preference. Whether UEVR's get_pose() reports in the same
+    // space get_stage_space() names is an assumption we have not measured, and each mode fails in a
+    // different, recognisable way. 0 = stage space, raw HMD pose. 1 = stage space with the
+    // recentre correction UEVR applies to its own quads. 2 = view space (head-locked; WRONG for a
+    // reticule on purpose -- if 2 draws and 0/1 do not, the pose math is the only thing left).
+    // Start at 2 when nothing appears at all. See build_pose() for what each answer means.
+    int   xr_layer_space = 0;
+    // RE-ANCHOR PLAYER-ATTACHED QUADS AT RENDER RATE. 1 = on (default).
+    //
+    // The aim reticule and the grab guide are not world-fixed: the reticule is origin + fwd*d
+    // measured from the WEAPON, and the guide sits at your hand. Both are chosen on the 32 Hz
+    // tick, then placed against the eye of the frame being drawn -- so while you locomote, a
+    // fresh eye is differenced against a stale anchor and they trail a tick of travel behind.
+    // With this on, the offset is captured at publish and the eye added back at render rate, so
+    // both sides come from the same instant.
+    //
+    // THE TRADE, so it is a choice and not a surprise: with a traced reticule, the DISTANCE is
+    // still a tick old. Walk straight at a near wall and the reticule sits a few cm off it until
+    // the next tick, instead of lagging your aim by the same few cm. Set 0 for the old behaviour.
+    int   xr_layer_head_rel = 1;
+    // MULTIPLIER on the in-scene widget's own world size, not a length. 1.0 = exactly the size of
+    // the hosted crosshair (aim_widget_draw x aim_widget_scale, with the same 1/distance apparent-size
+    // compensation), so the two agree by construction and keep agreeing when either is retuned.
+    //
+    // It was an absolute 0.06 m and came out ~8x too small in headset -- 0.06 m is ~7.9 UE cm at this
+    // world scale against the widget's 61.4. A number that has to be dialled in until two things look
+    // alike silently stops matching the moment either side moves.
+    float xr_layer_size = 1.0f;
+    // UE centimetres per VR metre. 0 = derive from UEVR's VR_WorldScale.
+    // RECON-NEEDED: the DIRECTION of the VR_WorldScale relationship is inferred, not measured, and
+    // a wrong factor does not look broken -- it looks like a reticule at the wrong depth, which
+    // reads as a tuning problem and sends the investigation elsewhere. Sweep this over a decade in
+    // headset once, then write the answer into ue_cm_per_metre() as a measurement.
+    float xr_layer_cm_per_m = 0.0f;
+    float xr_layer_alpha = 1.0f;
+    // Colour, 0..1 linear. Bright cyan by default -- near Halo's authored crosshair but pushed up,
+    // since the entire point is that nothing downstream will dim it.
+    float xr_layer_cr = 0.35f, xr_layer_cg = 0.95f, xr_layer_cb = 1.00f;
+    // Hide the IN-SCENE crosshair so the compositor layer can be judged on its own.
+    //
+    // Applied only while xrlayer_live() is true -- the layer must be PROVEN reaching the compositor,
+    // not merely enabled. If it is not, this does nothing and the in-scene crosshair stays, because
+    // the failure mode of getting that wrong is a player with no reticule at all.
+    //
+    // The widget keeps ticking and keeps rendering to its target either way: the compositor layer is
+    // PRESENTING that target, so stopping it would freeze the layer's texture. See
+    // reticule_widget_set_scene_hidden().
+    // 0 = off. 1 = ALPHA (component stays rendered, multiplies to zero pixels).
+    // 2 = SCALE (component stays rendered at sub-pixel size).
+    //
+    // A MODE, not a bool, because the mechanism is genuinely undecided: hiding via
+    // SetHiddenInGame froze the compositor layer's texture (measured twice in a headset -- the
+    // widget stops redrawing once the engine stops rendering it), and TickWhenOffscreen is NOT the
+    // gate (it has been set since creation). Both surviving mechanisms keep the component RENDERED
+    // and differ in how they make it invisible, so they fail for different reasons -- keeping both
+    // switchable live means one deploy can test both rather than one game restart each.
+    // Canonical at 1 (ALPHA). Proven in a headset; mode 2 (scale) is kept only as a fallback that
+    // fails differently. Gated on xrlayer_live() at the call site, so on a build where the layer
+    // cannot attach this does nothing and the in-scene crosshair stays -- the player is never left
+    // without a reticule.
+    //
+    // Worth recording WHY hiding the in-scene one matters beyond evaluation: the in-scene widget was
+    // being driven at aim_widget_tint 1024 x aim_widget_gain 5 to out-shout the tonemapper, which
+    // made the crosshair a light source -- it bloomed the environment and lit nearby surfaces. The
+    // compositor layer is composited AFTER the tonemapper and cannot bloom by construction, so
+    // hiding the in-scene copy removes artificial lighting that the brightness workaround had been
+    // adding all along. Noticed in a headset the moment the in-scene one went away.
+    // 1 = the reticule quad follows head ROLL (billboarded to the head, the original behaviour).
+    // 0 = it stays WORLD-UPRIGHT: still faces you, but tilting your head no longer tilts the
+    // crosshair. Costs nothing -- it reuses the per-slot orientation override built for the scope
+    // pane, feeding it the view forward with world +Z as the up reference.
+    //
+    // Degenerate case, stated because it is visible rather than hidden: looking straight up or down
+    // makes the view forward parallel to world up, the basis has no roll reference, and
+    // xr_look_rotation REFUSES rather than emitting a sheared quad -- so the reticule falls back to
+    // head-oriented at extreme pitch instead of flipping.
+    // Trim on the AUTOMATIC zoom-fit that shrinks the world reticule so it looks right inside the
+    // scope pane (mode 3 only -- see Reticule.cpp). 1.0 = take the computed factor as-is; raise or
+    // lower to taste. The computed factor is logged whenever it changes, so this is a correction to
+    // a stated number rather than a blind multiplier.
+    float xr_layer_zoom_fit = 4.4f;  // CANONICALISED 2026-08-31 from the user live profile
+    // SCOPE PANE RETICULE. Draw the reticule a second time, as a small quad sitting just in front
+    // of the scope pane, so the zoom view has a crosshair.
+    //
+    // WHY A QUAD AND NOT A BLIT INTO THE PANE CELL: the compositor already alpha-blends layers in
+    // submission order, so a quad submitted after the pane draws over it for free. Compositing into
+    // the atlas cell instead would need a real blend -- CopyTextureRegion does not blend, it would
+    // stamp an opaque square -- which means a shader, a root signature and a second GPU path in the
+    // capture ring. This costs one extra XrCompositionLayerQuad per frame and NO new GPU work at
+    // all: it reuses the reticule's existing atlas cell, which is already captured every frame.
+    //
+    // WHY IT IS CORRECT TO PUT IT AT THE PANE'S CENTRE: a scope's crosshair marks the optical axis,
+    // and the pane is mounted from the aim ray, so centre is where the shot goes. That is the
+    // conventional answer as well as the geometric one. If the capture is ever mounted off-axis
+    // this becomes a confident lie and the size key is not the fix -- the mount is.
+    //
+    // DEFAULT OFF. It cannot regress anything while it is off, and it is new.
+    int   xr_layer_scope_reticle = 1;  // CANONICALISED 2026-08-31 from the user live profile
+    // Its size as a fraction of the pane quad's own size.
+    float xr_layer_scope_reticle_size = 0.5f;
+    // Where the reticule sits relative to the pane's surface, in CENTIMETRES (this depot's unit for
+    // every length, matching Unreal). Positive is toward the viewer; NEGATIVE is behind the pane,
+    // i.e. further away, which is the direction that simulates a collimated/holographic sight.
+    //
+    // It exists at all because the reticule and the pane are two separate compositor quads on the
+    // same plane, so a nudge along the pane's normal is what stops them z-fighting. 1 cm was the
+    // hardcoded value and is a floor rather than a preference: below roughly half of it the two
+    // quads start to tear against each other at the edges.
+    //
+    // It is a real comfort control above that, not just a z-fight guard. The reticule sits at a
+    // different stereo depth from the pane image, so this is the knob that decides whether the
+    // crosshair reads as etched ON the glass or floating in front of it -- and that judgement is
+    // per-eye and per-person, which is exactly why it cannot be a constant.
+    float xr_layer_scope_reticle_depth = 0.2f;
+    int   xr_layer_roll = 0;      // CANONICALISED 2026-08-31 from the user live profile
+    // CANONICALISED 2026-09-01 from the user live profile, after the objection below was DISPROVED.
+    //
+    // The history matters, because this key was set to 3, reverted, and restored inside 48 hours and
+    // the next person to see the symptom will be tempted to revert it again:
+    //
+    // Set to 3 on 2026-08-31 (the user runs 3 and asked for their live values to be canonical).
+    // Reverted the same night on the theory that mode 3 caused a freeze in which the GUN, ARMS and
+    // RETICLE all stop updating together while aim keeps working -- the reasoning being that mode 3
+    // sets bVisibleInSceneCaptureOnly on a first-person component, and that hiding a SKELETAL MESH
+    // stops OnlyTickPoseWhenRendered and freezes the socket the gun and arms hang off.
+    //
+    // THAT MECHANISM CANNOT OPERATE HERE, and it is refuted by construction rather than by testing.
+    // Both callers of reticule_set_capture_only() pass g_ret_widget_comp -- the reticule's
+    // UWidgetComponent. OnlyTickPoseWhenRendered and sockets are USkeletalMeshComponent concepts; a
+    // widget component has no pose to tick and no socket to freeze. Mode 3 writes ONE bitfield bool
+    // on the reticule widget and touches no part of the arm/weapon rig.
+    //
+    // The freeze had a different cause, since corroborated from two independent instruments: the
+    // OpenXR runtime publishes EXACT (0,0,0) controller translation on focus loss, position_dead
+    // arms after ~120 such ticks, and the render path in on_pre_calculate_stereo_view_offset was
+    // re-writing the rig from a phantom offset. See the g_rigw_off_valid guard in Plugin.cpp.
+    //
+    // ** CORRECTED 2026-09-06: MODE 3 WORKS. The note that used to sit here was wrong, and it cost
+    // a full session. **
+    //
+    // It read: "it does not actually hide the widget from the main view -- measured in a headset
+    // with active=0 and both flags set. The flag does not govern a UWidgetComponent's main-view
+    // draw at all. So mode 3 is INEFFECTIVE at its stated job." An agent read that, concluded the
+    // behaviour the player wanted was unreachable through mode 3, and spent hours building the
+    // COMPOSITOR scope pane as an alternative route to it. None of that was needed.
+    //
+    // REPRODUCED AND CONFIRMED IN A HEADSET, with the log preserved at
+    // _Builds\_logs\log.ANOMALY-REPRODUCED-20260906-154556.txt and its exact cfg beside it:
+    //   unscoped, main view ............ reticule NOT visible   (mode 3 hiding it)
+    //   scoped, main view around scope . NOT visible
+    //   scoped, through the scope ...... VISIBLE                (the SceneCapture sees it)
+    //   compositor pane ................ 0 PRESENTING, 3 REFUSING -- NOT INVOLVED
+    // That is mode 3's stated job, done.
+    //
+    // CONFIRMED A SECOND TIME, independently, by the scope-pane lane on 2026-09-06 after it restored
+    // a re-assert host it had removed. Two headsets, two sessions, same result. Mode 3 works.
+    //
+    // AND THE THING THAT MAKES A NEGATIVE RESULT HERE UNTRUSTWORTHY: vsco is a single bool written
+    // once. Anything that rebuilds or re-hosts the widget clears it, and it stays clear until
+    // reticule_mode3_reassert() puts it back -- which needs BOTH of its hosts (the late one in
+    // reticule_widget_move AND the early one in update()). Every "mode 3 does not hide it"
+    // measurement so far was taken while that machinery was incomplete, and in each case the flag
+    // READ BACK as true, which is what made the wrong conclusion so convincing.
+    //
+    // DO NOT USE THE HIDDEN/restored TRANSITION LOG AS A VISIBILITY PROXY. Measured across ten
+    // sessions: the one the player confirmed as WORKING logged TWO restores, while three sessions
+    // with hundreds of tick faults logged NONE. An earlier version of this note reasoned from
+    // "17 transitions vs 5" and that inference does not hold.
+    //
+    // MODE 3 DEPENDS ON THE COMPOSITOR PANE BEING OFF. scopelayerhidepane hides the in-world pane
+    // when the compositor pane presents -- and the in-world pane's SceneCapture is the very thing
+    // showing the reticule in the scope. So making the compositor pane work (scopesrc=2) REMOVES
+    // the reticule from the scope unless the compositor draws its own. These two features are
+    // alternatives, not layers.
+    // MODE 3 WORKS. The table above is correct, and this note exists because I briefly "measured"
+    // otherwise and was wrong -- READ THIS BEFORE TRUSTING A NEGATIVE RESULT ABOUT MODE 3.
+    //
+    // On 2026-09-06 mode 3 was reported doubled in the main view with bVisibleInSceneCaptureOnly
+    // confirmed true by readback. That looked like hard evidence the flag does nothing, and it was
+    // not: the same session had just moved reticule_mode3_reassert() OFF reticule_widget_move() onto
+    // an early host in update(). The early host is a real fix for a real hole (that function is
+    // gated behind a successful aim pick, so failing ticks skipped the repair) -- but the LATE host
+    // matters independently, because it re-applies the bit after the widget rebuilds its material
+    // and transform, which happens later in the same tick. Re-asserting only early let the rebuild
+    // win. Restoring BOTH hosts made the reticule vanish from the main view immediately, confirmed
+    // in a headset.
+    //
+    // The lesson is the reusable part: a negative result about a FLAG is only as good as the
+    // machinery that keeps the flag applied. Check the re-assert path before concluding a property
+    // is inert -- and note that the transition log is NOT a visibility proxy (the compositor lane
+    // measured a session the user called correct that logged two "restored" lines).
+    //
+    // MODE 4: mode 3 PLUS bOwnerNoSee, kept as an A/B lever rather than a fix. bOwnerNoSee is
+    // evaluated against the view's ViewActor -- the pawn in the main view, unset for a
+    // SceneCaptureComponent2D -- so in principle it also hides from the main view while the scope
+    // capture still draws it. UNVERIFIED IN A HEADSET: mode 3 was fixed before mode 4 was ever
+    // needed, so nothing here rests on it. It reads the bit back and degrades to mode 3's behaviour
+    // if SetOwnerNoSee does not resolve, saying so rather than silently doing nothing.
+    int   xr_layer_hide_ws = 1;
+
+    // Hide the COMPOSITOR RETICULE while the scope pane is up. Both reticules are correct -- they
+    // just sit at different ranges -- and two crosshairs a few degrees apart read as noise. The
+    // scope pane carries its own reticule at the magnified range, so this one has nothing to add
+    // while the scope is raised. Retires the quad outright rather than letting it fade out on the
+    // retirement grace, which would leave it hanging for about a second each time you scope in.
+    bool  xr_layer_hide_scope = true;
+    // Mode 2 only: multiplier on the quad's world scale while hidden. Small enough to be invisible,
+    // large enough not to be screen-size-culled -- if the art reappears frozen in mode 2, raise it.
+    float xr_layer_hide_scale = 0.004f;
+    bool  xr_layer_log = false;
+    // STAGE 2 -- present the GAME'S OWN crosshair through the compositor layer instead of the ring
+    // we generate. Both keys are DEV/RESEARCH, default off, and belong in halo_vr_dev.cfg.
+    //
+    // xr_layer_src_probe is a LADDER, not a bool, because the two halves have different risk:
+    //   0  off.
+    //   1  WALK AND LOG ONLY. Bounded pointer walk from the widget's render target, reporting every
+    //      candidate offset triple it finds. Dereferences nothing it has not first classified as a
+    //      heap object with a vtable in a mapped image. Cannot make an indirect call.
+    //   2  the same walk, and then ATTEMPT UEVR's get_native_resource() on each candidate. That is a
+    //      virtual call on a pointer we inferred, so it is a separate, deliberate step taken by an
+    //      operator who has already read the mode-1 list. See XrSource.hpp.
+    // The walk is compiled out of a shipping build entirely (HALO_VR_DEV).
+    int   xr_layer_src_probe = 0;
+    // PROVE THE CHAIN OFFSETS ARE CLASS-LEVEL -- opt-in, and OFF by the same argument the whole
+    // dev-tooling split rests on. This is a one-shot proving harness: it walks a SECOND component's
+    // render target with the full triple-nested discovery probe and compares the offsets, to show
+    // that one measured chain may serve all nine slots. That walk is the expensive one (tens to
+    // ~200 ms), and it used to run on EVERY tick until it reached a verdict -- measured live as
+    // xrsource_tick 87-197 ms while markers were up, which in VR is nausea. HALO_VR_DEV alone did
+    // not protect anyone because we PLAYTEST on dev builds, so it gets its own key: default 0, so it
+    // never runs unless a developer explicitly asks, and throttled to once a second even then.
+    bool  xr_layer_src_xcheck = false;
+    // PER-TICK NATIVE-RESOLVE CACHE (default ON -- this is the perf fix, and it ships on).
+    //
+    // resolve_latched() re-validates the widget's chain every tick per fed slot. MEASURED (2026-08-24,
+    // live): the cost is NOT get_native_resource/GetDesc (both ~0.00 ms) but the pointer WALK --
+    // looks_like_object()'s VirtualQuery-based classification, ~42 VirtualQuery/slot, ~14.5 ms and
+    // rising with the session's VAD tree (6 markers = ~100 ms xrsource_tick, a VR-nausea hitch). The
+    // vtable classification only exists to make get_native_resource's virtual call safe, so on a CACHE
+    // HIT (where the cached ID3D12Resource is re-used and no virtual call is made) it is skipped: the
+    // hit path reaches the FRHITexture with readable_bytes guards only (~4 VirtualQuery) and re-uses
+    // the cache while the chain still leads to the SAME FRHITexture reading back its exact draw size.
+    // A miss (first resolve, re-host, FRHITexture pointer changed) takes the full classified walk.
+    // Crash-fix invariant preserved: RT-identity + component-change guards run every tick and clear
+    // the cache on any re-host, reads stay readable_bytes-guarded, the game thread issues no capture
+    // during a level load, and only the vtable sweep (which guards a call the hit path skips) is
+    // dropped. See the CACHE section in XrSource.hpp.
+    //
+    // DEV/RESEARCH toggle: set it to 0 to force the full classified walk EVERY tick (the pre-fix
+    // behaviour) -- the safe fallback, and the A/B control the dev split instrument measures against.
+    bool  xr_layer_src_cache = true;
+    // Hand the resolved-and-validated ID3D12Resource to the layer. Does nothing until the chain has
+    // been measured and re-validates; there is no compiled-in offset to fall back on, on purpose.
+    // Canonical: present the game's OWN reticle render target rather than our generated ring. This
+    // is what gives the layer real per-weapon art and live firing/reload animation.
+    bool  xr_layer_src = true;
+    // ms. HOW LONG THE LAYER KEEPS SHOWING THE LAST CAPTURED CROSSHAIR once the game thread stops
+    // capturing, before it gives up and draws the generated ring instead.
+    //
+    // The capture stops for two very different reasons and this number has to separate them:
+    //   - a TRANSIENT drop (a weapon pickup re-hosts the crosshair on a new render target; a
+    //     game-thread hitch of 600-750 ms, which is what this title actually does) -- re-resolves
+    //     within a few ticks, and showing a placeholder ring for it is strictly worse than showing
+    //     the previous frame;
+    //   - a LEVEL CHANGE -- seconds long, and a crosshair hanging frozen in space through it looks
+    //     worse than the ring.
+    // 1500 sits between the two with room on both sides. It was a hardcoded 250 ms, which is BELOW
+    // this title's worst hitch, so every hitch flashed the ring. Lower it only to reproduce that.
+    int   xr_layer_hold_ms = 1500;
+
+    // ---- WORLD NAVPOINT MARKERS ON THE COMPOSITOR LAYER (xrlayernav) -----------------------
+    //
+    // The markers want this for two reasons the reticule already demonstrated, plus one it does
+    // not have:
+    //   1. A composition layer is submitted AFTER the whole post chain, so exposure and the
+    //      tonemapper never touch it. The in-scene markers are driven at aim_widget_gain x
+    //      aim_widget_tint for the same reason the crosshair was -- which made the crosshair a
+    //      light source that bloomed the scene, measured in a headset once it was removed.
+    //   2. A COMPOSITOR QUAD IS NEVER OCCLUDED. That is the entire job of the navpoint line trace
+    //      in lane 2, so on this lane the trace can simply be skipped -- and it is skipped
+    //      CONDITIONALLY, on xrlayer_live() and the slot actually having art, never deleted. The
+    //      in-scene lane is still the shipping path (the compositor attachment needs a PDB no
+    //      player has), and it must not be degraded to make this one look better.
+    //   3. The RETICULE'S trace is NOT redundant in the same way and stays: it puts the reticle on
+    //      the surface the shot will hit, which is real information rather than an occlusion
+    //      workaround. The asymmetry is deliberate; do not "tidy" it.
+    //
+    // DEFAULT ON since 2026-08-30, by the user's decision after running it in a headset. It was
+    // default-off "like every stage of the layer before it was proven", and it is now proven.
+    //
+    // WHAT THIS COSTS A PLAYER WHO CANNOT USE IT: nothing. The compositor attachment fails closed
+    // -- the PDB tier needs a UEVRBackend.pdb no player install has, and the shipping route is the
+    // OpenXR API layer, which a player has to register. When neither is present the layer never
+    // arms, xrlayer_live() stays false, navw_layer_owns() is false, and the in-scene marker lane
+    // runs exactly as it did before. So this default turns the feature ON for anyone who CAN run
+    // it and is inert for everyone else, which is the only reason it is safe to flip.
+    bool  xr_layer_nav = true;
+    // How many marker quads may be submitted, 1..8. Does NOT change the atlas -- all eight cells
+    // exist whenever xrlayernav is on -- so this is live-tunable without a swapchain rebuild.
+    int   xr_layer_nav_max = 8;
+    // cm. The FURTHEST a compositor marker is placed from the eye.
+    //
+    // The trace used to supply this number as a side effect of avoiding occlusion, and a quad still
+    // needs a depth because depth is what sets VERGENCE -- the eyes physically converge on it. So
+    // it becomes a deliberate choice rather than an inherited raycast result: the objective's true
+    // distance, clamped into a comfort band (near clamp is fixed at 1 m, which is about as close as
+    // a quad can sit without being uncomfortable to fuse). Angular size is held constant across the
+    // clamp exactly as the in-scene lane does, so this changes where the marker LIVES, not how big
+    // it looks.
+    float xr_layer_nav_dist = 400.0f;
+    // FORCED composition-layer budget, 0 = use what xrGetSystemProperties reported.
+    //
+    // Its real job is testability. The drop ordering only runs when a runtime is short of layers,
+    // which on a healthy machine is never -- and this feature already has one rung (`skips=` in the
+    // XRLAYER state line) that has never executed in its life and is therefore unproven. Setting
+    // this to 2 or 3 forces the ORDERING to run, which is the interesting path; 0 layers is only
+    // the early-out. Watch drops= move in the state line.
+    int   xr_layer_budget = 0;
+
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
     float rig_clamp    = 0.0f;
@@ -1341,6 +1877,13 @@ struct Config {
     //                      MEASURED rather than folded into the mount. See the DIRECT-DRIVE RIG
     //                      block below; pairs with aim_direct, and Ctrl+PageUp swaps both.
     int   rig_mode     = 3;
+    // Whether the render path honours the position-dead origin-hold. 1 = honour it (the arms hold
+    // rotation and stay put during a controller-position outage); 0 = write the offset anyway, so
+    // the unguarded behaviour is visible. LIVE, so it can be flipped inside one outage.
+    //
+    // Default 1 is the conservative shipping choice, NOT a verdict: the guard was derived from code
+    // reading and has never been watched failing. See the banner at the g_rigw_off_valid write.
+    int   rigw_off_hold = 0;
 
     // Anchor hand TRANSLATION to the body rather than to a fixed point in the room.
     //
@@ -1476,21 +2019,134 @@ struct Config {
     // behaviour as UEVR's "Right Thumbrest + Left Joystick", but on a deliberate input rather than
     // one a resting thumb triggers by accident.
     bool  map_dpad_shift  = true;
+
+    // ---- HEAD-PROXIMITY D-PAD SHIFT ------------------------------------------------------------
+    //
+    // Bring either hand near your head and the RIGHT stick becomes the d-pad, leaving the LEFT
+    // stick on locomotion. The stick-up shift takes the left stick instead, so today you cannot
+    // move while switching grenades, dropping a weapon or triggering equipment -- which is exactly
+    // when you most want to be moving.
+    //
+    // OFF BY DEFAULT, and it should stay off until the radius has been tuned in a headset. The
+    // failure is ASYMMETRIC: a false trigger costs you TURNING mid-fight, with no visible cause,
+    // which is far worse than a missed d-pad press. So every gate here fails closed.
+    //
+    // Four things routinely put a hand near the head and none of them mean "d-pad": the two-handed
+    // hold with the barrel raised (excluded explicitly -- two_hand_latched()), the reload
+    // magazine grab, the melee swing windup, and simply resting a hand. Hysteresis plus a dwell
+    // are what stop the first two transients; the radius is what stops the rest, and it is a
+    // comfort number that cannot be picked from outside a headset.
+    bool  dpad_head       = true;
+    float dpad_head_cm    = 18.0f;   // hand-to-head distance that ARMS the shift
+    float dpad_head_hyst_cm = 8.0f;  // extra distance before it releases, so it cannot chatter
+    int   dpad_head_dwell_ms = 120;  // how long the hand must stay there before it commits
     int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it
     float map_dpad_dz     = 0.50f;    // left-stick deflection needed to count as a d-pad direction
 
     // Rebind a button to a different one. `mapfrom` is suppressed and `mapto` sent instead.
-    // Defaults are the MEASURED Quest mapping (never guess masks -- on Quest, XInput "X" is the
-    // RIGHT controller's B button, so a wrong mask silently unbinds a combat action; measure
-    // with `mapbtnlog=1` first): the physical crouch button (0x2000, vacated by the right-stick-
-    // down crouch above) becomes LB = equipment. 0/0 disables the rebind.
+    // NEVER GUESS THESE MASKS: on this profile XInput's labels do not match the controller's, so a
+    // wrong value silently unbinds a combat action. Measure with `mapbtnlog=1`.
+    //
+    // CORRECTED 2026-09-04. This block used to say 0x0100 was "LB = equipment". It is not -- 0x0100
+    // is the GRENADE throw mask, which is also what the physical left grip sends, and the code in
+    // Plugin.cpp's grip-swallow note says so plainly. Acting on the wrong comment put grenades on
+    // d-pad left for a while. The measured truth, logged this session:
+    //   left X      -> 0x2000     (XInput calls it B)
+    //   right grip  -> 0x0200     the game's EQUIPMENT button (overshield / active camo)
+    //   left grip   -> 0x0100     the game's GRENADE throw
+    // EQUIPMENT (overshield / active camo) ON LEFT X.
+    //
+    // MEASURED 2026-09-04: left X reports 0x2000, and the game's equipment button is the RIGHT
+    // GRIP, 0x0200 (logged five times). So this is left X -> equipment.
+    //
+    // Left X is free because the grenade moved onto the off-hand trigger (see grip_zoom). Before
+    // that, mapto was 0x0100 -- which is the THROW mask, not equipment, whatever the old comment
+    // here claimed. That mistake is why d-pad left threw grenades for a while.
+    //
+    // The right grip keeps working natively; this adds a binding rather than moving one.
     int   map_from        = 0x2000;
-    int   map_to          = 0x0100;
+    int   map_to          = 0x0200;
+
+    // ---- RIGHT GRIP IS RESERVED, AND NO LONGER EQUIPMENT ---------------------------------------
+    //
+    // The right grip natively sends 0x0200, which this game reads as EQUIPMENT (overshield /
+    // active camo). That native binding is being retired: the right grip becomes OVER-THE-SHOULDER
+    // WEAPON SWITCHING, and a button cannot mean two things at once -- reaching back to swap
+    // weapons would pop your overshield every time.
+    //
+    // Equipment does not lose a home by this; it gains one. It is on LEFT X (mapfrom/mapto above)
+    // and on d-pad LEFT under the shift.
+    //
+    // WHY A SWALLOW AND NOT A REMAP. There is nothing to remap the grip TO -- the point is that the
+    // GAME must stop seeing the press, while the grip stays readable by us for the gesture. Set
+    // rgripswallow=0 to hand it straight back to the game.
+    //
+    // MEASURED 2026-09-05 with mapbtnlog=1, five deliberate presses: right grip -> 0x0200 RB.
+    // Not reasoned about -- on this profile XInput's labels and the controller's do not line up,
+    // and guessing a mask here silently unbinds a combat action.
+    //
+    // APPLIED AFTER THE BUTTON LOGGER, on purpose. Swallowing before it would blind the one
+    // instrument that established this mapping in the first place, and the next person measuring
+    // the right grip would find nothing and conclude the controller was not sending anything.
+    int   rgrip_mask      = 0x0200;
+    bool  rgrip_swallow   = true;
 
     // Log every XInput button-mask change, so the Quest->XInput mapping can be READ rather than
     // assumed. Off by default; it is noisy.
     bool  map_btn_log     = false;
+
+    // ---- ACTION BINDS (the in-game "Halo VR Controls" panel) --------------------------------
+    //
+    // Each of these names a MOD ACTION and holds the SOURCE button the player presses for it.
+    // The DESTINATION is not repeated here -- it is whatever field already owns that action
+    // (maprstickdown for crouch, meleemask, reloadmask, grenadeaction), so there is exactly one
+    // place that knows what the game reads for each action and these only say who triggers it.
+    //
+    // 0 = KEEP THE BUILT-IN MECHANISM, which is why 0 is the shipped value for all of them: the
+    // stick gestures and the swing/reload gestures are the designed experience, and a bind is an
+    // ADDITION for players whose controller or comfort needs one, never a replacement that has
+    // to be configured before the mod works.
+    //
+    // WHY A SOURCE MASK AND NOT A NAME. The physical-button -> XInput-mask mapping is NOT stable
+    // across runtimes: on Quest the right controller's B reports as 0x4000, which XInput (and
+    // this file, and the menu's dropdown) calls "X". A mask is the only unambiguous form, which
+    // is also why the menu's primary way to set one is CAPTURE (press the button, we record what
+    // arrived) rather than a dropdown -- see bind_capture_key below. Nothing here should ever be
+    // guessed; measure with mapbtnlog=1 or let the capture do it.
+    //
+    // Applied BEFORE mapfrom/mapto, so a bind wins over the generic rebind if both name the same
+    // mask. That is a conflict the menu warns about rather than a feature -- first match wins is
+    // a tie-break, not a layering scheme.
+    int   bind_crouch     = 0x0000;   // -> injects maprstickdown's mask (0 = right stick down)
+    int   bind_melee      = 0x0000;   // -> injects meleemask          (0 = swing gesture only)
+    int   bind_reload     = 0x0000;   // -> injects reloadmask         (0 = reload gesture only)
+    int   bind_scope      = 0x0000;   // -> toggles the VR scope       (0 = left trigger)
+
+    // EQUIPMENT on d-pad LEFT -- and the one member of this family that does NOT default to 0.
+    //
+    // The 0-default rule above exists because every other action here already has a built-in
+    // mechanism a bind would merely duplicate. Equipment has none: it used to ride mapfrom/mapto,
+    // and when that pair moved to LEFT X the d-pad-left binding ceased to exist entirely. Several
+    // comments in this file went on describing it as though it were still there, which is exactly
+    // how it survived unnoticed -- the mechanism was gone and only the documentation remained.
+    //
+    // So this is not a convenience bind, it is the second home the design calls for: equipment on
+    // left X AND on d-pad left, now that the right grip is reserved (see rgrip_swallow above).
+    //
+    // 0x0004 is XINPUT_GAMEPAD_DPAD_LEFT, which is what the shift SYNTHESISES -- our own injection
+    // upstream, not a physical button, since neither Touch controller has a d-pad. It is read
+    // after that injection for exactly that reason. Set bindequip=0 to give d-pad left back to
+    // whatever the game does with it natively.
+    int   bind_equip      = 0x0004;   // -> injects mapto's mask       (0 = no d-pad binding)
+    int   bind_dpad_shift = 0x0000;   // -> holds the d-pad shift      (0 = right stick up)
+
+    // How long an armed capture waits for a press before giving up, milliseconds.
+    //
+    // A capture EATS the press it records, so an arm that never expires is a booby trap: the
+    // player gets distracted, plays on, and the next button they touch is silently swallowed and
+    // rebound. Bounded instead, and the menu reports the armed state on the way back in.
+    int   bind_capture_ms = 20000;
 
     // ---- FRAME-TIME INSTRUMENTATION --------------------------------------------------------
     // Time the PERIODIC work in update() and report max/mean per site every ~600 ticks.
@@ -1504,6 +2160,25 @@ struct Config {
     // debugging should not pay for them. Turn on to diagnose a stutter report from someone whose
     // machine reproduces it and ours does not.
     bool  perf_log        = false;
+
+    // ---- WIDGET-SWEEP SLICE BUDGET, in milliseconds of one game-thread tick.
+    //
+    // reticle_rescan() walks the whole UObject array looking for the HUD reticle, the navpoint
+    // layer and menu candidates. That walk costs one cache miss per object and the object array is
+    // a HIGH-WATER MARK that only grows for the life of the session, so its cost climbs with
+    // playtime no matter how the inner loop is written: 83.9 ms, optimised to 29.8 ms in
+    // 2026-08-12, measured back at 55.3 ms on 2026-08-23 with the optimisation fully intact.
+    // A 55 ms game-thread stall in VR is a dropped frame, which is a nausea event.
+    //
+    // So the walk is spread over consecutive ticks, at most this many milliseconds per tick, and
+    // its results are published atomically when a pass finishes. Total CPU is unchanged; what
+    // changes is that none of it lands in one frame.
+    //
+    // 0 disables slicing and does the whole array in a single tick -- the pre-2026-08-23
+    // behaviour, kept so this can be A/B'd in a headset without a rebuild, the same way rigfast=0
+    // A/Bs resolve_rig's fast path. Raising it above ~4 costs frames again; lowering it below
+    // ~0.5 makes a pass take long enough that a fresh reticle binds noticeably late after a load.
+    float ret_sweep_ms    = 2.0f;
 
     // AIM TRACE. 0->1 arms a recording of the aim loop; 1->0 writes it to halo_vr_trace_NNN.csv
     // beside this config. Exists so the aim law can be tuned by measurement instead of by feel:
@@ -1827,6 +2502,57 @@ struct Config {
     // the combination is what the whole aim solution is.
     bool  aim_direct = true;
 
+    // FREEZE AIM WHEN THE CONTROLLER POSE GOES EMPTY (position AND rotation exactly zero), rather
+    // than driving aim from it. On an OpenXR focus loss the runtime stops updating action poses but
+    // UEVR still returns success, so without this the direct write assigns aim to wherever identity
+    // points -- measured at a 76-degree slam, then held for the 3m38s the session stayed unfocused
+    // (2026-09-02 log). Costs one comparison per frame.
+    //
+    // ON by default and there is no good reason to turn it off; it exists as a key only so a
+    // misfire can be ruled out live without a rebuild. If aim ever freezes while your hands are
+    // visibly tracking, set aimfreezelost=0 and say so -- that would mean a real pose is landing on
+    // bit-exact zero in position and both angles at once, which should not be possible.
+    bool  aim_freeze_lost = true;
+
+    // ---- THE GRAB GUIDE ------------------------------------------------------------------------
+    // A thin translucent beam from the support hand to the point it would grab, shown ONLY while a
+    // grip press would actually latch the two-handed hold. Player IK is off in release, so there is
+    // no left arm on screen and nothing otherwise tells the player whether their hand is on the
+    // barrel -- the hold latches on a zone they cannot see. See InteractLine.hpp.
+    bool  grab_guide = true;
+    // HUD-ish cyan by default. These are the beam's own colour rather than a reference to the
+    // reticule's, because the two are read at different distances and want different weights.
+    float grab_guide_r = 0.35f, grab_guide_g = 0.85f, grab_guide_b = 1.00f;
+    // WHAT THE GRAB GUIDE DRAWS. 0 = the "Grip" LABEL at the off hand (default: it makes no claim
+    // about WHICH object, so it cannot be wrong about one). 1 = the BEAM from hand to latch point,
+    // which answers "which one" and becomes the better answer once grenades and magazines are
+    // grabbable and there is more than one candidate.
+    int   grab_guide_mode = 0;
+    // WHICH BASIS THE BEAM QUAD IS BUILT FROM. 0 is derived from xr_look_rotation's actual
+    // convention (z = -fwd, x = cross(up, z)), so x -- the quad's WIDTH, which is the axis scaled
+    // to the beam's length -- lands along the beam while the quad still faces the viewer.
+    //
+    // It is a TUNABLE rather than a constant because the pair goes through ue_offset_to_xr on the
+    // way in, and a sign or handedness flip in that mapping is not visible from reading either
+    // function alone. At ~70 s a build, four rebuilds to find a sign is minutes lost; four live
+    // values is seconds. 1 = up flipped, 2 = beam as the quad's UP (a deliberate sanity check --
+    // this should look WRONG, thin-axis-along-beam), 3 = the original pre-fix basis for comparison.
+    int   grab_guide_beam_basis = 0;
+    // LABEL SIZE, in game cm, on the compositor quad anchored to the off hand. Square, so this is
+    // both edges. 6 cm reads at arm's length without covering the thing you are reaching for.
+    float grab_guide_label_cm = 2.5f;
+    // Beam thickness; it lies along a weapon, so keep it thin. LIVE ONLY IN grabguidemode=1 -- the
+    // label is square and ignores it, so a player who sets this and sees nothing is on the default
+    // mode, not looking at a broken key.
+    float grab_guide_thick_cm = 0.5f;
+    // Below this length the beam is shorter than it is thick and reads as a blob -- and that is
+    // exactly the moment the grab is perfect and the player no longer needs telling.
+    float grab_guide_min_cm = 1.5f;
+    // Full material object path, for a FEATHERED beam. Empty uses Widget3DPassThrough_Translucent,
+    // which gives a clean translucent bar; there is no way to author an alpha falloff in-process
+    // (make_color_rt is a flat fill), so a real laser look needs a material from an added pak.
+    char  grab_guide_mat[256] = "";
+
     // Persist the located rotator (pc-relative offset + absolute VA, keyed to the exe's build
     // stamp) in halo_vr_aimcache.txt, so a relaunch on an unchanged binary warm-starts through
     // the normal hint validation instead of paying the full watch hunt. 0 = neither read nor
@@ -2051,7 +2777,156 @@ struct Config {
     // shimmer and tracer glow -- but they also enable the capture's own auto-exposure, which
     // measured in-headset as the pane fading to solid black. 0 disables the pin (auto-exposure
     // back on) for anyone who wants to see that behaviour.
-    float scope_exposure = 1.0f;
+    float scope_exposure = 0.0f;
+    // scopeautoexposurebias -> FPostProcessSettings::AutoExposureBias, in STOPS (EV). This is
+    // exposure COMPENSATION, applied AFTER adaptation, so it is the one brightness control that
+    // survives auto-exposure instead of replacing it: the capture still adapts per scene, the
+    // whole result just lands N stops brighter. +1 is twice as bright, +2 four times, -1 half.
+    //
+    // It exists because the alternative was unusable. With scopeexposure=0 the pin does not run,
+    // and the pin was the ONLY thing in this plugin that wrote any exposure field -- so an
+    // auto-exposed capture had no brightness control at all except scopebright, which is a tint
+    // applied AFTER the tonemapper and after 8-bit quantisation. That stretches an already
+    // compressed signal rather than feeding the curve higher, which is why it washes out (the
+    // measured symptom: a yellow/green cast as bright colours hit the tonemapper's shoulder)
+    // long before it makes the FX readable. Bias moves the exposure BEFORE the curve, where the
+    // range actually is.
+    //
+    // Works with the pin ON as well -- pin_capture_exposure() writes this value instead of the 0
+    // it used to hardcode, so pinned and auto configurations are tuned by the same key.
+    //
+    // NOTE the write is one-way per session: setting it back to 0 pins the bias to 0 rather than
+    // restoring whatever the capture would otherwise inherit, because the bOverride_ bit stays
+    // set once written. Delete the key and restart for a true inherit. 0 = never written.
+    float scope_autoexposure_bias = 2.5f;
+    // scopelumen -> DynamicGlobalIlluminationMethod + ReflectionMethod on the capture.
+    //   -1 = leave alone (DEFAULT, i.e. the engine's forced-off state)
+    //    0 = None   1 = Lumen   2 = ScreenSpace   3 = Plugin (GI only)
+    //
+    // UE turns Lumen OFF for every scene capture -- SceneCaptureRendering.cpp:880-885 sets both
+    // methods to None and halves LumenSurfaceCacheResolution, with the comment "By default, Lumen
+    // is disabled in scene captures, but can be re-enabled with the post process settings in the
+    // component." So the main view renders with Lumen GI and Lumen reflections and the scope does
+    // not: same scene, same camera, a DIFFERENT LIGHTING MODEL.
+    //
+    // Reported in a headset as "it is like the lighting is different for the scene through the
+    // scope", which is what losing indirect bounce and specular reflection looks like -- flatter,
+    // warmer, and darker specifically where the light was indirect. It had been chased as a colour
+    // cast for hours, and it is not one: this is BASE-PASS lighting, upstream of exposure, bloom,
+    // tone curve and tint, which is why none of those could ever reach it.
+    //
+    // 1 (Lumen) is the value that matches the main view on this title. Costs real GPU time -- the
+    // capture then runs a second Lumen scene -- so it is opt-in rather than defaulted on.
+    int   scope_lumen = -1;
+    // scopeppgrade: copy the game's COLOUR GRADE from its camera onto the capture -- the LUT, white
+    // balance, the saturation/contrast/gamma/gain/offset sets, and the film curve, each with its
+    // paired bOverride_ bit.
+    //
+    // MEASURED 2026-09-07: the same corridor renders purple-lit in the main view and warm tan in
+    // the scope. Not a tint -- a different colour family, i.e. raw albedo with the grade missing.
+    // PostProcess VOLUMES reach a capture identically, but a capture never goes through
+    // APlayerCameraManager, so a look configured on the CAMERA COMPONENT is invisible to it.
+    //
+    // Distinct from scopeppcopy, which copies BLENDABLES only. That one originally memcpy'd the
+    // whole struct (which would have carried the grade) and was cut back for safety, because
+    // FPostProcessSettings contains a TArray and byte-copying it gives two owners one allocation.
+    // This copies the grading fields individually -- all POD or one object pointer, never the array.
+    bool  scope_pp_grade = false;
+    // scopegain -> ColorGain on the capture: a flat brightness multiply in the grading chain.
+    // 0 = do not touch (DEFAULT). 1.0 = neutral.
+    //
+    // This is the COMPOSITOR QUAD's equivalent of scopebright. scopebright tints the in-world
+    // pane's MATERIAL, so it does nothing once the layer presents and the mesh is hidden, and the
+    // quad has no material to tint. OpenXR's per-layer gain is not available either: extensions
+    // must be enabled when the XrInstance is created and UEVR creates it, so the gain has to live
+    // in the capture instead.
+    //
+    // Distinct from scopeautoexposurebias on purpose: bias moves EXPOSURE, so it changes what the
+    // tonemapper's shoulder does to highlights; this scales the GRADED colour and leaves the
+    // exposure decision alone. Reach for bias first (it uses the curve's range properly) and this
+    // only when you want a plain multiply on top.
+    //
+    // CANON 5.0, raised from 4.0 in a headset 2026-09-07: the scope pane read dim through the
+    // compositor quad at 4. This initialiser IS the shipped value -- no cfg file sets scopegain,
+    // so changing it here is the whole change. (The "0 = do not touch (DEFAULT)" line above dates
+    // from when 0 was the default and has been wrong since it became non-zero; 0 still MEANS
+    // do-not-touch, it is simply no longer what ships.)
+    float scope_gain = 5.0f;
+    // scopelayerfollowpane: place the compositor quad AT the in-world pane's own world transform
+    // instead of from scopelayerfwd/right/up/width. 1 = follow (default), 0 = use the offsets.
+    //
+    // The pane is where every calibration lands -- scopedist/right/up, the per-weapon wpnscope
+    // trims, the socket handshake. Duplicating that into a parallel set of layer offsets guarantees
+    // the two drift apart the moment anyone calibrates, and the drift is silent. Reading the PLACED
+    // component's transform inherits all of it and cannot go stale, because it is the answer rather
+    // than a copy of the inputs to it. Falls back to the offsets when the pane's location cannot be
+    // read, and says so once in the log.
+    int   scope_layer_follow_pane = 1;
+    // scopemask: feather the compositor pane's edge into a soft OVAL by writing the atlas cell's
+    // alpha with a compute shader. 0 = off (DEFAULT).
+    //
+    // Read AT ATLAS CREATION TIME, because it needs D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS and
+    // that is a creation-time decision -- with this off the atlas is created byte-identically to
+    // before, so an unconfigured build carries none of the machinery.
+    //
+    // WHY A SHADER AND NOT fill_upload(): every other thing the layer draws is CPU-generated into a
+    // staging buffer and uploaded (the reticule ring, the markers, the guide beam, GDI text), so
+    // authoring art is a solved problem here. The scope pane is different in kind -- its pixels
+    // arrive by CopyTextureRegion from the game's render target, GPU to GPU, and CopyTextureRegion
+    // cannot copy a single channel. A second quad cannot mask it either: composition layers blend
+    // OVER one another, they cannot cut a hole. That leaves a per-pixel write, which is a shader.
+    //
+    // COUPLED TO SLOT 9'S BLEND FLAG. Slot 9 is submitted OPAQUE because a scene capture's alpha is
+    // ~0 and blending by it made the pane vanish except where the captured reticule wrote alpha.
+    // This mask is what makes that alpha meaningful, so blending is re-enabled ONLY on frames the
+    // mask actually ran (scopemask_applied()). Re-enabling it without the mask reproduces the
+    // invisible pane exactly.
+    // scoperetproject: place the compositor scope reticule at the PROJECTED impact point instead
+    // of dead pane centre. 1 = project (default), 0 = centre (the old behaviour).
+    //
+    // Centre is only correct while the capture camera's axis and the traced impact point agree.
+    // That holds for scopecamtrack=0 at rest and breaks under recoil, sway, or any camera that
+    // rides the weapon -- and a reticule that is confidently wrong is worse than one that is
+    // obviously approximate, because it is aimed with.
+    int   scope_ret_project = 1;
+    // RECONCILE THE RETICULE OFFSET'S FRAME WITH THE IMAGE'S. 0 = off (the old behaviour),
+    // 1 = on, 2 = on with the opposite sign.
+    //
+    // The offset that slides the pane reticule is computed in one frame and applied in another,
+    // and nothing rotated between them. The projection uses the CAPTURE CAMERA'S right/up, which
+    // is correct for naming a pixel -- the image is rendered in that frame -- but the offset is
+    // then applied along the compositor QUAD'S local axes. Those two differ by the camera's roll,
+    // which is scope_cam_roll + the per-shape uv_roll + THE ROLL LOCK.
+    //
+    // The roll lock is the part that makes this more than a constant: it moves continuously to keep
+    // the image upright as the weapon cants. So the reticule's slide direction was wrong by an angle
+    // that CHANGES AS YOU ROLL THE GUN, which is exactly why scoperetflipx/scoperetflipy could never
+    // fix it -- a sign flip corrects 180 degrees, not a moving angle.
+    //
+    // The correction is MEASURED, not assumed: the angle between the capture's up and the quad's up
+    // about their shared forward. That makes it immune to the pane's orientation drift, and it
+    // self-corrects as the roll lock moves.
+    //
+    // ONLY AFFECTS A NON-ZERO OFFSET. With xrlayerscopereticle=1 the reticule is pinned at centre
+    // (the capture looks AT the aim point, so the projection computes ~0,0), and rotating zero is
+    // zero. A/B this on mode 2, the sliding mode, or it is a no-op by construction.
+    //
+    // Mode 2 exists because the SIGN is not provable from here -- the same admission
+    // scoperetflipx/y already makes about the UE->XR mapping. One headset test beats a rebuild.
+    int   scope_ret_roll    = 1;
+    // Sign flips for the projected offset. UE camera right/up and the quad's local +X/+Y are both
+    // "right and up", but nothing guarantees they still agree after the pose has crossed the layer
+    // module's UE->XR mapping (which has determinant -1). A mirrored reticule looks plausible until
+    // you aim off-axis, so this is config rather than a guess baked into the maths: one edit in a
+    // headset instead of a rebuild.
+    int   scope_ret_flip_x = 0;
+    int   scope_ret_flip_y = 0;
+    int   scope_mask = 1;
+    // Oval aspect: >1 is WIDER THAN TALL (the X radius stays at the cell's half-width and Y is
+    // divided by this). Clamped 0.2..5; anything outside falls back to 1.35.
+    float scope_mask_aspect = 1.0f;
+    // Edge softness as a fraction of the radius. 0.15 = the outer 15% fades. Clamped 0..1.
+    float scope_mask_feather = 0.3f;
     // Force an anti-aliasing method on the CAPTURE only. -1 = leave the game's choice alone
     // (default). 0 None, 1 FXAA, 2 TAA, 3 MSAA, 4 TSR. Exists to test whether the black output
     // from post-processed capture sources is a temporal-upscaler interaction; a non-temporal
@@ -2061,7 +2936,7 @@ struct Config {
 
     // Research knobs (catalogued in halo_vr_dev.cfg, not shipped in halo_vr.cfg):
     float scope_base_fov    = 70.0f; // pane lens at 1x, deg horizontal
-    int   scope_capture_src = 0;     // ESceneCaptureSource byte; 0 = SCS_SceneColorHDR (linear,
+    int   scope_capture_src = 2;     // ESceneCaptureSource byte; 0 = SCS_SceneColorHDR (linear,
                                      // exposure-free -- pairs with the HDR RT + emissive lens;
                                      // 2 = FinalColorLDR was measured orders-of-magnitude dark
                                      // here, the capture's own eye adaptation never converging)
@@ -2075,13 +2950,99 @@ struct Config {
     //       aim-vs-rig delta changes.
     // The PANE is rigid in both modes; this only decides what the pane is showing.
     int   scope_cam_track   = 0;
+    // Where the capture camera's ORIGIN is, as opposed to its direction:
+    //   0 = the aim ray's origin (DEFAULT, and the old behaviour) -- which is THE HEAD. The
+    //       SIGHTLINE log's `origin` equals `hmd` every tick, so the scope is effectively a
+    //       head-mounted camera aimed down the shot line.
+    //   1 = the PANE, i.e. the weapon. The tube then moves with the rifle rather than the skull,
+    //       which is what a real optic does.
+    //
+    // This only became visible when hmdleash was turned off: the leash pins the sightline origin to
+    // the standing reference and absorbs the difference, so with it on the two origins agree. With
+    // it off, a 24 cm body step displaces the capture 24 cm and the pane shows the ground beside
+    // what you are aiming at.
+    //
+    // Default is 0 because that is the behaviour everything else was calibrated against; 1 is the
+    // correct optic and is expected to become the default once it has been flown.
+    int   scope_cam_origin  = 1;
     bool  scope_dev_ray     = false; // [dev build] synthesize the scope ray from the rendered view
                                      // -- SimVR-only verification; the null driver never validates
                                      // the controller aim pose, which parks the real ray source
+    // ---- DRAW THE PANE IN THE FOREGROUND DEPTH GROUP.
+    //
+    // The first-person arms and weapon render in SDPG_Foreground so they are never clipped by
+    // world geometry. Our pane is an ordinary spawned StaticMeshComponent and therefore sits in
+    // SDPG_World, so the arms draw straight over it -- which is what a scope pane must never be
+    // behind. Putting the pane in the same group fixes the ordering with no material work.
+    //
+    // ESceneDepthPriorityGroup: 0 = SDPG_World, 1 = SDPG_Foreground.
+    //
+    // Live-tunable, and applied ON CHANGE only, because it is a reflected property write.
+    // ---- WHAT THE SCOPE PANE HANGS OFF.
+    //   0 = the arms rig's ORIGIN (the original behaviour)
+    //   1 = the arms rig at socket `PrimaryWeapon` -- the socket the weapon itself rides  [default]
+    //   2 = the weapon actor's root component
+    //
+    // The problem: on the rig ORIGIN the pane does not follow recoil, and sniper recoil then drives
+    // the gun straight through the pane.
+    //
+    // WHY THE SOCKET AND NOT THE WEAPON. A component root does not move when its mesh animates --
+    // bones do. Rig.cpp establishes that the first-person arms mesh carries socket `PrimaryWeapon`
+    // and the weapon actor is attached there, so parenting the pane to that same socket makes it
+    // ride exactly what the gun rides. That is animated (proven the hard way: freezing this socket
+    // by hiding the arms is what removed the weapon's recoil in the armhide bug), and it costs no
+    // dependency on the weapon actor at all -- a swap, holster, death or vehicle changes which
+    // actor sits at the socket and changes nothing about our attachment. Mode 2 keeps the
+    // weapon-actor attachment for A/B in-headset; it is not the default because it depends on a
+    // pooled actor's lifetime, and pooled actors are recycled under a held pointer.
+    //
+    // Any weapon-following attach that is refused falls back to mode 0 automatically and says so:
+    // a refused attach leaves the component parented to NOTHING, which does not look like a failure
+    // -- it looks like a pane hanging in the world that the player can walk away from.
+    // WHAT HAPPENS WHEN THE WEAPON BONE NEVER SETTLES. 1 = keep waiting (default), 0 = convert
+    // anyway once the deadline passes (the older behaviour).
+    //
+    // The space-switch conversion is only valid if the bone is near its rest pose when it is taken
+    // -- KeepWorld bakes socket^-1 at that instant, and the pane rides socket(t) * rel forever after.
+    // A conversion taken mid-animation is wrong PERMANENTLY, and equip is not the only offender:
+    // reload has slow phases and firing pauses between shots, so a velocity test alone lets bad
+    // moments through.
+    //
+    // So the deadline no longer FORCES one. If the bone never reaches rest the pane simply stays on
+    // the rig, where it is CORRECTLY PLACED and merely does not ride recoil yet. That is a graceful
+    // degradation -- the scope works, it is just not weapon-mounted for a moment -- and it is
+    // strictly better than the alternative, which is a pane sitting visibly in the wrong place until
+    // the player cycles weapons. "Could not verify" must not become "refuse to work", and it does
+    // not here: nothing is disabled, one refinement is deferred.
+    //
+    // Kept as a key rather than hardcoded so the old behaviour is one live edit away if this ever
+    // strands a weapon whose bone genuinely never rests.
+    int   scope_socket_wait = 1;
+    // POST-CONVERSION AUDIT. DEFAULT OFF -- it was unsound, and the log said so.
+    //
+    // The idea was to catch a first conversion taken against a wrongly-detected rest pose: remember
+    // where "rest" was believed to be, and redo the conversion if that belief later moved. The flaw
+    // is the proxy. The rest estimate is a slow average of the socket's position, and a RELOAD moves
+    // it legitimately -- seconds of off-rest samples drag the average several centimetres without
+    // saying anything at all about whether the original conversion was good.
+    //
+    // MEASURED 2026-09-07, immediately after a reload: "the weapon's rest pose has moved 6.5 cm
+    // since the space-switch conversion was taken ... being REDONE". It redid a CORRECT conversion
+    // and the pane came back offset -- the audit was the only thing that had changed.
+    //
+    // So it fires precisely when it must not: after exactly the long animations whose bad moments it
+    // was written to protect against. Kept behind a key rather than deleted because the hole it aimed
+    // at is real -- a mis-detected first settle IS permanent now -- but the honest closure for that is
+    // to compare the pane's ACTUAL placement against the authored one at rest, which measures the
+    // outcome instead of a proxy for it. That is a bigger change than belongs near a release.
+    int   scope_socket_audit = 0;
+    int   scope_parent      = 1;
+
+    bool  scope_fp_depth    = true;
     bool  scope_force       = false; // hold the pane ON without any trigger input. Harness/support
                                      // diagnostic: under SimVR no input path can reach the LT
                                      // hook at all, and this is the config-file automation channel
-    int   scope_cap_mode    = 0;     // 0 = manual CaptureScene every scopediv ticks (the perf
+    int   scope_cap_mode    = 1;     // 0 = manual CaptureScene every scopediv ticks (the perf
                                      // valve); 1 = bCaptureEveryFrame while the pane is shown
                                      // (render-rate captures -- costlier, diagnosis + smoothness A/B)
     // ---- [dev build] TEST OBJECT: does a TRANSLUCENT primitive reach the capture at all? ------
@@ -2108,6 +3069,100 @@ struct Config {
     int   scope_test_obj    = 0;
     float scope_test_dist   = 300.0f;  // cm ahead of the capture camera (its local +X)
     float scope_test_size   = 0.5f;    // uniform scale on the 100 cm engine Cube
+    // WHICH TEXTURE THE PROBE CUBE'S EMISSIVE SAMPLES. This is the difference between an
+    // instrument and a black rectangle, and it took three wrong diagnoses to find.
+    //
+    // The pane and the cube build their material by an IDENTICAL recipe -- same
+    // EmissiveMeshMaterial, same BlendMode write, same CreateDynamicMaterialInstance, same
+    // "LinearColor"/"SlateUI" binds, same tint. The pane displays its render target perfectly.
+    // The cube was black in BOTH views. The only substantive difference was the texture OBJECT:
+    //   0 = /Engine/EngineResources/WhiteSquareTexture. Resolves to a live UObject (verified in the
+    //       object array), and renders BLACK anyway -- an /Engine/EngineResources asset need not
+    //       carry usable cooked texture data in a shipped build. This is the old default and it is
+    //       why scopetest 3 and 4 measured nothing, twice.
+    //   1 = a solid white render target built at runtime by make_color_rt (CreateRenderTarget2D +
+    //       an explicit ClearRenderTarget2D). THE SAME OBJECT TYPE the pane proves samples
+    //       correctly, with content we choose. The default.
+    //   2 = the scope's OWN render target. Guaranteed to sample -- it is literally what the pane
+    //       displays -- but it feeds the capture back into itself, so read it in the MAIN VIEW only
+    //       and treat the pane image as meaningless. A last-resort control.
+    int   scope_test_tex    = 1;
+    // [dev build] SCENE RENDER TARGET PROBE -- the feasibility question for "digital zoom".
+    // Instead of re-rendering the scene into a capture (which loses the FX we have never got
+    // back), sample the frame the engine ALREADY rendered and magnify a crop of it. UEVR exposes
+    // uevr::API::StereoHook::get_scene_render_target() -> FRHITexture2D, and
+    // FRHITexture2D::get_native_resource() -> the native D3D12 resource. This logs, once, whether
+    // both answer on this title and what the texture actually is (size/format), because the
+    // resolution of that surface is the hard ceiling on how far a crop can be magnified before it
+    // turns to mush.
+    bool  scene_rt_probe    = false;
+    // [dev build] IS THE GLOW ACTUALLY IN THE CAPTURE? -- the test that must come before any
+    // display-side work. The current hypothesis is that the pane (an in-scene emissive mesh) is
+    // destroying contrast via pre-exposure + tonemapping, so effects arrive with the right hue and
+    // no halo. That may be true. But moving the DISPLAY to an OpenXR composition layer cannot add
+    // a halo the CAPTURE never rendered, so believing it without checking risks a large piece of
+    // compositor work that ends with a sharp, correctly-exposed image and still no glow.
+    //
+    // This reads the render target's own pixels through UKismetRenderingLibrary
+    // ReadRenderTargetRawPixel (unnormalised, so HDR values come back un-clamped) along a
+    // horizontal line through the middle, and logs the luminance profile. Point the scope at a
+    // bright emissive object first.
+    //   bright core with values falling off over several samples -> BLOOM IS IN THE RT, the pane
+    //     is the problem, and the composition layer is the fix.
+    //   bright core with an abrupt edge into darkness      -> no bloom was ever captured; the bug
+    //     is upstream and no amount of display work helps.
+    bool  scope_rt_scan     = false;
+    // ---- DIGITAL ZOOM (ScopeBlit.cpp) ---------------------------------------------------------
+    // Magnify a crop of the frame the engine ALREADY rendered, instead of re-rendering the scene
+    // into a capture that arrives without its post-processing. Bloom, tonemapping and every other
+    // effect are correct by construction because it is the real main-view image, and there is no
+    // second scene pass at all.
+    // STAGE 1: a screen-space quad at a fixed position -- NOT yet locked to the gun. Off by
+    // default, and it disables itself permanently on the first failure rather than retrying on a
+    // render callback.
+    // ---- MAKE THE CAPTURE POST-PROCESS LIKE THE MAIN VIEW DOES --------------------------------
+    // The symptom that started this: FX arrive in the pane with the RIGHT HUE and NO GLOW. Bloom
+    // is post-processing, and a capture only runs post at all on a final-colour source
+    // (scopesrc=8). But running post is not enough on its own -- the capture carries its OWN
+    // FPostProcessSettings, freshly defaulted by the component, NOT the player camera's. If bloom
+    // is off or unset there, a post-processed capture still renders everything except the glow.
+    // BOTH of these need scopesrc=8 to mean anything.
+    //
+    // scopebloom: force BloomIntensity (and drop the threshold so dim effects still bloom) onto
+    //   the capture, with the paired bOverride_ bits. 0 = leave the capture's bloom alone.
+    // ---- MAKE THE CAPTURE PART OF THE MAIN VIEW FAMILY ---------------------------------------
+    // UE 5.5 has properties for exactly the question "why does this capture not render like the
+    // main view does". bRenderInMainRenderer is the strongest of them and is USELESS to us --
+    // ShouldRenderInMainRenderer() restricts it to depth/basecolor/normal sources, never colour.
+    // But these three carry NO capture-source restriction and have never been tried:
+    //
+    // scopemainfamily -> bMainViewFamily. "Render with main view family (bIsMainViewFamily ==
+    //   true)". Rendering features that skip non-main families would then run for our capture.
+    //   The cheapest of the three and the one to try first.
+    int   scope_main_family = 1;   // -1 = leave alone, 0/1 = force
+    // scopemainres -> bMainViewResolution. Renders at the MAIN VIEW's resolution, ignoring the
+    //   render target's own dimensions, and implies main view family. Costs more, but would also
+    //   hand the pane a far sharper image than scoperes ever could.
+    int   scope_main_res    = -1;
+    // scopemaincam -> bMainViewCamera. Renders from the MAIN CAMERA, which DESTROYS the whole
+    //   point of the scope (it would show where the head looks, not where the gun points). It is
+    //   here purely as a CONTROL: if the capture suddenly renders correctly with the main camera,
+    //   the path works and the difference is something about our own camera setup. Do not ship it.
+    int   scope_main_cam    = 0;
+    float scope_bloom     = 0.0f;
+    // scopeppcopy: copy an ENTIRE FPostProcessSettings struct onto the capture -- every field and
+    //   every bOverride_ flag at once -- from the game's own source, so nothing is missed by
+    //   guessing field names. Prefers an unbound PostProcessVolume (where a shipped UE game
+    //   usually keeps bloom), falling back to a camera component. Logs which it used.
+    bool  scope_pp_copy   = true;
+    bool  scope_blit      = false;
+    // Magnification. Blam reports 2.00 for the magnum via GetZoomMagnification (measured in
+    // headset), so this is what per-weapon zoom will eventually be driven from.
+    float scope_blit_mag  = 2.0f;
+    // Quad size as a fraction of frame HEIGHT, and its centre within each eye's half, normalised.
+    float scope_blit_size = 0.35f;
+    float scope_blit_x    = 0.5f;
+    float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------
     // The whole scope-FX question reduces to one unanswered thing: scene-colour sources render but
@@ -2154,6 +3209,1080 @@ struct Config {
     // the pass with a tiny aperture, so the image stays essentially in focus.
     float scope_dof        = 0.0f;        // f-stop; 0 = leave DOF alone
     float scope_dof_focus  = 100000.0f;   // focal distance, cm -- far, so nothing blurs
+
+    // ---- THE SCOPE AS AN OpenXR QUAD COMPOSITION LAYER (scopelayer*) ---------------------------
+    //
+    // Present the scope's render target through the COMPOSITOR instead of on the in-world pane, as
+    // a quad mounted on the gun. Submitted after the whole post chain, so scene pre-exposure, the
+    // tonemapper and TAA/TSR never touch the one surface in this mod whose whole job is to be read.
+    // Mechanism, the pose construction and the current blockers: src\ScopeLayer.hpp.
+    //
+    // EXPERIMENTAL AND DEFAULT OFF. With scopelayer=0 nothing in this family runs at all -- one
+    // int test per tick -- and the in-world pane behaves exactly as it always has.
+    //
+    //   0  off (default)
+    //   1  gun-mounted: the feature. Orientation comes from the aim ray.
+    //   2  [dev build] SELF-CHECK. Feed the layer the finished VIEW's own forward and up instead of
+    //      the aim ray's. The layer's UE->XR basis map then converts to identity, so the quad MUST
+    //      render exactly head-locked. If our vectors are in a frame we did not think they were,
+    //      this fails totally and obviously rather than as the near-zero-on-axis error a handedness
+    //      mistake produces. Hold your head LEVEL: the view roll is not published, so this arm
+    //      assumes roll 0. On a release build 2 and 3 fall back to 1 and say so once.
+    //   3  [dev build] CONTROL for arm 2: publish no orientation at all, which IS head-oriented.
+    //      2 and 3 must be indistinguishable. That is the test.
+    int   scope_layer       = 1;
+    // Which compositor slot the scope takes. 0 is the reticule, 1..8 are the navpoint markers, and
+    // 9 is XRLAYER_SLOT_PANE -- allocated for exactly this, with its cell sized by
+    // xrlayer_pane_configure(). The literal is here rather than the constant because Config.hpp
+    // must not include another module's header; ScopeLayer.cpp static_asserts that the two agree,
+    // so they cannot drift in silence. Pointing this anywhere else lands on a marker-sized cell and
+    // the source is refused -- which the log says, in numbers.
+    int   scope_layer_slot  = 9;
+    // GEOMETRY. Halo-MCC-VR's shipped gun-mounted zoom screen, transcribed from
+    // docs\GameRecon\MCC-VR-Study.md:232: width 0.159 m, right -0.058 m, up 0.216 m, forward
+    // 0.050 m. Field-proven numbers from a shipping mod rather than guesses -- but READ ALL THREE
+    // CAVEATS before treating them as fitted here:
+    //   1. CENTIMETRES, because every distance key in this depot is (matching Unreal's own unit).
+    //      These are UE cm, so the PHYSICAL size is width / (100 x VR_WorldScale) -- at this game's
+    //      1.312 that is 0.121 m, ~24% under MCC's 0.159 m. Multiply by the world scale to match
+    //      their physical fit exactly. The tick logs both numbers side by side with MCC's, so this
+    //      never has to be worked out from memory again.
+    //   2. THEIR OFFSETS ARE CONTROLLER-LOCAL; OURS ARE IN THE AIM FRAME. Deliberate: this scope's
+    //      premise is that it shows where the shot goes, not where the gun model points, so the
+    //      quad hangs off the same ray the capture camera uses.
+    //   3. OUR OWN PANE IS FITTED SOMEWHERE QUITE DIFFERENT -- scopedist 63.6 / scoperight 12.9 /
+    //      scopeup -0.3 cm, rig-relative. MCC's placement floats a small screen just above the
+    //      hand; ours sits well out in front. Expect an in-headset fit to move these a long way.
+    float scope_layer_width = 30.0f;
+    float scope_layer_fwd   = 64.0f;
+    float scope_layer_right = 13.0f;
+    float scope_layer_up    = 0.0f;
+    // Does the quad ROLL with the weapon? 1 = yes (MCC's construction: the lens's own up vector,
+    // perpendicularised against the aim axis, so cant rides the gun and no Euler decomposition is
+    // involved). 0 = world-levelled, which never cants.
+    //
+    // PAIR IT WITH scopecamlock. That key decides whether the captured IMAGE rolls with the lens,
+    // and it ships at 0 (world-pinned). scopelayerroll=1 with scopecamlock=0 rolls the screen while
+    // leaving the picture level, so canting the weapon appears to counter-rotate the image inside
+    // the quad. Set both to 1, or both to 0.
+    // 0 = world-upright (level, ignores the weapon's cant)
+    // 1 = the lens's up, so the image cants with the weapon (default)
+    // 2 = the PANE's own up -- the quad inherits the pane's FULL orientation, facing and roll.
+    //     Use this when the quad's image is rotated relative to the in-world pane: the capture
+    //     bakes its roll compensation for the PANE's frame, so a quad rolled differently shows that
+    //     content rotated by the difference. Measured 2026-09-07 -- the facing was already correct
+    //     (pane forward 0.968 against the aim), which left roll as the only remaining term.
+    // Degrees, applied about the quad's OWN facing axis, after whatever scopelayerroll chose.
+    //
+    // The quad and the mesh pane show the same render target, but the mesh displays it through its
+    // UVs and the quad does not -- and the round lens's UVs are rotated 90 degrees, which is why
+    // scope_cam_roll is -90 against a uv_roll of +90 (that pair cancels for the MESH only). A quad
+    // has no UV stage, so this difference is not recoverable by inheriting the pane's basis; it has
+    // to be trimmed, exactly as scope_cam_roll itself was fitted in a headset.
+    // Try +/-90 first if the quad's image is square to the mesh's but rotated.
+    float scope_layer_roll_trim = 0.0f;
+    // Degrees, applied about the quad's OWN facing axis, after whatever scopelayerroll chose.
+    //
+    // The quad and the mesh pane show the same render target, but the mesh displays it through its
+    // UVs and the quad does not -- and the round lens's UVs are rotated 90 degrees, which is why
+    // scope_cam_roll is -90 against a uv_roll of +90 (that pair cancels for the MESH only). A quad
+    // has no UV stage, so this difference is not recoverable by inheriting the pane's basis; it has
+    // to be trimmed, exactly as scope_cam_roll itself was fitted in a headset.
+    // Try +/-90 first if the quad's image is square to the mesh's but rotated.
+    int   scope_layer_roll  = 0;
+    // 1 = hide the in-world pane and let the quad be the scope, instead of drawing both.
+    //
+    // Gated on the layer actually PRESENTING -- our source accepted and xrlayer_slot_ready() true --
+    // never on "we asked it to". That distinction is the reticule lane's expensive lesson: a
+    // refused layer must never leave the player looking at nothing.
+    int   scope_layer_hide_pane = 1;
+
+    // ---- MELEE BY SWING --------------------------------------------------------------------
+    // Swing the aim hand and the game melees. The detector runs on the GAME THREAD tick and
+    // publishes a deadline; the XInput hook only compares a clock against it (see Gesture.hpp),
+    // which is the same produce-at-tick / consume-at-poll split the rest of this plugin uses.
+    //
+    // WHY LINEAR SPEED AND NOT ANGULAR. The obvious false positive is a fast aim turn: the hand
+    // is moving quickly but the player means to look, not hit. A turn is mostly ROTATION about
+    // the wrist/elbow with little travel, while a strike is mostly TRANSLATION. So the trigger
+    // is metres-per-second of controller travel, not deg/s -- g_setpoint_rate_dps already
+    // measures the angular rate and is deliberately NOT what gates this.
+    //
+    // Poses are in METRES (see xdist_m, added directly to a pose position in MotionAimControl),
+    // so melee_speed is genuinely m/s and not an abstract unit.
+    bool  melee_swing     = true;
+
+    // ---- WHAT COUNTS AS A STRIKE: ARM EXTENSION, NOT SPEED.
+    //
+    // The first version gated on world-space hand speed plus |dot(vel, hmd_fwd)| and fired on fast
+    // aiming. Measured, the reason is structural: when you turn, your HEAD TURNS WITH YOUR HAND,
+    // so hand velocity stays aligned with the view forward it is being compared against. Logged
+    // false positives sat at along=0.46-0.57 -- squarely inside a gate meant to exclude them.
+    //
+    // Head-to-hand DISTANCE has none of that failure mode, because it is a scalar and therefore
+    // invariant to rotation:
+    //   * a thrust      -- distance grows fast, and ends large
+    //   * an aim turn   -- the hand orbits the body at roughly constant radius, so ~0
+    //   * walking       -- head and hand travel together, so ~0
+    // Measuring the hand RELATIVE TO THE HEAD also removes whole-body motion for free.
+    //
+    // All distances in metres (poses are metres -- see xdist_m).
+
+    // Minimum RELATIVE speed, m/s: hand velocity with the head's own motion subtracted out. A
+    // floor, not the discriminator -- melee_ext below is what actually distinguishes a strike.
+    float melee_speed     = 1.50f;
+
+    // Rate the arm must be EXTENDING at, m/s -- d/dt of head-to-hand distance. THE test, and
+    // measurement says it is a very clean one. Over a logged session, ordinary play motion topped
+    // out at ext=0.80 while deliberate swings ran 2.24 to 4.51 -- a gap with nothing in it. 1.50
+    // sits in that gap, comfortably clear of both sides.
+    float melee_ext       = 1.50f;
+
+    // How far the hand must be from the head when it fires, metres. A floor, not the test.
+    //
+    // WHY IT IS LOW. Reach is evaluated the instant extension crosses the threshold, which is
+    // MID-SWING while the arm is still travelling -- not at full stretch. Real swings measured
+    // 0.37 to 0.57 at that moment despite finishing much further out, and a 0.50 floor rejected
+    // three of five genuine strikes. This only needs to exclude a twitch made with the hand
+    // tucked against the chest.
+    float melee_reach     = 0.30f;
+
+    // Sanity ceiling on relative speed, m/s. Sessions logged 26 m/s and 97 m/s "swings", which no
+    // arm produces -- those are tracking discontinuities. Above this the velocity history is
+    // dropped rather than fired on, because the sample after a teleport is garbage too.
+    float melee_max_speed = 12.0f;
+
+    // Sanity ceiling on reach, metres. After the 97 m/s spike above, head-to-hand distance read
+    // 2.45-2.51 m for several consecutive samples -- the velocity guard caught the jump but the
+    // POSITION stayed wrong, so a position check is needed as well as a rate one. No human arm is
+    // this long; anything beyond it means tracking is lying about where the hand is.
+    float melee_max_reach = 1.20f;
+
+    // Legacy forward-alignment gate, |dot(vel_dir, hmd_fwd)|, 0..1. DEFAULTS OFF: it is the check
+    // that proved unsound above. Kept because it is harmless when zero and someone may want it.
+    float melee_fwd       = 0.0f;
+
+    // Velocity smoothing time constant, ms. Tracking noise at 90 Hz is enough to spike a raw
+    // per-tick derivative; this is short enough not to blunt a real strike's leading edge.
+    float melee_tau_ms    = 20.0f;
+
+    // Refractory period after a fired melee, ms. Halo's melee animation is not interruptible, so
+    // a second trigger inside it is always spurious -- one swing crossing the threshold on
+    // several consecutive ticks must still be ONE press.
+    int   melee_cooldown_ms = 500;
+
+    // ---- DIRECTIONAL MELEE (blindcowboy24 PR-1) ----------------------------------------------
+    // Halo lunges along your AIM, and during a swing your aim is the flailing hand -- measured at
+    // a median 83 deg of travel by the time the hit lands, which is why stock-butt strikes used to
+    // whiff at a target you were looking straight at. So the strike is aimed along the SWING.
+    //
+    // 1 = aim the strike along the swing direction (shipped). 0 = leave it where you were looking.
+    int   melee_aim_mode  = 1;
+    // How long the aim is pinned to the swing direction, then how long it blends back to the live
+    // hand. The ramp exists so the reticule RETURNS rather than teleports: the hand has travelled a
+    // long way by then, and an instant handback is a visible snap in the opposite direction.
+    int   melee_aim_hold_ms = 250;
+    int   melee_aim_ramp_ms = 150;
+
+    // How long the synthetic button is held, ms. A single poll can land between the game's own
+    // input samples and be missed entirely, so the press is held across several.
+    int   melee_hold_ms   = 80;
+
+    // Pad mask ORed in to melee. 0x0080 = RTHUMB, which is this profile's melee (right stick
+    // click). Confirm against your own mapping with mapbtnlog=1 before changing it.
+    int   melee_mask      = 0x0080;
+
+    // Log every swing's peak speed and whether it fired. This is the tuning instrument for
+    // melee_speed and melee_fwd -- expect to set it once, swing a dozen times, and turn it off.
+    bool  melee_log       = false;
+
+    // ---- TWO-ARM RECON ---------------------------------------------------------------------
+    // Dump the first-person skeleton -- every bone with its parent -- and report which bone
+    // functions this build actually exposes. Read-only; nothing is written to the game.
+    //
+    // Fires on the RISING EDGE, so leaving it set does not re-dump every config reload. Set it
+    // while standing in gameplay with a weapon drawn: the rig does not exist in menus, in
+    // vehicles, or for ~5 s after a level load.
+    //
+    // This is the instrument that decides whether independent arms are buildable at all. See
+    // Arms.hpp for what the answer gates.
+    bool  bone_dump       = false;
+
+    // ---- LEFT ARM HIDE ---------------------------------------------------------------------
+    // Hide the left arm chain, so an independently tracked left hand can replace it.
+    //
+    // The bone dump established that this is possible: HideBoneByName and UnHideBoneByName are
+    // both PRESENT, and Shoulder_L is the single root of all 34 left bones (hiding a bone hides
+    // its children). Weapon_M hangs off Chest_M rather than either wrist, so the gun is not
+    // dragged along with the arm.
+    //
+    // WHAT THIS IS FOR RIGHT NOW. Present in the reflection table is not the same as working on
+    // this mesh -- Rig.cpp documents a relative-rotation write that is present and silently does
+    // nothing, which is the whole reason rigmode 3 exists. So this toggle exists first as PROOF,
+    // before anything is built on top of it. Fully reversible: setting it back to 0 unhides.
+    bool  arm_hide        = false;
+
+    // WHICH ARM DRIVER RUNS -- exactly one, ever. See ArmDriver.hpp for why this is one enum and
+    // not two independent switches.
+    //
+    //   0 = off      the game's stock first-person rig, untouched
+    //   1 = UeRig    Rig.cpp + Arms.cpp + Hands.cpp -- UE reflection, the route this project built
+    //   2 = Palette  src\palettearm\ -- the Blam node palette, ported from elliotttate's project
+    //
+    // DEFAULT 1: the shipped behaviour is exactly what it was before the palette route existed.
+    // Mode 2 has NEVER been verified against a running game -- its offset chain was measured on
+    // someone else's copy of the simulation DLL -- so it is opt-in, and it exists to be A/B'd in a
+    // headset against mode 1. Switching is live: the arbiter tears the outgoing driver down before
+    // the incoming one gets a frame, so it is safe to flip mid-session while wearing the headset.
+    int   arm_driver      = 1;
+
+    // ---- TWO-HANDED AIMING (src\TwoHandAim.hpp) --------------------------------------------
+    //
+    // Support hand on the barrel, squeeze its grip: aim eases onto the line between your hands,
+    // roll still taken from the aim hand. Independent of armdriver -- it is an aim feature, and
+    // it runs in every arm-driver mode including 0.
+    //
+    // DEFAULT OFF for the release that introduces it. Nothing here has been watched working in a
+    // headset; turn it on deliberately, and only flip this default once a session has confirmed
+    // it. Live-reloaded like every tunable, so it is an A/B you can do without leaving the game.
+    // ONE-SHOT PALETTE DUMP (dev builds only). Rising edge logs all 76 first-person node matrices
+    // from a single frame, then disarms itself.
+    //
+    // This is the measurement that settles "wrong bone indices" vs "wrong palette pointer" -- the
+    // two failures that look identical from outside, and the reason armdriver=2 has burned several
+    // headset sessions. Node discovery reporting hands-found-but-no-arm-above-them says the memory
+    // is structured; only the actual numbers say what it is structured AS.
+    //
+    // 76 log lines from inside the render hook is a deliberate one-frame stall. It is compiled out
+    // of release builds entirely and disarms after one frame, so it cannot reach a player.
+    bool  pa_dump         = false;
+
+    // SMOKE TEST for the palette write (dev builds only). Metres of upward displacement applied to
+    // the ENTIRE first-person node set, before any arm solving.
+    //
+    // WHY A DELIBERATE ABSURDITY. The drive currently reports success on every single call --
+    // "drive stage=DRIVING ok=9992" against "hook 9992 calls" -- and the arms still do not move.
+    // That is either (a) we are writing a palette nothing renders, or (b) we are writing the right
+    // one and the pose we compute happens to look like the stock pose. Subtle changes cannot tell
+    // those apart. Half a metre straight up can: if the weapon and hands do not visibly leap, the
+    // memory we are writing is not what the renderer reads, and no amount of IK tuning will help.
+    //
+    // 0 disables. 0.5 is the recommended value -- unmissable, and still on screen.
+    float pa_test_lift    = 0.0f;
+
+    // WHICH ARMS THE PALETTE ROUTE POSES. Bit 1 = aim hand, bit 2 = support hand. Default 3 = both.
+    //
+    // paarms=2 is the experiment worth running: leave the AIM arm completely stock and pose only
+    // the support hand. The stock aim hand is already authored ONTO the weapon, and the weapon has
+    // its own calibrated driver -- so not touching it may be the correct way to make it "ride the
+    // gun", rather than computing a target for it and hoping the frames agree.
+    int   pa_arms         = 3;
+
+    // WHICH FRAME THE SHOULDERS HANG OFF. This is the uncertain one, so it is switchable rather
+    // than guessed:
+    //   0 = the palette root as-is. The rig is already expressed in camera-local space (measured:
+    //       root sits at (0,0,0) every frame), so this adds nothing and may be correct by default.
+    //   1 = root composed with the HEAD. Intended to stop the shoulders following the AIM, but if
+    //       palette space is already view-relative it double-counts the head and the arms rotate
+    //       EXTRA as you yaw -- which is what was observed.
+    //   2 = root composed with the inverse HEAD, i.e. actively removing head yaw.
+    int   pa_torso_frame  = 6;
+
+    // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
+    // are (the midpoint of both controllers, or the single tracked one). Anything between blends
+    // the two along the shortest arc.
+    //
+    // Both terms are measured RELATIVE TO THE CAMERA via the recenter composition, so when the aim
+    // drive yaws the camera by t both terms counter-rotate by -t and the torso stays world-fixed.
+    // That makes this construction aim-independent BY CONSTRUCTION rather than by subtracting a
+    // correction -- which is why it needs no view-lock term, unlike modes 3/4/5.
+    float pa_head_shoulders_yaw_influence = 0.5f;
+
+    // PALETTE WEAPON DRIVE -- carry the weapon branch (nodes 7, 8, 22) onto the aim controller with
+    // ONE rigid transform, so the stock animation inside the branch survives.
+    //
+    // This is route (c): it stays entirely inside the Blam palette, where the arms are already
+    // posed, and never crosses the UE/Blam boundary. Every defect in the wpndrive lane lived on
+    // that boundary -- the socket recomputing our write, the cross-thread feedback race, the stale
+    // pooled actor, the per-eye divergence. None of them can exist here, because there is no socket
+    // in the composition and no UE component being fought over.
+    //
+    // Independently arrived at by blindcowboy24's PR #8 (BlamPalette.cpp: apply_weapon_branch, the
+    // same nodes {7,8,22}, the same one-rigid-delta shape) -- which is corroboration that the
+    // branch and the method are right, not a port. His notes are worth heeding on two points: he
+    // deliberately removed all trim knobs from this path ("hand-tunable knobs on a solved frame are
+    // how six coupled wrongs impersonate one right"), and he bounds every written node to arm's
+    // reach after a crash where a sleeping controller read (0,0,0) and produced a 2.4 m hand.
+    //
+    // DEFAULT OFF. Requires armdriver=2. Suppresses the legacy mesh drive while it owns the weapon,
+    // because two writers on one gun is the fight that has cost this project several sessions.
+    bool  pa_weapon       = false;
+
+    // WEAPON GRIP TRIM for the palette path, DEGREES, applied in the CONTROLLER's frame.
+    //
+    // The palette carry puts the AUTHORED marker (node 8) straight onto the controller, so whatever
+    // fixed rotation the artist baked between that marker and the barrel is currently discarded --
+    // reported in-headset as the weapon "yawed counterclockwise", and consistent with the socket
+    // measuring a 90 deg yaw (sock rot=(p-0.0 y90.1 r0.3)).
+    //
+    // THIS IS A MEASUREMENT STEP, NOT A CALIBRATION, and it should not survive. The existing
+    // grip_deg/grip_yaw/grip_roll already encode the hand->gun rotation the player tuned, but they
+    // are a UE ROTATOR and this path works in Blam's forward/left/up basis; composing them needs a
+    // convention conversion that is worth deriving rather than guessing. So: find the value that
+    // looks right here, compare it against the calibrated grip yaw, and if they agree the mapping is
+    // confirmed and this knob gets replaced by reading the calibration directly.
+    //
+    // blindcowboy24's warning applies and is the reason for that plan: "hand-tunable knobs on a
+    // solved frame are how six coupled wrongs impersonate one right."
+    // THE LOCK-GAP LIFT. 1 = on (correct), 0 = off (the old double-counting behaviour, kept only
+    // as an escape hatch if the sign is ever wrong on another build).
+    //
+    // The hand pose is published in the ROOM frame, which the view lock pins to the VIEW's yaw.
+    // The palette is CAMERA-local. Lifting the hand by the full camera yaw therefore counts the aim
+    // twice, because our aim drive writes the camera's yaw FROM that same controller -- reported
+    // in-headset as "the weapon moves extra, like there's a multiplier on the rotation".
+    //
+    // blindcowboy24 hit this and measured it (BlamPalette.cpp:1496): "The correct lift is
+    // (camera - view): the room hand already sits at view yaw, so only the difference between the
+    // two frames is missing. NO HEAD TERM. NO VIEW TERM. The camera's yaw, and nothing else." He
+    // also records that two stacked corrections here were BOTH wrong and a controlled sweep caught
+    // it using the arms as ground truth -- so this applies exactly ONE term.
+    //
+    // (camera - view) is the negation of g_view_lock_delta, which is published as (view - camera).
+    int   pa_wpn_lift     = 1;
+
+    // THE SAME LOCK-GAP LIFT, FOR THE HANDS. 1 = on, 0 = the old double-counting behaviour.
+    //
+    // The wrist target is built from the controller pose composed through the recenter offset --
+    // stage-relative and constant when the hand is still -- and then lifted by the FULL camera.
+    // But our aim drive WRITES that camera yaw from this same controller, so yawing the controller
+    // by t moves the hand target by 2t in the world. Identical to the weapon bug fixed by
+    // pa_wpn_lift; the arms were simply never given the same treatment.
+    //
+    // This is what was left of "the shoulders move with my aim" after the torso frame was fixed:
+    // the shoulder anchor was correct, but the HAND dragged the whole arm around with the aim, and
+    // the hand is what the eye follows.
+    int   pa_arm_lift     = 1;
+    // PITCH half of the arm lift. pa_arm_lift removes the game camera YAW from the arm frame;
+    // nothing removed its PITCH. Measured 2026-08-30: the game camera pitches 1:1 with the aim
+    // (PlayerCameraManager rotation.x -56.56 at aimpitch -56.6, -14.82 at -14.8) while the HMD sits
+    // level, and UEVR decoupled pitch keeps that out of the VIEW -- so a hand placed correctly in
+    // the pitched camera frame swings by the whole aim pitch in ROOM space. Pitch-only, because the
+    // yaw is already compensated and there is no aim roll. 0 = off, 1 = +gap, 2 = -gap (handedness
+    // is settled by measurement, exactly as the yaw gap was).
+    // MEASURED 2026-08-30 in sim, left controller pinned in room space: sweeping the aim across
+    // 74 deg, (sup XZ angle + aimpitch) held to 0.7 deg at mode 2, where at mode 0 it varied by the
+    // full 74 deg -- i.e. mode 2 leaves the hand ROOM-FIXED. Mode 1 rotated the wrong way, doubling
+    // the error. |sup| stayed constant throughout, confirming a pure rotation.
+    int   pa_arm_pitch    = 2;
+
+    // HANDS-ONLY (Half-Life Alyx style): collapse everything outside the two hands to invisible,
+    // keeping the full IK solve intact. 0 = full arms, 1 = hands only. Live-tunable.
+    //
+    // A post-solve FILTER, not a second code path -- the arm is still solved, so aim, the two-hand
+    // hold and the weapon carry cannot drift apart between the two modes. Lifted from pancreations
+    // MCC VR floating_hands, which ships this ON by default. The weapon nodes stay in the keep set,
+    // so the gun does not vanish with the arm.
+    //
+    // NOTE this is NOT the same thing as ArmSolve place_wrist_subtree ("no IK"): skipping the solve
+    // would make hands-only a second behaviour to keep in sync forever.
+    // Gates ONLY the arm rest-pose lift (the rotation about the SHOULDER), not the wrist-target
+    // lift. 1 = on (the behaviour to date), 0 = off.
+    //
+    // The two lifts apply the SAME gap about DIFFERENT pivots -- target about the head, rest pose
+    // about the shoulder -- so they disagree by roughly (pivot separation) x gap, about 22 cm at
+    // the 47 degree gaps measured in play. The IK bridges that by folding the arm. Measured:
+    // per-window bend peak vs lockdelta peak correlates 0.941.
+    //
+    // Separate from pa_arm_lift on purpose: that one gates BOTH halves, and turning it off brings
+    // back the arms-follow-the-aim problem this whole lane exists to fix.
+    // Which frame the WRIST TARGET is built in. 0 = live camera basis times the live lock gap
+    // (behaviour to date), 1 = the levelled TORSO frame.
+    //
+    // Mode 0 swings the target by the whole lock gap, and that gap reaches 98-125 degrees on this
+    // title. Measured with the support controller PINNED: hand excursions to 101 cm correlating with
+    // the gap at 1.000, and 10.8 cm of forearm STRETCH because the wrist is placed exactly even when
+    // the arm cannot reach. Mode 1 lets the gap enter the arm once, via a frame that is already
+    // gap-corrected and levelled, and makes the target share a frame with the rest-pose lift.
+    //
+    // pancreations MCC VR go further: their wrist target uses NO live camera orientation at all,
+    // only piecewise-constant references. Mode 1 is the nearest thing that fits our direct-drive
+    // camera without rewriting the aim architecture.
+    // DEFAULT 1 as of 2026-08-31. Measured, aim controller sweeping, support controller PINNED:
+    //   mode 0 -> hand excursion 102.4 cm peak, forearm stretched 9.2 cm
+    //   mode 1 -> hand excursion  0.002 cm peak, forearm stretch 0.001 cm
+    // Verified it is not simply switched off: 324 posed frames, zero bails, and the hand still
+    // tracks the controller (gotL follows leftZ monotonically and returns exactly on the way back).
+    // NOT yet confirmed in a headset -- patgtframe=0 restores the old behaviour live, no restart.
+    // 2 additionally puts the wrist ORIENTATION in the torso frame. Mode 1 pinned the hand POSITION
+    // to 0.002 cm but left its facing swinging 49.9 deg per frame, because the orientation still
+    // composed the live camera basis with the gapped controller. Mode 2 is NOT the default because
+    // the wrist convention is learned against root_basis, so it risks a constant mis-facing -- which
+    // is an offset, not jitter, and therefore invisible to every headless check here.
+    // DEFAULT 2. Measured with the aim sweeping and the support controller PINNED:
+    //   mode 0 -> hand 102.4 cm peak, forearm stretched 9.2 cm, correlates with the gap at 1.000
+    //   mode 1 -> hand  0.002 cm, but facing still swung 61.5 deg per frame
+    //   mode 2 -> hand  0.002 cm AND facing 0.000 deg
+    // Not switched off: 333 posed frames, zero bails, and the hand still tracks its controller.
+    // FIRST THING TO CHECK IN A HEADSET: whether the support hand FACES correctly. A constant
+    // mis-facing is an offset rather than jitter, so nothing measured here could have caught it.
+    // patgtframe=1 reverts the orientation half live; 0 reverts both.
+    int   pa_target_frame  = 2;
+
+    // Does the SUPPORT hand ride the weapon while two-handing? 0 = no (default), 1 = yes.
+    //
+    // 0 follows pancreations MCC VR, who never attach it: the support arm is solved onto its own
+    // controller and the hands couple ONE WAY, through the aim basis only. Attaching it makes the
+    // hand inherit everything the weapon inherits, including the aim hand rotation, which is why
+    // "grabbing" kept surfacing as a separate complaint from the arm itself.
+    int   pa_grab_weapon   = 0;
+
+    int   pa_arm_rest_lift = 1;
+
+    int   pa_hands_only   = 0;
+
+    float pa_wpn_yaw      = -90.0f;
+    float pa_wpn_pitch    = 0.0f;
+    float pa_wpn_roll     = 0.0f;
+
+    // ---- THE BARREL LOCK. One shared aim direction: the rendered gun points where it shoots.
+    //
+    // WHAT IT DOES, in one sentence: the rigid transform that carries the weapon branch onto the
+    // controller is constrained so it cannot move the AIM AXIS -- it may slide the gun and roll it
+    // about the ray, and nothing else. Ported from blindcowboy24's PR #1
+    // (BlamPalette.cpp:1574, `palettebarrellock`, which he ships ON).
+    //
+    // WHY IT IS WANTED. pa_wpn_yaw/pitch/roll and the per-weapon wpnfix are STATIC trims: they can
+    // be right for one wrist angle on one weapon. Everything that moves the gun off the reticle
+    // dynamically survives them -- the aim drive's own filtering lag, the dead zone, ffpitchcomp,
+    // gain adaptation, and whatever each weapon's authored marker does differently from the last.
+    // The lock removes all of it every frame, which is why "it felt better across weapons" cannot
+    // be explained by his per-weapon file (one non-identity entry in it).
+    //
+    // THE COARSE/FINE SPLIT, and it is the whole reason this composes rather than competes:
+    // this is the COARSE alignment and wpnfix is the FINE trim riding on top. Our lock is applied
+    // AFTER both trims (his is applied before his), so an existing wpnfix keeps working exactly as
+    // it did -- it still points the barrel at the ray, and the lock only removes what it missed.
+    // Reversing that order would make every captured wpnfix a double correction. See PaletteArm.cpp.
+    //
+    // WHERE THE AIM AXIS COMES FROM, and this is what had to be adapted rather than transplanted.
+    // He reads the game's ControlRotation on the sim thread and builds a WORLD aim ray, because his
+    // pose lives in world. Ours never leaves the palette: the palette ROOT *is* the game camera (see
+    // the torso-frame note above), so the aim ray in the frame the weapon basis lives in is just the
+    // camera's own forward -- +X, one term, no camera read, no thread bridge, no staleness. Both
+    // builds run aimdirect=1, so in both cases this constrains the model to a ray we are already
+    // steering; it is not a second aim source and it writes nothing back into aim.
+    //
+    // WHERE THE BARREL DIRECTION COMES FROM -- the one empirical assumption, worth stating plainly:
+    // THE GAME'S OWN FIRST-PERSON POSE POINTS THE GUN DOWN THE CAMERA FORWARD. That is what makes
+    // hipfire work in the stock game, and it means the barrel's direction in the marker bone's own
+    // frame is readable straight off the stock pose we are about to overwrite -- same frame, same
+    // instant, no measurement machinery at all. He instead reads the posed socket's world rotation
+    // back through reflection and EMAs it over still frames; that needs a game-thread reflection
+    // call, a cross-thread publish and an outlier filter that (in his build) can never adapt to a
+    // weapon whose barrel differs from the running mean by more than 10 degrees. Ours adapts per
+    // weapon for free and costs three vector operations.
+    //
+    // AND IT KEEPS RECOIL. Because the barrel direction is taken from the live stock pose rather
+    // than a latched constant, a stock pose that is deliberately off the ray -- recoil, sway, the
+    // reload animation -- stays off the ray by exactly the angle the animation asked for.
+    //
+    // ⚠️ pa_wpn_yaw IS STILL REQUIRED, and is NOT made redundant by this. The trim's job is to map
+    // the camera frame onto the ARTIST'S bone frame (a ~90 degree structural rotation on this
+    // title); the lock's job is the few degrees left over. With the trim at 0 the residual is far
+    // outside pa_barrel_release below and the lock simply stands down -- it can never supply a
+    // structural 90.
+    //
+    // DEFAULT OFF, deliberately, and this is the honest reason: the "stock pose points at the
+    // crosshair" assumption above has not been checked in a headset on THIS build, and Config.hpp
+    // defaults are the shipped configuration. Turn it on in halo_vr_dev.cfg, confirm, and only then
+    // move the default -- which is itself a settings change worth a release note.
+    bool  pa_barrel_lock  = false;
+
+    // HOW FAR OFF THE RAY THE LOCK STILL CORRECTS IN FULL, degrees. Above this it fades out to
+    // nothing at pa_barrel_release, so during a fast flick -- where the camera legitimately lags the
+    // hand -- the gun goes back to following the hand instead of being pinned to a stale ray.
+    //
+    // 25 is his engagement threshold, kept so the two builds compare. His is a HARD cap, i.e. a
+    // 25-degree snap of the model at the boundary, which is precisely where a flick lives; setting
+    // pa_barrel_release to 0 (or anything <= this) reproduces that exactly for an A/B.
+    float pa_barrel_full    = 25.0f;
+    float pa_barrel_release = 40.0f;
+
+    // CANONICALISED 2026-08-31: two-handed aiming ON, matching what the user plays with.
+    int   two_hand        = 1;
+
+    // WHICH BUTTON engages the hold. 0 = the OpenXR grip ACTION on the support hand.
+    //
+    // Non-zero = read that XInput pad mask instead (0x0100 = LEFT_SHOULDER, which is this
+    // profile's off-hand grip -- the same bit reloadgrip uses).
+    //
+    // WHY THE ALTERNATIVE EXISTS. The OpenXR action path is used by exactly two things in this
+    // plugin: this feature and the vehicle hard brake. Everything else -- melee, reload, the whole
+    // gesture stack -- reads the XInput mask, and that path is PROVEN on this profile while the
+    // per-hand action path is not. If the hold never latches, the status line says
+    // `griphandle=1 gripever=0`, and this key is the way to move to the proven path without
+    // waiting for a fix.
+    //
+    // Note the mask route cannot tell your hands apart -- it sees a button, not a side. That is
+    // acceptable here because the ZONE already requires the hand to be at the barrel.
+    int   bind_two_hand   = 0;
+
+    // Weapons that must NEVER two-hand, as comma-separated SUBSTRINGS of the weapon class name
+    // (same matching as wpnoff -- "Magnum" matches BP_Magnum_WeaponActor_C).
+    //
+    // A one-handed weapon held with a second hand on a barrel it does not have is not a feature,
+    // it is the aim wandering off for no reason the player can see. Halo's one-handers are the
+    // pistols, the Needler and the sword.
+    //
+    // ⚠️ THESE NAMES ARE UNVERIFIED against this title's actual class names -- they are the
+    // obvious spellings, not measured ones. Check them with a weapon in hand (the per-weapon
+    // offset log prints the class name) before trusting the defaults. A wrong entry fails in the
+    // safe direction -- the weapon simply is not denied -- which is exactly why it needs checking
+    // rather than assuming.
+    //
+    // Substrings are chosen not to collide: "PlasmaRifle" rather than "Rifle", which would also
+    // deny the Assault Rifle.
+    char  two_hand_deny[256] = "Magnum,PlasmaPistol,PlasmaRifle,Needler,Sword";
+
+    // THE NEAR EDGE OF THE GRAB ZONE FOR ONE-HANDED WEAPONS, in metres along the aim ray.
+    //
+    // The rifle zone starts 8 cm FORWARD of the firing grip, because that is where a foregrip is.
+    // A pistol has no foregrip: you cup it AT or just under your firing hand, which is `along`
+    // around zero or slightly negative -- so the most natural two-handed pistol hold was the exact
+    // position that could never register.
+    //
+    // Negative means "behind the firing grip", i.e. cupping under it. -0.10 covers a hand wrapped
+    // around the base of the grip without reaching so far back that a hand resting at your side
+    // starts latching. The FAR edge is unchanged: a hand a long way down a barrel that is not there
+    // should still not latch.
+    //
+    // Only applies to weapons matched by two_hand_deny -- the same list that withholds aim
+    // authority. Those two now travel together: a one-hander grips (for zoom) but never bends aim.
+    float two_hand_onehand_min_m = -0.10f;
+
+    // NO twohandhidereticule KEY YET, deliberately. elliotttate hides his floating reticule during
+    // a hold because it is drawn from the one-handed ray and therefore lies; ours is drawn
+    // downstream of the blend and stays truthful, so there is no bug to fix. If a player does want
+    // it hidden there are THREE surfaces -- the hosted crosshair, the ring mesh and the compositor
+    // reticule -- and hiding one of the three is worse than hiding none. A key that parses and
+    // half-works is the silent no-op this project keeps paying for, so it lands when all three do.
+
+    // ---- dev only: which consumer receives the blend.
+    //
+    // Both default ON and the shipped answer is that they are always both on. Setting
+    // twohandrig=1 twohandaim=0 reproduces the "gun points where the shots do not go" bug ON
+    // PURPOSE -- it is the only way to demonstrate in a headset that the two really are moving
+    // together, which is the single most important property of this feature.
+    bool  two_hand_aim    = true;
+    bool  two_hand_rig    = true;
+    bool  two_hand_log    = false;
+
+    // Which bone to hide. Shoulder_L takes the whole arm; Elbow_L leaves the upper arm in place
+    // and takes forearm downwards; Wrist_L takes just the hand. Configurable because which one
+    // looks right is a judgement to make in the headset, not from a bone list.
+    char  arm_hide_bone[64] = "Shoulder_L";
+
+    // HOW to hide. HideBoneByName reported success on all three meshes and changed nothing
+    // visible, so per-bone hiding may simply be inert here -- the same silent no-op Rig.cpp
+    // records for the relative rotation write.
+    //
+    //   0 = HideBoneByName            per-bone, keeps the right arm. What we want if it works.
+    //   1 = SetVisibility(false)      whole component. Takes BOTH arms.
+    //   2 = SetHiddenInGame(true)     whole component, different path to the same thing.
+    //
+    // Modes 1 and 2 are blunt, but they are the route to genuinely independent hands: with
+    // SetBoneTransformByName absent we cannot pose the game's arms, so the only way to two free
+    // arms is to remove the game's pair and attach our own to the controllers. Both pass
+    // bPropagateToChildren=false, so the weapon actor socket-attached to this mesh stays put.
+    int   arm_hide_mode   = 2;
+
+    // Apply to every first-person skeletal mesh, not just the arms.
+    //
+    // ON BY DEFAULT because the dump found THREE that carry this pose:
+    // BPC_FP_SkeletalMesh_C, BPC_FP_TranslucentSkeletalMesh_C (the shield shell, which Rig.cpp
+    // records as running its own instance of the same anim blueprint) and
+    // BPC_FP_ShadowSkeletalMesh_C. Hiding the bone on the arms alone leaves a floating shield
+    // limb and an arm-shaped shadow. Set 0 only to isolate which mesh is which while testing.
+    bool  arm_hide_all    = true;
+
+    // Force hidden skeletal meshes to keep evaluating their pose.
+    //
+    // UE defaults to OnlyTickPoseWhenRendered, so a hidden mesh can stop animating entirely --
+    // and Rig.cpp positions the weapon from this mesh's PrimaryWeapon SOCKET. A frozen pose means
+    // a frozen socket and a gun parked wherever the animation stopped, appearing intermittently
+    // depending on when the hide lands relative to the rig resolving.
+    //
+    // Set 0 to test whether the arm hide is what is moving your weapon.
+    bool  arm_keep_pose   = true;
+
+    // ---- PER-WEAPON OFFSETS ------------------------------------------------------------------
+    // One calibration cannot fit a pistol, an assault rifle and a rocket launcher: they do not
+    // share a grip geometry. These adjust the calibrated base per weapon, so the pose-match
+    // calibration still does the work and an entry is only needed where a weapon disagrees.
+    //
+    // A weapon with no entry behaves exactly as it does today, so enabling this changes nothing
+    // until something is tuned.
+    //
+    // SHIPS ON (2026-08-23). Safe to default on precisely because of the line above: the base is
+    // applied by ASSIGNMENT and a weapon with no entry lands exactly on the calibration, so with
+    // an empty table this is a no-op. What it buys by being on is that the INSERT capture key is
+    // live for everyone -- a player who finds one weapon sitting wrong can fix that weapon alone,
+    // without a hidden setting to discover first.
+    //
+    // Cost measured in-session: weapon_offset 0.004 ms mean / 0.064 ms max against a 0.2-0.5 ms
+    // tick. It is not a full-array sweep -- one class-name read on the held weapon per tick.
+    bool  wpn_offsets     = true;
+
+    // SOCKET-CANCELLING WEAPON DRIVE -- see WeaponDrive.hpp for the algebra.
+    //
+    // 0 (default) = legacy: controller tracking is delivered by placing the arm mesh, which per
+    // Rig.hpp:15 carries ARMS + GUN together and so parents the shoulders to the aim controller.
+    // 1 = drive the weapon root's relative transform instead and leave the mesh undriven, so the
+    // shoulders can be body-anchored by palettearm while the gun keeps tracking the hand.
+    //
+    // DEFAULTS OFF ON PURPOSE. An unflagged build behaves exactly as it always has; this is the
+    // structural half of "the legacy setup does not break", the other half being that the
+    // calibration (C) is passed through untouched so values tuned under either path are valid
+    // under both. The drive self-checks against the legacy result every frame and hands the gun
+    // back if it ever diverges, so leaving it on is safe even when it cannot solve.
+    bool  wpn_drive       = false;
+
+    // Per-weapon CAPTURE key, a Windows virtual-key code. Same gesture as the global calibration
+    // on calib_key (END): hold it, the weapon freezes, line your controller up with it, release.
+    // Only the destination differs -- this one stores a delta for the weapon in hand instead of
+    // rewriting the global calibration.
+    //   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
+    //
+    // ⚠️ INSERT, NOT HOME. PR #7 shipped this as 0x24, which is kill_key -- the mod's KILL
+    // SWITCH. Both are polled with GetAsyncKeyState in the same block, so HOME would have
+    // captured a weapon delta AND toggled the kill switch on the same press. The collision was
+    // invisible in the fork rather than introduced by the rebase: kill_key was already 0x24 on
+    // the branch point too, so the clash shipped in PR #7 as authored and simply went unchecked.
+    // Keep new hotkeys off the reserved set: 0x21 mode, 0x22 aim-calib, 0x23 calib,
+    // 0x24 KILL, 0x2E scope-calib.
+    int   wpn_calib_key   = 0x2D;
+    bool  wpn_calib_pending = false;
+
+    // The calibrated base, captured by WeaponOffset on each config reload. Published here so the
+    // capture can measure a DELTA against it: g_cfg's live values already carry this weapon's
+    // existing adjustment, so differencing against those would shrink toward zero on every
+    // recalibration.
+    float wpn_base_grip = 0.0f, wpn_base_grip_yaw = 0.0f, wpn_base_grip_roll = 0.0f;
+    float wpn_base_off_x = 0.0f, wpn_base_off_y = 0.0f, wpn_base_off_z = 0.0f;
+    bool  wpn_log         = false;
+    WeaponAdjust wpn[kMaxWeaponAdjust];
+    int   wpn_count       = 0;
+
+    // ---- PER-WEAPON SCOPE TRIMS (ScopeOffset.hpp) -------------------------------------------
+    // Zoom and pane placement as DELTAS on the global scope fit, so one calibration still does
+    // the work and an entry is only needed where a weapon disagrees. A weapon with no entry lands
+    // exactly on the global fit, which is why this can ship ON: with an empty table it is a no-op.
+    //
+    // Trims the IN-SCENE PANE path (Scope.cpp). The compositor layer (ScopeLayer.cpp,
+    // scope_layer_*) is a second placement system with its own frame and units; when it ships it
+    // wants its own delta set rather than this one overloaded onto it.
+    bool  scope_offsets   = true;
+    ScopeAdjust wpn_scope[kMaxScopeAdjust];
+    int   scope_count     = 0;
+    // Log which weapon matched which trim, on every weapon CHANGE. Off by default; this is the
+    // instrument for "is the trim being applied at all", answerable without a capture.
+    bool  scope_wpn_log   = false;
+
+    // The global fit as the FILE supplied it, republished by ScopeOffset every reload. The capture
+    // measures its delta against THESE, not against the live g_cfg.scope_* -- which already carry
+    // the current weapon trim, and would therefore fold the old trim into the new one.
+    float scope_base_zoom  = 0.0f;
+    float scope_base_dist  = 0.0f, scope_base_right = 0.0f, scope_base_up = 0.0f;
+    float scope_base_rot_p = 0.0f, scope_base_rot_y = 0.0f, scope_base_rot_r = 0.0f;
+
+    // ---- PER-WEAPON RIGID DELTA FOR THE PALETTE CARRY (wpnfix) -------------------------------
+    // TWO TIERS, ONE TABLE: the shipped baseline in halo_vr.cfg and the player's own captures in
+    // halo_vr_weapons.cfg, merged in load order and resolved by weapon_fix_for() above -- read its
+    // precedence note before touching either half.
+    //
+    // Captured by the same INSERT gesture as wpnoff above; which of the two a press writes is
+    // decided by WHICH DRIVER OWNS THE WEAPON, not by a second hotkey. Under the palette driver
+    // (armdriver=2 + pawpn=1) the rig's grip/mount fit is not in the chain at all, so a wpnoff delta
+    // would adjust nothing a player can see; under the rig driver the reverse. One key, one meaning:
+    // "fix the weapon in my hand".
+    //
+    // NO STRUCT DEFAULTS, AND THAT IS THE RULE WORKING RATHER THAN AN EXCEPTION TO IT. These are
+    // CALIBRATION DATA, not settings: their home is halo_vr.cfg, the one shipped file that still
+    // carries values, exactly as grip/offx/pivx do. An empty table is a valid state -- every weapon
+    // then lands where the plain palette carry puts it.
+    WeaponFix wpnfix[kMaxWeaponAdjust];
+    int   wpnfix_count    = 0;
+    // How many wpnfix lines were DROPPED this load for carrying the wrong schema stamp. Reported
+    // once per reload rather than per tick: a silently ignored calibration file is indistinguishable
+    // from a feature that does not work, and that is the report nobody can act on.
+    int   wpnfix_dropped  = 0;
+
+    // ---- VR RELOAD -------------------------------------------------------------------------
+    // Two-stage reload: press reload to drop the mag, then physically fetch a fresh one from your
+    // belt and bring it to the gun. See the state machine in Gesture.hpp for why the game's own
+    // reload is DEFERRED rather than driven -- Halo's reload is one atomic animation with no
+    // magazine object to manipulate, so the physicality has to come from making you earn it.
+    bool  reload_vr       = false;
+
+    // Pad mask that STARTS the reload. Default 0x4000 = X, this game's reload.
+    //
+    // UNCONFIRMED -- verify with mapbtnlog=1 before trusting it. This profile's mapping is not
+    // obvious (mapfrom=0x2000 -> mapto=0x0100, mapmenuback=0x4000), and a wrong mask here means
+    // the reload either never starts or hijacks a button you needed.
+    int   reload_mask     = 0x4000;
+
+    // Pad mask for the left GRIP -- what you hold to keep hold of the magazine. Also unconfirmed.
+    int   reload_grip_mask = 0x0100;
+
+    // BELT ZONE, measured from the head because that is the only body reference VR gives us.
+    // Hand must be at least this far BELOW head height, in metres.
+    float reload_belt_drop = 0.55f;
+
+    // ...and within this horizontal radius of the head, so a hand dropped straight down at your
+    // side counts but one flung out sideways does not.
+    float reload_belt_radius = 0.50f;
+
+    // INSERT: how close the left hand must come to the aim hand to seat the magazine, metres.
+    // Hand-to-hand rather than hand-to-weapon: the gun is a separate actor whose grip point moves
+    // per weapon, while the two controllers are always both known.
+    float reload_join_dist = 0.30f;
+
+    // Swallow the trigger while the magazine is out. THIS is what gives the gesture stakes -- you
+    // are genuinely defenceless until you finish. Off means the reload is cosmetic.
+    bool  reload_suppress_fire = true;
+
+    // Pressing reload again while the mag is out re-seats it and aborts.
+    //
+    // OFF, because that is not how VR reloading works. Onward, Pavlov, H3VR: once the magazine is
+    // out you deal with it -- there is no take-backs button, because a cancel is a menu concept
+    // and this is a physical action. Leaving it on also meant a double-tap silently skipped the
+    // entire gesture, which reads as an exploit even though no ammo is gained by it.
+    //
+    // It was originally on as a safety hatch against a stuck MAG_OUT leaving the trigger dead in
+    // a headset. Six-for-six on the first live session made that argument much weaker, and the
+    // involuntary cases are covered anyway: the kill switch, stick mode (vehicles, cutscenes,
+    // death) and calibration all reset to Idle and release the suppression. What is NOT covered
+    // is a gesture the player simply cannot complete -- an awkward seating position, tracking
+    // loss on the off hand -- and the only exit there is enabled=0 in the file.
+    bool  reload_cancel   = false;
+
+    // WATCHDOG on an unfinishable gesture. Seconds in MAG_OUT/MAG_HELD before the machine gives up
+    // and returns to Idle. 0 disables it.
+    //
+    // This closes the hole the comment above names. A tap that never becomes a completed reload --
+    // awkward seating, tracking loss on the off hand, or simply changing your mind mid-firefight --
+    // used to latch MAG_OUT forever, and with reload_suppress_fire on that means bRightTrigger is
+    // zeroed on every poll for the rest of the session. Reported from a live session as "I wasn't
+    // able to shoot after a bit", with the tell that a MOUSE click still fired: mouse input never
+    // passes through our XInput hook, so it is the one path the suppression cannot reach.
+    //
+    // Deliberately NOT a cancel-and-reload: it restores the trigger and says so in the log, and the
+    // player reloads again if they still want to. Firing a reload the player did not ask for, in a
+    // firefight, seconds after they stopped gesturing, would be its own bug.
+    //
+    // 6 s is several times the ~1-2 s a completed gesture takes, so it cannot cut short a reload
+    // that is merely slow.
+    float reload_timeout_s = 6.0f;
+
+    // The left grip belongs to US, not to the game.
+    //
+    // It is the VR interaction button -- magazine grabs now, weapon holding later -- and a button
+    // that throws a grenade when you reach for something cannot carry physical interactions. With
+    // this on the game never sees the grip at all, which means GRENADES HAVE NO BINDING until one
+    // is given to them elsewhere. That is a deliberate trade, not an oversight.
+    //
+    // Set 0 for the narrower behaviour: grip swallowed only while a magazine is expected or held.
+    // Only meaningful with reloadvr=1, and only when gripswallow is OFF -- otherwise the grip is
+    // already unbound outright and this window is moot.
+    bool  grip_exclusive  = true;
+
+    // THE LEFT GRIP NEVER REACHES THE GAME. A plain unbind, owned by nothing else.
+    //
+    // Its native action on this game is Throw Grenade, and the grip is our VR interaction button
+    // -- two-handed aiming now, magazine grabs and weapon holding later -- so every grab threw a
+    // frag. Grenades are not lost: left X is rebound onto the throw mask by mapfrom/mapto, and
+    // that rebind runs AFTER this swallow, so only the physical grip is removed.
+    //
+    // STANDALONE ON PURPOSE. This was first implemented by routing through the reload lane's
+    // grip_exclusive, so switching off an unrelated feature silently gave the grip back to the
+    // game and the grenade came with it. A binding must not be a side effect of another lane's
+    // flag. Set 0 only if you actually want the grip to throw grenades again.
+    bool  grip_swallow    = true;
+
+    // THE OFF-HAND TRIGGER IS MODAL, on whether you are gripping the weapon.
+    //   gripping     -> zoom toggle, and this is the ONLY way to zoom
+    //   not gripping -> throw grenade
+    // Releasing the grip also closes the zoom, because letting go is an unambiguous "done".
+    //
+    // The grip is a mode the player can feel, so one button carries both jobs without ambiguity.
+    // It is also why two_hand_deny no longer refuses the grip on one-handed weapons -- it now
+    // withholds only the AIM BLEND. A Magnum you cannot grip is a Magnum you cannot zoom, and the
+    // one-handers are exactly the weapons with a zoom; the interaction is the same on everything.
+    //
+    // Deliberate consequence: while gripping you have no grenade. Let go, throw, re-grip.
+    //
+    // 0 restores the old split: trigger always toggles zoom, grenade lives on whatever
+    // grenadefrom/mapfrom point at.
+    bool  grip_zoom       = true;
+
+    // GRENADE, moved off the grip.
+    //
+    // With grip_exclusive the game never sees the grip, so grenades need a home. This is a pure
+    // remap: press the button named by grenade_from, and the plugin injects grenade_action in its
+    // place.
+    //
+    // BOTH MASKS ARE UNCONFIRMED. Controller buttons and XInput masks do not line up on this
+    // profile -- the right controller B reports as 0x4000, which the game labels X -- so these
+    // must be measured with mapbtnlog=1 rather than reasoned about. grenade_from should be
+    // whatever your LEFT controller X reports; grenade_action should be whatever the grip used to
+    // report, since that is the mask the game already reads as throw.
+    //
+    // MEASURED 2026-09-04 with mapbtnlog=1 on this profile, not guessed:
+    //   right thumbstick click -> 0x0080
+    //   left controller X      -> 0x2000   (XInput calls it B; the labels do not line up here)
+    //
+    // GRENADE IS THE OFF-HAND TRIGGER, so this remap is OFF. 0 = no button remap; the throw comes
+    // from the modal LT path in Plugin.cpp (trigger throws when you are not two-hand gripping,
+    // zooms when you are), which is the designed input.
+    //
+    // IT WAS 0x2000 -- LEFT X -- AND THAT DOUBLE-BOUND THE BUTTON. map_from is also 0x2000, so one
+    // press of left X did both jobs: the rebind stripped 0x2000 and injected equipment, and then
+    // this remap injected the throw as well, because it reads raw_btn (the pre-injection snapshot)
+    // and the strip therefore never hid the press from it. Equipment AND a grenade, every time.
+    //
+    // That is worth understanding rather than just fixing, because raw_btn is CORRECT here and the
+    // collision is not its fault. Reading the live state instead would make our own injected masks
+    // satisfy the remap -- the melee swing would throw grenades. raw_btn deliberately sees the
+    // physical press regardless of what any earlier stage did with it, which is exactly what makes
+    // two features pointed at one physical button both fire. The lesson is that a raw_btn consumer
+    // does not participate in "first match wins": it cannot be disarmed by an upstream strip, so
+    // its source mask must be unique by construction. Check that before pointing another one at a
+    // button that already has a job.
+    //
+    // Set grenade_from to a mask to put the throw back on a button. Do not reuse 0x2000 (equipment
+    // via map_from), 0x0080 (melee_mask -- costs button-melee entirely, leaving only the swing) or
+    // map_rstick_down's mask (every crouch would throw).
+    int   grenade_from    = 0x0000;
+    int   grenade_action  = 0x0100;
+
+    // How long the reload button must be held before it stops being a reload and becomes the
+    // game's own action, milliseconds.
+    //
+    // Both buttons this feature borrows already have jobs. The reload button is ALSO Interact and
+    // Enter Vehicle; a full playthrough with it swallowed unconditionally meant no vehicles and no
+    // interaction for the whole chapter. Tap starts the VR reload, hold passes through -- and past
+    // the threshold the press is released to the game, so it arrives slightly late rather than
+    // never.
+    int   reload_hold_ms  = 500;
+
+    // Log every state transition. The tuning instrument for the belt zone and join distance.
+    bool  reload_log      = false;
+
+    // ---- OUR OWN HANDS -----------------------------------------------------------------------
+    // With the game's first-person meshes hidden there is nothing on screen but a floating gun.
+    // These are the replacement: spawned StaticMeshComponents attached to the motion controllers
+    // through UObjectHook, the same mechanism Rig.cpp uses for the weapon.
+    //
+    // Spawned rather than borrowed because the bone dump closed every other route:
+    // SetBoneTransformByName is ABSENT, so the game's hand bones cannot be posed, and both arms
+    // share one mesh driven by one anim blueprint.
+    bool  hands_vr        = false;
+
+    // Mesh for a hand. Empty falls back to an engine primitive (a small sphere), which is a
+    // placeholder and looks like one -- Halo ships no standalone hand asset we can borrow.
+    char  hand_mesh_path[192] = "";
+
+    // Uniform scale. The engine sphere is 100 cm radius, hence the very small default.
+    float hand_scale      = 0.06f;
+
+    // Offset from the controller, centimetres, in the controller's own frame. The tracked point
+    // sits behind and below where a real palm is, so a hand mesh placed at the raw pose floats
+    // off the wrist.
+    float hand_off_x      = 0.0f;
+    float hand_off_y      = 0.0f;
+    float hand_off_z      = 0.0f;
+
+    // Show a mesh on the AIM hand too. Off by default: the weapon already tracks that controller,
+    // so a second object there mostly intersects the gun.
+    bool  hand_show_aim   = false;
+
+    // ---- THE MAGAZINE ------------------------------------------------------------------------
+    // Visible only while the reload state machine has one in your hand. Hidden rather than
+    // destroyed between reloads -- spawning a component per reload would churn objects on the
+    // game thread for nothing, and a component we keep is one we can still clean up.
+    bool  mag_show        = true;
+    char  mag_mesh_path[192] = "";
+    float mag_scale       = 0.04f;
+    float mag_off_x       = 0.0f;
+    float mag_off_y       = 0.0f;
+    float mag_off_z       = 0.0f;
+
+    // ===== FROM blindcowboy24 PR-1, TAKEN ALONE =====================================
+    // Over-the-shoulder weapon switching (stow / draw / exchange) and the grenade pouches that
+    // share its body frame. Extracted WITHOUT the palette weapon-positioning hook, two-handed
+    // aiming or the VR reload from that PR -- Holster.cpp depends on none of them; its only
+    // cross-subsystem calls are markers_hide_all() and reload_state()/weapon_key(), all of which
+    // this tree already has.
+    // ---- HOLSTERS (Holster.hpp). Head-frame offsets in METRES: x right, y up, z BACK.
+    bool  holster_enabled = true;
+    float holster_radius  = 0.16f;
+    // GRENADE POUCHES. Measured 2026-08-24: of 15 grip presses that caught nothing, FOURTEEN were
+    // within 16 cm of a pouch and eleven within 12 cm, against a catch radius of 7 cm. They were
+    // near misses, not wild reaches -- the hand was arriving at the right place and the sphere was
+    // too small to be there. The frag-side misses centre 7.7 cm BEHIND the pouch, which is larger
+    // than the entire old radius: the hand sweeps in from the front, and by the time the grip is
+    // actually pressed it has settled back against the chest.
+    //
+    // 0.13 catches 12 of the 15 recorded misses and absorbs that 7.7 cm bias without moving the
+    // centre, so the reaches that already worked keep working. It stays clear of the right hip
+    // slot too (centres 0.329 apart, 0.13 + 0.16 = 0.29), and where the two pouches now overlap
+    // slightly at the sternum the nearest centre wins, which is just "whichever side you are on".
+    float holster_gradius = 0.13f;
+    float holster_rs[3] = { 0.20f, -0.10f,  0.22f};   // right shoulder (behind)
+    float holster_ls[3] = {-0.20f, -0.10f,  0.22f};   // left shoulder (behind)
+    float holster_rh[3] = { 0.22f, -0.65f,  0.05f};   // right hip
+    float holster_lc[3] = {-0.12f, -0.30f, -0.12f};   // left chest (in front): FRAG
+    float holster_rc[3] = { 0.12f, -0.30f, -0.12f};   // right chest (in front): PLASMA
+    int   holster_gswitch_mask = 0;                   // "Switch Grenade" pad mask; 0 = not wired yet
+    int   holster_melee_veto_ms = 400;                // no melee this long after a holster action
+    // ---- HOW FAR OUTSIDE A HOLSTER ZONE STILL VETOES A MELEE.
+    //
+    // Was 0.10, giving a veto sphere of holster_radius + 0.10 = 0.26 m around EACH of the five
+    // zones, which is a large part of the space a punch travels through.
+    //
+    // The first session's 16 vetoes looked like the veto doing its job, because ten of them sat
+    // between a "grenade armed" and a "HOLSTER THROW" -- the detector firing on grenade throws,
+    // correctly suppressed. That reading was right about those ten and wrong as a verdict on the
+    // rule: the grenades were masking it. The next session threw NO grenades, and all ten vetoes
+    // were proximity, against 24 fired -- 29% of qualifying strikes killed, every one with genuine
+    // strike kinematics (speed 2.74-5.46, ext 1.89-3.98). They sat at 0.147 to 0.256 m from a zone.
+    //
+    // 0.00 keeps the veto at holster_radius itself, so a hand actually INSIDE a zone still cannot
+    // melee, and saves nine of those ten. What the margin was really protecting is the DRAW -- a
+    // weapon coming out of a slot is a fast extension away from the head, indistinguishable from a
+    // strike -- and a draw is already covered by holster_melee_veto_ms, which runs from the grip
+    // press that started it. The margin was a second, much blunter guard on the same event.
+    float holster_melee_margin  = 0.00f;
+
+    // ---- GRENADE VISUALS. From the headset: "it's hard to tell when I actually grab it". Three spheres,
+    // spawned with the wheel-marker recipe: one on each chest pouch so the grab target is visible,
+    // and one ON THE HAND while a grenade is armed, so a successful grab is unmissable. Spheres
+    // for now -- real grenade meshes need their asset names, which grenademeshdump discovers.
+    //   holstermarkers: 0 off, 1 = pouches appear as the hand approaches (default), 2 = always on.
+    int   holster_markers = 1;
+    float holster_marker_scale = 0.08f;   // sphere diameter in engine scale (~8 cm)
+
+    // ---- THE THROW GOES WHERE YOU THREW IT. Same disease, same cure as melee: the game lobs the
+    // grenade along the AIM, and the aim during a throw is the flailing hand itself. On a fired
+    // throw the aim is pinned to the SWING'S OWN DIRECTION -- sampled at the velocity peak, the
+    // same instant the throw gate reads -- for this many ms, through the identical hold machinery
+    // the melee uses. 0 disables (grenade flies wherever the aim happens to point, old behaviour).
+    // 350 covers the 120 ms synthetic press plus the game's wind-up; how long the game actually
+    // needs is NOT measured -- raise this first if grenades fly off-line.
+    int   holster_aim_hold_ms = 350;
+
+
+    // ---- THE ZONES HANG ON A TORSO, NOT ON THE HEAD. From the headset: turn your head
+    // right and the plasma pouch is inside your body -- because the zones rotated one-to-one with
+    // head yaw, as if the player were a 2D square. The standard VR fix (and what body-holster
+    // games actually ship) is a lagged body yaw with a leash: the body stays put while the head
+    // looks around inside a dead zone, gets DRAGGED once the head passes the limit (gear is never
+    // fully behind you), and re-centres slowly toward where you face, so a sustained turn brings
+    // the gear around while a glance moves nothing.
+    //   holsteryawdead: half-width of the free-look cone, degrees.
+    //   holsteryawrate: recentre speed, deg/s (0 = only the drag moves the body).
+    float holster_yaw_dead = 45.0f;
+    float holster_yaw_rate = 10.0f;
+
+    // ---- NECK PIVOT (torso tier 1). The zones used to hang off the head's POSITION, and the
+    // head's position arcs ~20 cm forward when you nod -- the eyes rotate about the neck, the
+    // chest does not, so looking down dragged the pouches forward off the body. The anchor is now
+    // a computed NECK point (head position + this offset rotated by the full head orientation),
+    // lifted back to head height in the BODY frame -- for a level head the zones land exactly
+    // where they always did, and a nod moves them barely at all. Metres; both 0 = old behaviour.
+    float holster_neck_down = 0.15f;   // eyes to neck pivot, straight down in the head frame
+    float holster_neck_back = 0.08f;   // ...and slightly behind the eyes
+
+    // With holsters on, the PHYSICAL buttons for grenade switch / grenade throw are swallowed --
+    // the gesture system owns those actions. Synthetic holster presses are injected AFTER the
+    // steal, so they still work. Menus and stick mode keep the buttons, since Y navigates UI and
+    // stick mode has no holsters to replace them with.
+    //
+    // SWAP (Y) IS NO LONGER IN THE STEAL SET, whatever this is set to. The original text here read
+    // "a stray Y press must not swap", which sounds right and was not: the reach gesture needs no
+    // button, so taking Y away bought nothing and simply deleted the game's native weapon switch.
+    // Both work independently now -- press Y, or reach over your shoulder.
+    //
+    // Turning this off is ALSO not the cure for a missing grenade throw. throw_mask is 0x0100,
+    // shared with the trigger grenade, and that fault was ordering: the trigger injected the mask
+    // and this steal stripped it a few lines later. The injector now runs after the steal.
+    int   holster_steal_buttons = 1;
+    // WHICH HAND WORKS THE GRENADE POUCHES. 2 = BOTH (default): either grip grabs, and the
+    // behaviour follows the hand that is carrying -- in the OFF hand the gun stays live and
+    // visible in the aim hand (the natural two-handed carry); in the AIM hand the weapon hides
+    // and fire suppresses while the grenade shares it (the original single-hand behaviour).
+    // 1 = off hand only; 0 = aim hand only. Weapon-swap holsters stay on the aim hand
+    // regardless -- only the pouches are handed.
+    // ---- MOTION GRENADES: OFF BY DEFAULT, AND THAT IS A DELIBERATE CANONICALISATION -----------
+    //
+    // The pouch-grab/throw half of the holster system (blindcowboy24's) is a GESTURE feature: a grip
+    // closing inside a chest pouch arms a grenade and a throw motion releases it. Reported
+    // 2026-09-07 firing unprompted during release-candidate testing -- a grenade thrown by an
+    // ordinary hand movement is not a cosmetic surprise, it is a wasted resource and possibly a
+    // suicide, and it happens with no button pressed.
+    //
+    // WHY THIS KEY EXISTS AT ALL: until now the only lever was `holster`, the MASTER switch, which
+    // also disables over-the-shoulder weapon switching -- a separate feature that was merged
+    // deliberately and works. Turning off an unwanted gesture should not cost a wanted one, so the
+    // two halves are now independently switchable.
+    //
+    // Off by default because a gesture that fires unbidden must be opted INTO, not out of. Weapon
+    // switching keeps its existing default; only the pouches change.
+    //
+    // NO RELEASE-NOTES MIGRATION LINE IS OWED FOR THIS. The pouch gesture has never appeared in a
+    // shipped release, so no player has it to lose -- the settings-invalidation rule protects
+    // behaviour people ALREADY HAVE, and defaulting an unshipped feature off strands nobody. Noted
+    // because the rule is easy to over-apply: a default change that looks alarming in a diff is not
+    // automatically a promise being broken.
+    bool  holster_grenades = false;
+
+    int   holster_gren_hand = 2;
+
+    int   holster_swap_mask  = 0x8000;                // Y = switch weapon on the default pad map
+    int   holster_throw_mask = 0x0100;                // LB = throw grenade (grenade_action)
+    int   holster_press_ms   = 120;
+    float holster_throw_speed = 1.2f;                 // m/s forward at release
+    bool  holster_haptic = true;
+    bool  holster_log    = false;
+
+    // ---- THE VISIBLE MAGAZINE (reloadmag). The belt grab used to be a half-metre invisible ring
+    // around the waist: reach anywhere low and squeeze. With this on, dropping the mag SPAWNS a
+    // magazine mesh at a fixed point on the belt, and the grab must take THAT -- the fetch hand
+    // within reloadmagrad of the mag itself. While carried, the mesh rides the fetch hand until it
+    // seats. The mesh is the game's own (resolved from the loaded-object list, same recipe as the
+    // grenade pouch markers); the resolve log prints every magazine-ish StaticMesh it finds, which
+    // is also the asset survey the per-weapon-mag step needs. Falls back to the frag grenade mesh
+    // rather than an invisible point -- a stand-in you can see beats a shape you cannot.
+    // The point and the grab test live in the HOLSTER's body frame (torso leash, neck pivot), so
+    // the mag hangs on your hip exactly as the pouches do; with holster=0 the frame does not run
+    // and the grab silently falls back to the legacy ring.
+    // HIDE THE WEAPON'S OWN MAGAZINE while the VR reload has it out. The gun keeping its mag
+    // during MAG_OUT was reported from the field as "the magazine still appears to be in the
+    // rifle" -- the game ships the mag as its own component on the weapon actor, so it can be
+    // hidden for real. Substring of the component's class or object name; magdump surveys the
+    // held weapon's components one-shot on value change (dev instrument, harmless in release).
+    bool  mag_hide = true;
+    char  mag_hide_name[64] = "Magazine";
+    int   mag_dump = 0;
+
+    int   reload_mag = 1;
+    // Body-frame belt point (x right, y up, z back, metres) -- default mirrors holsterrh onto the
+    // LEFT hip, the fetch hand's side.
+    float reload_mag_off[3] = {-0.22f, -0.65f, 0.05f};
+    float reload_mag_radius = 0.15f;
+    // World scale on the mag mesh. 1.0 = the asset's authored size.
+    float reload_mag_scale = 1.0f;
 };
 
 extern Config g_cfg;
@@ -2170,6 +4299,15 @@ extern char     g_calib_path_right[MAX_PATH];
 enum { CALIB_HAND_RIGHT = 0, CALIB_HAND_LEFT_LOADED = 1, CALIB_HAND_LEFT_SEEDED = 2 };
 int select_calib_for_hand();
 extern uint32_t g_cfg_check_tick;
+
+// Incremented ONLY by a load_config() that parsed the main file successfully and therefore
+// restored the calibrated values from disk.
+//
+// g_cfg_check_tick is NOT a substitute: it advances on every ~2 s attempt, including the early
+// return taken when halo_vr.cfg fails to parse (a momentary file lock while editing is enough).
+// Anything that needs to know "g_cfg now holds clean on-disk values" must watch THIS, because on
+// the early-return path it does not.
+extern uint32_t g_cfg_load_gen;
 extern bool     g_pivot_from_calib;
 // TRUE when an aim offset loaded WITHOUT an explicit aimcalibver stamp, so its schema is inferred
 // rather than known. Set by load_config(); the tick reports it once (this file makes no API calls).
@@ -2183,6 +4321,9 @@ void write_calib_file();
 void ensure_user_cfg_template();
 // TRUE if the file exists and contains at least one active (uncommented) key line.
 bool config_file_has_uncommented_keys(const char* path);
+// Same, but NAMES the keys: fills a comma-separated list and returns the count. A warning that a
+// shared file "has uncommented keys" without saying which is nearly useless -- see Config.cpp.
+int  config_file_list_uncommented_keys(const char* path, char* out, size_t out_sz);
 
 // Keyboard gestures poll GetAsyncKeyState, which reads GLOBAL key state -- keys typed into ANY
 // app register, game focused or not. On a machine that keeps working while the game runs, End /
@@ -2209,10 +4350,41 @@ extern char g_ref_mirror_path[MAX_PATH];
 extern char g_dev_mirror_path[MAX_PATH];
 extern char g_calib_mirror_path[MAX_PATH];
 extern char g_status_path[MAX_PATH];
-// Menu-armed calibration mode: 0 = off, 1 = pose-match armed, 2 = aim-ray armed. Written by the
-// bridge (calib:pose / calib:aim / calib:off commands) and by the trigger edges in Plugin.cpp;
-// the update() gesture block treats an armed mode as a held calibration key.
+// Menu-armed calibration mode: 0 = off, 1 = pose-match armed, 2 = aim-ray armed, 3 = SUPPORT HAND
+// armed. Written by the bridge (calib:pose / calib:aim / calib:hand / calib:off commands) and by
+// the trigger edges in Plugin.cpp; the update() gesture block treats an armed mode as a held
+// calibration key.
 extern std::atomic<int> g_menu_calib_mode;
+
+// The SUPPORT-HAND gesture's hold, published by the same game-thread block that derives the pose
+// and aim holds -- because the left-trigger "save and re-arm" half of the gesture is only visible
+// there (g_menu_calib_lt is TU-local to Plugin.cpp, sampled inside the XInput hook).
+//
+// READ IT GATED ON THE MODE, never alone: `mode == 3 && g_hand_calib_held`. The mode is the
+// authoritative half -- it is what the right trigger and the menu's Cancel clear -- so gating on it
+// means a publisher that stops running (an update() early-out, a driver release) can never leave a
+// freeze latched with the hand pinned in mid-air.
+extern std::atomic<bool> g_hand_calib_held;
+
+// ---- BIND CAPTURE ("press the button you want").
+//
+// Same shape as the armed calibration above, and for the same reason: with UEVR's overlay open
+// the VR mod zeroes the pad upstream, so NO controller input reaches this plugin while the menu
+// is on screen. A listen-for-a-press widget inside the menu is therefore impossible -- the menu
+// can only ARM, and the player closes it and presses the button.
+//
+// Ownership is split so no lock is needed. The BRIDGE (game thread, ~2 s poll) owns the key name
+// and only touches it while disarmed; the XINPUT HOOK owns the captured mask and disarms itself.
+//   bridge: writes g_bind_capture_key, then stores 1 to g_bind_capture (release)
+//   hook:   sees armed, records the first NEW button bit into g_bind_captured, stores 0 (release)
+//   bridge: sees g_bind_captured != 0, writes `<key>=0xNNNN` into halo_vr_user.cfg, clears it
+// The hook does no file I/O -- writing a cfg from an input callback is exactly the stall class
+// the load_config gate exists to avoid.
+extern std::atomic<int>      g_bind_capture;     // 0 = idle, 1 = armed
+extern std::atomic<int>      g_bind_captured;    // mask the hook caught, 0 = nothing yet
+extern std::atomic<uint64_t> g_bind_capture_deadline;   // GetTickCount64 expiry, 0 = none
+extern char g_bind_capture_key[32];              // cfg key the capture writes to
+
 // Consume menu commands + refresh the data\ mirrors. Returns how many commands were applied.
 int menu_bridge_tick();
 
