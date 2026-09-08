@@ -594,7 +594,25 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
 // point: the walk itself cannot crash, and turning the crash-capable half on is a separate,
 // deliberate act by an operator who has already read the candidate list.
 
-#if HALO_VR_DEV
+// NOT DEV-GATED, AND THE GATE THAT USED TO BE HERE WAS A SHIPPING BUG.
+//
+// probe() is the ONLY thing that ever latches g_chain, and resolve_latched() returns nullptr
+// immediately unless g_chain.valid(). So with this behind HALO_VR_DEV a release build could never
+// latch, never resolve, and never capture: `chain=none comps=9 resolved=0 fed=0`, and the layer
+// fell back to the generated ring for EVERY slot. That is not a diagnostic being unavailable --
+// it is the whole "game art through the XR layer" feature (the real reticule, the navpoint marker
+// art) silently absent from every build a player has ever run.
+//
+// Found 2026-09-07 from a pre-release test build: "my XR reticle is the generated art, not the
+// sniper's". It could not have been found any other way round, because we PLAYTEST ON DEV BUILDS
+// -- which is the exact hazard the comment further down (search "did not protect anyone here")
+// already warned about for the cross-check. Same file, same trap, one gate higher.
+//
+// Cost of un-gating is bounded and self-limiting: the caller only probes while !g_chain.valid()
+// and no faster than once a second, so it runs a handful of times at bring-up and then never
+// again for the life of the process. The genuinely expensive part -- the xcheck that re-walks a
+// SECOND target to prove the first -- stays dev-gated below, because that one is a research
+// question and has no verdict to reach on the play path.
 
 // How far into each object to look. Generous enough to cover an FTextureRenderTargetResource (which
 // carries two base vtables and a fair amount of state before TextureRHI) without being a sweep.
@@ -730,8 +748,6 @@ done:
              ? " Set xrlayersrcprobe 2 to attempt the virtual call on these -- read the list first."
              : "");
 }
-
-#endif   // HALO_VR_DEV
 
 // ============================================================================================
 // Driving it
@@ -1053,8 +1069,12 @@ void xrsource_tick(uint32_t tick) {
         }
     }
 
-#if HALO_VR_DEV
     // ---- the walk: only when we have nothing, and never faster than once a second ----
+    //
+    // DELIBERATELY NOT DEV-GATED -- see the note above probe(). This is the only latch, and without
+    // it a release build resolves nothing and shows generated art in place of every piece of game
+    // art the layer is supposed to carry. Self-limiting: gated on !g_chain.valid(), so it stops
+    // for good once the chain is measured.
     if (probe_mode > 0 && !g_chain.valid() && (int32_t)(tick - g_next_probe) >= 0) {
         g_next_probe = tick + 32;
 
@@ -1063,7 +1083,16 @@ void xrsource_tick(uint32_t tick) {
         // either way; see probe_render_target().
         API::UObject* subject =
             component_render_target(g_ret_widget_comp.get_checked(L"WidgetComponent"));
+#if HALO_VR_DEV
+        // THE MADE-UP SUBJECT STAYS DEV-ONLY, while the latch above it does not.
+        //
+        // This fallback exists for the headless lane, where the aim stack idles and the reticule
+        // widget is never created, so there is no real render target to measure. A player always
+        // has the widget's own target -- and if it is not up yet the latch simply retries a second
+        // later, because it is gated on !g_chain.valid(). Allocating a render target in a player
+        // build to measure something that is about to exist anyway is a cost with no payer.
         if (subject == nullptr && want >= 16 && want <= 4096) subject = probe_render_target(want);
+#endif
 
         if (subject == nullptr) {
             set_status("no render target to probe (neither the widget's nor a made one)");
@@ -1077,7 +1106,13 @@ void xrsource_tick(uint32_t tick) {
         }
     }
 
+#if HALO_VR_DEV
     // ---- PROVE THE OFFSETS ARE CLASS-LEVEL RATHER THAN ASSUMING IT -----------------------------
+    //
+    // THE DEV GATE STARTS HERE NOW, not above the latch. Everything from this point down is the
+    // research half: it re-walks a second target purely to prove the first, reaches a verdict, and
+    // then never runs again. A player build has no use for the verdict and should not pay for the
+    // walk, which is the same reasoning that (wrongly) swallowed the latch with it until 2026-09-07.
     //
     // Nine components resolving through ONE measured chain is only sound if off_res/off_rhi/off_ext
     // are members of UTexture/FTexture and therefore identical for every UTextureRenderTarget2D.

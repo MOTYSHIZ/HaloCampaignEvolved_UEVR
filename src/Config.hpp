@@ -2845,7 +2845,13 @@ struct Config {
     // tonemapper's shoulder does to highlights; this scales the GRADED colour and leaves the
     // exposure decision alone. Reach for bias first (it uses the curve's range properly) and this
     // only when you want a plain multiply on top.
-    float scope_gain = 4.0f;
+    //
+    // CANON 5.0, raised from 4.0 in a headset 2026-09-07: the scope pane read dim through the
+    // compositor quad at 4. This initialiser IS the shipped value -- no cfg file sets scopegain,
+    // so changing it here is the whole change. (The "0 = do not touch (DEFAULT)" line above dates
+    // from when 0 was the default and has been wrong since it became non-zero; 0 still MEANS
+    // do-not-touch, it is simply no longer what ships.)
+    float scope_gain = 5.0f;
     // scopelayerfollowpane: place the compositor quad AT the in-world pane's own world transform
     // instead of from scopelayerfwd/right/up/width. 1 = follow (default), 0 = use the offsets.
     //

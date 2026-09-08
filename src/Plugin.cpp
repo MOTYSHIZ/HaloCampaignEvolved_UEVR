@@ -7004,8 +7004,32 @@ void update() {
     // because those carry the accumulated snap-turn and are not zero for an empty pose. That
     // mistake shipped once and left the guard silent through nine field dropouts.
     // AimPoseGuard.hpp carries the reasoning; the rig keeps using the run-length gate below.
-    halo::g_ctrl_pose_empty.store(halo::aim_pose_is_empty(pos_is_zero, cq.x, cq.y, cq.z),
-                                  std::memory_order_relaxed);
+    // DEBOUNCED, for the same reason the zero-POSITION run above is: one odd frame must not trip a
+    // guard whose whole purpose is to ride out an outage lasting seconds.
+    //
+    // Undebounced, this flapped. Measured 2026-09-07 from a pre-release build with the sniper in
+    // hand: ELEVEN freeze/release cycles inside two seconds, of 1, 1, 2, 2, 3, 4 ticks each,
+    // alongside the genuine long ones (805, 1998, 2508 ticks). The long ones are what the guard is
+    // for -- focus loss, a level-load stall -- and they are unaffected by a two-tick delay. The
+    // short ones are a runtime handing us one empty pose and then a good one, and freezing for a
+    // single tick on that is worse than simply using the last good pose: the player feels it as
+    // periodic stutter, which is exactly how it was reported.
+    //
+    // The freeze REPORTER's own comment a few hundred lines below assumed "an outage lasts seconds
+    // rather than a single tick" and used that to justify a non-atomic edge detector. That
+    // assumption was false; this is what makes it true.
+    //
+    // Release is INSTANT and arm is DELAYED, deliberately asymmetric: coming back late costs a
+    // frame of aim, going in late costs nothing, and the failure we are guarding against is long.
+    {
+        static uint32_t s_empty_run = 0;
+        const bool raw_empty = halo::aim_pose_is_empty(pos_is_zero, cq.x, cq.y, cq.z);
+        if (raw_empty) { if (s_empty_run < 1000u) ++s_empty_run; }
+        else           { s_empty_run = 0; }
+        // 3 ticks: long enough that a one- or two-frame runtime hiccup never reaches it, short
+        // enough to be imperceptible against an outage measured in hundreds of ticks.
+        halo::g_ctrl_pose_empty.store(s_empty_run >= 3u, std::memory_order_relaxed);
+    }
 
     // ~2 s at tick rate. Long enough that a transient cannot reach it, short enough to be reported
     // before the player has finished wondering why the gun is not in their hand.
