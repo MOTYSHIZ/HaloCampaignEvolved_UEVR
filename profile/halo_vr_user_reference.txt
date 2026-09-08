@@ -805,6 +805,21 @@
 #
 # To remove the crosshair entirely use xrlayerscopereticle=0 rather than a depth of 0.
 #xrlayerscopereticledepth=0.2
+
+# ================================== WORLD DETAIL & PERFORMANCE ==================================
+# The game decides what to keep drawn partly from where your AIM points rather than from where you
+# are looking. With motion controls those stopped being the same thing, so sweeping your hand away
+# from something could make it vanish while it was still in front of you. The mod works around it
+# by raising the distance at which things are culled, far enough that what you would notice stays
+# loaded. 40000 = 400 metres.
+#
+# This is the one setting in this file with a real frame-time cost: nothing inside that radius is
+# distance-culled any more. Raise it if you still see things pop out; lower it to buy performance
+# back.
+#culldist=40000
+# 0 turns the override off entirely. The game returns to its own behaviour after a restart.
+#cullfix=1
+
 # ===================================== SUPPORT DIAGNOSTICS ======================================
 # Leave these at their defaults unless troubleshooting asks for them.
 #
