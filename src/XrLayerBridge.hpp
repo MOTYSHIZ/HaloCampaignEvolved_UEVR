@@ -5,11 +5,13 @@
 // ============================================================================================
 // XrLayerAttach.hpp lists how the plugin can reach the OpenXR entry points UEVR actually calls:
 //
-//   BackendPdb    symbol lookup in UEVRBackend.pdb. Exact, and DEV-ONLY -- players have no PDB.
+//   BackendPdb    symbol lookup in UEVRBackend.pdb. Exact, and it cannot succeed for a player,
+//                 who has no PDB -- though it IS compiled into release builds and is still
+//                 asked as a fallback. See XrLayerAttach.hpp.
 //   LoaderExport  openxr_loader.dll exports. Real addresses, wrong loader, kept as a rung for a
 //                 host that dynamically links.
 //
-// Neither can ship. This module is the tier that can:
+// Neither can SUCCEED on a player's machine. This module is the tier that can:
 //
 //   ApiLayer      the entry points are handed to us by XrApiLayer_HALOVR_reticule.dll, which the
 //                 OpenXR loader loaded into this process through the ordinary API-layer chain.

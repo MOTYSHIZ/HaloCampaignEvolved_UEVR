@@ -29,11 +29,22 @@
 // UEVR pin bumps automatically because a PDB always matches its own DLL. There is no byte
 // signature here and no recorded offset, so there is nothing to re-measure when the pin moves.
 //
-// DEV-ONLY, per DevTools.hpp. Not because it is dangerous, but because it depends on a PDB that
-// only exists in a UEVR checkout: players have no UEVRBackend.pdb, so this could never be the
-// shipping attachment. The shipping route is an OpenXR API layer, which the statically-linked
-// loader loads through the normal implicit-layer chain and which needs no symbol lookup at all.
-// This module is the PROVING HARNESS that lets the swapchain, blit, pose math and colour override
+// DEV-ONLY BY DEPENDENCY, NOT BY COMPILE GATE -- and the distinction matters, because the two
+// are easy to conflate and this comment used to. Nothing here sits behind HALO_VR_DEV: the
+// dbghelp calls are compiled into every build, release included, and you can confirm that by
+// finding SymLoadModuleExW in a shipped halo_vr.dll. What players lack is the PDB, so the
+// lookup cannot SUCCEED for them -- it fails closed, logs, and the tier latches off.
+//
+// That is deliberate rather than an oversight: this module is still the fallback for a player
+// whose API layer is not registered (see below), so compiling it out would remove a rung that
+// is meant to be reachable. The cost of keeping it is that such a player loads dbghelp.dll into
+// the game process for one failed lookup. If that ever becomes unacceptable, gate the module --
+// but then fix the fallback claim below in the same edit, because the two cannot both be true.
+//
+// The shipping route is an OpenXR API layer, which the statically-linked loader loads through
+// the normal implicit-layer chain and which needs no symbol lookup at all. This module began as
+// the PROVING HARNESS that let the swapchain, blit, pose math and colour override be tested in a
+// headset before that layer existed.
 // be tested in a headset now, rather than after that layer is built.
 //
 // THAT LAYER NOW EXISTS. `apilayer\` builds it, `src\XrLayerBridge.hpp` is the plugin's side of it,

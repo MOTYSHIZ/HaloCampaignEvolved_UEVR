@@ -75,8 +75,10 @@
 // XrLayerAttach.hpp. That is a third option the paragraphs above did not consider, and it is the
 // shipping one -- do not read the section above and conclude the feature is unbuilt.
 //
-// The catch is the PDB: only a UEVR checkout has UEVRBackend.pdb, so this attachment is DEV-ONLY by
-// construction and can never ship to players.
+// The catch is the PDB: only a UEVR checkout has UEVRBackend.pdb, so this attachment can never
+// SUCCEED for a player. It is compiled into release builds all the same -- it is not behind
+// HALO_VR_DEV -- and is still asked as a fallback when the API layer is not registered, where it
+// fails closed and logs. See XrLayerAttach.hpp for why it is kept rather than gated out.
 //
 // FOR SHIPPING, the route is a real OpenXR API layer: the statically-linked loader still walks the
 // implicit-layer registry and loads what it finds there, which is proven on this exact stack --
