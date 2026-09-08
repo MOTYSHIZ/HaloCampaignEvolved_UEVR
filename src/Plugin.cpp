@@ -6791,6 +6791,17 @@ void update() {
                                                    "before set_projection_mono -- rebuild/redeploy "
                                                    "the layer)");
                 }
+#if HALO_VR_DEV
+                // WHILE ON, RELAY THE LAYER'S OWN COUNTERS every ~2 s. The status string carries
+                // mono=/patched=, and patched= must be CLIMBING -- a switch that applied while
+                // that number sits still means no projection layer matched the rewrite. The
+                // 14:38 run on 2026-09-08 had exactly one sample of this string, taken before
+                // the switch, and was unreadable for it.
+                if (want != 0 && (tick % 64) == 17) {
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO layer: %s",
+                                         halo::xrbridge_status());
+                }
+#endif
             }
 
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER

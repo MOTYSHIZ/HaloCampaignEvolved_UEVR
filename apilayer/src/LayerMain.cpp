@@ -323,6 +323,24 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                             combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dst);
                             ++mono_used;
                             g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                            // ONCE: the positive proof that a projection layer was actually
+                            // rewritten, with the shape we saw. Without this line a run where
+                            // the switch applied but no layer ever matched (wrong type, viewCount
+                            // outside 2..4, null views) is indistinguishable from one that
+                            // worked -- which is exactly the run of 2026-09-08 14:38.
+                            static bool s_said_first = false;
+                            if (!s_said_first) {
+                                s_said_first = true;
+                                logf("mono: first projection layer patched -- views=%u, "
+                                     "imageArrayIndex[0]=%u, rect[0]=%dx%d@%d,%d; every view "
+                                     "now shows view[0]'s sub-image (poses/FOVs untouched)",
+                                     src->viewCount,
+                                     src->views[0].subImage.imageArrayIndex,
+                                     src->views[0].subImage.imageRect.extent.width,
+                                     src->views[0].subImage.imageRect.extent.height,
+                                     src->views[0].subImage.imageRect.offset.x,
+                                     src->views[0].subImage.imageRect.offset.y);
+                            }
                             continue;
                         }
                     }
@@ -416,10 +434,11 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrDestroyInstance(XrInstance instance) {
         g_next_destroy_session.store(nullptr, std::memory_order_release);
         g_next_gipa.store(nullptr, std::memory_order_release);
     }
-    logf("instance destroyed (%p) -- frames_seen=%llu layers_appended=%llu",
+    logf("instance destroyed (%p) -- frames_seen=%llu layers_appended=%llu mono_patched=%llu",
          (void*)instance,
          (unsigned long long)g_frames_seen.load(),
-         (unsigned long long)g_layers_appended.load());
+         (unsigned long long)g_layers_appended.load(),
+         (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
     return next(instance);
 }
 
@@ -609,7 +628,15 @@ XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
     // Behind the gate like everything else: an inert layer must not start rewriting a stranger's
     // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
     if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
-    g_projection_mono.store(on != 0 ? 1 : 0, std::memory_order_relaxed);
+    const int want = (on != 0) ? 1 : 0;
+    const int prev = g_projection_mono.exchange(want, std::memory_order_relaxed);
+    // Say so in the LAYER's log, on change only. The plugin logs what it asked for; this is the
+    // record of what the layer actually accepted, plus how many frames it had rewritten up to the
+    // flip -- so an OFF line reads as "N frames went mono", not just "switched".
+    if (prev != want) {
+        logf("mono projection %s (frames patched so far=%llu)", want ? "ON" : "OFF",
+             (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
+    }
     return 1;
 }
 
