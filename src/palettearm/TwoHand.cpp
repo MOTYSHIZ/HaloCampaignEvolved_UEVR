@@ -25,10 +25,32 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
         // once at the end is what stops the scale factor being applied twice (it was, once).
         const Vec3  aim_forward = normalized(input.aim_basis.forward);
         const Vec3  hand_line   = input.support_grip_position - input.aim_grip_position;
-        const float along_units = dot(hand_line, aim_forward);
-        const Vec3  perpendicular = hand_line - aim_forward * along_units;
-        const float along   = along_units * tuning.units_to_metres;
-        const float lateral = length(perpendicular) * tuning.units_to_metres;
+
+        // THE CALLER'S MEASUREMENT WINS when it has one. It is taken in the GUN's frame, so the
+        // cylinder lies along the barrel the player can see rather than along the controller's
+        // ray -- see the note on TwoHandInput::zone_measured. `units_to_metres` is NOT applied to
+        // it: the caller supplies metres, because it converted out of game centimetres itself.
+        float along, lateral;
+        // A SUPPLIED MEASUREMENT MUST STILL BE PLAUSIBLE. It is metres from a hand to a gun the
+        // same person is holding, so anything past a couple of metres is a unit or frame error,
+        // not a reach -- and the failure mode of trusting it is that the hold silently never
+        // latches, with nothing logged and nothing to see. That has happened once already (game
+        // centimetres divided by 100 instead of by rig_scale), so the fallback is the projection
+        // rather than a refusal: a zone measured on the wrong axis still beats no zone at all.
+        const bool supplied_sane = input.zone_measured
+                                && std::isfinite(input.zone_along_m)
+                                && std::isfinite(input.zone_lateral_m)
+                                && std::fabs(input.zone_along_m) < 2.5f
+                                && input.zone_lateral_m < 2.5f;
+        if (supplied_sane) {
+            along   = input.zone_along_m;
+            lateral = input.zone_lateral_m;
+        } else {
+            const float along_units   = dot(hand_line, aim_forward);
+            const Vec3  perpendicular = hand_line - aim_forward * along_units;
+            along   = along_units * tuning.units_to_metres;
+            lateral = length(perpendicular) * tuning.units_to_metres;
+        }
 
         m_state.along_m   = along;
         m_state.lateral_m = lateral;

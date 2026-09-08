@@ -91,6 +91,12 @@ already in your `log.txt` — but please do not assume it is the cause and reins
 
 Delete the `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` folder.
 
+If — and only if — you turned on the [optional bright reticule](#bright-reticule-optional) at some
+point, run `apilayer\Unregister-XrApiLayer.ps1` from inside that folder **before** deleting it. That
+is the one thing this mod puts outside its own folder, and the script is the way to take it back
+out. If you have already deleted the folder, re-extract the zip anywhere and run the script from
+there with `-All`.
+
 ## Required game settings
 
 | Setting | Value | Why |
@@ -117,6 +123,45 @@ Frontend_RequestedRuntime=openxr_loader.dll
 OpenXR does have one trade-off worth knowing: losing session focus (the SteamVR dashboard, an overlay
 app, a remote-desktop connection) stops controller poses updating until the game has focus and input
 again — see [Known issues](#known-issues). That's an annoyance; wrong button mappings are a blocker.
+
+## Bright reticule (optional)
+
+**Skip this if you are happy with the reticule. Nothing else in the mod depends on it, and it is the
+only feature that asks for anything outside the mod's own folder.**
+
+Halo's crosshair is drawn inside the game's scene, so the game's exposure and tonemapping apply to
+it: it dims on a bright beach and blows out in shade, and no single brightness setting wins both.
+This option draws the reticule as an **OpenXR composition layer** instead, which the headset
+receives *after* all of the game's image processing — so it looks the same everywhere.
+
+Reaching that stage of the pipeline needs an **OpenXR API layer**, and the OpenXR loader only loads
+layers it has been told about. Because the game is launched by Steam there is no chance to say so
+per-launch, so it is recorded once, for your Windows user account:
+
+1. Close the game.
+2. Open `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\apilayer\`.
+3. Right-click `Register-XrApiLayer.ps1` and choose **Run with PowerShell**.
+4. Start the game and inject as usual.
+
+**What that actually changes**, because you should not have to take a mod's word for it:
+
+- It writes **one value** under `HKEY_CURRENT_USER` naming that folder's `.json` file. No
+  administrator rights, no service, no file outside that folder, nothing copied anywhere.
+- The layer is then loaded into **every OpenXR application you run**, not only this game. That is
+  how OpenXR layers work and it cannot be avoided. The layer checks which program it is in the
+  moment it starts, and in anything that is not Halo it does nothing at all — no interception, no
+  work, no files written.
+- To undo it: `Unregister-XrApiLayer.ps1`, in the same folder. It removes only what it added and
+  leaves other software's OpenXR layers alone. Setting the environment variable
+  `HALOVR_LAYER_DISABLE=1` also switches it off without unregistering.
+
+**It will not take effect if you run the game as administrator.** The OpenXR loader deliberately
+ignores per-user layer registrations in elevated programs, so that ordinary software cannot inject
+code into elevated software. Run the game normally, or skip this feature.
+
+**How to tell whether it worked:** a `halo_vr_layer.log` file appears in the `apilayer` folder the
+first time the layer loads into the game. If it never appears, the loader is not picking the layer
+up — see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Controls (Quest-style controllers)
 

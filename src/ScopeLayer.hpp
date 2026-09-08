@@ -100,6 +100,79 @@ struct ScopeLayerFeed {
     // number, so a guess here is a wrong ValueAgreement, not a cosmetic slip.
     uevr::API::UObject* render_target = nullptr;
     int                 rt_dim        = 0;
+
+    // THE IN-WORLD PANE'S OWN PLACEMENT, so the quad can be derived from it instead of from a
+    // parallel set of numbers. The pane is where the whole calibration lands -- scopedist/right/up,
+    // the per-weapon wpnscope trims, the socket handshake, everything -- and duplicating that into
+    // scopelayerfwd/right/up guarantees the two drift apart the moment anyone calibrates.
+    // Reading the placed component's world transform inherits all of it for free and cannot go
+    // stale, because it IS the answer rather than a copy of the inputs to it.
+    // valid=false falls back to the scopelayer* offsets, so a build where the location UFUNCTION
+    // is not callable degrades to the old behaviour rather than putting the quad at the origin.
+    Vec3  pane_world{0.0f, 0.0f, 0.0f};
+    float pane_width_cm = 0.0f;
+    bool  pane_valid    = false;
+
+    // WHERE THE SHOT ACTUALLY LANDS, as normalised pane coordinates in -1..1 (0,0 = pane centre,
+    // +u right, +v up). The scope reticule quad was pinned to dead pane centre, which is only
+    // correct while the capture camera's axis and the traced impact point agree -- true for
+    // scopecamtrack=0 at rest, and false the moment the camera rides the weapon through recoil,
+    // sway, or any mode where it is not re-anchored to the live ray every tick.
+    //
+    // Computed by PROJECTING the traced hit point into the capture camera's OWN frustum (its real
+    // world basis, read back from the component, and the FOV actually written to it) rather than
+    // assumed from the aim ray -- the whole point is to catch the cases where those two differ.
+    // valid=false leaves the reticule at centre, i.e. exactly the old behaviour.
+    float ret_u      = 0.0f;
+    float ret_v      = 0.0f;
+    bool  ret_valid  = false;
+    // THE CAPTURE CAMERA'S OWN AXES. The pane image is rendered in this frame, so it is the frame
+    // the reticule offset is expressed in -- and it is NOT the quad's frame, because the camera
+    // carries scope_cam_roll + uv_roll + the live roll lock. Carried so the layer can measure the
+    // angle between the two rather than assume it.
+    Vec3  cam_fwd{1.0f, 0.0f, 0.0f};
+    Vec3  cam_right{0.0f, 1.0f, 0.0f};
+    Vec3  cam_up{0.0f, 0.0f, 1.0f};
+    bool  cam_axes_valid = false;
+
+    // The pane's OWN facing axis. With scopelayerfollowpane the quad should BE the pane
+    // geometrically -- position and orientation both -- rather than sitting at the pane's position
+    // while facing where the ray points. Those are different frames, and the gap between them
+    // changes as the weapon rotates, which is what produced a non-constant offset that no placement
+    // constant could explain.
+    //
+    // ROLL IS THE ONE DELIBERATE EXCEPTION: a real optic does not spin its image when the rifle
+    // cants, so roll keeps coming from scopelayerroll rather than from the pane.
+    // ALL THREE of the pane's axes, because WHICH ONE FACES DOWNRANGE IS NOT KNOWABLE FROM HERE.
+    // Measured 2026-09-07: the pane's GetForwardVector reads -0.17 against the aim -- near
+    // perpendicular, so it is not the facing axis at all. That is what a Plane mesh does: its
+    // normal is local +Z, i.e. its UP vector, which is exactly why the lens roll already reads
+    // GetUpVector rather than GetForwardVector.
+    //
+    // Rather than swap one assumption for another, all three are published and the facing axis is
+    // CHOSEN by which is most aligned with the aim. That is a measurement, it costs two extra
+    // UFUNCTION calls per tick, and it cannot be wrong on a shape nobody tested.
+    Vec3 pane_fwd{0.0f, 0.0f, 0.0f};
+    Vec3 pane_right{0.0f, 0.0f, 0.0f};
+    Vec3 pane_up_axis{0.0f, 0.0f, 0.0f};
+    bool pane_fwd_valid = false;
+
+    // THE RIG'S WORLD ROTATION ON THIS TICK, so the layer can correct the orientation for however
+    // far the rig turns before the frame is actually drawn.
+    //
+    // The in-world pane is parented to the weapon socket and its transform is composed at RENDER
+    // rate -- Plugin.cpp recomposes the rig every frame and reports correcting "up to 161 deg of
+    // parent motion since tick". Everything above is a ~32 Hz sample of that, so a quad built from
+    // it agrees with the pane while still and trails it while you rotate. Publishing the rig
+    // rotation these vectors were measured against lets the submit thread apply the same delta.
+    // The rig's own AXES on this tick -- vectors, never Euler angles. An Euler round-trip
+    // redistributes between its three terms as pitch changes and degenerates near vertical, which
+    // showed up as the pane going jittery when the controller was rolled.
+    Vec3 rig_pos{0.0f, 0.0f, 0.0f};
+    Vec3 rig_fwd{1.0f, 0.0f, 0.0f};
+    Vec3 rig_right{0.0f, 1.0f, 0.0f};
+    Vec3 rig_up{0.0f, 0.0f, 1.0f};
+    bool rig_rot_valid = false;
 };
 
 // GAME THREAD, from scope_apply() -- i.e. only on a tick that produced a real aim ray, with the
@@ -110,6 +183,10 @@ void scopelayer_notice(const ScopeLayerFeed& feed, uint32_t tick);
 // GAME THREAD, every tick, from scope_frame_end() -- ABOVE its early-outs, like xrlayer_tick().
 // Owns retirement (no notice within the grace window = the scope is not up), the config edges and
 // the state logging. Costs one bool test while scopelayer is off.
+// Ask for the pane's atlas cell BEFORE the layer brings up. Must be called from update()
+// ahead of xrlayer_tick(); see the definition for the 92 ms race it exists to lose.
+void scopelayer_configure_cell_early();
+
 void scopelayer_tick(uint32_t tick);
 
 // True ONLY while the compositor is proven to be presenting this slot's art -- our source was

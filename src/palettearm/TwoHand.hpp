@@ -26,8 +26,11 @@ struct TwoHandTuning {
     // elliotttate's change and it matters -- a hard cutoff snaps the weapon about 70 degrees when
     // a LATCHED support hand crosses the boundary, because the hold persists across a threshold
     // the aim does not.
-    float minimum_agreement = 0.35f;
-    float full_agreement    = 0.50f;
+    // CANONICALISED 2026-08-31 from the values the user has been playing on. -1 is below the
+    // minimum a dot product can reach, so the agreement gate is effectively OPEN: the hold latches
+    // on the zone and the grip button rather than on how well the hands agree about forward.
+    float minimum_agreement = -1.0f;
+    float full_agreement    = -1.0f;
 
     // Seconds for the influence to fade fully in or out.
     float blend_seconds = 0.15f;
@@ -68,6 +71,25 @@ struct TwoHandInput {
     bool support_grip_held = false; // the grip button on the support hand
     bool gameplay_active = false;   // false in menus, cutscenes, pause -- forces a release
     float delta_seconds = 0.0f;
+
+    // ---- THE ZONE, MEASURED BY THE CALLER (preferred) ------------------------------------------
+    //
+    // The cylinder used to be projected onto aim_basis.forward -- the CONTROLLER's ray. That is not
+    // where the rifle points: the two differ by the mount calibration, by tens of degrees. So the
+    // grab zone sat along a line through the player's hand rather than along the barrel they can
+    // see, and "put your hand on the gun" did not latch where the gun visibly was.
+    //
+    // When `zone_measured` is set, these two scalars are used instead. The caller measures them in
+    // the GUN's own frame -- along = distance down the barrel, lateral = distance off it -- which
+    // it can do and this module cannot, because the gun's orientation only exists in game space
+    // and everything here is in the caller's VR frame.
+    //
+    // The projection below remains as the fallback for callers that have no gun frame (the
+    // standalone test harness, and any future consumer of this module). It is NOT dead code, but
+    // it is also not the shipped path: Plugin.cpp always supplies the measurement.
+    bool  zone_measured  = false;
+    float zone_along_m   = 0.0f;
+    float zone_lateral_m = 0.0f;
 };
 
 // What the hold decided.

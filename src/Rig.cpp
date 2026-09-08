@@ -1,5 +1,6 @@
 #include "Rig.hpp"
 #include "Config.hpp"
+#include "ArmDriver.hpp"  // the palette driver owns the weapon too; do not attach under it
 #include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
 
 #include <cstdio>
@@ -674,6 +675,16 @@ std::atomic<float> g_rigw_parent_yaw{0.0f};
 API::UObject* g_attach_obj = nullptr;
 
 void attach_apply(API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm) {
+    // NOT GATED ON THE ARM DRIVER, and that is deliberate -- it was, briefly, and it was wrong.
+    //
+    // The two-drivers rule is about two things moving the SAME object. This attachment moves
+    // the WEAPON; the palette route poses the ARM NODES. Different objects, no conflict.
+    //
+    // More importantly, this path carries the CALIBRATION -- grip_deg/grip_yaw/grip_roll, the
+    // off_x/y/z placement, and the per-weapon wpnoff deltas the player tuned by hand. Posing
+    // the weapon from the palette instead replaced all of that with a raw controller basis,
+    // which discards the calibration and is why the gun stopped sitting where it was tuned to
+    // sit. The weapon keeps its calibrated driver; the hand is IK'd TO the weapon.
     if (rig == nullptr) return;
     // Target changed under us -- drop the old one first, or it stays pinned to the controller
     // forever with no reference left to release it by.

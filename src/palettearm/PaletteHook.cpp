@@ -146,6 +146,16 @@ std::atomic<uint64_t> s_calls_nocapture{0};
 // How many capture-bank records have been written. Zero while the hook is running means the mirror
 // is finding no matching record, which is a completely different problem from the drive failing.
 std::atomic<uint64_t> s_bank_writes{0};
+// WHY the capture mirror declined, counted per reason. The freeze under investigation (gun, arms
+// and reticule all stop while the aim keeps working) would be explained by the renderer reading a
+// bank we stopped writing -- but "banks stopped incrementing" cannot say WHICH gate closed, and
+// guessing has already cost several rounds. Each early-out gets its own counter.
+#if HALO_VR_DEV
+std::atomic<uint64_t> s_cap_no_tls{0}, s_cap_no_ctx{0}, s_cap_gate{0}, s_cap_mismatch{0};
+#define HALO_CAPCENSUS(x) x.fetch_add(1, std::memory_order_relaxed)
+#else
+#define HALO_CAPCENSUS(x) ((void)0)
+#endif
 char             s_resolution[192] = "not resolved";
 
 // 600 ticks is ~10 s at 60 Hz on the engine tick this is driven from. Stated here because getting
@@ -209,12 +219,16 @@ int drive_capture_banks(const PaletteAccess& live, PaletteDriveFn drive) {
     auto** const tls_slots = reinterpret_cast<void**>(__readgsqword(0x58));
     if (tls_slots == nullptr) return 0;
     auto* const tls = static_cast<uint8_t*>(tls_slots[s_tls_index]);
-    if (tls == nullptr) return 0;
+    if (tls == nullptr) { HALO_CAPCENSUS(s_cap_no_tls); return 0; }
 
     auto* const context = *reinterpret_cast<uint8_t**>(tls + TLS_CAPTURE_CONTEXT_OFF);
     auto* const shared  = *reinterpret_cast<uint8_t**>(s_sim_base + SHARED_CAPTURE_PTR_RVA);
-    if (context == nullptr || shared == nullptr) return 0;
-    if (context[2] == 0 || context[0] >= 2) return 0;   // capture not active this frame
+    if (context == nullptr || shared == nullptr) {
+        HALO_CAPCENSUS(s_cap_no_ctx); return 0;
+    }
+    if (context[2] == 0 || context[0] >= 2) {   // capture not active this frame
+        HALO_CAPCENSUS(s_cap_gate); return 0;
+    }
 
     int written = 0;
     for (uint8_t bank = 0; bank < 2; ++bank) {
@@ -225,7 +239,9 @@ int drive_capture_banks(const PaletteAccess& live, PaletteDriveFn drive) {
 
         const int32_t tag   = *reinterpret_cast<const int32_t*>(record + CAPTURE_TAG_OFF);
         const int32_t count = *reinterpret_cast<const int32_t*>(record + CAPTURE_COUNT_OFF);
-        if (tag != live.model_tag || count != static_cast<int32_t>(live.node_count)) continue;
+        if (tag != live.model_tag || count != static_cast<int32_t>(live.node_count)) {
+            HALO_CAPCENSUS(s_cap_mismatch); continue;
+        }
 
         PaletteAccess bank_access = live;
         bank_access.palette         = reinterpret_cast<BlamMatrix4x3*>(record + CAPTURE_PALETTE_OFF);
@@ -276,6 +292,18 @@ std::uint64_t palettehook_call_count() { return s_calls.load(std::memory_order_r
 std::uint64_t palettehook_capture_calls()   { return s_calls_capture.load(std::memory_order_relaxed); }
 std::uint64_t palettehook_nocapture_calls() { return s_calls_nocapture.load(std::memory_order_relaxed); }
 std::uint64_t palettehook_bank_writes()      { return s_bank_writes.load(std::memory_order_relaxed); }
+void palettehook_capture_census(std::uint64_t* no_tls, std::uint64_t* no_ctx,
+                                std::uint64_t* gate, std::uint64_t* mismatch) {
+#if HALO_VR_DEV
+    if (no_tls)   *no_tls   = s_cap_no_tls.load(std::memory_order_relaxed);
+    if (no_ctx)   *no_ctx   = s_cap_no_ctx.load(std::memory_order_relaxed);
+    if (gate)     *gate     = s_cap_gate.load(std::memory_order_relaxed);
+    if (mismatch) *mismatch = s_cap_mismatch.load(std::memory_order_relaxed);
+#else
+    if (no_tls) *no_tls = 0; if (no_ctx) *no_ctx = 0;
+    if (gate) *gate = 0;   if (mismatch) *mismatch = 0;
+#endif
+}
 
 bool palettehook_watchdog_tick(bool gameplay_active) {
     // event_happened is a LATCH -- "has this hook EVER been called" -- not "did it fire since the

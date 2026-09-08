@@ -31,16 +31,47 @@
 # ---- Button remaps.
 # Hold right stick UP: the left stick becomes the d-pad (grenades / weapon switching).
 #mapdpadshift=1
+#
+# ---- Reach for your head instead (EXPERIMENTAL, off by default).
+# Bring either hand near your head and the RIGHT stick becomes the d-pad, so the left stick keeps
+# walking you around. The stick-up shift above takes the left stick instead, which means you cannot
+# move while switching grenades or triggering equipment -- exactly when you want to be moving.
+#
+# While it is active the right stick is the selector, so two things it normally does are paused:
+# turning, and the right-stick-DOWN crouch. Both come straight back when you lower your hand.
+# Your left stick keeps moving you the whole time, correctly oriented -- that is the point.
+#
+# Off until you have tuned the radius, because the cost of a false trigger is losing TURNING for a
+# moment, which is worse than a missed d-pad press. Turn it on, play a few minutes, and if it fires
+# when you did not mean it, raise dpadheadcm or dpadheaddwell.
+#dpadhead=1
+# How close your hand has to get, in centimetres.
+#dpadheadcm=18
+# Extra distance before it lets go again, so a hand hovering at the edge cannot flicker it.
+#dpadheadhyst=8
+# How long the hand must STAY there before it counts, milliseconds. This is what stops a melee
+# swing or a magazine grab from triggering it in passing.
+#dpadheaddwell=120
 # How far the left stick must move to count as a d-pad press.
 #mapdpaddz=0.50
 # How far the right stick must move for its gestures (high, so turning never triggers them).
 #maprstickdz=0.65
 # Pushing the right stick DOWN presses this button. Default: B, which is crouch.
 #maprstickdown=0x2000
-# Rebind one button to another: pressing `mapfrom` sends `mapto` instead. Default: the crouch
-# button now does equipment (LB), since crouch moved onto the right stick above.
+# Rebind one button to another: pressing `mapfrom` sends `mapto` instead. Default: EQUIPMENT
+# (overshield / active camo) on LEFT X. Both masks were MEASURED on this profile with mapbtnlog=1
+# rather than guessed: left X arrives as 0x2000, and the game's equipment button is 0x0200.
 #mapfrom=0x2000
-#mapto=0x0100
+#mapto=0x0200
+
+# The RIGHT GRIP is reserved for over-the-shoulder weapon switching, so the game no longer sees it.
+# Without this, reaching back to swap weapons would also burn your overshield -- one button cannot
+# mean two things. Equipment is still on left X (above) and on d-pad LEFT. Set this to 0 to hand
+# the grip straight back to the game.
+#rgripswallow=1
+# What your right grip actually sends. Measured here as 0x0200 (RB); if the swallow appears to do
+# nothing, check yours with mapbtnlog=1 rather than assuming -- button names differ by runtime.
+#rgripmask=0x0200
 
 # ---- Action binds. Put one of the mod's own actions on a button of your choice.
 #
@@ -59,6 +90,11 @@
 #bindreload=0x0000
 # Scope toggle. 0 = left trigger. Binding a button KEEPS the trigger working as well.
 #bindscope=0x0000
+# Equipment (overshield / active camo) -- the ONE bind here that is not 0 by default, because
+# equipment has no built-in gesture for a bind to duplicate. 0x0004 is d-pad LEFT, giving it a
+# second home alongside left X now that the right grip is reserved for weapon switching.
+# Set to 0 to hand d-pad left back to whatever the game does with it.
+#bindequip=0x0004
 # Hold to turn the left stick into the d-pad. 0 = right stick UP. A bound button REPLACES the
 # stick gesture (rather than adding to it), so binding this is also how you turn that gesture off.
 #binddpadshift=0x0000
@@ -129,6 +165,20 @@
 #aimreticulesmoothms=0
 #aimreticulesmoothctrlms=8
 
+# ============================= CRISP RETICULE & WAYPOINTS (headset-drawn) ========================
+# The reticule and the mission waypoints can be drawn by the HEADSET's own compositor instead of
+# being painted into the scene. Two things get better: they are not dimmed or washed out by the
+# game's lighting and exposure, so they stay readable on a bright beach and in a dark corridor
+# alike; and a waypoint is never hidden behind a wall or a rock.
+#
+# Both are ON by default. If your setup cannot use them the mod quietly falls back to drawing them
+# in the world exactly as before -- you will not lose your reticule or your waypoints either way.
+#
+# 1 = draw the reticule on the headset layer.
+#xrlayer=1
+# 1 = draw the mission waypoint markers on the headset layer.
+#xrlayernav=1
+
 # ================================== CROSSHAIR BRIGHTNESS & HUD ==================================
 # The crosshair the mod hosts at the aim point -- the game's own art, hit marker included.
 #
@@ -196,8 +246,84 @@
 
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
+
+# ---- pahands -- HANDS ONLY (hide the arms, keep the hands) -------------------------------------
+#
+#   0 = full arms (default)      1 = hands only, Half-Life Alyx style
+#
+# Hides everything except your two hands and the weapon. The arms are still fully simulated
+# underneath -- this only changes what is DRAWN -- so aiming, the two-handed hold and the weapon
+# grip behave identically in both modes. Switching it is safe mid-game; it takes effect within a
+# couple of seconds like every other key here.
+#
+# Why you might want it: floating hands cannot be in the wrong place the way a whole arm can. An
+# arm has to guess where your elbow and shoulder are from two hand positions, and when that guess
+# is off it is very visible. Hands alone have nothing to guess.
+#
+# pahands=1
+
 # Contributed by blindcowboy24 (PR #7). Everything here is OFF or neutral by default -- copy a
 # line into halo_vr_user.cfg and uncomment it to turn a feature on.
+
+# ---------------------------------------------------------------- TWO-HANDED AIMING
+# Bring your other hand to the barrel and squeeze its grip. Aim eases onto the line
+# between your two hands, so a rifle steadies the way it would if you were really
+# holding it. Roll still comes from your firing hand. Let go of the grip to release.
+#
+# You do not have to hold the grip down to keep it: squeezing near the barrel LATCHES
+# the hold, and it stays until you release the button, wherever your hand drifts. The
+# controller buzzes when it grabs and again when it lets go.
+#
+# OFF BY DEFAULT while it is new. It is safe to switch on and off mid-session -- the
+# config reloads about every two seconds -- so it is easy to A/B against one-handed.
+#twohand=0
+
+# Weapons that never two-hand, as a comma-separated list matched against the weapon's
+# internal name. A one-handed weapon has no barrel to grab, so a second hand there is
+# just the aim wandering for a reason you cannot see.
+#
+# The default covers Halo's one-handers -- the pistols, the Needler and the sword.
+# Clear it (twohanddeny=) to allow every weapon, or add your own entries.
+#twohanddeny=Magnum,PlasmaPistol,PlasmaRifle,Needler,Sword
+
+# ---------------------------------------------------------------- THE GRAB GUIDE
+#
+# A marker at your support hand telling you the two-handed grip is available: the word "Grip" by
+# default, or a beam to the spot on the barrel it would grab (see grabguidemode below).
+#
+# It appears ONLY when squeezing the grip would actually take hold -- so it is a promise, not a
+# hint. If you can see it, the two-handed grip works right now. It vanishes the moment you take
+# the hold, and while your hand is off the barrel there is nothing to see.
+#
+# This exists because there are no arms drawn in this release, so nothing else tells you whether
+# your hand has reached the barrel yet. If you turn it off, the hold still works exactly the same
+# -- you just have to find the barrel by feel.
+#grabguide=1
+#
+# What it draws.
+#   0 = the word "Grip" floating at your off hand (the default)
+#   1 = a beam drawn from your hand to the spot on the weapon that will latch
+# The label simply tells you the grip is available. The beam also tells you WHERE, which matters
+# more once there is more than one thing within reach.
+#grabguidemode=0
+#
+# Colour, 0..1 each. The default is a pale cyan that reads against Halo's greens and browns.
+#grabguider=0.35
+#grabguideg=0.85
+#grabguideb=1.0
+#
+# How big the "Grip" label is, in centimetres, measured at the hand. Only used when
+# grabguidemode=0.
+#grabguidelabelcm=2.5
+#
+# Beam thickness in centimetres. It lies along a weapon, so thin is better than bright.
+# Only used when grabguidemode=1.
+#grabguidethick=0.5
+#
+# Hide the beam once it is shorter than this (cm). At that point your hand is as good as on the
+# barrel and a stub of beam is just clutter. Only used when grabguidemode=1 -- the label has no
+# length, and is deliberately still shown at close range.
+#grabguidemin=1.5
 
 # ---------------------------------------------------------------- MELEE BY SWING
 # Swing the aim hand and the game melees. Detection runs on the game thread and
@@ -327,7 +453,7 @@
 #reloadvr=0
 
 # UNCONFIRMED MASKS -- verify both with mapbtnlog=1 before trusting them. This
-# profile's mapping is not obvious (mapfrom=0x2000 -> mapto=0x0100,
+# profile's mapping is not obvious (mapfrom=0x2000 -> mapto=0x0200,
 # mapmenuback=0x4000), and a wrong mask means reload never starts or steals a
 # button you needed.
 # 0x4000 = X, this game's reload.
@@ -459,16 +585,22 @@
 # Set 0 for the narrower rule: grip swallowed only mid-reload.
 #gripexclusive=1
 
-# GRENADE, moved off the grip. Pure remap: press grenadefrom, the plugin injects
-# grenadeaction in its place.
+# GRENADE ON A BUTTON. OFF by default (grenadefrom=0), because the throw already has
+# a home: the off-hand TRIGGER throws when you are not two-hand gripping, and zooms
+# when you are. This is the opt-in for putting it on a button as well.
 #
-# BOTH MASKS MUST BE MEASURED, not guessed. Controller buttons and XInput masks
-# do not line up here -- your right controller B reports as 0x4000, which the
-# game labels X. Set mapbtnlog=1, press your LEFT controller X, and read the
-# mask; that is grenadefrom. grenadeaction should be whatever the grip used to
-# report, since that is the mask the game already treats as throw.
+# Press grenadefrom, the plugin injects grenadeaction in its place.
 #
-# 0 disables the remap.
+# PICK A BUTTON NOTHING ELSE USES. This remap reads the button BEFORE any other
+# rebinding, so it cannot be switched off by whatever else claims that button -- both
+# actions simply fire. It was briefly on left X while left X was also equipment, and
+# one press did both. Avoid 0x2000 (equipment), 0x0080 (melee -- you would lose the
+# melee button and keep only the swing) and whatever maprstickdown is set to (every
+# crouch would throw).
+#
+# MASKS MUST BE MEASURED, not guessed -- controller buttons and XInput masks do not
+# line up here (left X reports as 0x2000, which XInput calls B). Set mapbtnlog=1,
+# press the button you want, and read the mask from the log.
 #grenadefrom=0x0000
 #grenadeaction=0x0100
 
@@ -517,11 +649,98 @@
 # the weapon in your hands and leaves the global calibration alone.
 #
 # Captures are written to halo_vr_weapons.cfg, which the plugin owns and
-# rewrites in full. Hand-written wpnoff lines stay here in halo_vr.cfg and keep
-# their comments; both files feed the same table.
+# rewrites in full. It is YOURS: updates never overwrite it, and DELETING IT
+# puts every weapon back on the shipped calibration.
+#
+# WHAT THE KEY WRITES DEPENDS ON WHICH WEAPON DRIVER IS RUNNING, so there is
+# only ever one key to remember:
+#   * the default (rig) route  -> a wpnoff delta on the grip/mount fit
+#   * the palette route (armdriver=2 with pawpn=1) -> a wpnfix rigid delta,
+#     which OVERRIDES the shipped per-weapon calibration in halo_vr.cfg for
+#     that weapon alone. Repeat captures refine rather than reset, and they
+#     start from whichever value is currently in effect.
+#
+# A capture needs about a fifth of a second of hold to count, so it cannot be
+# triggered by brushing the key. If it refuses one, log.txt says why.
 #
 #   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
 #wpncalibkey=0x2D
+
+# ===================================== PER-WEAPON SCOPE TRIM ====================================
+# One scope calibration cannot suit a pistol, a battle rifle and a sniper. These let a weapon
+# differ from your global scope fit WITHOUT re-fitting everything: each entry is a DELTA, and a
+# weapon with no entry sits exactly where the global fit puts it.
+#
+# You do not normally hand-write these. Open the mod's Script UI, press "Arm per-weapon scope
+# trim", then do the ordinary scope calibration while holding that weapon: raise the scope, hold
+# the scope calibration key, move the pane where you want it, release. The result is stored for
+# that weapon alone and written to halo_vr_weapons.cfg.
+#
+# Master switch. On by default, and safe there: with no entries it changes nothing at all.
+#scopeoffsets=1
+#
+# wpnscope=<match>,<dzoom>,<ddist>,<dright>,<dup>,<dpitch>,<dyaw>,<droll>
+#   match   substring of the weapon class, e.g. FP_SniperRifle -- the same key wpnoff uses
+#   dzoom   magnification MULTIPLIER: 1.5 = one-and-a-half times your global zoom, 2 = double,
+#           0.75 = three-quarters. Leave it 0 (or omit it) to keep the global zoom.
+#   ddist / dright / dup     pane placement, centimetres
+#   dpitch / dyaw / droll    pane facing, degrees
+# Everything after the match is optional, so "wpnscope=FP_SniperRifle,1.5" only changes zoom.
+# Delete a line to send that weapon back to the global fit.
+#wpnscope=
+
+# ------------------------------------------------- DIRECTIONAL MELEE
+# Halo lunges along your AIM, and during a swing your aim is the flailing hand -- so a strike
+# at something you were looking straight at used to land wherever the hand was pointing. With
+# this on, the strike is aimed along the SWING instead.
+#
+# 1 = aim along the swing (default). 0 = strike where you were looking.
+#meleeaimmode=1
+# How long the aim is pinned to the swing direction, milliseconds...
+#meleeaimhold=250
+# ...and how long it blends back to your live hand afterwards. The blend is why the reticule
+# returns smoothly instead of snapping back the other way.
+#meleeaimramp=150
+
+# ------------------------------------------------- SCOPE PANE: PARENT AND RETICULE
+# What the scope pane hangs off. The weapon is a separate object socketed onto your arms, so on
+# the arms the pane does not follow recoil -- and sniper recoil pushes the gun through the pane.
+#   1 = the weapon, so the pane rides recoil and sway with it (default)
+#   0 = the arms, the older behaviour
+# Falls back to the arms on its own whenever there is no weapon in hand.
+#scopeparent=1
+#
+# Hide the bright compositor crosshair while the scope is raised. Both crosshairs are correct --
+# they just sit at different ranges -- and two of them a few degrees apart reads as noise. The
+# scope pane has its own reticule at the magnified range.
+#xrlayerhidescope=1
+#
+# Draw the pane as a first-person primitive so the arms and weapon do not draw over it.
+#scopefpdepth=1
+#
+# The scope pane's OWN reticule -- the crosshair drawn on the magnified image, not the one in the
+# world. This is the one you aim with while scoped.
+#   1 = on (default)
+#   0 = off, if you would rather use the weapon's own sight picture
+#xrlayerscopereticle=1
+# Its size, as a fraction of the pane. 0.12 is about an eighth of the pane's width.
+#xrlayerscopereticlesize=0.5
+# How far in FRONT of the pane's glass the crosshair floats, in centimetres.
+#
+# This is a stereo-depth setting, not a size one: the crosshair and the magnified image sit at
+# slightly different distances from your eyes, and this is the gap. Small values read as etched
+# ON the glass; larger ones float it in front, which some people find easier to focus on and
+# others find doubles when they relax their eyes. Comfortable values are personal -- try 1 to 4.
+#
+# NEGATIVE VALUES PUT IT BEHIND THE PANE -- further from your eye. That is how a real holographic
+# or red-dot sight behaves: its reticle sits at optical infinity, so it stays put on the target
+# while the scope image shifts with your head. Try -20 or -50 with a larger size to taste.
+#
+# Pushing it away also makes it SMALLER on screen, exactly as a real object would, so raise
+# xrlayerscopereticlesize as you go more negative. The two work as a pair.
+#
+# To remove the crosshair entirely use xrlayerscopereticle=0 rather than a depth of 0.
+#xrlayerscopereticledepth=0.2
 # ===================================== SUPPORT DIAGNOSTICS ======================================
 # Leave these at their defaults unless troubleshooting asks for them.
 #

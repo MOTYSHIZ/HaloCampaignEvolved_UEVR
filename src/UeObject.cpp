@@ -22,6 +22,25 @@ std::wstring class_name_of(API::UObject* obj) {
     return f->to_string();
 }
 
+bool uobject_live(API::UObject* p, int32_t* cached_index) {
+    if (p == nullptr || cached_index == nullptr) return false;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return true;                       // cannot tell -- fail open
+    const int32_t n = arr->get_object_count();
+
+    // Fast path: the slot we already know still holds it.
+    if (*cached_index >= 0 && *cached_index < n && arr->get_object(*cached_index) == p) {
+        return true;
+    }
+    // Either first sight of this pointer, or the slot changed. One walk to (re)locate it;
+    // not finding it means the object is gone.
+    for (int32_t i = 0; i < n; ++i) {
+        if (arr->get_object(i) == p) { *cached_index = i; return true; }
+    }
+    *cached_index = -1;
+    return false;
+}
+
 API::FName make_fname(const wchar_t* name) {
     API::FName fn{name, API::FName::EFindName::Add};
     if (fn.comparison_index != 0) return fn;

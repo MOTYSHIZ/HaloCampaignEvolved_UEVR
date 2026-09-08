@@ -161,11 +161,51 @@ gameplay remaps are suspended; if a specific menu misbehaves, report which one.
 The loop measures the game's turn rate and adapts (`gainadapt=1`). Give it a few seconds of
 turning after changing sensitivity.
 
+## Bright reticule (the optional OpenXR layer)
+
+Only relevant if you ran `apilayer\Register-XrApiLayer.ps1`. If you have not, none of this applies
+and nothing here is loaded.
+
+**I registered it and the reticule looks exactly the same.**
+Check for `halo_vr_layer.log` in `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\apilayer\`. The layer
+writes it the first time it loads into the game, so its absence and its presence point in different
+directions:
+
+- **No file at all** — the OpenXR loader never loaded the layer. In order of likelihood: the game is
+  running on **OpenVR** rather than OpenXR (the layer only exists on the OpenXR side — see *Runtime:
+  use OpenXR* in the README); the game is being run **as administrator**, in which case the loader
+  ignores per-user layer registrations by design; or the registration is pointing at a folder you
+  have since moved or re-extracted over. For the last one, run `Unregister-XrApiLayer.ps1 -All` and
+  then `Register-XrApiLayer.ps1` again from the folder you are actually using.
+- **The file exists** — the layer is loading and the problem is downstream. Send `log.txt` and this
+  file together; the mod's own log carries an `[XRBRIDGE]` line saying whether the plugin and the
+  layer agreed on a version, which is the usual answer when the two are from different releases.
+
+**I updated the mod and now it does not work / the log says the version was refused.**
+The layer is registered by **path**, once, while the rest of the mod is replaced by every update. If
+you extracted the new version somewhere else, the registration is still pointing at the old copy.
+Run `Register-XrApiLayer.ps1` again from your current folder — it clears out the stale entry as part
+of registering.
+
+**Another VR game started behaving oddly after I registered this.**
+Run `Unregister-XrApiLayer.ps1` and the layer stops being loaded anywhere. You can also leave it
+registered and set the environment variable `HALOVR_LAYER_DISABLE=1`, which switches it off without
+removing anything. Either way the mod keeps working and falls back to the in-game reticule. Please
+also report it — the layer is meant to be inert outside this game.
+
 ## Logs
 
 Everything the mod does is logged with a `[Halo-CampE-UEVR]` prefix in
 `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\log.txt`. Include the tail of that file in bug reports.
 
+If you enabled the optional bright reticule, `apilayer\halo_vr_layer.log` in the same profile folder
+is worth attaching too.
+
 ## Uninstall
 
-Delete `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\`. Nothing else is touched.
+Delete `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\`.
+
+That is everything **unless you enabled the optional bright reticule**, which records one value
+under `HKEY_CURRENT_USER` pointing at the mod's folder. Run `apilayer\Unregister-XrApiLayer.ps1`
+before deleting the folder and that value goes too. If the folder is already gone, re-extract the
+zip anywhere and run the script from there with `-All`.

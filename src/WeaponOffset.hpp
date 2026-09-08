@@ -36,4 +36,14 @@ void weapon_offset_update();
 // weapon in hand happens to have an entry.
 void weapon_offset_adopt_solve();
 
+// The class name of the weapon currently in hand, as last resolved by weapon_offset_update().
+// Empty when nothing is held.
+//
+// PUBLISHED RATHER THAN RE-RESOLVED. Asking the engine costs a reflected call, and reflected calls
+// are the expensive operation in a UEVR plugin -- this function already runs every tick and
+// already has the answer, so a second consumer should read it rather than pay again. Game thread
+// only, and one tick stale for anything that runs before update(); weapon identity changes on a
+// swap, so that is not a meaningful staleness.
+const char* weapon_offset_current_class();
+
 } // namespace halo

@@ -70,6 +70,7 @@ bool  vnorm(Vec3* v) {
 // pose cross through one mapping inside the layer module, and converting here would apply it twice.
 struct ScopeQuad {
     Vec3  centre{0.0f, 0.0f, 0.0f};   // cm
+    bool  follow_pane = false;        // placed FROM the in-world pane, not our offsets
     float width_cm = 0.0f;            // cells are SQUARE, so this is the height too
     // DOWNRANGE, unflipped: normalize(target - origin). The quad's visible face NORMAL does point
     // back at the shooter -- compute_pose()'s facing axis is +Z and its +Z faces the viewer -- but
@@ -80,6 +81,20 @@ struct ScopeQuad {
     Vec3  up{0.0f, 0.0f, 0.0f};       // unit here, though the layer orthogonalises it anyway
     bool  rolled     = false;         // `up` carries the weapon's cant
     bool  head_basis = false;         // the self-check arm built this from the VIEW, not the aim
+    // Where the reticule sits WITHIN the pane, normalised -1..1. Carried on the quad rather
+    // than read from the feed at the call site so the pose and the offset are always the
+    // same tick's answer -- they describe one geometry and must not be assembled from two.
+    float ret_u     = 0.0f;
+    float ret_v     = 0.0f;
+    bool  ret_valid = false;
+    // The rig rotation `fwd`/`up` were measured against, carried alongside them so the pair can
+    // never be assembled from two different ticks -- the correction is a difference between two
+    // measurements of one thing, and mixing instants reintroduces the error it removes.
+    Vec3  rig_pos{0.0f, 0.0f, 0.0f};
+    Vec3  rig_fwd{1.0f, 0.0f, 0.0f};
+    Vec3  rig_right{0.0f, 1.0f, 0.0f};
+    Vec3  rig_up{0.0f, 0.0f, 1.0f};
+    bool  rig_rot_valid = false;
 };
 
 struct LayerResult {
@@ -180,9 +195,15 @@ static_assert(std::is_same_v<decltype(kFnPaneConfigure), bool (*const)(int)>,
               "xrlayer_pane_configure(int) changed shape -- update the scope adapter");
 static_assert(std::is_same_v<decltype(kFnSetRenderTarget), void (*const)(int, void*, int)>,
               "xrsource_set_slot_render_target(int, void*, int) changed shape -- update the scope adapter");
+// Gained a SIXTH parameter 2026-09-04: `float world_cm_h`, the quad's second world extent, added
+// for the grab guide's beam. It is DEFAULTED to 0 = square in the header, so this file's call site
+// is unchanged and the scope pane stays square as it always was -- but the pointer type changed, so
+// the bind below had to be updated with it. That is the assertion doing its job: a defaulted
+// parameter is invisible at every call site and would otherwise have been an entirely silent ABI
+// change on a seam whose whole purpose is that changes here cannot be silent.
 static_assert(std::is_same_v<decltype(kFnNoticeQuad),
-                             void (*const)(int, const Vec3&, float, float, int)>,
-              "xrlayer_notice_quad(int, const Vec3&, float, float, int) changed shape -- update the scope adapter");
+                             void (*const)(int, const Vec3&, float, float, int, float)>,
+              "xrlayer_notice_quad(int, const Vec3&, float, float, int, float) changed shape -- update the scope adapter");
 static_assert(std::is_same_v<decltype(kFnSetOrientation),
                              void (*const)(int, const Vec3&, const Vec3&)>,
               "xrlayer_set_quad_orientation(int, const Vec3&, const Vec3&) changed shape -- update the scope adapter");
@@ -325,8 +346,60 @@ LayerResult layer_present(int slot, void* render_target, int rt_dim, const Scope
 
     // Position and size. hold_cm = 0: a gun-mounted quad is AT its real distance by definition,
     // which is also the vergence the eyes should converge at.
+    //
+    // HEAD-RELATIVE, because this quad is GUN-MOUNTED and therefore moves WITH the player.
+    //
+    // compute_pose does d_world = target - eye, with the target chosen on the ~32 Hz game tick and
+    // the eye belonging to the frame being drawn. For a world-fixed navpoint that is exactly right.
+    // For anything glued to the player it is exactly wrong: while you locomote, gun and eye
+    // translate together, so a fresh eye is differenced against a stale gun and the quad sits one
+    // tick of travel BEHIND. At a walking pace that is several centimetres, and it reads as the
+    // pane lagging and jittering when you move -- reported in a headset 2026-09-07, and the same
+    // symptom the reticule and grab guide already carry this fix for.
+    //
+    // Publishing (target - eye) and letting the layer add a FRESH eye back at render rate makes both
+    // sides of the subtraction come from the same instant, so the translation cancels and what
+    // remains is sub-frame rather than sub-tick.
+    //
+    // The flag and the vector are set TOGETHER and never apart: the flag says how to INTERPRET the
+    // vector, so a stale one reinterprets a world position as an offset and throws the quad a whole
+    // world-origin away. That failure reads as "the layer vanished", not as a bad number, and
+    // nothing in the log would say why -- which is precisely the shape of bug this session spent
+    // hours on. Falling back to the world point when no view has been composed keeps the worst case
+    // at the OLD behaviour rather than a quad at the origin.
+    // RIG-RELATIVE beats head-relative for a weapon-mounted quad, and the difference is measurable:
+    // head-relative cancels translation the target shares with the EYE, which fixed locomotion but
+    // does nothing when the weapon swings about a stationary head. Measured with scopelayer=3 (no
+    // orientation published at all) the quad still hopped while the controller rotated, which
+    // isolates the fault to POSITION and to the rig frame rather than the head's.
+    //
+    // The rig frame already carries the body's translation, so this cancels both and head-relative
+    // is switched off for the slot rather than stacked with it -- two anchors would each try to
+    // remove the same motion.
+    const bool rig_rel = q.rig_rot_valid && q.follow_pane;
+    Vec3 anchor = q.centre;
+    if (!rig_rel) {
+        Vec3 eye{};
+        const bool head_rel = xrlayer_mono_view_pos(&eye);
+        if (head_rel) {
+            anchor = Vec3{q.centre.x - eye.x, q.centre.y - eye.y, q.centre.z - eye.z};
+        }
+        xrlayer_set_quad_head_relative(slot, head_rel);
+    } else {
+        xrlayer_set_quad_head_relative(slot, false);
+    }
+
     bind_proof(BIND_QUAD);
-    xrlayer_notice_quad(slot, q.centre, q.width_cm, 0.0f, kPanePriority);
+    xrlayer_notice_quad(slot, anchor, q.width_cm, 0.0f, kPanePriority);
+    // AFTER notice_quad: it decomposes the target the layer has just been given, so the world
+    // position must already be stored. Ordering them the other way silently decomposes the PREVIOUS
+    // tick's target against this tick's rig.
+    xrlayer_set_quad_rig_relative(slot, rig_rel, q.rig_pos, q.rig_fwd, q.rig_right, q.rig_up);
+
+    // The reticule's position WITHIN the pane, normalised. Published every tick the pose is, so the
+    // two can never describe different frames -- and cleared to centre when the projection did not
+    // resolve, rather than left holding the last good value while the scope points somewhere else.
+    xrlayer_set_scope_reticle_offset(q.ret_u, q.ret_v, q.ret_valid);
 
     // Orientation, published SEPARATELY from the position and every tick the position is. The split
     // is theirs and it is a good one: a caller that simply stops driving orientation falls back to
@@ -341,7 +414,16 @@ LayerResult layer_present(int slot, void* render_target, int rt_dim, const Scope
     // The zero vector is this module's own "control arm" marker, never a value we compute.
     if (q.fwd.x != 0.0f || q.fwd.y != 0.0f || q.fwd.z != 0.0f) {
         bind_proof(BIND_ORIENT);
-        xrlayer_set_quad_orientation(slot, q.fwd, q.up);
+        // TRACKED when we know which rig rotation these vectors belong to, so the layer can correct
+        // for the rig turning between this tick and the frame that draws it. Plain otherwise --
+        // the untracked call is exactly the old behaviour, so a build with no rig reading degrades
+        // to trailing rather than to nothing.
+        if (q.rig_rot_valid) {
+            xrlayer_set_quad_orientation_tracked(slot, q.fwd, q.up,
+                                                 q.rig_fwd, q.rig_right, q.rig_up);
+        } else {
+            xrlayer_set_quad_orientation(slot, q.fwd, q.up);
+        }
     } else {
         bind_proof(BIND_CLEAR);
         xrlayer_clear_quad_orientation(slot);
@@ -371,6 +453,14 @@ void layer_retire(int slot) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     bind_proof(BIND_RETIRE);
     xrlayer_retire_quad(slot);
+    // AND DISCARD THE ART. retire_quad keeps it on purpose -- right for a navpoint, which comes
+    // back as the same marker -- but this slot's cell holds a picture of the weapon we just put
+    // away, at its zoom, of a scene we may no longer be looking at. With xrlayerhold at 1500 ms
+    // that stale cell still reads READY, so re-scoping inside a second and a half drew the previous
+    // session's frozen frame until a new capture landed. Retirement is the moment we know this
+    // slot's meaning changes; the orientation override is already dropped here for exactly that
+    // reason, and the art deserves the same treatment.
+    xrlayer_invalidate_capture(slot);
     bind_proof(BIND_SRC);
     // Drop the source too. Our render target is rebuilt on a scoperes change, on a capture-source
     // format change and on every level load, so a slot left pointing at it across a teardown is a
@@ -573,18 +663,218 @@ bool build_quad(const ScopeLayerFeed& f, int mode, ScopeQuad* out, const char** 
         (void)vnorm(&up);
     }
 
-    out->centre = Vec3{
-        f.ray_origin.x + fwd.x * g_cfg.scope_layer_fwd + right.x * g_cfg.scope_layer_right +
-            up.x * g_cfg.scope_layer_up,
-        f.ray_origin.y + fwd.y * g_cfg.scope_layer_fwd + right.y * g_cfg.scope_layer_right +
-            up.y * g_cfg.scope_layer_up,
-        f.ray_origin.z + fwd.z * g_cfg.scope_layer_fwd + right.z * g_cfg.scope_layer_right +
-            up.z * g_cfg.scope_layer_up};
-    out->width_cm   = g_cfg.scope_layer_width;
-    out->fwd        = fwd;              // the layer's fwd_world IS the aim direction; it owns the sign
+    // FOLLOW THE PANE, or place from our own offsets.
+    //
+    // The pane is where the calibration lands. Deriving the quad from its PLACED world transform
+    // means a recalibration moves both together by construction -- there is no second set of
+    // numbers to keep in step, and no way for them to drift apart silently. The scopelayer*
+    // offsets remain as the manual override for fitting work, and as the fallback when the pane's
+    // location cannot be read.
+    const bool follow = (g_cfg.scope_layer_follow_pane != 0) && f.pane_valid;
+    if (follow) {
+        out->centre   = f.pane_world;
+        out->width_cm = f.pane_width_cm;
+    } else {
+        out->centre = Vec3{
+            f.ray_origin.x + fwd.x * g_cfg.scope_layer_fwd + right.x * g_cfg.scope_layer_right +
+                up.x * g_cfg.scope_layer_up,
+            f.ray_origin.y + fwd.y * g_cfg.scope_layer_fwd + right.y * g_cfg.scope_layer_right +
+                up.y * g_cfg.scope_layer_up,
+            f.ray_origin.z + fwd.z * g_cfg.scope_layer_fwd + right.z * g_cfg.scope_layer_right +
+                up.z * g_cfg.scope_layer_up};
+        out->width_cm = g_cfg.scope_layer_width;
+    }
+    // ---- THE DEFAULT ORIENTATION, WRITTEN BEFORE ANYTHING THAT REFINES IT ----------------------
+    //
+    // These four USED TO SIT AT THE BOTTOM of this function, below the pane-orientation block and
+    // below the roll trim, and they overwrote both. Everything downstream computed a pane-derived
+    // basis into out->fwd/out->up and then had it thrown away two lines later, so the quad was
+    // ALWAYS the plain aim frame no matter what the pane said.
+    //
+    // The symptom was a knob that did nothing: scopelayerrolltrim had no effect at any value, and
+    // scopelayerroll=2 appeared to "work" only because modes 1 and 2 both take the lens-cant branch
+    // for the LOCAL up above -- so what looked like the pane's roll being inherited was really just
+    // mode 1. Four consecutive orientation fixes in one session produced no visible change for this
+    // reason, and each one was re-theorised as a frame or UV problem.
+    //
+    // Order is the invariant here: a default is written FIRST and refined after. Writing it last
+    // makes every refinement above it dead code that still compiles, still runs, and still logs.
+    out->fwd        = fwd;      // the layer's fwd_world IS the aim direction; it owns the sign
     out->up         = up;
     out->rolled     = rolled;
     out->head_basis = false;
+
+    // ORIENTATION FROM THE PANE TOO, when following it. Position from the pane and facing from
+    // the ray are two different frames, and their disagreement grows and shrinks as the weapon
+    // rotates -- a non-constant offset no placement constant could produce, which is exactly how it
+    // was reported. If the quad is following the pane it should BE the pane.
+    //
+    // WHICH PANE AXIS IS DOWNRANGE IS RESOLVED, NOT ASSUMED. The pane's visible face points back at
+    // the shooter, so its forward vector may be either sense. The downrange axis is whichever one
+    // agrees with the aim direction, so the sign comes from a dot product rather than a constant
+    // somebody has to get right in a headset. If the axis is near-perpendicular to the aim then it
+    // is not the facing axis at all -- fall back to the ray and say so, rather than silently
+    // turning the pane sideways.
+    if (follow && f.pane_fwd_valid) {
+        // PICK THE FACING AXIS BY MEASUREMENT. A Plane's normal is its local +Z (its UP vector);
+        // a Cylinder's cap points elsewhere again. Testing all three and taking the best-aligned
+        // one means this works on any pane shape without a per-shape constant to maintain -- and
+        // the alignment value itself is the evidence for whether the answer is trustworthy.
+        struct Cand { Vec3 v; const char* name; };
+        const Cand cands[3] = {{f.pane_fwd, "forward"}, {f.pane_right, "right"},
+                               {f.pane_up_axis, "up"}};
+        Vec3 pf{}; float best = 0.0f; const char* best_name = "none";
+        for (const Cand& c : cands) {
+            Vec3 v = c.v;
+            if (!vnorm(&v)) continue;
+            const float a = vdot(v, fwd);
+            if (std::fabs(a) > std::fabs(best)) { best = a; pf = v; best_name = c.name; }
+        }
+        {
+            const float agree = best;
+            // Log the CHOICE once, with the number, so "which axis is the pane facing along" is
+            // answerable from the log rather than from a screenshot.
+            // REPORT ALL THREE, not just the winner.
+            //
+            // The winner alone cannot distinguish "this is the normal" from "this was the least bad
+            // of three wrong answers". forward won at 0.85 -- about 32 degrees off the aim -- which
+            // is either a genuinely tilted pane or a sign the normal is not among these axes at all,
+            // and those need opposite fixes. Printing the full set makes that readable instead of
+            // inferable, which is the difference between the next step being a measurement and
+            // being a third guess.
+            //
+            // Also prints the quad's own facing so the two can be compared directly: if the pane's
+            // chosen axis and the quad's fwd agree but the IMAGE still disagrees, the fault is in
+            // the roll or the UV, not in the facing.
+            static bool said_axis = false;
+            if (!said_axis) {
+                said_axis = true;
+                Vec3 af = f.pane_fwd, ar = f.pane_right, au = f.pane_up_axis;
+                const bool nf = vnorm(&af), nr = vnorm(&ar), nu = vnorm(&au);
+                logf("pane axis alignments vs aim -- forward %.3f%s, right %.3f%s, up %.3f%s. "
+                     "CHOSE %s (%.3f). A true surface normal reads near +/-1.000; if the best is "
+                     "well under that, the pane's normal is NOT one of these three and inheriting "
+                     "any of them will leave the quad tilted.",
+                     nf ? vdot(af, fwd) : 0.0f, nf ? "" : " (degenerate)",
+                     nr ? vdot(ar, fwd) : 0.0f, nr ? "" : " (degenerate)",
+                     nu ? vdot(au, fwd) : 0.0f, nu ? "" : " (degenerate)",
+                     best_name, agree);
+            }
+            if (std::fabs(agree) >= 0.5f) {
+                if (agree < 0.0f) { pf.x = -pf.x; pf.y = -pf.y; pf.z = -pf.z; }
+                out->fwd = pf;
+                // ROLL MODE 2: take the pane's OWN up as well, so the quad inherits the pane's
+                // FULL orientation rather than its facing only.
+                //
+                // MEASURED 2026-09-07: forward reads 0.968 against the aim (right 0.083, up
+                // -0.239), so the facing axis is unambiguous and correctly inherited -- and the
+                // image still disagreed with the pane. That leaves ROLL, and it is ours: modes 0
+                // and 1 build `up` from the aim frame, while the CAPTURE bakes its roll
+                // compensation (scopecamroll + the per-shape UV roll + the roll lock) sized for the
+                // PANE's frame. Showing that content on a differently-rolled quad rotates the image
+                // by exactly the difference.
+                //
+                // Mode 2 makes the quad match the pane, so the baked compensation lands as intended.
+                // Upright-in-the-world is then a property of what the CAPTURE bakes, not of the
+                // quad -- which is the correct place for it, because that is the term that also
+                // decides what the in-world pane shows.
+                if (g_cfg.scope_layer_roll == 2) {
+                    Vec3 pu = f.pane_up_axis;
+                    if (vnorm(&pu)) {
+                        // Re-orthogonalise against the facing rather than trusting the pair: the
+                        // layer refuses a degenerate basis, and a refusal here would silently fall
+                        // back to head-oriented, which looks like the feature having no effect.
+                        Vec3 r2 = vcross(pu, pf);
+                        if (vnorm(&r2)) {
+                            Vec3 u2 = vcross(pf, r2);
+                            if (vnorm(&u2)) out->up = u2;
+                        }
+                    }
+                }
+                // ROLL STAYS OURS. up is left exactly as the scopelayerroll path built it --
+                // world-upright at 0, weapon-canted at 1 -- because a real optic does not spin its
+                // image when the rifle cants. Re-orthogonalise against the new facing so the basis
+                // stays square; the layer orthogonalises again, but a degenerate pair sent from
+                // here would be refused rather than corrected.
+                Vec3 r2 = vcross(out->up, pf);
+                if (vnorm(&r2)) {
+                    Vec3 u2 = vcross(pf, r2);
+                    if (vnorm(&u2)) out->up = u2;
+                }
+            } else {
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    logf("NO pane axis faces the aim -- best was %s at %.2f, and anything under "
+                         "0.50 is perpendicular rather than facing. Orientation stays on the aim "
+                         "ray. If the quad looks rotated against the pane, this is the line to "
+                         "doubt: it means the pane's basis is not what this assumes.",
+                         best_name, agree);
+                }
+            }
+        }
+    }
+    out->follow_pane = follow;
+    // ROLL TRIM: rotate the quad about its OWN facing axis, in degrees.
+    //
+    // The quad and the in-world pane show the SAME render target, but the mesh displays it through
+    // its UVs and the quad does not -- and for the round lens those UVs are rotated 90 degrees
+    // (which is the entire reason scope_cam_roll is -90 against a uv_roll of +90; the pair cancels
+    // for the MESH). A quad has no UV stage to compensate, so a UV-space difference cannot be fixed
+    // by inheriting geometry, which is why taking the pane's own up axis made the roll worse rather
+    // than better.
+    //
+    // It is a TRIM rather than a computed constant for the same reason scope_cam_roll is one: it was
+    // fitted in a headset, because the number depends on the mesh's UV layout and no amount of
+    // reasoning about basis vectors recovers it. Rodrigues about the facing axis -- fwd is already
+    // unit and perpendicular to up, so the general form reduces to a plane rotation.
+    if (g_cfg.scope_layer_roll_trim != 0.0f) {
+        const float a = g_cfg.scope_layer_roll_trim * 3.14159265f / 180.0f;
+        const float ca = std::cos(a), sa = std::sin(a);
+        Vec3 r = vcross(out->up, out->fwd);      // UE: up x fwd == right
+        if (vnorm(&r)) {
+            Vec3 u2{out->up.x * ca + r.x * sa,
+                    out->up.y * ca + r.y * sa,
+                    out->up.z * ca + r.z * sa};
+            if (vnorm(&u2)) out->up = u2;
+        }
+    }
+
+    out->rig_pos       = f.rig_pos;
+    out->rig_fwd       = f.rig_fwd;
+    out->rig_right     = f.rig_right;
+    out->rig_up        = f.rig_up;
+    out->rig_rot_valid = f.rig_rot_valid;
+
+    out->ret_u     = f.ret_u;
+    out->ret_v     = f.ret_v;
+    out->ret_valid = f.ret_valid;
+
+    // WHAT THE QUAD ACTUALLY ENDED UP WITH, next to what the pane wanted. One shot.
+    //
+    // The bug above was invisible precisely because the pane-axis line already logged a confident,
+    // CORRECT-looking measurement ("forward 0.968, CHOSE forward") -- of a value that was then
+    // discarded. A log that reports an intermediate proves the intermediate, not the output. This
+    // one prints the FINAL basis, so "did the pane's orientation reach the quad" is readable
+    // instead of inferable.
+    {
+        static bool said_final = false;
+        // Mode 1 only: the dev self-check arms below deliberately replace the basis after this
+        // point, so printing it for them would report a value that is about to be discarded --
+        // which is the exact failure this log exists to catch.
+        if (!said_final && follow && mode == 1) {
+            said_final = true;
+            Vec3 pf = f.pane_fwd, pu = f.pane_up_axis;
+            const bool nf = vnorm(&pf), nu = vnorm(&pu);
+            logf("quad FINAL basis: fwd (%.3f %.3f %.3f) up (%.3f %.3f %.3f); pane fwd "
+                 "(%.3f %.3f %.3f) up (%.3f %.3f %.3f); fwd.fwd %.3f up.up %.3f "
+                 "(roll=%d trim=%.1f). Near 1.000 on both dots means the quad IS the pane.",
+                 out->fwd.x, out->fwd.y, out->fwd.z, out->up.x, out->up.y, out->up.z,
+                 pf.x, pf.y, pf.z, pu.x, pu.y, pu.z,
+                 nf ? vdot(out->fwd, pf) : 0.0f, nu ? vdot(out->up, pu) : 0.0f,
+                 g_cfg.scope_layer_roll, g_cfg.scope_layer_roll_trim);
+        }
+    }
 
 #if HALO_VR_DEV
     // ---- THE SELF-CHECK ARMS. Position is left exactly where the gun-mounted arm put it; only the
@@ -706,6 +996,11 @@ void scopelayer_notice(const ScopeLayerFeed& feed, uint32_t tick) {
         return;
     }
 
+    // The capture's own axes, for the layer's mode-2 projection. Published every tick the quad is,
+    // and BEFORE layer_present, so the basis the offset is built against is never a tick behind the
+    // offset itself -- the same ordering rule the rig-relative position needed.
+    xrlayer_note_scope_cam_axes(feed.cam_right, feed.cam_up, feed.cam_axes_valid);
+
     const LayerResult r = scopelayer_adapter::layer_present(
         g_cfg.scope_layer_slot, feed.render_target, feed.rt_dim, q, detail, sizeof(detail));
 
@@ -737,6 +1032,30 @@ void scopelayer_notice(const ScopeLayerFeed& feed, uint32_t tick) {
         say(tick, "%s%s%s", r.refused != nullptr ? r.refused : "no reason recorded (a bug here)",
             detail[0] != '\0' ? " -- " : "", detail);
     }
+}
+
+// ASK FOR THE ATLAS CELL EARLY -- called from update() BEFORE xrlayer_tick(), which is the tick
+// that brings the layer up and decides the atlas.
+//
+// THE RACE THIS EXISTS TO LOSE. The request below used to live only in scopelayer_tick(), which
+// runs from scope_frame_end() near the END of update(); xrlayer_tick() runs near the TOP. At the
+// main menu update() returns before ever reaching scope_frame_end, so the layer armed with
+// g_pane_req still 0 and built an atlas with no pane cell -- permanently, because the atlas is
+// deliberately never resized under a live submit thread. By the time gameplay started and the
+// scope finally asked, it was 92 ms too late (measured 2026-09-06) and the pane had no cell for
+// the whole session. The symptom was "the scope pane and its reticule are simply not there",
+// with a log line claiming the request had been accepted.
+//
+// The size is pure config (scoperes), so nothing here needs a weapon, a pawn or a render target --
+// which is exactly why it can run this early and why it should.
+void scopelayer_configure_cell_early() {
+    if (!g_cfg.scope_layer) return;
+    if (s_cfg_cell == g_cfg.scope_rt_size) return;    // already asked for this size
+    const int want = g_cfg.scope_rt_size;
+    s_cfg_cell = want;
+    const bool ok = scopelayer_adapter::layer_configure_cell(want);
+    logf("pane cell requested %dpx (from scoperes, EARLY -- before the layer can bring up) -> %s",
+         want, ok ? "accepted" : "NOT IN EFFECT NOW (atlas already built; next bring-up)");
 }
 
 void scopelayer_tick(uint32_t tick) {

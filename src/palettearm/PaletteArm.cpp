@@ -290,6 +290,14 @@ std::int32_t s_tag_last = 0;
 bool         s_tag_have = false;
 unsigned     s_tag_switches = 0;
 std::int32_t s_tag_a = 0, s_tag_b = 0;
+// FROZEN-POSE DETECTOR. A hand resting on a knee and a snapshot that has stopped updating BOTH read
+// as ~0 cm of motion -- magnitude cannot tell them apart, and mistaking one for the other is how the
+// arms-stop-tracking report was nearly mis-diagnosed. Real tracking always jitters in the low bits,
+// so BIT-IDENTICAL consecutive poses are the discriminator: a resting hand gives runs of 1-2, a
+// frozen source gives runs of hundreds.
+float    s_frz_x = 0.0f, s_frz_y = 0.0f, s_frz_z = 0.0f;
+bool     s_frz_have = false;
+unsigned s_frz_run = 0, s_frz_worst = 0;
 JitterAcc    s_j_handpos;
 BasisJitter  s_j_handrot;
 ScalarJitter s_j_gap, s_j_view;
@@ -1104,6 +1112,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // double-counts the aim, because our aim drive wrote that camera yaw from this controller.
         pa::Mat3 arm_gap{ pa::Vec3{1.0f, 0.0f, 0.0f}, pa::Vec3{0.0f, 1.0f, 0.0f},
                           pa::Vec3{0.0f, 0.0f, 1.0f} };
+        // Kept UNGAPPED for pa_target_frame=1: torso_basis already carries the gap, so composing it
+        // with the gapped controller would apply the same rotation twice.
+        const pa::Mat3 controller_raw = controller;
         if (g_cfg.pa_arm_lift != 0) {
             const float g = -::halo::g_view_lock_delta.load() * 0.01745329252f;   // camera - view
             const float cg = std::cos(g), sg = std::sin(g);
@@ -1160,8 +1171,22 @@ bool drive_palette(const pa::PaletteAccess& access) {
                          pa::orthonormal_basis(access.palette[plan.arm->wrist]));
         if (!plan.conv->observe(stock_rel)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[3];); continue; }
 
+        // ORIENTATION IN THE SAME FRAME AS THE POSITION -- see Config.hpp pa_target_frame.
+        //
+        // Mode 1 originally routed only the POSITION through the torso frame, which pinned the hand
+        // to 0.002 cm but left its ORIENTATION swinging 49.9 deg per frame, because this still
+        // composed the LIVE camera basis with the GAPPED controller. Hand in the right place,
+        // pointing somewhere new every frame. Position and facing have to share a frame or the
+        // second one reintroduces exactly what the first one removed.
+        // MODE 2 ONLY, and separate from mode 1 on purpose. The convention in plan.conv->latched is
+        // learned against root_basis (see stock_rel just above), so composing it with a different
+        // frame risks a CONSTANT MIS-FACING -- a hand in the right place pointing the wrong way.
+        // That is invisible to every headless measure here (it is not jitter, it is an offset), so
+        // it needs a human's eyes before it can become the default.
         pa::Mat3 desired_wrist =
-            pa::multiply(pa::multiply(root_basis, controller), plan.conv->latched);
+            (g_cfg.pa_target_frame >= 2)
+                ? pa::multiply(pa::multiply(torso_basis, controller_raw), plan.conv->latched)
+                : pa::multiply(pa::multiply(root_basis, controller), plan.conv->latched);
         if (!pa::valid_basis(desired_wrist)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[4];); continue; }
 
         // The POSITION half of the same lift. Rotating only the orientation would leave the hand
@@ -1177,9 +1202,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
         const pa::Vec3 wrist_local{
             -s_arm_tuning.grip_to_wrist_back_m / pa::kMetresPerBlamUnit, 0.0f,
             -s_arm_tuning.grip_to_wrist_down_m / pa::kMetresPerBlamUnit};
+        // TARGET FRAME -- see Config.hpp pa_target_frame.
+        //
+        // Mode 0 places the hand as root_basis * (arm_gap * offset): the LIVE camera basis times the
+        // LIVE lock gap. That gap is not small on this title -- the code below records it measured at
+        // 98-125 degrees, and per-frame values near 180 occur -- so the target is being swung by up
+        // to half a turn about the head. Measured with the support controller PINNED: hand excursions
+        // to 101 cm, correlating with the gap at 1.000, and the forearm stretching 10.8 cm because
+        // the wrist is placed exactly even when the arm cannot reach that far.
+        //
+        // Mode 1 places it in the TORSO frame instead. That frame is already gap-corrected, levelled
+        // and stable, so the gap enters the arm exactly ONCE and the target and the rest pose finally
+        // share a frame -- which also removes the two-pivot mismatch documented at the rest lift.
+        //
+        // This follows pancreations MCC VR, whose wrist target touches NO live camera orientation at
+        // all: theirs is built from piecewise-constant references (base camera position, head-yaw and
+        // game-yaw refs) precisely so a live camera cannot throw the hand.
         pa::Vec3 wrist_target =
-            root_position + pa::transform_vector(root_basis, delta_blam) +
-            pa::transform_vector(pa::multiply(root_basis, controller), wrist_local);
+            (g_cfg.pa_target_frame >= 1)
+                ? (root_position + pa::transform_vector(torso_basis, stage_off) +
+                   pa::transform_vector(pa::multiply(torso_basis, controller_raw), wrist_local))
+                : (root_position + pa::transform_vector(root_basis, delta_blam) +
+                   pa::transform_vector(pa::multiply(root_basis, controller), wrist_local));
 
         if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
                                           plan.left_side, s_arm_tuning)) {
@@ -1260,7 +1304,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // Refusing here (rather than refusing the whole capture when the hold is engaged) keeps the
         // gesture usable two-handed: the hold stays latched, the hand simply stops riding it for
         // the duration.
-        if (!plan.is_aim && wpn_delta_valid && !s_hfreeze_active.load(std::memory_order_acquire)) {
+        // GATED OFF BY DEFAULT -- see Config.hpp pa_grab_weapon.
+        //
+        // pancreations MCC VR never attach the support hand to the weapon: it is solved onto its own
+        // controller, and the only coupling between the hands runs one-way through the aim basis.
+        // That is the cleaner dependency, and it matches the report that grabbing behaves as a
+        // separate concern from the arm itself.
+        if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
+            !s_hfreeze_active.load(std::memory_order_acquire)) {
             const float w = ::halo::two_hand_blend_weight();
             if (w > 0.0f) {
                 const pa::Vec3 stock_pos   = access.palette[plan.arm->wrist].position;
@@ -1344,6 +1395,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 {
                     // The drawn hand, position AND orientation, in the aim-free torso frame.
                     const pa::Mat3 tinv2 = pa::transpose(torso_basis);
+                    {
+                        const pa::Vec3& gp = plan.grip_position;
+                        if (s_frz_have && gp.x == s_frz_x && gp.y == s_frz_y && gp.z == s_frz_z) {
+                            if (++s_frz_run > s_frz_worst) s_frz_worst = s_frz_run;
+                        } else { s_frz_run = 0; }
+                        s_frz_x = gp.x; s_frz_y = gp.y; s_frz_z = gp.z; s_frz_have = true;
+                    }
                     s_j_upper.feed(pa::length(ef - shf) * pa::kMetresPerBlamUnit * 100.0f);
                     s_j_lower.feed(pa::length(wf - ef) * pa::kMetresPerBlamUnit * 100.0f);
                     s_j_handpos.feed(pa::transform_vector(tinv2,
@@ -1902,13 +1960,14 @@ const char* palettearm_status_jitter() {
         " | posed %u bail[track %u conv %u solve %u anchor %u] hands %d/%u"
         " | SHAPE bend %.2f/%.2f deg  perp %.3f/%.3f cm  swivel %.2f/%.2f deg"
         " | HAND pos %.3f/%.3f cm  rot %.3f/%.3f deg"
-        " | BONE up %.3f/%.3f lo %.3f/%.3f cm | tag sw=%u a=%d b=%d",
+        " | BONE up %.3f/%.3f lo %.3f/%.3f cm | tag sw=%u a=%d b=%d | frozen run=%u",
         s_posed, s_bail[1], s_bail[3], s_bail[5], s_bail[6], g_cfg.pa_hands_only, s_hands_applied,
         s_j_bend.mean(), s_j_bend.peak, s_j_perp.mean(), s_j_perp.peak,
         s_j_swivel.mean(), s_j_swivel.peak,
         s_j_handpos.mean_cm(), s_j_handpos.peak_cm(), s_j_handrot.mean(), s_j_handrot.peak,
         s_j_upper.mean(), s_j_upper.peak, s_j_lower.mean(), s_j_lower.peak,
-        s_tag_switches, s_tag_a, s_tag_b);
+        s_tag_switches, s_tag_a, s_tag_b, s_frz_worst);
+    s_frz_worst = 0;
     s_j_bend.reset(); s_j_perp.reset(); s_j_swivel.reset(); s_j_handpos.reset(); s_j_handrot.reset(); s_j_upper.reset(); s_j_lower.reset(); s_tag_switches = 0;
     s_posed = 0;
     s_hands_applied = 0;
@@ -2040,9 +2099,15 @@ void palettearm_update(float delta_seconds) {
         s_unavailable = true;
     }
 
+    // Why the capture mirror declined, per reason. Named counters rather than "banks stopped", so a
+    // freeze reports which gate closed instead of costing another round of guessing.
+#if HALO_VR_DEV
+    std::uint64_t cap_no_tls = 0, cap_no_ctx = 0, cap_gate = 0, cap_miss = 0;
+    pa::palettehook_capture_census(&cap_no_tls, &cap_no_ctx, &cap_gate, &cap_miss);
+#endif
+
     std::snprintf(s_status, sizeof(s_status),
-                  "palettearm: %s | hook %llu calls (cap=%llu nocap=%llu) | banks %llu | node map %s "
-                  "| drive stage=%s ok=%llu",
+                  "palettearm: %s | hook %llu calls (cap=%llu nocap=%llu) | banks %llu | node map %s " "| drive stage=%s ok=%llu",
                   pa::palettehook_resolution(),
                   (unsigned long long)pa::palettehook_call_count(),
                   (unsigned long long)pa::palettehook_capture_calls(),
@@ -2051,6 +2116,19 @@ void palettearm_update(float delta_seconds) {
                   pa::nodemap_tier_name(s_node_map.tier()),
                   s_drive_stage.load(std::memory_order_relaxed),
                   (unsigned long long)s_drive_ok.load(std::memory_order_relaxed));
+
+    // Census appended only in a DEV build. The counters themselves are compiled out in release, so
+    // printing them there would be four guaranteed zeros and a misleading line -- and this project
+    // requires that anything answering a question rather than playing the game not exist at all in a
+    // player build.
+    HALO_VR_DEV_ONLY(
+        {
+            const std::size_t u = std::strlen(s_status);
+            std::snprintf(s_status + u, sizeof(s_status) - u,
+                          " | capdecline tls=%llu ctx=%llu gate=%llu tagmiss=%llu",
+                          (unsigned long long)cap_no_tls, (unsigned long long)cap_no_ctx,
+                          (unsigned long long)cap_gate,   (unsigned long long)cap_miss);
+        });
 
     // A second line rather than a longer one: the geometry is what a human reads when the pose is
     // wrong, and burying it at the end of an already-long status line makes it easy to miss.

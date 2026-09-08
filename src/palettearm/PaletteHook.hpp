@@ -93,6 +93,9 @@ std::uint64_t palettehook_nocapture_calls();
 // different failure from the drive itself failing, and the one that leaves a correct pose
 // invisible on screen.
 std::uint64_t palettehook_bank_writes();
+// Why the capture mirror declined, per reason -- see the counters in PaletteHook.cpp.
+void palettehook_capture_census(std::uint64_t* no_tls, std::uint64_t* no_ctx,
+                                std::uint64_t* gate, std::uint64_t* mismatch);
 
 // Per-tick watchdog. `gameplay_active` says whether a first-person weapon could be being built
 // right now; without it the alarm counts time in which the call was impossible and condemns a

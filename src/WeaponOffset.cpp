@@ -11,6 +11,11 @@
 using uevr::API;
 
 namespace halo {
+
+// Last resolved weapon class name; see the header for why this is published rather than
+// re-derived by every consumer. Game thread only.
+static char s_current_class[128] = {0};
+
 namespace {
 
 // The calibrated values exactly as the FILE supplies them, before any delta.
@@ -83,6 +88,16 @@ void weapon_offset_update() {
     // so the class name is the identity -- there is no need for a handle that survives the swap.
     std::wstring wpn;
     if (auto* actor = fp_weapon_actor()) wpn = class_name_of(actor);
+
+    // Publish it for anyone else who needs the weapon identity -- see the header. Narrowed
+    // here because every consumer wants a char string and the class names are ASCII.
+    {
+        size_t i = 0;
+        for (; i + 1 < sizeof(s_current_class) && i < wpn.size(); ++i) {
+            s_current_class[i] = (wpn[i] < 128) ? (char)wpn[i] : '?';
+        }
+        s_current_class[i] = 0;
+    }
 
     // Find a matching entry. SUBSTRING, not exact: class names on this title are long and
     // decorated, and a config that has to reproduce them character-perfect is one nobody will
@@ -183,5 +198,8 @@ void weapon_offset_adopt_solve() {
     // The file is about to receive this, so the next reload reads back the same numbers and the
     // generation check finds nothing to change.
 }
+
+
+const char* weapon_offset_current_class() { return s_current_class; }
 
 } // namespace halo

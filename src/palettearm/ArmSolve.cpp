@@ -208,8 +208,8 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     Vec3 elbow_position    = palette[arm.elbow].position;
     const Vec3 wrist_position = palette[arm.wrist].position;
 
-    const float upper_length = length(elbow_position - shoulder_position);
-    const float lower_length = length(wrist_position - elbow_position);
+    float upper_length = length(elbow_position - shoulder_position);
+    float lower_length = length(wrist_position - elbow_position);
     if (!std::isfinite(upper_length) || !std::isfinite(lower_length) ||
         upper_length < 1.0e-4f || lower_length < 1.0e-4f ||
         !finite(requested_wrist_position) || !valid_basis(desired_wrist_basis)) {
@@ -220,7 +220,22 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     float target_distance = length(target_delta);
     if (!std::isfinite(target_distance) || target_distance < 1.0e-4f) return false;
 
-    const Vec3  target_direction = target_delta / target_distance;
+    const Vec3 target_direction = target_delta / target_distance;
+
+    // NOT DONE, DELIBERATELY -- "stretch, don't clamp". pancreations MCC VR (game.cpp:4638-4649)
+    // scale BOTH bones by k = min(targetDist / reach, 1.8) and solve stretched, because a chain that
+    // stops short makes "the hand visibly detach from the forearm" and skinning stretches the mesh
+    // with the bones.
+    //
+    // Attempted 2026-08-31 and reverted: scaling only these two LENGTHS does nothing, because the
+    // solve below applies a pure ROTATION (rotation_between + apply_rigid_delta) which cannot change
+    // a bone's length. The elbow would still land at its unscaled position while `along` and
+    // `height_squared` were computed from stretched numbers -- a worse pose than clamping, not a
+    // better one. A real stretch has to move the bone POSITIONS along the chain.
+    //
+    // Left undone on purpose: with pa_target_frame=1 the target no longer flies out of reach (hand
+    // excursion 102 cm -> 0.002 cm), so over-reach went from constant to rare, and a half-built
+    // stretch is worse than an honest clamp.
     const float minimum_reach    = std::fabs(upper_length - lower_length) + 1.0e-4f;
     const float maximum_reach    = upper_length + lower_length - 1.0e-4f;
 

@@ -1,4 +1,5 @@
 #include "Gesture.hpp"
+#include "TwoHandAim.hpp"   // two_hand_latched(): the grip is shared with the barrel hold
 
 #include "Config.hpp"
 #include "Math.hpp"
@@ -156,16 +157,19 @@ bool reload_swallow_reload_button() {
            !s_reload_passing.load(std::memory_order_relaxed);
 }
 
+// RELOAD'S OWN grip swallow, and nothing more.
+//
+// Whether the grip reaches the game AT ALL is not decided here any more -- that is `gripswallow`,
+// a standalone unbind applied at the XInput call site. It used to be routed through this function
+// via grip_exclusive, which meant switching off an unrelated reload feature silently handed the
+// grip back to the game and put grenades on it again. A binding should not depend on a feature
+// flag from another lane.
+//
+// What is left here is genuinely reload's business: withholding the grip for the WINDOW in which a
+// magazine is expected or held, which only the reload state machine can define.
 bool reload_swallow_grip() {
     if (!g_cfg.reload_vr || g_cfg.reload_grip_mask == 0) return false;
-    // EXCLUSIVE: the grip is ours outright, not just while a magazine is in play. It is the VR
-    // interaction button -- magazine grabs now, weapon holding later -- and a button that lobs a
-    // grenade when you reach for something is not one you can build physical interactions on.
-    //
-    // The cost is explicit and worth stating: with this on, THE GAME NEVER SEES THE GRIP, so
-    // grenades have no binding until one is given to them elsewhere.
     if (g_cfg.grip_exclusive) return true;
-    // Otherwise the narrower rule: only while a magazine is expected or held.
     return s_reload != ReloadState::Idle;
 }
 
@@ -236,7 +240,16 @@ static void reload_update(const Vec3* hand_r, const Vec3* head) {
         const float drop = head->y - hand_l.y;
         const float dx = hand_l.x - head->x, dz = hand_l.z - head->z;
         const float horiz = std::sqrt(dx * dx + dz * dz);
-        if (grip_held && drop >= g_cfg.reload_belt_drop && horiz <= g_cfg.reload_belt_radius) {
+        // NOT WHILE BOTH HANDS ARE ON THE GUN. The two-handed hold and this state machine read
+        // the SAME physical button -- this one through the XInput mask, the hold through the
+        // OpenXR action. They do not collide in code; they collide in the player's hand, and a
+        // support hand that dips past the belt zone mid-hold would silently start a reload.
+        //
+        // Zone-disjointness rather than a new binding: you cannot pull a magazine with both hands
+        // on the weapon, so the suppression is also what a player expects. bindtwohand exists for
+        // anyone whose grip is genuinely double-booked.
+        if (grip_held && !two_hand_latched() &&
+            drop >= g_cfg.reload_belt_drop && horiz <= g_cfg.reload_belt_radius) {
             set_state(ReloadState::MagHeld, "grabbed from belt");
         }
         break;
@@ -450,6 +463,27 @@ void gesture_update(float dt) {
     if (along < g_cfg.melee_fwd)   return;
 
     g_melee_hold_until.store(now + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);
+
+    // ---- AIM THE STRIKE ALONG THE SWING (melee_aim_mode 1, shipped).
+    //
+    // Halo lunges along the AIM, and during a swing the aim IS the flailing hand -- so a strike at
+    // something you were looking straight at lands wherever the hand happened to be pointing. The
+    // hold pins the aim to the swing DIRECTION for melee_aim_hold_ms, then ramps back.
+    //
+    // Yaw is atan2(vx, -vz) in the same convention the rest of this file uses, plus the turn offset
+    // so the direction is expressed in the frame the aim path consumes. Pitch is the velocity's
+    // elevation, clamped before asin because a normalised-looking ratio can still land at 1.0000001
+    // and produce a NaN that would poison the aim for the rest of the session.
+    if (g_cfg.melee_aim_mode == 1 && g_cfg.melee_aim_hold_ms > 0 && speed > 0.0001f) {
+        const float hy = wrap180(std::atan2(s_vel.x, -s_vel.z) * RAD2DEG
+                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
+        const float ratio = s_vel.y / speed;
+        const float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, ratio))) * RAD2DEG;
+        g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
+        g_melee_aim_ctrl_pitch.store(hp, std::memory_order_relaxed);
+        g_melee_aim_hold_until.store(now + ms_to_ticks(g_cfg.melee_aim_hold_ms),
+                                     std::memory_order_relaxed);
+    }
     s_cooldown_until = now + ms_to_ticks(g_cfg.melee_cooldown_ms);
 
     if (g_cfg.melee_log) {

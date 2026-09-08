@@ -111,6 +111,7 @@ std::atomic<uint64_t> g_frames_seen{0};
 std::atomic<uint64_t> g_layers_appended{0};
 std::atomic<uint64_t> g_batch_refused{0};   // callback returned more than it was offered
 std::atomic<uint64_t> g_runtime_rejects{0}; // runtime refused the frame WITH our layers in it
+std::atomic<uint64_t> g_passthrough_rejects{0}; // refused for a reason that is NOT ours; returned as-is
 
 char g_build_stamp[160] = HALOVR_LAYER_NAME " (unstamped)";
 char g_status_line[512] = HALOVR_LAYER_NAME ": not initialised";
@@ -284,12 +285,22 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
 
                 if (XR_SUCCEEDED(result)) {
                     g_layers_appended.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    // FAIL OPEN. The runtime rejected the frame with our layers in it -- retry with
-                    // the application's original list rather than dropping the player's frame. A
-                    // missing overlay is cosmetic; a dropped frame in VR is nausea.
+                } else if (result == XR_ERROR_LAYER_INVALID
+                        || result == XR_ERROR_LAYER_LIMIT_EXCEEDED
+                        || result == XR_ERROR_SWAPCHAIN_RECT_INVALID) {
+                    // FAIL OPEN, BUT ONLY FOR FAILURES THAT ARE OURS. Retry with the application's
+                    // original list rather than dropping the player's frame: a missing overlay is
+                    // cosmetic, a dropped frame in VR is nausea.
                     g_runtime_rejects.fetch_add(1, std::memory_order_relaxed);
                     handled = false;
+                } else {
+                    // NOT OURS -- return it to the application untouched. The plugin-side hook had
+                    // exactly this bug and it was measured on 2026-09-04: retrying a frame the
+                    // runtime rejected for a STALE DISPLAY TIME (-30 TIME_INVALID) called xrEndFrame
+                    // a second time on a finished frame (-37 CALL_ORDER_INVALID) and discarded the
+                    // next one. Resubmitting cannot fix a time, a call order, or a lost session.
+                    g_passthrough_rejects.fetch_add(1, std::memory_order_relaxed);
+                    handled = true;
                 }
             }
         }

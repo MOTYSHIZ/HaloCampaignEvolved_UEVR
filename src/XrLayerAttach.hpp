@@ -87,6 +87,12 @@ enum class XrAttachTier {
     // nothing in common with the dbghelp machinery here and no reason to load a 142 MB PDB to find
     // out. xrattach_resolve() therefore never returns this value; ask xrbridge_available() first
     // and fall through to xrattach_resolve() only when the layer is absent.
+    //
+    // WIRED 2026-08-31. XrLayer.cpp's resolve_openxr() now does exactly that, and xrlayer_tick()
+    // skips xrattach_begin_async() entirely when the layer answers -- so a machine with the layer
+    // registered never loads the PDB at all. Between the layer being BUILT and being ASKED it sat
+    // here complete and with zero callers, which is the failure mode this project names elsewhere
+    // as "installed is not running", one level up: written is not wired.
     ApiLayer,
 };
 

@@ -152,7 +152,25 @@ constexpr int XRLAYER_NAV_COUNT     = 8;
 // slot, because a silently letterboxed scope is worse than one that says why it is absent.
 constexpr int XRLAYER_SLOT_PANE     = 9;
 
-constexpr int XRLAYER_SLOTS         = 10;
+// THE GRAB GUIDE -- the beam from the support hand to the point on the barrel it would grab.
+//
+// It is here for the reasons the reticule and the markers are: in the scene it was occluded by the
+// weapon it lies along, it took the game's lighting and exposure so it dimmed exactly where it was
+// needed most, and an emissive material bright enough to read would bloom. In the compositor none
+// of those exist, because it never enters the scene.
+//
+// THE CHEAPEST SLOT IN THIS FILE, and deliberately so. It uses NONE of the source machinery: no
+// XrSource target, no widget to host, no render target to capture, no rehost or coherence tracking,
+// no per-tick re-resolve. It is a FLAT COLOUR, filled once, so its cell is 8 px rather than the
+// reticule's 256 or a marker's 128. What it needs from this module is the two things only this
+// module can do: a world pose the compositor honours, and pixels that are never occluded.
+//
+// It is also the first NON-SQUARE quad. A beam is long and thin, and XrCompositionLayerQuad::size
+// is an XrExtent2Df -- width and height, independent -- so the squareness was only ever our own
+// single-scalar API. See xrlayer_notice_quad's `world_cm_h`.
+constexpr int XRLAYER_SLOT_GUIDE    = 10;
+
+constexpr int XRLAYER_SLOTS         = 11;
 
 // GAME THREAD, tick rate. Same contract as xrlayer_notice_reticule: one snapshot write, no OpenXR,
 // cheap enough to call unconditionally.
@@ -181,12 +199,38 @@ constexpr int XRLAYER_SLOTS         = 10;
 // `priority` orders the drop list when the runtime has fewer free layers than we have quads.
 // 0 = never dropped (the reticule). Higher = dropped sooner. Within one priority the SMALLEST
 // APPARENT quad goes first, which is "furthest/smallest first" expressed as one number.
+// `world_cm_h` IS THE SECOND EXTENT, and 0 means "square" so every existing caller is unchanged.
+//
+// XrCompositionLayerQuad::size has always been an XrExtent2Df -- width and height, independent.
+// This API carried one scalar and wrote it into both, so every quad in this file has been square
+// by our choice rather than the runtime's. The grab guide is a BEAM: long along the barrel, thin
+// across it, and stretching a square would mean either a fat beam or a short one.
+//
+// The cell stays SQUARE regardless -- this is the quad's world extent, not its source rectangle.
+// A flat colour has no aspect to distort, so nothing is letterboxed; a caller feeding real ART
+// through a non-square extent WOULD stretch it, and should not.
 void xrlayer_notice_quad(int slot, const Vec3& world_pos, float world_cm, float hold_cm,
-                         int priority);
+                         int priority, float world_cm_h = 0.0f);
 
 // GAME THREAD. Stop submitting this slot. Cheap, idempotent, and does NOT drop the slot's captured
 // art -- a marker that comes back within a tick or two should not have to re-resolve its texture.
 void xrlayer_retire_quad(int slot);
+
+// GAME THREAD. Additionally DISCARD this slot's captured art, so xrlayer_slot_ready() is false
+// until genuinely new pixels land. The counterpart to retire_quad for a slot whose MEANING changes
+// between uses, rather than one that merely blinks.
+//
+// retire_quad deliberately keeps the art, and for a navpoint that is right: the marker that comes
+// back is the same marker, and re-resolving its texture would cost more than one stale frame. The
+// scope is the opposite case. Its cell holds a picture of a DIFFERENT weapon's sight at a different
+// zoom, and xrlayerhold is 1500 ms -- so re-opening the scope inside a second and a half found the
+// slot already "ready" and drew the previous session's frozen image while the new capture caught up.
+// That was the reported "I see the previous image frozen in the pane for a split second".
+//
+// Cheap and idempotent: it zeroes the freshness beat, and the next real capture sets it again. A
+// beat of 0 is already the module's "has never captured" value, so nothing downstream needs to
+// learn a new state -- this just returns the slot to it.
+void xrlayer_invalidate_capture(int slot);
 
 // GAME THREAD. This slot's hosted widget CLASS just changed (the sparse navpoint map reordered, so a
 // stable pool component now wears a different navpoint's art). Marks the slot incoherent until its
@@ -234,6 +278,68 @@ void xrlayer_set_quad_orientation(int slot, const Vec3& fwd_world, const Vec3& u
 
 // GAME THREAD. Back to head-oriented for this slot. Idempotent; safe on a slot that never had one.
 void xrlayer_clear_quad_orientation(int slot);
+
+// Treat this slot's next target as an offset from the eye, not a world point. For quads glued to
+// something that moves WITH the player (the aim reticule, the grab guide) -- it is what stops them
+// trailing a tick of travel behind during locomotion.
+void xrlayer_set_quad_head_relative(int slot, bool on);
+
+// RENDER THREAD. The rig's world rotation for the frame being drawn.
+//
+// Plugin.cpp already recomposes the rig against a live parent every frame -- its own instrument
+// reports "corrected up to 161 deg of parent motion since tick". Anything placed from a GAME-TICK
+// sample of that rig is therefore stale by however far the weapon turned in the interval, which is
+// why a quad following the in-world pane tracks correctly when still and lags when you rotate.
+// Publishing the render-rate rotation lets a slot's orientation be corrected by the same delta the
+// arms already get.
+void xrlayer_note_rig(const Vec3& pos, const Vec3& fwd, const Vec3& right, const Vec3& up);
+
+// GAME THREAD. Publish this slot's POSITION as an offset expressed in the RIG's own basis, to be
+// recomposed against the render-rate rig each frame.
+//
+// MEASURED 2026-09-07: with scopelayer=3 -- no orientation published at all -- the quad still
+// hopped while the controller was ROTATED. That isolates the fault to POSITION, and explains it:
+// the pane swings through an arc about the shoulder at high angular rate, and the quad's position
+// was a ~32 Hz sample of it displayed at 90+ Hz.
+//
+// Head-relative anchoring cannot fix this. It cancels translation the target and the EYE share,
+// which is why it fixed locomotion -- but a weapon rotating about the shoulder moves relative to a
+// stationary head, so there is nothing for it to cancel. The rig is the frame the pane actually
+// rides, so the offset has to be expressed there.
+//
+// Supersedes head-relative for a weapon-mounted slot: the rig frame already carries the body's
+// translation, so this cancels both.
+void xrlayer_set_quad_rig_relative(int slot, bool on, const Vec3& rig_pos, const Vec3& rig_fwd,
+                                   const Vec3& rig_right, const Vec3& rig_up);
+
+// GAME THREAD. As xrlayer_set_quad_orientation, but ALSO records the rig rotation the vectors were
+// measured against. At submit the slot's orientation is rotated by (render_rig * inverse(tick_rig)),
+// so a weapon-mounted quad stays with the weapon between ticks instead of trailing it.
+//
+// Pass the rig rotation from the SAME tick that produced fwd/up -- the correction is a difference
+// between two measurements of one thing, and mixing ticks reintroduces exactly the error it removes.
+void xrlayer_set_quad_orientation_tracked(int slot, const Vec3& fwd_world, const Vec3& up_world,
+                                          const Vec3& rig_fwd, const Vec3& rig_right,
+                                          const Vec3& rig_up);
+
+// GAME THREAD. Where the scope reticule sits WITHIN the pane, as normalised pane coordinates in
+// -1..1 (0,0 = centre, +u right, +v up). The reticule quad was pinned to dead pane centre, which is
+// correct only while the capture camera's axis and the traced impact point agree; the caller
+// projects the real impact point into the capture's own frustum and publishes the result here.
+// valid=false restores centre, which is the old behaviour exactly.
+void xrlayer_set_scope_reticle_offset(float u, float v, bool valid);
+
+// GAME THREAD. The CAPTURE CAMERA'S world right/up. Mode 2 of the scope reticule needs them to
+// project into the frame the image is actually rendered in.
+//
+// Mode 2 used to build its own basis from world up (right = aim x worldUp). That is a THIRD frame:
+// the image's axes are the CAMERA'S, and the blit maps them onto the quad's local axes one to one,
+// so a world-levelled projection is wrong by the camera's whole roll -- scope_cam_roll, the
+// per-shape uv_roll, AND the live roll lock. The roll lock is what made it more than a constant: it
+// moves continuously to hold the image upright as the weapon cants, so the reticule's slide
+// direction was wrong by an angle that changed as the gun rolled. That is why scoperetflipx/y could
+// never fix it -- a sign flip corrects 180 degrees, not a moving angle.
+void xrlayer_note_scope_cam_axes(const Vec3& right, const Vec3& up, bool valid);
 
 // GAME THREAD, from the reticule publish site. Say WHY this tick did not publish a target, so the
 // "layer DARK" line can name the upstream gate instead of just observing that nothing arrived.
@@ -290,6 +396,12 @@ void xrlayer_note_scope_ray(const Vec3& origin, const Vec3& target);
 // is a plausible-looking identity basis and would launder "no view yet" as "verified".
 bool xrlayer_view_basis(Vec3* fwd_world, Vec3* up_world);
 
+// The MONO view position in UE world cm -- the same value head-relative slots are re-anchored
+// against. false until a view has been composed. For callers outside Plugin.cpp that need to turn
+// a world point into a head-relative offset (see xrlayer_set_quad_head_relative); Plugin.cpp's own
+// layer_anchor() does this with file-local globals nothing else can reach.
+bool xrlayer_mono_view_pos(Vec3* out_world);
+
 // GAME THREAD, ONCE, BEFORE THE ATLAS IS BUILT (i.e. from config load or first tick, not mid-session).
 // Ask for the pane cell to be `cell_px` square. 0 = no pane cell at all, which is the default: a
 // build nobody has asked for a pane on pays no atlas for it.
@@ -328,7 +440,9 @@ int xrlayer_cell_dim(int slot);
 // ROLL MUST BE PASSED. The pose maths rotates the reticule offset by the head orientation from
 // get_pose(), which carries the player's real roll; reconstructing the camera basis without roll
 // makes the two disagree about it and swings the quad around the view axis. Was a live bug.
-void xrlayer_note_eye(int eye_index, const Vec3& eye_pos,
+// mono_view_pos is the PRE-HOOK game camera -- the same value for BOTH eyes. It is what
+// head-relative slots are re-anchored against; eye_pos must NOT be used for that (see below).
+void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_pos,
                       float view_yaw, float view_pitch, float view_roll);
 
 // Per-tick housekeeping on the GAME THREAD: config changes, lazy init, the liveness watchdog, and

@@ -10,6 +10,7 @@
 #include "Config.hpp"
 #include "DevTools.hpp"
 #include "Reticule.hpp"
+#include "UeObject.hpp"    // class_name_of, for validating a component before dereferencing it
 #include "XrLayer.hpp"
 #include "addrcascade/AddressCascade.hpp"
 
@@ -222,7 +223,22 @@ Chain g_chain;
 // properties of the CLASS, not of any instance. It is very probably true and it is still an
 // assumption, so a dev build measures a second component and compares -- see g_crosscheck.
 struct Target {
-    void*    comp         = nullptr;   // UWidgetComponent; identity only, never dereferenced here
+    void*    comp         = nullptr;   // UWidgetComponent -- IS dereferenced, see comp_index
+    // ITS SLOT IN THE GLOBAL UOBJECT ARRAY, resolved once when the component is adopted.
+    //
+    // MEASURED 2026-09-04, and this is the fault the whole crash hunt was chasing:
+    //   TICK FAULT: 0xC0000005 at UEVRBackend.dll+0x6283EC reading 0x1E31C0908,
+    //               last lane entered 'xrsource_tick'
+    // We handed UEVR a UWidgetComponent the level teardown had already freed, and UEVR faulted
+    // walking it inside call_function. The address is a live-looking heap pointer, not null, which
+    // is exactly why the first guard here (IsBadReadPtr + a reflected class-name check) did not
+    // help: a freed UObject whose memory has been REUSED passes both. Its own comment said so.
+    //
+    // Only ARRAY LIVENESS can tell a recycled address from a live object, which is what
+    // TrackedObject::get() does everywhere else in this codebase. Resolving the index costs one
+    // walk of the object array, so it is done ONLY when the component changes (a handful of times
+    // per level); verifying it afterwards is a single indexed compare per slot per tick.
+    int32_t  comp_index   = -1;
     bool     is_rt        = false;     // comp IS the render target (pane); skip the widget hop
     int      want         = 0;         // its SetDrawSize edge -- the ValueAgreement number
     void*    native       = nullptr;
@@ -249,6 +265,20 @@ Target g_t[XRLAYER_SLOTS];
 struct SlotReq { void* comp = nullptr; int want = 0; bool is_rt = false; };
 SlotReq g_req[XRLAYER_SLOTS];
 
+// THE LAST COMPONENT POINTER REFUSED FOR EACH SLOT.
+//
+// The refusal below sets t.comp = nullptr but CANNOT clear g_req -- the request belongs to the
+// publisher, and g_req persists between ticks by design. So a publisher that keeps offering the
+// same freed pointer (which is exactly what a level teardown produces: Plugin.cpp stops resolving
+// a new one, and the last value sits there) makes `g_req[s].comp != t.comp` true on EVERY tick,
+// and each one re-runs the ~296k object-array walk and logs again. A per-tick full-array walk is
+// the precise cost this project has already been bitten by (the find_uobject miss, and the
+// comps=9 report at 87-197 ms per tick), so the refusal must be remembered, not just acted on.
+//
+// Remembering it costs one pointer compare and changes no behaviour: a genuinely NEW component
+// differs from the rejected value and resolves exactly as before.
+void* g_slot_rejected[XRLAYER_SLOTS] = {};
+
 // 0 = not attempted, 1 = a second component's chain AGREED, -1 = it disagreed.
 int g_crosscheck = 0;
 
@@ -268,8 +298,50 @@ void set_status(const char* fmt, ...) {
 // of UTexture/FTexture and therefore the same for any render target, which is what makes ONE
 // measured chain serve nine components -- see xrsource_chain_crosscheck_state() for the proof
 // rather than the assertion.
+// Is this pointer still the object we adopted, in the slot we adopted it from?
+//
+// THE ONLY CHECK THAT CATCHES A RECYCLED ADDRESS. A freed UObject stays mapped and its memory is
+// handed to the next allocation, so IsBadReadPtr passes and the class name can even still read
+// "WidgetComponent". The array slot is the identity: if it no longer holds our pointer, the object
+// we adopted is gone whatever now lives at that address.
+bool comp_still_live(void* comp, int32_t index) {
+    if (comp == nullptr || index < 0) return false;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return true;                       // cannot tell -- fail open, as before
+    if (index >= arr->get_object_count()) return false;
+    return arr->get_object(index) == comp;
+}
+
 API::UObject* component_render_target(API::UObject* wc) {
     if (wc == nullptr) return nullptr;
+
+    // ---- VALIDATE BEFORE DEREFERENCING. THIS POINTER IS HELD ACROSS TICKS. ------------------
+    //
+    // Target::comp is documented as "identity only, never dereferenced here" -- and that stopped
+    // being true the moment this function started taking the component as an argument. It IS
+    // dereferenced, by call_function, one frame or one LEVEL LOAD after whoever published it.
+    //
+    // MEASURED 2026-09-04, and it predates that session: on a level transition
+    // (mission -> menu -> new mission) UEVR logs "Exception occurred in on_pre_engine_tick" every
+    // tick and never recovers -- 13,879 of them in one session. The line 2 ms before the first one
+    // is ours: "XRSRC: slot 0 component changed (...->0000000000000000)". A component going null is
+    // the transition; the slot that went NULL is handled by service_slot's own null check, so the
+    // fault is a SIBLING slot still holding a non-null pointer to a widget the level change
+    // destroyed. From the player's seat this reads as "the controls broke after the loading
+    // screen", because the tick body dies while BLAMCTL/DIRECT keep running on the XInput hook.
+    //
+    // This is precisely the standing rule in CLAUDE.md that actors here are pooled and recycled and
+    // must never be held across frames. The same guard navw_entry_widget already uses for map
+    // entries: a readability check, then a reflected CLASS check, and a null return that the caller
+    // already treats as "no render target" and resets the slot for.
+    //
+    // HONEST LIMIT: a freed UObject whose memory has been REUSED by another component will pass
+    // both checks. This does not make the pointer provably valid -- it removes the unmapped and
+    // garbage cases, which is what is actually faulting here, and it fails to a path the caller
+    // already handles rather than to an access violation.
+    if (IsBadReadPtr(wc, 0x30)) return nullptr;
+    if (class_name_of(wc).find(L"Component") == std::wstring::npos) return nullptr;
+
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
     wc->call_function(L"GetRenderTarget", p);
     return *reinterpret_cast<API::UObject**>(p);
@@ -693,6 +765,22 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
         return;
     }
 
+    // LIVENESS FIRST, BEFORE EITHER RUNG DEREFERENCES ANYTHING. Both the widget hop and the pane
+    // rung walk this pointer; a dead one faults inside UEVR, not here, which is why the crash never
+    // named us. Dropping the slot is the path service_slot already takes for "no render target".
+    if (!comp_still_live(t.comp, t.comp_index)) {
+        static uint32_t said = 0;
+        if (said < 8) {
+            ++said;
+            logf("slot %d: the component we adopted is no longer in its UObject array slot -- it was "
+                 "freed (a level teardown does this). Dropping the source rather than handing a dead "
+                 "object to UEVR.", s);
+        }
+        if (t.native != nullptr || t.fed != nullptr) reset_slot(s);
+        t.comp = nullptr; t.comp_index = -1;
+        return;
+    }
+
     API::UObject* rt;
     if (t.is_rt) {
         // THE PANE RUNG: the caller handed us the render target itself, so there is no
@@ -700,7 +788,17 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
         // identical -- the same offset walk, the same ValueAgreement on `want`, the same
         // re-validation every tick, the same refusal to capture from a resource whose identity
         // changed. The ONLY thing being skipped is one reflected UFunction call.
-        rt = reinterpret_cast<API::UObject*>(t.comp);
+        // SAME CROSS-TICK HAZARD AS THE WIDGET RUNG, and this one had no check whatsoever: the
+        // pointer is cast straight to a render target and then walked for offsets. A level
+        // transition frees the pane's target exactly as it frees a widget, so validate it here for
+        // the same reason and by the same means. Returning null lands on the `rt == nullptr` path
+        // below, which already resets the slot and re-resolves.
+        auto* pane = reinterpret_cast<API::UObject*>(t.comp);
+        if (IsBadReadPtr(pane, 0x30) ||
+            class_name_of(pane).find(L"RenderTarget") == std::wstring::npos) {
+            pane = nullptr;
+        }
+        rt = pane;
     } else {
 #if HALO_VR_DEV
         SplitTimer _t(&g_split.getrt_ms, &g_split.getrt_n);   // reflected GetRenderTarget, timed
@@ -869,6 +967,13 @@ void xrsource_tick(uint32_t tick) {
         // is_rt is part of the IDENTITY, not a mode flag applied to a surviving resolve: the same
         // address reused as a different KIND of object would otherwise keep the previous rung's
         // cached native pointer. Cheap insurance against a case that should never happen.
+        // ALREADY REFUSED THIS EXACT POINTER -- do not walk the object array for it again. See
+        // g_slot_rejected. Without this the teardown case re-walks ~296k objects per tick, per
+        // stuck slot, forever, and re-logs the refusal with it.
+        if (g_req[s].comp != nullptr && g_req[s].comp == g_slot_rejected[s] && t.comp == nullptr) {
+            t.want = g_req[s].want;
+            continue;
+        }
         if (g_req[s].comp != t.comp || g_req[s].is_rt != t.is_rt) {
             // A new widget component means a new render target and a new D3D12 resource. Dropping
             // the old one here is what stops us capturing from freed memory across a mission
@@ -884,6 +989,27 @@ void xrsource_tick(uint32_t tick) {
                      s, t.comp, g_req[s].comp);
             }
             t.comp  = g_req[s].comp;
+            // Resolve the array slot for the NEW component. One walk, on change only -- never on
+            // the steady path, because a full object-array walk per tick is the exact cost this
+            // project has already been bitten by (see the find_uobject miss).
+            t.comp_index = -1;
+            if (t.comp != nullptr) {
+                if (auto* arr = API::get()->get_uobject_array()) {
+                    const int32_t n = arr->get_object_count();
+                    for (int32_t i = 0; i < n; ++i) {
+                        if (arr->get_object(i) == t.comp) { t.comp_index = i; break; }
+                    }
+                }
+                if (t.comp_index < 0) {
+                    logf("slot %d: component %p is not in the UObject array -- refusing to hold it. "
+                         "Nothing will be captured for this slot until a live one is published.",
+                         s, t.comp);
+                    g_slot_rejected[s] = t.comp;   // remember it: never re-walk this same pointer
+                    t.comp = nullptr;
+                } else {
+                    g_slot_rejected[s] = nullptr;  // resolved -- a later refusal starts fresh
+                }
+            }
             t.is_rt = g_req[s].is_rt;
             reset_slot(s);
         }

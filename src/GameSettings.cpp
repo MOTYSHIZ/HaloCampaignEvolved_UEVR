@@ -97,8 +97,40 @@ void call_one_arg(API::UObject* o, const wchar_t* fn, const void* arg, size_t ar
     o->call_function(fn, frame);
 }
 
+// VALIDATE THE CACHED SETTINGS OBJECT THROUGH THE OBJECT ARRAY, not by touching it.
+//
+// Seven reflection calls follow, and until now their only guards were a null check and
+// settings_are_loaded() -- which reads g_aim_law_armed, i.e. "gameplay is live", NOT "this
+// pointer is valid". After a level teardown the object is freed while g_settings still points
+// at it; the re-resolve that would fix that is rationed to ~30 polls (~60 s). So there is a
+// window of up to a minute in the NEW level where the pointer is dead, non-null, gameplay is
+// live, and both guards pass -- and then seven call_function()s run against a corpse.
+//
+// THE COMMENT AT THE RE-RESOLVE SAYS VALIDATING MEANS DEREFERENCING. That was true when it was
+// written and is not any more: uobject_live() looks the pointer up in the object array and
+// never touches the object, so it is safe on a freed pointer by construction. That is the whole
+// reason it exists (added 2026-09-06 after four use-after-free sites in the same shape).
+//
+// THIS IS ALSO THE EXPERIMENT. Measured: a mission -> menu -> mission teardown, then a tick
+// fault ~40 s later, inside that window, reading null+0x10 through UEVR's reflection. If the
+// line below fires where the faults used to be, that was the call. If the faults continue with
+// this line never appearing, g_settings was never the dead object and the audit should move on
+// to the next cached pointer -- do not assume it was this one.
 void apply_sens_and_dz(int sensH, int sensV, float axial, float radial, int accel) {
     if (g_settings == nullptr) return;
+    {
+        static int32_t s_idx = -1;
+        if (!halo::uobject_live(g_settings, &s_idx)) {
+            uevr::API::get()->log_info(
+                "[Halo-CampE-UEVR] SETTINGS: cached settings object %p is NO LONGER IN THE "
+                "OBJECT ARRAY (freed by a level teardown) -- dropped BEFORE 7 reflection calls "
+                "that would have run against it. Re-resolve on the next ration.",
+                (void*)g_settings);
+            g_settings = nullptr;
+            s_idx = -1;
+            return;
+        }
+    }
     const uint8_t h = (uint8_t)sensH, v = (uint8_t)sensV;
     call_one_arg(g_settings, L"SetControllerLookSensitivityHorizontal", &h, 1);
     call_one_arg(g_settings, L"SetControllerLookSensitivityVertical",   &v, 1);

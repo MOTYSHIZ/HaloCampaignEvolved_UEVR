@@ -6,9 +6,23 @@
 //                  xrlayer_capture_source(). Reads g_cfg, writes the pose snapshot, runs the
 //                  watchdog, owns the D3D12 OBJECT LIFETIMES, and -- since 2026-08-23 -- owns the
 //                  one copy that reads an engine-owned resource. Never calls OpenXR.
-//   SUBMIT THREAD  hooked_end_frame(). Reads the snapshot, owns every OpenXR call and the copy into
+//   SUBMIT THREAD  produce_layers(). Reads the snapshot, owns every OpenXR call and the copy into
 //                  the swapchain image. Never calls UE reflection, never allocates on the steady
 //                  path, and NEVER touches a resource this plugin did not create.
+//
+// ATTACHMENT -- HOW produce_layers() GETS CALLED. Two rungs, chosen in resolve_openxr(), reported
+// as tier= in the state line. The per-frame work is identical on both; only the plumbing differs.
+//
+//   tier=apilayer  THE SHIPPING ROUTE. Our own OpenXR API layer (built in apilayer/, registered by
+//                  scripts/Register-XrApiLayer.ps1) is loaded into the process by the loader and
+//                  calls bridge_end_frame(); the layer does the copy, the call-through and the
+//                  fail-open retry. No PDB, no signature, no recorded address, and NOTHING HERE TO
+//                  ROT when UEVR or the game updates. XrLayerBridge.hpp is our side of it.
+//
+//   tier=pdb       DEV FALLBACK. An inline hook on xrEndFrame, whose address comes from symbols in
+//                  UEVRBackend.pdb. Exact, correct, and CANNOT REACH PLAYERS -- a player install
+//                  has no PDB, so this rung resolves nothing and the feature latches off. That is
+//                  the whole reason the layer above exists; see XrLayerAttach.hpp.
 //
 // The two share the pose snapshot (seqlock), the config mirror (per-field atomics), and one atomic
 // texture pointer that is only ever g_owned or nullptr. Each has its own command list, allocators
@@ -20,8 +34,10 @@
 // where nothing could validate it. Three crashes later, the copy is on the thread that can.
 
 #include "XrLayer.hpp"
+#include "ScopeMask.hpp"
 
 #include "Config.hpp"
+#include "Scope.hpp"   // g_scope_active -- the one-reticule-at-a-time gate
 #include "DevTools.hpp"
 #include "addrcascade/AddressCascade.hpp"
 #include "XrLayerAttach.hpp"
@@ -35,6 +51,10 @@
 #define XR_USE_GRAPHICS_API_D3D12
 #include "thirdparty/openxr/openxr.h"
 #include "thirdparty/openxr/openxr_platform.h"
+
+// The SHIPPING attachment. Included after the OpenXR headers on purpose: XrLayerAbi.h pulls in the
+// same vendored copy, and both sides of the ABI must see one set of struct layouts.
+#include "XrLayerBridge.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -91,6 +111,29 @@ struct XrFns {
 };
 XrFns g_xr;
 
+// WHICH RUNG WON. Recorded rather than inferred: the two tiers reach the compositor by completely
+// different routes -- one appends inside our own inline hook, the other hands quads to a layer that
+// appends them for us -- and a log that does not say which is in play cannot be read after the fact.
+XrAttachTier g_tier = XrAttachTier::None;
+
+// Set by resolve_openxr() when it returns false for a TIMING reason rather than a failure. The
+// difference decides whether the caller waits or latches Failed, and getting it wrong turns "the
+// session has not started yet" into "this feature is broken for the rest of the run".
+bool g_resolve_waiting = false;
+
+// True once the API layer has accepted our end-frame callback. The hook rung has g_hook_id; this is
+// its counterpart, and remove_hook() must clear whichever one is set.
+bool g_bridge_cb = false;
+
+const char* tier_name(XrAttachTier t) {
+    switch (t) {
+        case XrAttachTier::ApiLayer:     return "apilayer";
+        case XrAttachTier::BackendPdb:   return "pdb";
+        case XrAttachTier::LoaderExport: return "loader";
+        default:                         return "none";
+    }
+}
+
 // EVERY entry point comes from the SAME loader instance, and it must be the one UEVR uses.
 //
 // This is not only about the hook. The XrSession the plugin API hands us belongs to the loader
@@ -100,7 +143,82 @@ XrFns g_xr;
 // it only ever looked like a hook problem because the hook never fired to expose the rest.
 bool resolve_openxr() {
     if (g_xr.ok) return true;
-    if (!xrattach_ready()) return false;          // PDB still loading on the worker
+    g_resolve_waiting = false;
+
+    // ---- THE SHIPPING RUNG, ASKED FIRST: our own OpenXR API layer -----------------------------
+    //
+    // Asked before the PDB for the reason XrLayerAttach.hpp spells out at length: the PDB tier is
+    // exact, correct, and CANNOT REACH PLAYERS, because UEVRBackend.pdb exists only in a UEVR
+    // checkout. A player install resolves nothing, the feature latches off, and it does so while
+    // shipping enabled -- which is the worst shape a failure can take. The layer needs no PDB, no
+    // signature and no recorded address; the loader hands it the chain for free.
+    //
+    // get_proc() resolves BELOW our layer on the SAME chain the session came from, so the handle
+    // and the calls belong to one loader instance BY CONSTRUCTION. That is the exact correctness
+    // argument this module lost the first time round, when the session came from UEVR and the
+    // entry points came from openxr_loader.dll.
+    if (const HaloVrLayerApi* api = xrbridge_api()) {
+        // THE INSTANCE MAY NOT EXIST YET, AND THAT IS NOT A FAILURE. api->get_proc() answers null
+        // for every name until the layer has seen xrCreateInstance, so resolving now would fail the
+        // whole tier for a timing reason and latch us onto the PDB for the rest of the session --
+        // on a player machine, onto nothing at all. Wait instead; the caller retries every tick.
+        if (api->get_instance() == XR_NULL_HANDLE) {
+            static uint32_t waited  = 0;
+            static bool     gave_up = false;
+            if (!gave_up && ++waited >= 900) {          // ~10 s at the game-thread tick rate
+                gave_up = true;
+                logf("the API layer is loaded but no OpenXR instance has appeared in ~10 s. That is "
+                     "not what a working layer looks like; falling through to the PDB tier so a dev "
+                     "checkout still has a route. Layer status: %s", xrbridge_status());
+            }
+            if (!gave_up) {
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    logf("API layer present -- waiting for the OpenXR instance before resolving "
+                         "entry points through it. %s", xrbridge_status());
+                }
+                g_resolve_waiting = true;
+                return false;
+            }
+        } else {
+            auto lget = [&](const char* name) -> void* {
+                void* f = (void*)api->get_proc(name);
+                if (f == nullptr) logf("the API layer could not resolve %s", name);
+                return f;
+            };
+            XrFns f{};
+            f.enumerate_formats = (PFN_xrEnumerateSwapchainFormats)lget("xrEnumerateSwapchainFormats");
+            f.create_swapchain  = (PFN_xrCreateSwapchain)          lget("xrCreateSwapchain");
+            f.destroy_swapchain = (PFN_xrDestroySwapchain)         lget("xrDestroySwapchain");
+            f.enumerate_images  = (PFN_xrEnumerateSwapchainImages) lget("xrEnumerateSwapchainImages");
+            f.acquire_image     = (PFN_xrAcquireSwapchainImage)    lget("xrAcquireSwapchainImage");
+            f.wait_image        = (PFN_xrWaitSwapchainImage)       lget("xrWaitSwapchainImage");
+            f.release_image     = (PFN_xrReleaseSwapchainImage)    lget("xrReleaseSwapchainImage");
+            // Optional here for the same reason as below: losing these costs the measured layer
+            // budget and nothing else.
+            f.get_system        = (PFN_xrGetSystem)                lget("xrGetSystem");
+            f.get_system_props  = (PFN_xrGetSystemProperties)      lget("xrGetSystemProperties");
+
+            // NOTE WHAT IS DELIBERATELY NOT REQUIRED: xrEndFrame. On this rung the LAYER owns that
+            // call and we never make it, so demanding it would fail the shipping route over a
+            // function it does not use. The hook rung below still requires it, because there it IS
+            // the hook. end_frame stays null here, and hooked_end_frame is never installed.
+            if (f.enumerate_formats && f.create_swapchain && f.destroy_swapchain &&
+                f.enumerate_images && f.acquire_image && f.wait_image && f.release_image) {
+                g_xr    = f;
+                g_xr.ok = true;
+                g_tier  = XrAttachTier::ApiLayer;
+                logf("entry points resolved through the API LAYER -- no PDB, no signature, no "
+                     "recorded address. %s", xrbridge_status());
+                return true;
+            }
+            logf("the API layer is present and has an instance, but did not resolve the swapchain "
+                 "entry points. Falling through to the PDB tier.");
+        }
+    }
+
+    if (!xrattach_ready()) { g_resolve_waiting = true; return false; }   // PDB still loading
 
     XrAttachTier tier = XrAttachTier::None;
     XrAttachTier first_tier = XrAttachTier::None;
@@ -151,8 +269,11 @@ bool resolve_openxr() {
         return false;
     }
 
-    logf("entry points resolved from UEVRBackend.pdb -- xrEndFrame @ %p", (void*)g_xr.end_frame);
+    logf("entry points resolved from UEVRBackend.pdb -- xrEndFrame @ %p. THIS IS THE DEV RUNG: a "
+         "player install has no PDB, so a release that reaches here has no compositor overlay. "
+         "Register the API layer to get the shipping route.", (void*)g_xr.end_frame);
     g_xr.ok = true;
+    g_tier  = XrAttachTier::BackendPdb;
     return true;
 }
 
@@ -179,6 +300,12 @@ bool resolve_openxr() {
 struct Snapshot {
     XrPosef  pose{};          // stage (or view) space, ready to submit
     float    size_m = 0.05f;
+    // SECOND EXTENT, 0 = square (which every slot but the guide is). XrCompositionLayerQuad::size
+    // is an XrExtent2Df; the squareness was our own single scalar, never the runtime's. A beam is
+    // long and thin, so it needs the other half. The drop key `ang` deliberately keeps using
+    // size_m alone -- a beam's apparent size is its LENGTH, and ranking a thin quad by its
+    // thickness would make the guide the first thing dropped every time.
+    float    size_h_m = 0.0f;
     // THE DROP KEY: apparent (angular) size, size_m / distance_m. One number that expresses
     // "furthest/smallest first" exactly -- a marker twice as far with the same quad size has half
     // the angular size, and so does a marker at the same range drawn half as big. When the runtime
@@ -212,10 +339,34 @@ std::atomic<uint32_t> g_game_tick{0};
 // one caller. Each caller computes its own world size and passes it.
 std::atomic<float>    g_tgt_x[XRLAYER_SLOTS]{}, g_tgt_y[XRLAYER_SLOTS]{}, g_tgt_z[XRLAYER_SLOTS]{};
 std::atomic<float>    g_tgt_cm[XRLAYER_SLOTS]{};
+// Second extent, 0 = square. Only the guide sets it; see xrlayer_notice_quad.
+std::atomic<float>    g_tgt_cm_h[XRLAYER_SLOTS]{};
 std::atomic<float>    g_tgt_hold[XRLAYER_SLOTS]{};   // 0 = at the point; >0 = along the ray at this
 std::atomic<int>      g_tgt_prio[XRLAYER_SLOTS]{};
 std::atomic<uint32_t> g_tgt_tick[XRLAYER_SLOTS]{};
 std::atomic<bool>     g_tgt_live[XRLAYER_SLOTS]{};
+// TARGET IS AN OFFSET FROM THE EYE, NOT A WORLD POINT -- for quads glued to something that moves
+// WITH the player, which is the case a world point handles worst.
+//
+// compute_pose does d_world = target - eye. The target is chosen on the 32 Hz game tick; the eye
+// belongs to the frame being drawn. For a WORLD-FIXED thing (a navpoint) that is exactly right and
+// is why the subtraction lives at render rate. For a HAND-ATTACHED thing it is exactly wrong: while
+// you locomote, both your hand and your eye translate together, so the fresh eye is differenced
+// against a stale hand and the quad sits one tick of travel BEHIND the controller. Reported as
+// "the xr layer visual lags behind when I locomote", and at a walking pace a tick is several cm.
+//
+// With this set, the stored vector is (target - eye) captured at publish time and the eye is added
+// back at render rate, so the two sides of the subtraction come from the same instant and the
+// translation cancels. What remains is sub-frame, not sub-tick.
+std::atomic<bool>     g_tgt_headrel[XRLAYER_SLOTS]{};
+// The MONO camera the head-relative offsets were measured against, published for readers on the
+// SUBMIT thread that need to turn an offset back into a world point. note_eye writes it every
+// frame. Anything reading g_tgt_* for WORLD-SPACE maths must add this back when the slot's
+// headrel flag is set -- the scope-pane reticule (mode 2) is one such reader, and it silently
+// became wrong the moment head-relative targets landed, because it was written when g_tgt_* could
+// only ever hold a world position.
+std::atomic<float>    g_mono_view_x{0.0f}, g_mono_view_y{0.0f}, g_mono_view_z{0.0f};
+std::atomic<bool>     g_mono_view_have{false};
 
 // The RENDER-RATE half: each eye's last rendered position, so their midpoint gives the head.
 std::atomic<float>    g_eye_x[2]{}, g_eye_y[2]{}, g_eye_z[2]{};
@@ -573,6 +724,57 @@ std::atomic<bool> g_regen{false};
 
 // Liveness. Set by the hook, consumed and cleared by the game-thread watchdog.
 std::atomic<uint32_t> g_layers_submitted{0};
+// COHERENCE REJECTIONS, and the window that produces a visibly wrong marker.
+//
+// slot_cell_coherent() is the ONLY thing between a re-let slot and one or two frames of the
+// PREVIOUS navpoint's art drawn at the NEW navpoint's pose -- the "flicker of a wrong navpoint"
+// report. It had NO telemetry. The census `staleart` field counts the PLUGIN-side guard, which
+// fires on a different condition (a re-host that did not complete), so a reader seeing staleart=0
+// would reasonably conclude this window was covered when nothing had ever measured it.
+//
+// cohskip counts rejections. cohdrawn counts the opposite and is the one that matters: slots
+// appended within 2 ticks of their own re-host, i.e. frames where wrong art COULD have reached the
+// compositor. cohskip climbing with cohdrawn at 0 is the guard working; cohdrawn climbing is the
+// bug, measured rather than inferred.
+// WHY WAS THIS SLOT NOT SUBMITTED? Every gate below drops a slot with a bare `continue` and no
+// record, so "the quad is never submitted" has been an unanswerable question -- exactly the gap the
+// grab-guide hunt ran into from the other side. One byte per slot, written on the submit thread,
+// read by the game thread's state line.
+//   0 not dropped   1 !valid (compute_pose)   2 pose stale (>8 ticks)   3 no atlas cell
+//   4 capture stale (freshness)   5 art incoherent after re-host   6 shed by the layer budget
+std::atomic<uint8_t>  g_slot_drop[XRLAYER_SLOTS]{};
+// LAST VALUE IS NOT ENOUGH, and the grab-guide hunt is why.
+//
+// The state line samples every 64 ticks. A slot that publishes BRIEFLY -- the guide appears for
+// a fraction of a second while a hand crosses a threshold -- is almost never caught by that
+// sample, so the line read 10:nopose forever and I reported 'never admitted' when the truth was
+// 'admitted twice, between samples'. The teammate's edge-triggered length log had the mirror-
+// image flaw: it could only emit values under its own threshold. Two instruments, one failure --
+// SAMPLING AN EVENT INSTEAD OF COUNTING IT.
+//
+// cand counts ticks where the slot HAD a pose and was therefore a real candidate; drop counts
+// ticks where it was then rejected. cand=0 means it never published at all and the slot is
+// simply idle -- which is why idle slots are now omitted from the line instead of reading as
+// 'nopose' and crying wolf on every unused slot.
+std::atomic<uint32_t> g_slot_cand[XRLAYER_SLOTS]{};
+std::atomic<uint32_t> g_slot_dropn[XRLAYER_SLOTS]{};
+// PER-GATE COUNTS, because "which gate" is the question and `last` cannot answer it.
+//
+// g_slot_drop holds only the MOST RECENT reason, sampled once every 64 ticks by the state
+// line. That is the same sample-an-event-instead-of-counting-it flaw already fixed once in
+// this file: slot 9 showed cand=5960 drop=949 last=nopose, and `nopose` was simply whatever
+// the last tick happened to be -- it said nothing about the 949. Index = the drop code.
+std::atomic<uint32_t> g_slot_gate[XRLAYER_SLOTS][7]{};
+const char* drop_name(uint8_t d) {
+    switch (d) {
+        case 0: return "ok";     case 1: return "nopose";  case 2: return "posestale";
+        case 3: return "nocell"; case 4: return "capstale"; case 5: return "incoherent";
+        case 6: return "budget"; default: return "?";
+    }
+}
+
+std::atomic<uint32_t> g_coh_skips{0};
+std::atomic<uint32_t> g_coh_drawn{0};
 std::atomic<bool>     g_live{false};
 
 // Config mirror, so the submit thread never reads g_cfg (which the config poll rewrites under it).
@@ -598,6 +800,8 @@ struct Mirror {
     int   budget    = 0;
     int   scope_ret      = 0;      // draw a reticule quad over the scope pane
     float scope_ret_size = 0.12f;  // as a fraction of the pane quad
+    float scope_ret_depth_cm = 1.0f; // in FRONT of the pane's surface, cm (see Config.hpp)
+    int   scope_ret_roll     = 1;    // mode 2's projection frame; see Config.hpp
     float cap_fov_deg    = 4.375f; // the capture's own FOV: scope_base_fov / scope_zoom
     float cap_dist_cm    = 90.0f;  // how far along the ray the capture sits (scope_cam_dist)
 };
@@ -609,6 +813,48 @@ std::atomic<int>   g_m_budget{0};
 // different size, and the feature is off by default.
 std::atomic<int>   g_m_scope_ret{0};
 std::atomic<float> g_m_scope_ret_size{0.12f};
+std::atomic<float> g_m_scope_ret_depth{1.0f};   // cm; converted with g_cm_per_m at use
+std::atomic<int>   g_m_scope_ret_roll{1};
+// WHERE the scope reticule sits in the pane, normalised -1..1. Written on the game thread by
+// xrlayer_set_scope_reticle_offset, read on the submit thread when the quad is built.
+std::atomic<float> g_scope_ret_u{0.0f};
+std::atomic<float> g_scope_ret_v{0.0f};
+std::atomic<bool>  g_scope_ret_off_have{false};
+// The CAPTURE CAMERA'S world right/up, for mode 2's projection. UE world vectors, written on the
+// game thread. Relaxed: a torn read is one frame of a slightly stale basis on a reticule offset.
+std::atomic<float> g_scope_cam_rx{0.0f}, g_scope_cam_ry{1.0f}, g_scope_cam_rz{0.0f};
+std::atomic<float> g_scope_cam_ux{0.0f}, g_scope_cam_uy{0.0f}, g_scope_cam_uz{1.0f};
+std::atomic<bool>  g_scope_cam_axes{false};
+
+// ---- RIG-TRACKED ORIENTATION ------------------------------------------------------------------
+// g_rig_* is written on the RENDER thread every frame; g_slot_rig_* on the GAME thread with the
+// orientation it belongs to. The submit thread rotates the stored vectors by the difference, which
+// is the same correction Plugin.cpp's apply_render makes for the arm meshes.
+// BASIS VECTORS, NOT EULER ANGLES -- and that distinction is the whole of a reported bug.
+//
+// The first version of this published the rig as (pitch, yaw, roll) and rebuilt quaternions from
+// them. Scope.cpp already records why that fails, from two earlier attempts at a different problem:
+// "an Euler decomposition redistributes between those three as pitch changes -- degenerating
+// entirely near vertical", producing "roll that tracked unevenly through a sweep". Reported here as
+// the pane going jittery when the controller is ROLLED, which is the same failure.
+//
+// Three orthonormal vectors have no decomposition and no singularity. Plugin.cpp already holds the
+// rig as a quaternion, and Scope.cpp can read the rig's axes directly, so nothing has to be
+// decomposed anywhere along this path.
+std::atomic<float> g_rig_fx{1.0f}, g_rig_fy{0.0f}, g_rig_fz{0.0f};
+std::atomic<float> g_rig_rx{0.0f}, g_rig_ry{1.0f}, g_rig_rz{0.0f};
+std::atomic<float> g_rig_ux{0.0f}, g_rig_uy{0.0f}, g_rig_uz{1.0f};
+std::atomic<float> g_rig_px{0.0f}, g_rig_py{0.0f}, g_rig_pz{0.0f};
+std::atomic<bool>  g_rig_have{false};
+// Per-slot: the offset from the rig, IN THE RIG'S OWN BASIS, plus the flag saying to use it.
+// Separate from the orientation tracking above because a slot may need one without the other --
+// the control arm publishes no orientation at all and still needs its position corrected.
+std::atomic<float> g_slot_rp_x[XRLAYER_SLOTS]{}, g_slot_rp_y[XRLAYER_SLOTS]{}, g_slot_rp_z[XRLAYER_SLOTS]{};
+std::atomic<bool>  g_slot_rig_pos[XRLAYER_SLOTS]{};
+std::atomic<float> g_slot_rig_fx[XRLAYER_SLOTS]{}, g_slot_rig_fy[XRLAYER_SLOTS]{}, g_slot_rig_fz[XRLAYER_SLOTS]{};
+std::atomic<float> g_slot_rig_rx[XRLAYER_SLOTS]{}, g_slot_rig_ry[XRLAYER_SLOTS]{}, g_slot_rig_rz[XRLAYER_SLOTS]{};
+std::atomic<float> g_slot_rig_ux[XRLAYER_SLOTS]{}, g_slot_rig_uy[XRLAYER_SLOTS]{}, g_slot_rig_uz[XRLAYER_SLOTS]{};
+std::atomic<bool>  g_slot_rig_track[XRLAYER_SLOTS]{};
 std::atomic<float> g_m_cap_fov{4.375f};
 std::atomic<float> g_m_cap_dist{90.0f};
 std::atomic<int>   g_m_space{0};
@@ -646,6 +892,8 @@ void mirror_store(const Mirror& m) {
     g_m_budget.store(m.budget, std::memory_order_relaxed);
     g_m_scope_ret.store(m.scope_ret, std::memory_order_relaxed);
     g_m_scope_ret_size.store(m.scope_ret_size, std::memory_order_relaxed);
+    g_m_scope_ret_depth.store(m.scope_ret_depth_cm, std::memory_order_relaxed);
+    g_m_scope_ret_roll.store(m.scope_ret_roll, std::memory_order_relaxed);
     g_m_cap_fov.store(m.cap_fov_deg, std::memory_order_relaxed);
     g_m_cap_dist.store(m.cap_dist_cm, std::memory_order_relaxed);
 }
@@ -714,6 +962,175 @@ void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, flo
         }
     }
 }
+
+// THE GRAB GUIDE'S ART: a feathered capsule, generated once.
+//
+// Same conventions as generate_bitmap above -- premultiplied, BGRA-aware, alpha carries the shape.
+// The quad it lands on is NON-SQUARE (long along the barrel, thin across it), so the capsule is
+// authored square and stretched by the extent. Stretching is exactly right for this shape: a
+// capsule is a rectangle with semicircular caps, and scaling one axis keeps the caps round-ish
+// while the body simply gets longer. A circle would work too -- it is this with body_half = 0.
+//
+// FEATHERED IN ALPHA, which is the whole point. A hard-edged bar in a compositor layer reads as a
+// sticker pasted over the scene, because it has none of the softness everything behind it has. The
+// falloff is what makes it look like light rather than geometry, and it costs nothing: it is a
+// distance field either way.
+//
+// LOW RES IS FINE and 32 px is plenty. The thing is a couple of centimetres on screen, it has no
+// detail to lose, and the alpha ramp is what the eye reads -- not the resolution. Bigger would only
+// cost atlas.
+// The beam's art. KEPT although the label is the default: the beam earns its place again the
+// moment there is more than one thing to grab (grenades, magazines), because then "you can grip"
+// is not enough and WHICH ONE has to be answered. Fully dim-parameterised, so it renders correctly
+// in the label-sized 128px cell as well as the 32px one it was written for.
+void generate_capsule(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
+                      bool bgra) {
+    const float c         = (float)dim * 0.5f - 0.5f;
+    const float radius    = (float)dim * 0.34f;   // cap radius / half-thickness, px
+    const float body_half = (float)dim * 0.16f;   // half-length of the straight section, px
+    const float AA        = (float)dim * 0.16f;   // feather width, px -- generous on purpose
+
+    for (int y = 0; y < dim; ++y) {
+        for (int x = 0; x < dim; ++x) {
+            // Distance to a horizontal SEGMENT, which is what makes this a capsule rather than an
+            // ellipse: clamp along the body, then measure radially. The caps fall out of the clamp.
+            const float dx = (float)x - c, dy = (float)y - c;
+            float ax = dx;
+            if (ax >  body_half) ax -= body_half;
+            else if (ax < -body_half) ax += body_half;
+            else ax = 0.0f;
+            const float d = std::sqrt(ax * ax + dy * dy);
+
+            // 1 inside, feathering to 0 across AA. Smoothstep rather than linear so the edge has
+            // no visible band where the ramp starts.
+            float t = 1.0f - (d - (radius - AA)) / AA;
+            if (t > 1.0f) t = 1.0f;
+            if (t < 0.0f) t = 0.0f;
+            float cov = t * t * (3.0f - 2.0f * t);
+            cov *= a;
+
+            uint8_t* p = out + (size_t)y * stride + (size_t)x * 4;
+            const uint8_t R = (uint8_t)(r * cov * 255.0f + 0.5f);
+            const uint8_t G = (uint8_t)(g * cov * 255.0f + 0.5f);
+            const uint8_t B = (uint8_t)(b * cov * 255.0f + 0.5f);
+            p[0] = bgra ? B : R;
+            p[1] = G;
+            p[2] = bgra ? R : B;
+            p[3] = (uint8_t)(cov * 255.0f + 0.5f);
+        }
+    }
+}
+
+// THE GRAB-GUIDE LABEL: the word "Grip", rendered with a real font, anchored to the off hand.
+//
+// It replaces the beam (generate_capsule, removed). The beam had to state a DIRECTION, and a
+// direction is a claim about which object you are about to grab -- a claim it got visibly wrong.
+// A label anchored to the hand makes no such claim: it says "you can grip here, now", which is the
+// affordance that was actually wanted, and it cannot point at the wrong thing because it does not
+// point. Note what this does and does not fix: the ZONE test still decides WHEN the label appears,
+// so a wrong zone now reads as "Grip showing when nothing is grabbable" rather than as bad aim.
+//
+// WHY GDI. The atlas is CPU-side pixels (see fill_upload), so text has to be rasterised on the CPU.
+// GDI is the smallest way to get a real, hinted, antialiased typeface -- the alternative was baking
+// a glyph atlas by hand, which is more code and a worse-looking result. It costs one gdi32.lib
+// link and runs ONCE at bring-up (and on a colour change), never per frame.
+//
+// ANTIALIASED_QUALITY, NOT CLEARTYPE, and this is not a style preference. ClearType is subpixel
+// antialiasing: it deliberately puts DIFFERENT coverage in R, G and B to exploit the physical
+// stripe order of a desktop LCD. We read the luminance back as an ALPHA MASK, so per-channel
+// coverage would come back as coloured fringing on the glyph edges -- and on an HMD's optics,
+// aimed at a subpixel layout that is not there, it would be wrong even if we did not.
+void generate_label(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
+                    bool bgra) {
+    // GDI gives us no alpha: DrawText writes RGB and leaves the fourth byte at zero. So render
+    // WHITE ON BLACK and read the result back as coverage. That is why the bitmap is cleared to
+    // black and the text colour is pure white -- the luminance IS the glyph's alpha.
+    // Array, not a pointer, so the length comes from sizeof and this needs no <cwchar> for wcslen.
+    static const wchar_t kText[]  = L"Grip";
+    constexpr int        kTextLen = (int)(sizeof(kText) / sizeof(kText[0])) - 1;
+
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (dc == nullptr) return;
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = dim;
+    bi.bmiHeader.biHeight      = -dim;          // negative = TOP-DOWN, matching our atlas rows
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void*   bits = nullptr;
+    HBITMAP bmp  = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp == nullptr || bits == nullptr) { DeleteDC(dc); return; }
+    ZeroMemory(bits, (size_t)dim * (size_t)dim * 4);
+
+    HGDIOBJ old_bmp = SelectObject(dc, bmp);
+
+    // MEASURE, THEN FIT. "Grip" at a guessed point size either clips or swims in whitespace, and
+    // every wrong guess costs a full rebuild to see. So pick a height, ask GDI how wide that
+    // actually is in the chosen face, and scale once to fit the cell with a small margin. One
+    // correction is enough -- text width is very nearly linear in font height.
+    auto make_font = [](int h) {
+        return CreateFontW(-h, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    };
+
+    const int  margin_px = (int)((float)dim * 0.10f);
+    const int  avail     = dim - 2 * margin_px;
+    int        height    = (int)((float)dim * 0.46f);
+    HFONT      font      = make_font(height);
+    // A NULL font is not fatal: GDI then draws in the DC's default face, which is ugly but legible.
+    // Failing closed here would trade a cosmetic problem for a missing affordance.
+    HGDIOBJ    old_font  = (font != nullptr) ? SelectObject(dc, font) : nullptr;
+
+    SIZE ext{};
+    if (GetTextExtentPoint32W(dc, kText, kTextLen, &ext) && ext.cx > avail && ext.cx > 0) {
+        const int shrunk = (int)((float)height * ((float)avail / (float)ext.cx));
+        if (HFONT f2 = make_font(shrunk > 6 ? shrunk : 6)) {
+            SelectObject(dc, f2);
+            if (font != nullptr) DeleteObject(font);
+            font = f2;
+        }
+    }
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    RECT rc{0, 0, dim, dim};
+    DrawTextW(dc, kText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+
+    // GDI flushes lazily; the batch must be drained before the DIB's bits are read on the CPU.
+    GdiFlush();
+
+    const uint8_t* srcpx = (const uint8_t*)bits;
+    for (int y = 0; y < dim; ++y) {
+        for (int x = 0; x < dim; ++x) {
+            const uint8_t* sp = srcpx + ((size_t)y * (size_t)dim + (size_t)x) * 4;
+            // DIB is BGRX. White-on-black means all three channels carry the same coverage; take
+            // the max so a substituted face that happens to render with any tint still reads.
+            const uint8_t mx  = sp[0] > sp[1] ? (sp[0] > sp[2] ? sp[0] : sp[2])
+                                              : (sp[1] > sp[2] ? sp[1] : sp[2]);
+            const float   cov = ((float)mx / 255.0f) * a;
+
+            uint8_t* p = out + (size_t)y * stride + (size_t)x * 4;
+            const uint8_t R = (uint8_t)(r * cov * 255.0f + 0.5f);
+            const uint8_t G = (uint8_t)(g * cov * 255.0f + 0.5f);
+            const uint8_t B = (uint8_t)(b * cov * 255.0f + 0.5f);
+            p[0] = bgra ? B : R;
+            p[1] = G;
+            p[2] = bgra ? R : B;
+            p[3] = (uint8_t)(cov * 255.0f + 0.5f);
+        }
+    }
+
+    if (old_font != nullptr) SelectObject(dc, old_font);
+    if (font     != nullptr) DeleteObject(font);
+    SelectObject(dc, old_bmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
+
 
 // ============================================================================================
 // D3D12 plumbing
@@ -784,6 +1201,27 @@ bool fill_upload(float r, float g, float b, float a) {
     if (c0.dim > 0) {
         generate_bitmap(tex.data() + ((size_t)c0.y * g_sc_w + c0.x) * 4, c0.dim,
                         (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
+    }
+    // THE GUIDE'S CELL, filled from the same staging pass. It is a generated shape like the
+    // fallback ring, not captured art, so it belongs here rather than anywhere near XrSource --
+    // no widget, no render target, no capture, nothing to re-resolve. Filled ONCE with the rest of
+    // the staging buffer and then simply present forever.
+    const Cell& cg = g_cell[XRLAYER_SLOT_GUIDE];
+    if (cg.dim > 0) {
+        // ONE CELL, TWO POSSIBLE PICTURES. grabguidemode picks which; changing it live sets
+        // g_regen (see the config poll), which is what re-runs this pass and swaps the art. Without
+        // that the key would change the QUAD's shape and leave the old picture in the cell -- a
+        // tunable that half-works, which is harder to diagnose than one that does nothing at all.
+        uint8_t* const dstpx = tex.data() + ((size_t)cg.y * g_sc_w + cg.x) * 4;
+        if (g_cfg.grab_guide_mode == 1) {
+            generate_capsule(dstpx, cg.dim, (size_t)g_sc_w * 4,
+                             g_cfg.grab_guide_r, g_cfg.grab_guide_g, g_cfg.grab_guide_b, 1.0f,
+                             g_is_bgra);
+        } else {
+            generate_label(dstpx, cg.dim, (size_t)g_sc_w * 4,
+                           g_cfg.grab_guide_r, g_cfg.grab_guide_g, g_cfg.grab_guide_b, 1.0f,
+                           g_is_bgra);
+        }
     }
 
     void* mapped = nullptr;
@@ -882,7 +1320,15 @@ bool create_d3d_resources(float r, float g, float b, float a) {
         td.Format           = g_is_bgra ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
         td.SampleDesc.Count = 1;
         td.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        td.Flags            = D3D12_RESOURCE_FLAG_NONE;
+        // UAV ONLY WHEN THE MASK IS ON. scopemask writes this texture's alpha with a compute
+        // shader, which needs ALLOW_UNORDERED_ACCESS -- and that is a CREATION-TIME decision, so it
+        // is taken here rather than lazily. With the mask off the atlas is created byte-identically
+        // to before: an unconfigured build carries none of it, and the flag cannot affect anyone
+        // who has not asked for the feature. This texture has crash history around its lifetime,
+        // so its creation is deliberately the one place this decision is made.
+        const bool want_uav = scopemask_wanted();
+        td.Flags            = want_uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                       : D3D12_RESOURCE_FLAG_NONE;
 
         if (FAILED(g_device->CreateCommittedResource(&hp2, D3D12_HEAP_FLAG_NONE, &td,
                                                      D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
@@ -891,6 +1337,10 @@ bool create_d3d_resources(float r, float g, float b, float a) {
                  "generated ring keeps drawing", g_sc_w, g_sc_h);
             return false;
         }
+        // Tell the mask what this atlas can actually DO. Without it the apply path cannot tell a
+        // UAV-capable atlas from one built before scopemask was set, and creating a UAV on the
+        // latter removes the device -- which is exactly what a live scopemask=1 did on 2026-09-07.
+        scopemask_note_atlas(want_uav);
     }
 
     for (int i = 0; i < GT_RING; ++i) {
@@ -951,7 +1401,20 @@ constexpr D3D12_RESOURCE_STATES ENGINE_SRC_COLOR =
 // stores nullptr through it BEFORE releasing the resource, so a submit thread that only ever
 // follows the published pointer cannot be handed a released one. Reading the raw g_owned global
 // here instead would quietly reintroduce exactly that race.
-bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0) {
+// GUIDE_CELL: lay the generated grab-guide capsule back over a CAPTURED atlas, same idea as
+// ring_cell0 and for the same reason -- it is the fix for "the guide is submitted and invisible".
+//
+// The guide's pixels are GENERATED once into the staging buffer by fill_upload(). That is fine
+// while nothing is being captured, because then the whole generated atlas is copied. The moment
+// real widget art arrives, the `src != nullptr` path below does CopyResource(dst, src) -- the WHOLE
+// captured atlas over the WHOLE image, every frame -- and nothing ever captures into the guide's
+// cell at (g_ret_dim, 0). So the capsule is wiped on the first captured frame and never restored:
+// slot 10 keeps being posed, admitted and submitted (measured: cand=370, 277 admitted) while
+// sampling a rectangle that has been blanked to transparent.
+//
+// Every upstream instrument said "healthy", because every upstream stage WAS healthy. The one
+// question none of them asked is whether the pixels the quad points at survived the frame.
+bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell) {
     if (dst == nullptr || g_list == nullptr || g_queue == nullptr) return false;
 
     // Pick this frame's allocator and wait ONLY if the GPU has not finished what that allocator
@@ -1008,9 +1471,10 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0) {
         g_list->CopyResource(dst, src);
     }
 
-    // The staging-buffer path: either the WHOLE generated atlas (nothing captured yet) or just
-    // cell 0 laid back over a captured atlas (the reticule's stale fall-back).
-    if (src == nullptr || ring_cell0) {
+    // The staging-buffer path: either the WHOLE generated atlas (nothing captured yet), or the
+    // GENERATED cells laid back over a captured atlas -- cell 0 for the reticule's stale fall-back,
+    // and the guide's cell whenever the guide is being drawn.
+    if (src == nullptr || ring_cell0 || guide_cell) {
         const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
                                ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 
@@ -1035,19 +1499,30 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0) {
         if (src == nullptr) {
             g_list->CopyTextureRegion(&dl, 0, 0, 0, &s, nullptr);
         } else {
-            // Cell 0 only, out of the same full-atlas footprint. The source box is in the
-            // footprint's own coordinates, which for cell 0 is its rectangle unchanged.
-            const Cell& c0 = g_cell[XRLAYER_SLOT_RETICULE];
-            if (c0.dim > 0) {
+            // ONE CELL AT A TIME, EACH BEHIND ITS OWN GATE. This branch used to copy cell 0
+            // unconditionally, which was safe only because ring_cell0 was the single way in.
+            // Now that guide_cell can also open it, an ungated cell-0 copy would lay the STALE
+            // GENERATED RING over perfectly good captured reticule art every frame the guide is
+            // up -- turning a fix for one slot into a regression on the slot that already worked.
+            //
+            // The source box is in the full-atlas footprint's own coordinates, which for these
+            // cells is their rectangle unchanged.
+            auto lay_back = [&](const Cell& c) {
+                if (c.dim <= 0) return;
                 D3D12_BOX box{};
-                box.left   = (UINT)c0.x;
-                box.top    = (UINT)c0.y;
+                box.left   = (UINT)c.x;
+                box.top    = (UINT)c.y;
                 box.front  = 0;
-                box.right  = (UINT)(c0.x + c0.dim);
-                box.bottom = (UINT)(c0.y + c0.dim);
+                box.right  = (UINT)(c.x + c.dim);
+                box.bottom = (UINT)(c.y + c.dim);
                 box.back   = 1;
-                g_list->CopyTextureRegion(&dl, (UINT)c0.x, (UINT)c0.y, 0, &s, &box);
-            }
+                g_list->CopyTextureRegion(&dl, (UINT)c.x, (UINT)c.y, 0, &s, &box);
+            };
+
+            if (ring_cell0)  lay_back(g_cell[XRLAYER_SLOT_RETICULE]);
+            // 32x32 -- 4 KB, and only on frames the guide is actually drawn. The per-frame cost of
+            // NOT doing this was an invisible feature, which is the more expensive of the two.
+            if (guide_cell)  lay_back(g_cell[XRLAYER_SLOT_GUIDE]);
         }
     }
 
@@ -1675,10 +2150,39 @@ void build_atlas_layout() {
         g_cell[XRLAYER_SLOT_PANE] = Cell{0, (int32_t)(g_ret_dim + rows * nd), (int32_t)pane};
     }
 
+    // THE GUIDE CELL GOES IN SPARE SPACE, and that is the entire design of it.
+    //
+    // atlas_w is max(g_ret_dim, COLS*nd, pane) -- so whenever the marker row is wider than the
+    // reticule (512 vs 256 on the shipped numbers) there is already an unused rectangle to the
+    // reticule's right. Putting the guide there means the atlas does NOT grow, the swapchain extent
+    // does NOT change, and cells 0..9 keep byte-identical rectangles.
+    //
+    // That matters more than saving memory. This function's own header records that resizing the
+    // atlas at runtime tore the layer down and left the reticule permanently on its generated ring
+    // -- so a new cell that changed the extent would risk exactly the failure the fixed layout
+    // exists to prevent. Fitting into slack risks nothing.
+    //
+    // IF IT DOES NOT FIT, the guide simply has no cell (dim 0) and never presents. Degrading to
+    // "no guide" is correct; growing the atlas to make room is not.
+    constexpr int GUIDE_DIM = 128;  // TEXT needs resolution a capsule did not: 32px could not spell "Grip"
+    if (g_ret_dim + GUIDE_DIM <= w && GUIDE_DIM <= g_ret_dim) {
+        g_cell[XRLAYER_SLOT_GUIDE] = Cell{(int32_t)g_ret_dim, 0, (int32_t)GUIDE_DIM};
+    } else {
+        logf("no slack in the atlas for the grab-guide cell (%dpx needed beside a %dpx reticule in "
+             "a %dpx-wide atlas) -- the guide will not present on the layer.",
+             GUIDE_DIM, g_ret_dim, w);
+    }
+
+    // The guide is stated POSITIVELY here, not left to be inferred from the absence of the "no
+    // slack" warning above. Inferring presence from a missing line is the weaker evidence, and it
+    // reads identically to "that code never ran" -- which is exactly the ambiguity that cost a
+    // round of guessing when the guide did not appear.
+    const Cell& gc = g_cell[XRLAYER_SLOT_GUIDE];
     logf("atlas: %dx%d -- cell 0 reticule %dpx at (0,0), %d navpoint cells %dpx from y=%d, "
-         "pane %dpx at y=%d%s",
+         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s",
          g_sc_w, g_sc_h, g_ret_dim, XRLAYER_NAV_COUNT, nd, g_ret_dim,
-         pane, g_ret_dim + rows * nd, pane > 0 ? "" : " (none)");
+         pane, g_ret_dim + rows * nd, pane > 0 ? "" : " (none)",
+         gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)");
 }
 
 // HOW MANY COMPOSITION LAYERS WILL THIS RUNTIME ACCEPT? Ask it. GAME THREAD, once.
@@ -1755,6 +2259,22 @@ bool bring_up(const Mirror& m) {
     }
 
     g_session = session;
+
+    // CROSS-CHECK THE HANDLE ON THE LAYER RUNG. produce_layers() gates on session == g_session, so
+    // a disagreement here would not surface as an error -- it would be the overlay silently never
+    // drawing, on every frame, with every other diagnostic reading healthy. The two handles come
+    // from different places (UEVR's plugin API, and the layer's own xrCreateSession) and are
+    // expected to be the same value; nothing downstream can tell you when they are not.
+    if (g_tier == XrAttachTier::ApiLayer) {
+        const HaloVrLayerApi* api = xrbridge_api();
+        const XrSession ls = (api != nullptr && api->get_session != nullptr)
+                                 ? api->get_session() : XR_NULL_HANDLE;
+        if (ls != XR_NULL_HANDLE && ls != session) {
+            logf("SESSION MISMATCH: UEVR reports %p, the API layer reports %p. Using UEVR's -- if "
+                 "the overlay never appears, this is why.", (void*)session, (void*)ls);
+        }
+    }
+
     g_device  = (ID3D12Device*)p->renderer->device;
     g_queue   = (ID3D12CommandQueue*)p->renderer->command_queue;
 
@@ -1818,27 +2338,43 @@ XrCompositionLayerQuad g_quads[XRLAYER_SLOTS]{};
 // -- it is derived from another slot's pose rather than owning a slot of its own.
 XrCompositionLayerQuad g_scope_ret_quad{};
 
-XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrameEndInfo* info) {
-    // Fail-open on every path below: anything unexpected forwards the call untouched.
-    if (g_end_frame_orig == nullptr) return XR_ERROR_RUNTIME_FAILURE;
-    if (info == nullptr) return g_end_frame_orig(session, info);
+// PRODUCE OUR LAYERS FOR THIS FRAME. SUBMIT THREAD. Returns how many pointers it wrote into
+// `out`, at most `out_capacity`; 0 means "nothing to add" and is the fail-open answer at every
+// gate below.
+//
+// THIS IS THE WHOLE OF THE PER-FRAME WORK, AND BOTH ATTACHMENT RUNGS SHARE IT. What differs is
+// only who does the appending afterwards:
+//
+//   layer rung -- bridge_end_frame() hands these straight back to the API layer, which does the
+//                 copy, the call-through and the fail-open retry itself (see XrLayerAbi.h).
+//   hook rung  -- hooked_end_frame() copies UEVR's layers, appends ours, calls through, and
+//                 retries clean if the runtime refuses.
+//
+// Splitting it this way is not tidiness. Two copies of these gates would drift, and the ones that
+// would drift silently are exactly the ones deciding whether a wrong marker is shown.
+//
+// THE POINTERS WRITTEN HERE MUST OUTLIVE THE RETURN -- both callers forward them to the runtime
+// after this returns. That is why g_quads and g_scope_ret_quad are static and not locals.
+uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
+                        const XrCompositionLayerBaseHeader** out, uint32_t out_capacity) {
+    if (info == nullptr || out == nullptr) return 0;
 
     const Mirror m = mirror_load();
-    if (!m.enabled) return g_end_frame_orig(session, info);
+    if (!m.enabled) return 0;
 
     const State st = g_state.load(std::memory_order_relaxed);
-    if (st == State::Failed || st == State::Off) return g_end_frame_orig(session, info);
+    if (st == State::Failed || st == State::Off) return 0;
 
     // Bring-up is NOT done here -- see bring_up() on the game thread. Until it succeeds we are only
     // a pass-through.
-    if (st != State::Armed) return g_end_frame_orig(session, info);
-    if (session != g_session) return g_end_frame_orig(session, info);
+    if (st != State::Armed) return 0;
+    if (session != g_session) return 0;
 
     Frame fr{};
-    if (!read_snapshot(&fr)) return g_end_frame_orig(session, info);
+    if (!read_snapshot(&fr)) return 0;
 
     const XrSpace space = (m.space == 2) ? g_view_space : g_stage_space;
-    if (space == XR_NULL_HANDLE) return g_end_frame_orig(session, info);
+    if (space == XR_NULL_HANDLE) return 0;
 
     // ============================================================================================
     // WHICH SLOTS ARE DRAWABLE, and how many of them fit
@@ -1866,11 +2402,17 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
 
     for (int s = 0; s < XRLAYER_SLOTS; ++s) {
         const Snapshot& sn = fr.slot[s];
-        if (!sn.valid) continue;
+        g_slot_drop[s].store(0, std::memory_order_relaxed);
+        if (!sn.valid) { g_slot_drop[s].store(1, std::memory_order_relaxed); continue; }
+        g_slot_cand[s].fetch_add(1, std::memory_order_relaxed);   // had a pose: a real candidate
         // No fresh pose for a while means the drive path is not running (menu, cutscene, loading).
         // Draw nothing rather than leaving a stale quad hanging in space.
-        if (game_tick - sn.tick > 8) continue;
-        if (g_cell[s].dim <= 0) continue;                 // no cell -- e.g. nav off at bring-up
+        if (game_tick - sn.tick > 8) { g_slot_drop[s].store(2, std::memory_order_relaxed);
+                                       g_slot_gate[s][2].fetch_add(1, std::memory_order_relaxed);
+                                       g_slot_dropn[s].fetch_add(1, std::memory_order_relaxed); continue; }
+        if (g_cell[s].dim <= 0) { g_slot_drop[s].store(3, std::memory_order_relaxed);
+                                  g_slot_gate[s][3].fetch_add(1, std::memory_order_relaxed);
+                                  g_slot_dropn[s].fetch_add(1, std::memory_order_relaxed); continue; }
 
         // ---- THE FRESHNESS GATE, NOW PER SLOT AND STILL COSMETIC ----
         //
@@ -1887,9 +2429,29 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
 
         if (s == XRLAYER_SLOT_RETICULE) {
             ret_stale = !fresh;
+        } else if (s == XRLAYER_SLOT_GUIDE) {
+            // EXEMPT, for the same reason slot 0 is: its art is GENERATED, not captured.
+            //
+            // This gate asks "is the game thread still capturing this slot", and the guide has
+            // nothing to capture -- generate_label writes its cell once at bring-up and it is
+            // correct forever. g_slot_beat therefore stays 0, `fresh` is permanently false, and
+            // without this branch the guide was built, posed, and then silently dropped from the
+            // layer list every single frame. That was the "I do not see it" report: everything
+            // upstream worked and the quad was never appended.
+            //
+            // Nothing is lost by exempting it. Liveness is already enforced above by the POSE --
+            // sn.valid and the 8-tick staleness check -- which is the right question for a quad
+            // whose pixels cannot go stale. xrlayer_retire_quad() is what turns it off.
         } else if (!fresh) {
+            g_slot_drop[s].store(4, std::memory_order_relaxed);
+            g_slot_gate[s][4].fetch_add(1, std::memory_order_relaxed);
+            g_slot_dropn[s].fetch_add(1, std::memory_order_relaxed);
             continue;
         } else if (!slot_cell_coherent(s)) {
+            g_slot_drop[s].store(5, std::memory_order_relaxed);
+            g_slot_gate[s][5].fetch_add(1, std::memory_order_relaxed);
+            g_slot_dropn[s].fetch_add(1, std::memory_order_relaxed);
+            g_coh_skips.fetch_add(1, std::memory_order_relaxed);
             // Fresh art, but captured BEFORE this slot's most recent re-host -- the cell still holds
             // the previous navpoint's widget while the pose has already moved to the new one. Do not
             // append it: the coherent capture arrives next tick, and Plugin.cpp draws the in-scene
@@ -1897,12 +2459,21 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
             // costs a marker at most one or two frames on the layer when its kind changes.
             continue;
         }
+        // ABOUT TO APPEND. If this slot was re-hosted within the last couple of ticks the cell may
+        // still hold the outgoing navpoint's pixels while coherence has just said otherwise.
+        // Counting it turns "I sometimes see a wrong marker" into a number.
+        if (s != XRLAYER_SLOT_RETICULE) {
+            const uint32_t host = g_slot_host_tick[s].load(std::memory_order_relaxed);
+            if (host != 0 && (int32_t)(game_tick - host) >= 0 && (game_tick - host) <= 2) {
+                g_coh_drawn.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         draw[n_draw].slot = s;
         draw[n_draw].ang  = sn.ang;
         draw[n_draw].prio = sn.prio;
         ++n_draw;
     }
-    if (n_draw == 0) return g_end_frame_orig(session, info);
+    if (n_draw == 0) return 0;
 
     // ---- the ring fall-back counter, on the EDGE only ----
     //
@@ -1948,12 +2519,21 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // one is exactly the invention this block exists to avoid. The real ceiling came from
     // xrGetSystemProperties at bring-up (see query_max_layers), and what UEVR has already put in
     // this frame is read from info->layerCount every time rather than guessed.
-    constexpr uint32_t MAX_LAYERS = 32;
-    if (info->layerCount >= MAX_LAYERS) return g_end_frame_orig(session, info);
+    // `out_capacity` is the caller's room for OUR layers and nothing more -- the hook rung passes
+    // what is left of its 32-entry array after UEVR's own layers, the API-layer rung passes
+    // HALOVR_LAYER_MAX_EXTRA_LAYERS. It is NOT a budget, and reading it as one is the invention
+    // this block exists to avoid. The real ceiling came from xrGetSystemProperties at bring-up
+    // (see query_max_layers), and what UEVR has already put in this frame is read from
+    // info->layerCount every time rather than guessed.
+    //
+    // Tested HERE rather than at the top of the function on purpose: the freshness gates and the
+    // ring fall-back counter above have already run, and they must keep running on a frame we end
+    // up adding nothing to, or ringfalls and g_showing_ring stop tracking reality.
+    if (out_capacity == 0) return 0;
 
     uint32_t budget = our_layer_budget(info->layerCount, m.budget);
-    if (budget > MAX_LAYERS - info->layerCount) budget = MAX_LAYERS - info->layerCount;
-    if (budget == 0) return g_end_frame_orig(session, info);   // forward untouched, nothing acquired
+    if (budget > out_capacity) budget = out_capacity;
+    if (budget == 0) return 0;   // nothing acquired, so nothing to release
 
     // DROP ORDER: priority first (0 = the reticule, never dropped), then LARGEST APPARENT SIZE
     // first, so what goes is the furthest/smallest -- one comparison expressing both. Insertion
@@ -1972,13 +2552,20 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     uint32_t n_use = (uint32_t)n_draw;
     if (n_use > budget) {
         g_layer_drops.fetch_add((uint32_t)n_draw - budget, std::memory_order_relaxed);
+        // Mark the ones the sort is about to shed, so "my quad vanished" names the budget rather
+        // than looking identical to never having been a candidate.
+        for (uint32_t di = budget; di < (uint32_t)n_draw; ++di) {
+            g_slot_drop[draw[di].slot].store(6, std::memory_order_relaxed);
+            g_slot_gate[draw[di].slot][6].fetch_add(1, std::memory_order_relaxed);
+            g_slot_dropn[draw[di].slot].fetch_add(1, std::memory_order_relaxed);
+        }
         n_use = budget;
     }
 
     // ---- acquire / wait / blit / release ----
     uint32_t idx = 0;
     XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(g_xr.acquire_image(g_swapchain, &ai, &idx))) return g_end_frame_orig(session, info);
+    if (XR_FAILED(g_xr.acquire_image(g_swapchain, &ai, &idx))) return 0;
 
     // TIMEOUT IS A SUCCESS CODE. XR_TIMEOUT_EXPIRED is non-negative, so XR_FAILED() does not catch
     // it -- testing with XR_FAILED here would sail past a wait that never completed and write into
@@ -1997,7 +2584,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         g_xr.release_image(g_swapchain, &ri);
         static uint32_t waits = 0;
         if (waits < 5) { ++waits; logf("xrWaitSwapchainImage did not complete -- overlay skipped this frame"); }
-        return g_end_frame_orig(session, info);
+        return 0;
     }
 
     // A colour/alpha edge rewrites the staging buffer IN PLACE, so the GPU must be done reading it.
@@ -2021,9 +2608,17 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // atlas changes every frame and every image is copied every frame, which is why blit_into does
     // NOT fence-wait on that path.
     const bool ring_cell0 = from_atlas && ret_stale;
+    // THE GUIDE'S CELL HAS TO BE RE-LAID EVERY CAPTURED FRAME, not once per image. CopyResource
+    // above rewrites the whole image from the captured atlas each frame, so a dirty-flag-style
+    // "write it once" is exactly what fails here -- the capsule survives until the first captured
+    // frame and is gone from then on. g_tgt_live is the game thread saying it wants the guide
+    // drawn; it is cleared by xrlayer_retire_quad, so the copy stops when the guide does.
+    const bool guide_cell = from_atlas &&
+                            g_tgt_live[XRLAYER_SLOT_GUIDE].load(std::memory_order_relaxed) &&
+                            g_cell[XRLAYER_SLOT_GUIDE].dim > 0;
     const bool need_copy  = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
     if (need_copy && idx < g_images.size()) {
-        if (blit_into(g_images[idx], atlas, ring_cell0) && idx < g_image_dirty.size()) {
+        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell) && idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
     }
@@ -2042,9 +2637,9 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // on this stack, that SteamVR DROPS eye-visibility quad pairs from normal presentation -- they
     // only appear when the dashboard flattens app layers. A per-eye disparity pair would therefore
     // work on some runtimes and silently render nothing on the one most of our users are on.
-    const XrCompositionLayerBaseHeader* layers[MAX_LAYERS];
-    for (uint32_t i = 0; i < info->layerCount; ++i) layers[i] = info->layers[i];
-    uint32_t n_layers = info->layerCount;
+    // OURS ONLY. Copying UEVR's own layers alongside them belongs to the caller, because only the
+    // caller knows whether it or the API layer is going to do the appending.
+    uint32_t n_ours = 0;
 
     // APPENDED IN REVERSE OF THE DROP ORDER, so the thing least willing to be dropped ends up LAST
     // -- and last is topmost. The reticule therefore draws over the markers, which is the right way
@@ -2054,7 +2649,26 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         const Cell& c = g_cell[s];
         XrCompositionLayerQuad& q = g_quads[k];
         q = XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-        q.layerFlags    = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        // ALPHA BLENDING IS PER-SLOT, because the slots are not the same KIND of image.
+        //
+        // Slots 0..8 are WIDGETS on transparent backgrounds -- the reticule and the navpoint
+        // markers. They need source-alpha blending or each one composites as a big opaque square.
+        //
+        // Slot 9 is the scope pane: a FULL-FRAME SCENE CAPTURE. Its alpha comes from the renderer,
+        // where it is not meaningful for an opaque scene and reads ~0 across the image. Blended by
+        // that alpha the entire pane disappears EXCEPT where something wrote alpha -- which, since
+        // xrlayerhidews=3 keeps the world-space reticule in the capture, is the reticule's own
+        // pixels. Reported from a headset as "the render is happening within the lines of the
+        // reticle", with its colour tracking aim: that is the scene showing through an alpha mask,
+        // and it was misread as a brightness problem for an hour (it is not -- no amount of gain
+        // moves an alpha of zero).
+        // Slot 9 blends ONLY when scopemask actually wrote its alpha this frame. Without the mask
+        // the capture's alpha is ~0 and blending by it makes the whole pane disappear except where
+        // the captured reticule wrote alpha -- the exact bug this per-slot flag was added to fix.
+        // So the flag follows the mask having RUN, never merely the mask being configured.
+        q.layerFlags    = (s == XRLAYER_SLOT_PANE && !scopemask_applied())
+                        ? 0
+                        : XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         q.space         = space;
         q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         q.subImage.swapchain        = g_swapchain;
@@ -2062,8 +2676,11 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
         q.subImage.imageRect.extent = {c.dim, c.dim};
         q.subImage.imageArrayIndex  = 0;
         q.pose = fr.slot[s].pose;
-        q.size = {fr.slot[s].size_m, fr.slot[s].size_m};
-        layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&q;
+        // Non-square when the caller asked for it (the grab guide); square otherwise, which is
+        // every other slot and is what size_h_m == 0 means.
+        q.size = {fr.slot[s].size_m,
+                  fr.slot[s].size_h_m > 0.0f ? fr.slot[s].size_h_m : fr.slot[s].size_m};
+        out[n_ours++] = (const XrCompositionLayerBaseHeader*)&q;
     }
 
     // ---- SCOPE PANE RETICULE -------------------------------------------------------------------
@@ -2074,12 +2691,34 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     //
     // Guarded on every precondition rather than assumed, because this runs on the submit thread:
     // feature on, pane actually drawn this frame, reticule cell exists, and room in the array.
-    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 && n_layers < MAX_LAYERS) {
+    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 && n_ours < out_capacity) {
         bool pane_drawn = false;
         for (uint32_t k = 0; k < n_use; ++k) {
             if (draw[k].slot == XRLAYER_SLOT_PANE) { pane_drawn = true; break; }
         }
         const Cell& rc = g_cell[XRLAYER_SLOT_RETICULE];
+        // WHY THE SCOPE RETICULE IS NOT THERE -- edge-triggered on the reason, so a steady state
+        // costs nothing and every transition is recorded (including the transition INTO working).
+        //
+        // This block had NO instrument at all, which is why "I still see no reticle in the scope"
+        // survived several rounds of guessing: it silently does nothing when the pane is not drawn,
+        // and the pane not being drawn has its own four possible causes one layer down. Absence of
+        // a complaint was being read as "this part is fine".
+        {
+            enum : int { R_OK = 0, R_NO_PANE = 1, R_NO_RET_CELL = 2 };
+            const int why = !pane_drawn ? R_NO_PANE : (rc.dim <= 0 ? R_NO_RET_CELL : R_OK);
+            static int s_why_prev = -1;
+            if (why != s_why_prev) {
+                s_why_prev = why;
+                static const char* kWhy[] = {
+                    "DRAWING over the pane",
+                    "NOT drawing: the pane quad was not submitted this frame (slot 9 lost its "
+                    "admission -- read the slot 9 gate breakdown in the state line)",
+                    "NOT drawing: the reticule has no atlas cell",
+                };
+                logf("scope reticule: %s", kWhy[why]);
+            }
+        }
         if (pane_drawn && rc.dim > 0) {
             const Snapshot& pane = fr.slot[XRLAYER_SLOT_PANE];
             float f = g_m_scope_ret_size.load(std::memory_order_relaxed);
@@ -2094,10 +2733,30 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
             g_scope_ret_quad.subImage.imageRect.extent = {rc.dim, rc.dim};
             g_scope_ret_quad.subImage.imageArrayIndex  = 0;
 
-            // Same plane and facing as the pane, nudged 1 cm toward the viewer along the quad's own
-            // +Z so it cannot z-fight with the pane it sits on.
+            // Same plane and facing as the pane, nudged toward the viewer along the quad's own +Z
+            // so it cannot z-fight with the pane it sits on -- and SLID ACROSS THE PANE'S FACE by
+            // the projected impact offset, in the pane's OWN local axes, so it stays on the surface
+            // at any pane orientation instead of being displaced through the world.
+            //
+            // The offset is normalised -1..1 against the pane's HALF extent, so u=1 is exactly the
+            // right edge. Absent or invalid, it is 0,0 -- dead centre, the old behaviour.
             g_scope_ret_quad.pose = pane.pose;
-            const XrVector3f n = xr_rotate(pane.pose.orientation, XrVector3f{0.0f, 0.0f, 0.01f});
+            float ru = 0.0f, rv = 0.0f;
+            if (g_scope_ret_off_have.load(std::memory_order_relaxed)) {
+                ru = g_scope_ret_u.load(std::memory_order_relaxed);
+                rv = g_scope_ret_v.load(std::memory_order_relaxed);
+            }
+            const float rhalf = pane.size_m * 0.5f;
+            // THE STANDOFF, via g_cm_per_m rather than a bare /100. That atomic already carries the
+            // UEVR world scale, which is what the pane's own size_m was built with -- so converting
+            // the same way keeps the reticule's standoff proportional to the pane instead of
+            // drifting relative to it whenever world scale changes. The old hardcoded 0.01 m was
+            // correct only at world scale 1, and silently wrong at the 1.312 this profile ships.
+            float cmpm = g_cm_per_m.load(std::memory_order_relaxed);
+            if (!(cmpm > 0.0f)) cmpm = 100.0f;
+            const float depth_m = g_m_scope_ret_depth.load(std::memory_order_relaxed) / cmpm;
+            const XrVector3f n = xr_rotate(pane.pose.orientation,
+                                           XrVector3f{ru * rhalf, rv * rhalf, depth_m});
             g_scope_ret_quad.pose.position.x += n.x;
             g_scope_ret_quad.pose.position.y += n.y;
             g_scope_ret_quad.pose.position.z += n.z;
@@ -2126,14 +2785,34 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
                 const Vec3 rt{g_scope_ray_tx.load(std::memory_order_relaxed),
                               g_scope_ray_ty.load(std::memory_order_relaxed),
                               g_scope_ray_tz.load(std::memory_order_relaxed)};
-                const Vec3 tgt{g_tgt_x[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed),
-                               g_tgt_y[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed),
-                               g_tgt_z[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed)};
+                // WORLD POINT, RECONSTRUCTED. g_tgt_* no longer always holds one: with
+                // xrlayerhrel on, the reticule's entry is an OFFSET from the mono camera (that is
+                // what stops it trailing a tick behind during locomotion). Every line below is UE
+                // world-space maths against the scope ray, so an offset used here would be wrong by
+                // the whole distance from the world origin to your head -- and it would look like
+                // "mode 2 puts the reticule in the wrong place", not like a unit mismatch.
+                Vec3 tgt{g_tgt_x[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed),
+                         g_tgt_y[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed),
+                         g_tgt_z[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed)};
+                bool tgt_ok = true;
+                if (g_tgt_headrel[XRLAYER_SLOT_RETICULE].load(std::memory_order_relaxed)) {
+                    if (g_mono_view_have.load(std::memory_order_acquire)) {
+                        tgt.x += g_mono_view_x.load(std::memory_order_relaxed);
+                        tgt.y += g_mono_view_y.load(std::memory_order_relaxed);
+                        tgt.z += g_mono_view_z.load(std::memory_order_relaxed);
+                    } else {
+                        // No camera to undo it with, so we do NOT have a world point. Leave the
+                        // quad at the pane centre rather than place it from a fabricated one: mode
+                        // 1 is a known approximation, a bad world point is a lie about where the
+                        // round lands -- and this reticule's whole purpose is that promise.
+                        tgt_ok = false;
+                    }
+                }
 
                 Vec3 d{rt.x - ro.x, rt.y - ro.y, rt.z - ro.z};
                 const float dl = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
                 const float fov = g_m_cap_fov.load(std::memory_order_relaxed);
-                if (dl > 1e-3f && fov > 0.01f) {
+                if (tgt_ok && dl > 1e-3f && fov > 0.01f) {
                     d.x /= dl; d.y /= dl; d.z /= dl;                    // capture optical axis
 
                     // Capture position: along the ray at scope_cam_dist, per Scope.cpp.
@@ -2146,13 +2825,49 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
                         // Camera right/up in UE world space. UE is Z-up, so world up is the
                         // reference; if the axis is near-vertical there is no stable right vector
                         // and we leave the quad centred rather than emit a spun basis.
+                        // PROJECT IN THE FRAME THE IMAGE IS ACTUALLY RENDERED IN.
+                        //
+                        // The world-levelled basis below (right = aim x worldUp) is a THIRD frame
+                        // and it is the bug: image coordinates are defined by the CAPTURE CAMERA'S
+                        // axes, and the blit maps image axes onto the quad's local axes one to one,
+                        // so projecting against world-up is wrong by the camera's entire roll --
+                        // scope_cam_roll + the per-shape uv_roll + THE LIVE ROLL LOCK. The roll lock
+                        // is why this was never fixable with a sign: it moves continuously to hold
+                        // the image upright as the weapon cants, so the slide direction was wrong by
+                        // an angle that changed as the gun rolled.
+                        //
+                        // Mode 1's chain was already right for exactly this reason -- it projects on
+                        // the camera's own right/up -- which is why only the SLIDING mode misbehaved.
+                        //
+                        // scoperetroll: 0 keeps the old world-levelled basis for A/B, 1 uses the
+                        // camera's, 2 uses the camera's with the vertical negated (the UE->XR up
+                        // sign is not provable from here -- the same admission scoperetflipx/y makes).
+                        const int   roll_mode = g_m_scope_ret_roll.load(std::memory_order_relaxed);
+                        const bool  use_cam   = (roll_mode != 0) &&
+                                                g_scope_cam_axes.load(std::memory_order_acquire);
                         const Vec3 wup{0.0f, 0.0f, 1.0f};
                         Vec3 rgt{d.y*wup.z - d.z*wup.y, d.z*wup.x - d.x*wup.z, d.x*wup.y - d.y*wup.x};
-                        const float rl = std::sqrt(rgt.x*rgt.x + rgt.y*rgt.y + rgt.z*rgt.z);
+                        float rl = std::sqrt(rgt.x*rgt.x + rgt.y*rgt.y + rgt.z*rgt.z);
+                        Vec3 cam_r{}, cam_u{};
+                        if (use_cam) {
+                            cam_r = Vec3{g_scope_cam_rx.load(std::memory_order_relaxed),
+                                         g_scope_cam_ry.load(std::memory_order_relaxed),
+                                         g_scope_cam_rz.load(std::memory_order_relaxed)};
+                            cam_u = Vec3{g_scope_cam_ux.load(std::memory_order_relaxed),
+                                         g_scope_cam_uy.load(std::memory_order_relaxed),
+                                         g_scope_cam_uz.load(std::memory_order_relaxed)};
+                            const float cl = std::sqrt(cam_r.x*cam_r.x + cam_r.y*cam_r.y +
+                                                       cam_r.z*cam_r.z);
+                            if (cl > 1e-3f) { rgt = cam_r; rl = cl; }
+                        }
                         if (rl > 1e-3f) {
                             rgt.x /= rl; rgt.y /= rl; rgt.z /= rl;
-                            const Vec3 up{rgt.y*d.z - rgt.z*d.y, rgt.z*d.x - rgt.x*d.z,
-                                          rgt.x*d.y - rgt.y*d.x};
+                            Vec3 up{rgt.y*d.z - rgt.z*d.y, rgt.z*d.x - rgt.x*d.z,
+                                    rgt.x*d.y - rgt.y*d.x};
+                            if (use_cam) {
+                                up = cam_u;
+                                if (roll_mode == 2) { up.x = -up.x; up.y = -up.y; up.z = -up.z; }
+                            }
 
                             // Image fractions in [-1,1]: tan(theta) / tan(fov/2).
                             const float half = std::tan(fov * 0.5f * 3.14159265f / 180.0f);
@@ -2179,12 +2894,49 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
                 }
             }
 
-            layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&g_scope_ret_quad;
+            out[n_ours++] = (const XrCompositionLayerBaseHeader*)&g_scope_ret_quad;
         }
     }
 
+    return n_ours;
+}
+
+// ---- RUNG 1: the API layer. THE SHIPPING ROUTE -----------------------------------------------
+//
+// Registered with the layer through set_end_frame_callback(). The layer calls this from inside its
+// own xrEndFrame -- the same thread and the same moment the inline hook used, so nothing above
+// needed rethinking; only the way it is reached has changed.
+//
+// Every clause of the contract in XrLayerAbi.h is honoured by construction: `info` is never
+// touched, never more than `cap` pointers are written, the pointers are static, and nothing here
+// calls back into the layer. The copy, the call-through and the fail-open retry are its job.
+XRAPI_ATTR uint32_t XRAPI_CALL bridge_end_frame(XrSession session, const XrFrameEndInfo* info,
+                                                const XrCompositionLayerBaseHeader** out,
+                                                uint32_t cap, void* /*user*/) {
+    return produce_layers(session, info, out, cap);
+}
+
+// ---- RUNG 2: our own inline hook on xrEndFrame. DEV ONLY, needs UEVRBackend.pdb ---------------
+XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrameEndInfo* info) {
+    // Fail-open on every path below: anything unexpected forwards the call untouched.
+    if (g_end_frame_orig == nullptr) return XR_ERROR_RUNTIME_FAILURE;
+    if (info == nullptr) return g_end_frame_orig(session, info);
+
+    // The local array bound, and nothing more: room for UEVR's layers plus ours.
+    constexpr uint32_t MAX_LAYERS = 32;
+    const uint32_t room = (info->layerCount >= MAX_LAYERS) ? 0u : (MAX_LAYERS - info->layerCount);
+
+    const XrCompositionLayerBaseHeader* ours[MAX_LAYERS];
+    const uint32_t n = produce_layers(session, info, ours, room);
+    if (n == 0) return g_end_frame_orig(session, info);
+
+    const XrCompositionLayerBaseHeader* layers[MAX_LAYERS];
+    for (uint32_t i = 0; i < info->layerCount; ++i) layers[i] = info->layers[i];
+    // OURS LAST, therefore topmost -- the same ordering the API layer applies on its own rung.
+    for (uint32_t i = 0; i < n; ++i) layers[info->layerCount + i] = ours[i];
+
     XrFrameEndInfo patched = *info;
-    patched.layerCount = n_layers;
+    patched.layerCount = info->layerCount + n;
     patched.layers     = layers;
 
     const XrResult r = g_end_frame_orig(session, &patched);
@@ -2195,6 +2947,39 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
 
     // The runtime rejected the frame WITH our layer in it. Retry without it rather than dropping
     // the player's whole frame: a missing overlay is a cosmetic fault, a dropped frame is nausea.
+    //
+    // IS THIS FAILURE ACTUALLY OURS? Only retry the ones that are.
+    //
+    // The retry exists so a runtime that dislikes OUR composition layer costs the player an
+    // overlay rather than a frame. That premise is sound and stays -- but it was applied to EVERY
+    // XrResult, and most failures have nothing to do with us.
+    //
+    // MEASURED 2026-09-04. The runtime returned -30 XR_ERROR_TIME_INVALID, and UEVR logged the
+    // arithmetic on the same tick: submitted 1053954453232700 vs frame_state 1053954469895900 --
+    // a ~16.7 ms STALE DISPLAY TIME. Resubmitting cannot fix a stale time; it resubmits the same
+    // one. What it did instead was call xrEndFrame a SECOND time on a frame the runtime had
+    // already finished with, which is -37 XR_ERROR_CALL_ORDER_INVALID, and the next xrBeginFrame
+    // then came back XR_FRAME_DISCARDED. One rejected frame became three failures inside 4 ms.
+    //
+    // So: retry only on codes attributable to the layer WE added, and pass everything else back
+    // untouched. A stale display time, a call-order violation and a lost session are the
+    // application's frame and the application's problem; our job is to not make them worse.
+    //
+    // Codes verified against src/thirdparty/openxr/openxr.h rather than remembered.
+    const bool blame_our_layer = (r == XR_ERROR_LAYER_INVALID)
+                              || (r == XR_ERROR_LAYER_LIMIT_EXCEEDED)
+                              || (r == XR_ERROR_SWAPCHAIN_RECT_INVALID);
+    if (!blame_our_layer) {
+        static uint32_t passed = 0;
+        if (passed < 5) {
+            ++passed;
+            logf("xrEndFrame failed (%d) for a reason that is NOT our composition layer -- passing "
+                 "it back untouched. Resubmitting here used to turn this into a second xrEndFrame "
+                 "on a finished frame (CALL_ORDER_INVALID) and a discarded next frame.", (int)r);
+        }
+        return r;
+    }
+
     static uint32_t complained = 0;
     if (complained < 5) { ++complained; logf("xrEndFrame rejected with our layer (%d) -- retrying clean", (int)r); }
     return g_end_frame_orig(session, info);
@@ -2203,6 +2988,13 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
 bool install_hook() {
     if (g_hook_id >= 0) return true;
     if (!resolve_openxr()) return false;
+    if (g_tier != XrAttachTier::BackendPdb) {
+        // Belt and braces: nothing should reach the hook on another rung, and if something does,
+        // register_inline_hook would happily install at whatever g_xr.end_frame holds. On the layer
+        // rung that field is deliberately null.
+        logf("refusing to install the inline hook on tier %s", tier_name(g_tier));
+        return false;
+    }
 
     auto* p = API::get()->param();
     if (p == nullptr || p->functions == nullptr || p->functions->register_inline_hook == nullptr) {
@@ -2229,7 +3021,48 @@ bool install_hook() {
     return true;
 }
 
+// Register our producer with the API layer. No hook, no PDB, no address -- this is the whole of
+// the shipping attachment.
+bool install_bridge_callback() {
+    if (g_bridge_cb) return true;
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr || api->set_end_frame_callback == nullptr) return false;
+    if (api->set_end_frame_callback(&bridge_end_frame, nullptr) != 1) {
+        logf("the API layer REFUSED the end-frame callback -- %s", xrbridge_status());
+        return false;
+    }
+    g_bridge_cb = true;
+    logf("end-frame callback registered with the API layer. REGISTERED IS NOT RUNNING: the layer "
+         "counts its own frames, and the watchdog below reads those rather than trusting this line.");
+    return true;
+}
+
+// WAITING IS NOT FAILING, and conflating them is what would make the layer rung unusable: the
+// OpenXR instance appears some way into startup, so a caller that latched Failed on the first
+// "not yet" would turn every session into a permanent refusal. Only a hard no latches.
+enum class Attach { Waiting, Ok, Failed };
+
+Attach attach_submit_path() {
+    if (g_hook_id >= 0 || g_bridge_cb) return Attach::Ok;
+    if (!resolve_openxr()) return g_resolve_waiting ? Attach::Waiting : Attach::Failed;
+    if (g_tier == XrAttachTier::ApiLayer) {
+        return install_bridge_callback() ? Attach::Ok : Attach::Failed;
+    }
+    return install_hook() ? Attach::Ok : Attach::Failed;
+}
+
 void remove_hook() {
+    if (g_bridge_cb) {
+        // Clearing BLOCKS until any in-flight call has returned (XrLayerAbi.h spells out the
+        // handshake), which is exactly what makes destroying the swapchain on the caller's next
+        // line safe. The inline hook below offers no such guarantee -- this rung is the stronger
+        // of the two on teardown, not merely the more portable one.
+        const HaloVrLayerApi* api = xrbridge_api();
+        if (api != nullptr && api->set_end_frame_callback != nullptr) {
+            api->set_end_frame_callback(nullptr, nullptr);
+        }
+        g_bridge_cb = false;
+    }
     if (g_hook_id >= 0) {
         auto* p = API::get()->param();
         if (p != nullptr && p->functions != nullptr && p->functions->unregister_inline_hook != nullptr) {
@@ -2247,7 +3080,7 @@ void remove_hook() {
 // ============================================================================================
 
 void xrlayer_notice_quad(int slot, const Vec3& world_pos, float world_cm, float hold_cm,
-                         int priority) {
+                         int priority, float world_cm_h) {
     if (!g_cfg.xr_layer) return;
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     if (!(world_cm > 0.0f)) return;      // a zero-size quad is not a quad
@@ -2279,6 +3112,7 @@ void xrlayer_notice_quad(int slot, const Vec3& world_pos, float world_cm, float 
     g_tgt_y[slot].store(world_pos.y, std::memory_order_relaxed);
     g_tgt_z[slot].store(world_pos.z, std::memory_order_relaxed);
     g_tgt_cm[slot].store(world_cm, std::memory_order_relaxed);
+    g_tgt_cm_h[slot].store(world_cm_h > 0.0f ? world_cm_h : 0.0f, std::memory_order_relaxed);
     g_tgt_hold[slot].store(hold_cm > 0.0f ? hold_cm : 0.0f, std::memory_order_relaxed);
     g_tgt_prio[slot].store(priority, std::memory_order_relaxed);
     g_tgt_live[slot].store(true, std::memory_order_relaxed);
@@ -2299,6 +3133,15 @@ void xrlayer_retire_quad(int slot) {
     g_slot_orient_on[slot].store(false, std::memory_order_release);
 }
 
+void xrlayer_invalidate_capture(int slot) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    // 0 is the module's existing "has never captured" value -- see the skip path in the capture,
+    // which refreshes every slot that already has art but deliberately leaves a 0 alone so it
+    // cannot pretend to be fresh. Returning the slot to 0 reuses that rule rather than adding a
+    // second notion of staleness.
+    g_slot_beat[slot].store(0, std::memory_order_release);
+}
+
 void xrlayer_set_quad_orientation(int slot, const Vec3& fwd_world, const Vec3& up_world) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     g_slot_fwd_x[slot].store(fwd_world.x, std::memory_order_relaxed);
@@ -2312,8 +3155,99 @@ void xrlayer_set_quad_orientation(int slot, const Vec3& fwd_world, const Vec3& u
     g_slot_orient_on[slot].store(true, std::memory_order_release);
 }
 
+// Declare that this slot's next target is an OFFSET FROM THE EYE rather than a world point.
+// See the g_tgt_headrel comment for why. Set it every publish, next to notice_quad, so the flag
+// and the vector it describes can never disagree -- a stale flag reinterprets a world position as
+// an offset, which puts the quad a whole world-origin away and looks like the layer vanishing.
+void xrlayer_set_quad_head_relative(int slot, bool on) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    g_tgt_headrel[slot].store(on, std::memory_order_relaxed);
+}
+
+// Clamped HERE as well as at the caller. The caller clamps because an off-pane impact point should
+// pin to the rim rather than fly off; this clamps because a NaN or a wild value arriving on the
+// submit thread would move the quad somewhere no log would explain, and a compositor pose is not
+// the place to find out a divide went wrong.
+void xrlayer_note_rig(const Vec3& pos, const Vec3& fwd, const Vec3& right, const Vec3& up) {
+    g_rig_px.store(pos.x, std::memory_order_relaxed);
+    g_rig_py.store(pos.y, std::memory_order_relaxed);
+    g_rig_pz.store(pos.z, std::memory_order_relaxed);
+    g_rig_fx.store(fwd.x, std::memory_order_relaxed);
+    g_rig_fy.store(fwd.y, std::memory_order_relaxed);
+    g_rig_fz.store(fwd.z, std::memory_order_relaxed);
+    g_rig_rx.store(right.x, std::memory_order_relaxed);
+    g_rig_ry.store(right.y, std::memory_order_relaxed);
+    g_rig_rz.store(right.z, std::memory_order_relaxed);
+    g_rig_ux.store(up.x, std::memory_order_relaxed);
+    g_rig_uy.store(up.y, std::memory_order_relaxed);
+    g_rig_uz.store(up.z, std::memory_order_relaxed);
+    g_rig_have.store(true, std::memory_order_release);
+}
+
+// The offset is decomposed into the rig's basis HERE, on the game thread, so the submit thread does
+// three multiply-adds against a fresh basis and nothing else. Storing a WORLD offset instead would
+// leave the rotation uncancelled, which is the entire bug this exists for.
+void xrlayer_set_quad_rig_relative(int slot, bool on, const Vec3& rig_pos, const Vec3& rig_fwd,
+                                   const Vec3& rig_right, const Vec3& rig_up) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    if (!on) { g_slot_rig_pos[slot].store(false, std::memory_order_relaxed); return; }
+    const Vec3 w{g_tgt_x[slot].load(std::memory_order_relaxed) - rig_pos.x,
+                 g_tgt_y[slot].load(std::memory_order_relaxed) - rig_pos.y,
+                 g_tgt_z[slot].load(std::memory_order_relaxed) - rig_pos.z};
+    g_slot_rp_x[slot].store(w.x * rig_fwd.x   + w.y * rig_fwd.y   + w.z * rig_fwd.z,
+                            std::memory_order_relaxed);
+    g_slot_rp_y[slot].store(w.x * rig_right.x + w.y * rig_right.y + w.z * rig_right.z,
+                            std::memory_order_relaxed);
+    g_slot_rp_z[slot].store(w.x * rig_up.x    + w.y * rig_up.y    + w.z * rig_up.z,
+                            std::memory_order_relaxed);
+    g_slot_rig_pos[slot].store(true, std::memory_order_release);
+}
+
+void xrlayer_set_quad_orientation_tracked(int slot, const Vec3& fwd_world, const Vec3& up_world,
+                                          const Vec3& rig_fwd, const Vec3& rig_right,
+                                          const Vec3& rig_up) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    xrlayer_set_quad_orientation(slot, fwd_world, up_world);
+    g_slot_rig_fx[slot].store(rig_fwd.x, std::memory_order_relaxed);
+    g_slot_rig_fy[slot].store(rig_fwd.y, std::memory_order_relaxed);
+    g_slot_rig_fz[slot].store(rig_fwd.z, std::memory_order_relaxed);
+    g_slot_rig_rx[slot].store(rig_right.x, std::memory_order_relaxed);
+    g_slot_rig_ry[slot].store(rig_right.y, std::memory_order_relaxed);
+    g_slot_rig_rz[slot].store(rig_right.z, std::memory_order_relaxed);
+    g_slot_rig_ux[slot].store(rig_up.x, std::memory_order_relaxed);
+    g_slot_rig_uy[slot].store(rig_up.y, std::memory_order_relaxed);
+    g_slot_rig_uz[slot].store(rig_up.z, std::memory_order_relaxed);
+    // Released LAST, so the submit thread never sees the flag before the angles it needs.
+    g_slot_rig_track[slot].store(true, std::memory_order_release);
+}
+
+void xrlayer_note_scope_cam_axes(const Vec3& right, const Vec3& up, bool valid) {
+    if (valid) {
+        g_scope_cam_rx.store(right.x, std::memory_order_relaxed);
+        g_scope_cam_ry.store(right.y, std::memory_order_relaxed);
+        g_scope_cam_rz.store(right.z, std::memory_order_relaxed);
+        g_scope_cam_ux.store(up.x, std::memory_order_relaxed);
+        g_scope_cam_uy.store(up.y, std::memory_order_relaxed);
+        g_scope_cam_uz.store(up.z, std::memory_order_relaxed);
+    }
+    g_scope_cam_axes.store(valid, std::memory_order_release);
+}
+
+void xrlayer_set_scope_reticle_offset(float u, float v, bool valid) {
+    if (!(u > -1.0f)) u = (u != u) ? 0.0f : -1.0f;   // NaN -> centre, else clamp low
+    if (!(v > -1.0f)) v = (v != v) ? 0.0f : -1.0f;
+    if (u > 1.0f) u = 1.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_scope_ret_u.store(u, std::memory_order_relaxed);
+    g_scope_ret_v.store(v, std::memory_order_relaxed);
+    g_scope_ret_off_have.store(valid, std::memory_order_relaxed);
+}
+
 void xrlayer_clear_quad_orientation(int slot) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    // A stale tracking flag would keep applying a delta against a rig rotation from whenever the
+    // orientation was last published -- which grows without bound once nobody is updating it.
+    g_slot_rig_track[slot].store(false, std::memory_order_relaxed);
     g_slot_orient_on[slot].store(false, std::memory_order_release);
 }
 
@@ -2329,6 +3263,26 @@ void xrlayer_note_scope_ray(const Vec3& origin, const Vec3& target) {
     g_scope_ray_ty.store(target.y, std::memory_order_relaxed);
     g_scope_ray_tz.store(target.z, std::memory_order_relaxed);
     g_scope_ray_have.store(true, std::memory_order_release);
+}
+
+// THE MONO VIEW POSITION, so a caller outside this file can publish a HEAD-RELATIVE target.
+//
+// Plugin.cpp already does this via its own static layer_anchor(), but that helper and the
+// g_view_pos_* it reads are in Plugin.cpp's ANONYMOUS NAMESPACE, so nothing else can reach them --
+// internal linkage, and no amount of extern spelling gets around it. Rather than move Plugin.cpp's
+// globals (a file several sessions edit) this exposes the value the layer ALREADY receives every
+// frame through xrlayer_note_eye, which is the same number by construction.
+//
+// MONO, never per-eye: g_eye_pos alternates left/right every frame, so capturing an offset against
+// it and re-anchoring per eye throws one eye a full IPD sideways and flattens the stereo. That trap
+// is documented at xrlayer_note_eye and this getter deliberately cannot expose the per-eye value.
+bool xrlayer_mono_view_pos(Vec3* out_world) {
+    if (out_world == nullptr) return false;
+    if (!g_mono_view_have.load(std::memory_order_acquire)) return false;
+    *out_world = Vec3{g_mono_view_x.load(std::memory_order_relaxed),
+                      g_mono_view_y.load(std::memory_order_relaxed),
+                      g_mono_view_z.load(std::memory_order_relaxed)};
+    return true;
 }
 
 bool xrlayer_view_basis(Vec3* fwd_world, Vec3* up_world) {
@@ -2361,7 +3315,21 @@ bool xrlayer_pane_configure(int cell_px) {
     // records the request for the NEXT bring-up and says plainly that it did not take effect now,
     // rather than half-applying or pretending to succeed.
     if (g_pane_dim == cell_px) return cell_px == 0 || g_cell[XRLAYER_SLOT_PANE].dim == cell_px;
-    if (xrlayer_live()) {
+    // THE TEST IS "IS THE ATLAS ALREADY BUILT", NOT "IS THE LAYER SUBMITTING", and the difference
+    // is a real 92 ms window that silently cost the pane its cell.
+    //
+    // MEASURED 2026-09-06:
+    //     14:20:41.894  atlas built -- pane 0px (none)
+    //     14:20:41.901  ARMED
+    //     14:20:41.986  pane cell requested 1024px -> reported "accepted for this bring-up"
+    //
+    // xrlayer_live() only becomes true once frames are actually being submitted, which is LATER
+    // than the atlas being built. A request landing in between took this early-return path and was
+    // told it had been accepted, while the atlas it needed to be part of had already been decided
+    // without it. The pane then reported "no atlas cell" forever and the two logs did not appear to
+    // be about the same thing. A false "accepted" is worse than a refusal: it sends the reader to
+    // look somewhere else entirely.
+    if (g_sc_w > 0 || g_state.load(std::memory_order_relaxed) != State::Off) {
         logf("pane cell %dpx requested while the layer is already up -- recorded for the next "
              "bring-up; the atlas is NOT resized under a running submit thread.", cell_px);
         return false;
@@ -2379,8 +3347,63 @@ void xrlayer_notice_rehost(int slot) {
                                  std::memory_order_relaxed);
 }
 
+// Watchdog state for the scope-hide of the compositor reticule. File scope rather than function
+// statics because BOTH branches touch it: the hiding branch arms it, the non-hiding branch clears it.
+static uint32_t s_hide_since = 0;
+static bool     s_warned     = false;
+
 void xrlayer_notice_reticule(const Vec3& world_pos, float apparent_scale) {
     if (!g_cfg.xr_layer) return;
+
+    // ---- ONE RETICULE AT A TIME. Hide this one while the scope pane is up.
+    //
+    // The compositor reticule draws over everything by construction, and the scope pane carries its
+    // own reticule at the magnified range. Both are CORRECT -- they simply sit at different
+    // distances, and having two crosshairs a few degrees apart reads as noise rather than as aim.
+    //
+    // RETIRED EXPLICITLY, not merely left un-noticed. A quad that stops being noticed only fades on
+    // the retirement grace (dozens of ticks), which would leave the second reticule hanging around
+    // for a second or so every time the scope comes up -- exactly the artefact this removes. Note
+    // the comment at report_dark_reason: nothing in the tree had ever retired slot 0 before, so this
+    // is the first caller to do it.
+    if (g_cfg.xr_layer_hide_scope && g_scope_active.load(std::memory_order_relaxed)) {
+        // STUCK-HIDDEN WATCHDOG.
+        //
+        // Recovery works by construction: retire only clears g_tgt_live, and the next call that gets
+        // past this gate re-arms the slot through notice_quad. So the ONLY way the crosshair stays
+        // gone is g_scope_active being stuck TRUE with no scope on screen.
+        //
+        // That should not happen -- Scope.cpp forces it false on a stale aim ray, on a weapon swap
+        // and at teardown -- but "should not" is how a reticule goes missing for a whole session with
+        // nothing in the log. Deliberately NOT cross-checked against s_pane_shown: that variable
+        // carries two comments saying we are not its only writer, so a second source of truth here
+        // would desync and cause the exact bug it was added to prevent.
+        //
+        // So this does not override anything. It SAYS SO, once, if the hide has been continuous for
+        // implausibly long -- turning a silent missing crosshair into a log line naming the cause
+        // and the escape hatch.
+        {
+            const uint32_t now = g_game_tick.load(std::memory_order_relaxed);
+            if (s_hide_since == 0) { s_hide_since = now; s_warned = false; }
+            // ~32 Hz tick, so 2000 ticks is about a minute of unbroken scoping.
+            else if (!s_warned && (now - s_hide_since) > 2000u) {
+                s_warned = true;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] XRLAYER: the compositor reticule has been hidden for the scope "
+                    "for ~%u ticks unbroken. That is legitimate if you have genuinely been scoped that "
+                    "long. If the scope is NOT up, g_scope_active is stuck true and the crosshair will "
+                    "not return -- set xrlayerhidescope=0 to get it back and say so.",
+                    now - s_hide_since);
+            }
+        }
+        xrlayer_retire_quad(XRLAYER_SLOT_RETICULE);
+        return;
+    }
+    // Not hiding this pass -- reset the watchdog so the next scope-in starts a fresh window, and
+    // so a warning can fire again on a genuinely new stuck episode rather than only once per run.
+    s_hide_since = 0;
+    s_warned     = false;
+
     const float s = (apparent_scale > 0.0f) ? apparent_scale : 1.0f;
 
     // THE RETICULE'S WORLD SIZE IS COMPUTED HERE, not inside compute_pose, and xrlayersize is
@@ -2429,7 +3452,7 @@ int xrlayer_cell_dim(int slot) {
     return (int)g_cell[slot].dim;
 }
 
-void xrlayer_note_eye(int eye_index, const Vec3& eye_pos,
+void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_pos,
                       float view_yaw, float view_pitch, float view_roll) {
     if (!g_cfg.xr_layer) return;
     if (g_state.load(std::memory_order_relaxed) != State::Armed) return;
@@ -2477,6 +3500,14 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos,
     // exact callback because "at a 4 m draw distance the eye-to-objective direction changes
     // materially between 32 Hz ticks", and a compositor quad computed on the tick would carry the
     // same error with none of the in-scene lane's ability to hide it.
+    // BEFORE THE LOOP, not inside it. The loop skips slots that are not live, so a session with
+    // nothing published would never have set this -- and a submit-thread reader would then undo a
+    // head-relative offset with a stale or zero camera, which is worse than not undoing it at all.
+    g_mono_view_x.store(mono_view_pos.x, std::memory_order_relaxed);
+    g_mono_view_y.store(mono_view_pos.y, std::memory_order_relaxed);
+    g_mono_view_z.store(mono_view_pos.z, std::memory_order_relaxed);
+    g_mono_view_have.store(true, std::memory_order_release);
+
     Frame f{};
     for (int s = 0; s < XRLAYER_SLOTS; ++s) {
         if (!g_tgt_live[s].load(std::memory_order_relaxed)) continue;
@@ -2497,21 +3528,124 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos,
             const Vec3 fwd_w{g_slot_fwd_x[s].load(std::memory_order_relaxed),
                              g_slot_fwd_y[s].load(std::memory_order_relaxed),
                              g_slot_fwd_z[s].load(std::memory_order_relaxed)};
-            const Vec3 up_w {g_slot_up_x[s].load(std::memory_order_relaxed),
-                             g_slot_up_y[s].load(std::memory_order_relaxed),
-                             g_slot_up_z[s].load(std::memory_order_relaxed)};
-            const XrVector3f fwd_l = ue_offset_to_xr(fwd_w, view_yaw, view_pitch, view_roll, 1.0f);
+            Vec3 up_w {g_slot_up_x[s].load(std::memory_order_relaxed),
+                       g_slot_up_y[s].load(std::memory_order_relaxed),
+                       g_slot_up_z[s].load(std::memory_order_relaxed)};
+
+            // RIG-TRACKED: rotate the published vectors by how far the rig has turned SINCE the
+            // tick that measured them. Without this a weapon-mounted quad is placed from a ~32 Hz
+            // sample of a transform the engine recomposes every frame, so it tracks correctly while
+            // still and trails while you rotate -- which is precisely how it was reported.
+            //
+            // delta = render_rig * inverse(tick_rig), applied in UE world space BEFORE the UE->XR
+            // conversion below, so the correction and the conversion stay in the order the rest of
+            // this file assumes.
+            Vec3 fwd_c = fwd_w;
+            if (g_slot_rig_track[s].load(std::memory_order_acquire) &&
+                g_rig_have.load(std::memory_order_acquire)) {
+                // A PURE CHANGE OF BASIS, with no decomposition anywhere: express the vector
+                // in the TICK's rig basis (three dot products), then rebuild it in the RENDER
+                // basis. Equivalent to rotating by render x inverse(tick), but built only from
+                // orthonormal axes, so there is no Euler ordering to get wrong and no singularity
+                // near vertical -- which is what made this jitter on roll the first time.
+                const Vec3 tf{g_slot_rig_fx[s].load(std::memory_order_relaxed),
+                              g_slot_rig_fy[s].load(std::memory_order_relaxed),
+                              g_slot_rig_fz[s].load(std::memory_order_relaxed)};
+                const Vec3 tr{g_slot_rig_rx[s].load(std::memory_order_relaxed),
+                              g_slot_rig_ry[s].load(std::memory_order_relaxed),
+                              g_slot_rig_rz[s].load(std::memory_order_relaxed)};
+                const Vec3 tu{g_slot_rig_ux[s].load(std::memory_order_relaxed),
+                              g_slot_rig_uy[s].load(std::memory_order_relaxed),
+                              g_slot_rig_uz[s].load(std::memory_order_relaxed)};
+                const Vec3 nf{g_rig_fx.load(std::memory_order_relaxed),
+                              g_rig_fy.load(std::memory_order_relaxed),
+                              g_rig_fz.load(std::memory_order_relaxed)};
+                const Vec3 nr{g_rig_rx.load(std::memory_order_relaxed),
+                              g_rig_ry.load(std::memory_order_relaxed),
+                              g_rig_rz.load(std::memory_order_relaxed)};
+                const Vec3 nu{g_rig_ux.load(std::memory_order_relaxed),
+                              g_rig_uy.load(std::memory_order_relaxed),
+                              g_rig_uz.load(std::memory_order_relaxed)};
+                auto rebase = [&](const Vec3& v) {
+                    const float a = v.x * tf.x + v.y * tf.y + v.z * tf.z;
+                    const float b = v.x * tr.x + v.y * tr.y + v.z * tr.z;
+                    const float c = v.x * tu.x + v.y * tu.y + v.z * tu.z;
+                    return Vec3{nf.x * a + nr.x * b + nu.x * c,
+                                nf.y * a + nr.y * b + nu.y * c,
+                                nf.z * a + nr.z * b + nu.z * c};
+                };
+                fwd_c = rebase(fwd_c);
+                up_w  = rebase(up_w);
+            }
+            const XrVector3f fwd_l = ue_offset_to_xr(fwd_c, view_yaw, view_pitch, view_roll, 1.0f);
             const XrVector3f up_l  = ue_offset_to_xr(up_w,  view_yaw, view_pitch, view_roll, 1.0f);
             if (xr_look_rotation(fwd_l, up_l, &orient)) orient_p = &orient;
         }
 
-        sn.valid = compute_pose(Vec3{g_tgt_x[s].load(std::memory_order_relaxed),
-                                     g_tgt_y[s].load(std::memory_order_relaxed),
-                                     g_tgt_z[s].load(std::memory_order_relaxed)},
+        // HEAD-RELATIVE TARGETS ARE RE-ANCHORED HERE, at render rate, which is the whole point:
+        // compute_pose immediately subtracts `head` again, so d_world comes out as the stored
+        // offset exactly and the tick-old eye that offset was measured against never enters the
+        // arithmetic. A world target (a navpoint) skips this and keeps the render-rate subtraction
+        // it wants.
+        Vec3 tgt{g_tgt_x[s].load(std::memory_order_relaxed),
+                 g_tgt_y[s].load(std::memory_order_relaxed),
+                 g_tgt_z[s].load(std::memory_order_relaxed)};
+        // RE-ANCHOR AGAINST THE MONO CAMERA, NEVER AGAINST `head`.
+        //
+        // `head` is the RENDERED EYE: this callback runs once per eye, and the two differ by the
+        // IPD. Using it here was a stereo bug, shipped and caught in a headset. The offset is
+        // captured once on the game tick against whichever eye happened to be written last, then
+        // added back per eye -- so one eye landed a full IPD (~6.4 cm) to the side. Worse, it made
+        // d_world identical in both eyes, which DESTROYS PARALLAX: the quad loses its real depth
+        // and stops being at the distance it is supposed to mark.
+        //
+        // The mono pre-hook camera is the same value for both eyes, so the offset survives the
+        // round trip unchanged and compute_pose's per-eye subtraction still produces parallax.
+        if (g_tgt_headrel[s].load(std::memory_order_relaxed)) {
+            tgt.x += mono_view_pos.x; tgt.y += mono_view_pos.y; tgt.z += mono_view_pos.z;
+        }
+
+        // RIG-RELATIVE: rebuild the world point from the rig AS IT IS THIS FRAME.
+        //
+        // The offset is held in the rig's own basis, so rotating the weapon carries the quad with it
+        // instead of leaving it on a ~32 Hz sample of an arc. MEASURED 2026-09-07: with no
+        // orientation published at all (scopelayer=3) the quad still hopped while the controller
+        // rotated, which isolated the fault to POSITION -- and head-relative could never fix it,
+        // because it cancels only what the target shares with the EYE, and a weapon swinging about
+        // a stationary head shares nothing.
+        //
+        // Mutually exclusive with head-relative by construction: the rig frame already carries the
+        // body's translation, so applying both would try to remove the same motion twice.
+        if (g_slot_rig_pos[s].load(std::memory_order_acquire) &&
+            g_rig_have.load(std::memory_order_acquire)) {
+            const float a = g_slot_rp_x[s].load(std::memory_order_relaxed);
+            const float b = g_slot_rp_y[s].load(std::memory_order_relaxed);
+            const float c = g_slot_rp_z[s].load(std::memory_order_relaxed);
+            tgt = Vec3{g_rig_px.load(std::memory_order_relaxed)
+                         + g_rig_fx.load(std::memory_order_relaxed) * a
+                         + g_rig_rx.load(std::memory_order_relaxed) * b
+                         + g_rig_ux.load(std::memory_order_relaxed) * c,
+                       g_rig_py.load(std::memory_order_relaxed)
+                         + g_rig_fy.load(std::memory_order_relaxed) * a
+                         + g_rig_ry.load(std::memory_order_relaxed) * b
+                         + g_rig_uy.load(std::memory_order_relaxed) * c,
+                       g_rig_pz.load(std::memory_order_relaxed)
+                         + g_rig_fz.load(std::memory_order_relaxed) * a
+                         + g_rig_rz.load(std::memory_order_relaxed) * b
+                         + g_rig_uz.load(std::memory_order_relaxed) * c};
+        }
+
+        sn.valid = compute_pose(tgt,
                                 head, view_yaw, view_pitch, view_roll,
                                 g_tgt_cm[s].load(std::memory_order_relaxed),
                                 g_tgt_hold[s].load(std::memory_order_relaxed),
                                 &sn.pose, &sn.size_m, &sn.ang, orient_p);
+        // Second extent, through the SAME cm_per_m compute_pose used for the first -- read back off
+        // size_m rather than re-deriving, so the two axes cannot end up on different scales if the
+        // world-scale handling in compute_pose ever changes.
+        const float cm_w = g_tgt_cm[s].load(std::memory_order_relaxed);
+        const float cm_h = g_tgt_cm_h[s].load(std::memory_order_relaxed);
+        sn.size_h_m = (cm_h > 0.0f && cm_w > 0.0f) ? (sn.size_m * (cm_h / cm_w)) : 0.0f;
     }
     publish(f);
 }
@@ -2676,6 +3810,8 @@ void xrlayer_tick() {
     m.budget   = g_cfg.xr_layer_budget;
     m.scope_ret      = g_cfg.xr_layer_scope_reticle;
     m.scope_ret_size = g_cfg.xr_layer_scope_reticle_size;
+    m.scope_ret_depth_cm = g_cfg.xr_layer_scope_reticle_depth;
+    m.scope_ret_roll     = g_cfg.scope_ret_roll;
     m.cap_fov_deg    = (g_cfg.scope_zoom > 1.0f) ? (g_cfg.scope_base_fov / g_cfg.scope_zoom)
                                                  : g_cfg.scope_base_fov;
     m.cap_dist_cm    = g_cfg.scope_cam_dist;
@@ -2743,6 +3879,20 @@ void xrlayer_tick() {
         g_regen.store(true, std::memory_order_relaxed);
     }
 
+    // SAME ARGUMENT, FOR THE GUIDE'S ART MODE. grabguidemode selects between the label and the beam
+    // and they are two different pictures in one cell, so the cell has to be re-generated when it
+    // moves -- otherwise the quad changes shape while still showing the other mode's art. Tracked
+    // with its own static rather than added to the Mirror struct: the mirror is the submit thread's
+    // snapshot of what it needs per frame, and this is a once-in-a-blue-moon edge.
+    {
+        static int s_guide_mode_seen = -1;
+        const int  now = g_cfg.grab_guide_mode;
+        if (s_guide_mode_seen != now) {
+            s_guide_mode_seen = now;
+            g_regen.store(true, std::memory_order_relaxed);
+        }
+    }
+
     if (g_state.load(std::memory_order_relaxed) == State::Off) {
         if (!API::VR::is_openxr()) {
             static bool said = false;
@@ -2753,21 +3903,30 @@ void xrlayer_tick() {
             }
             return;
         }
-        // Kick the PDB load onto its own thread and come back next tick. Loading ~142 MB of symbols
-        // on the game thread would not be a stutter, it would be a fault -- the same reason MemScan
-        // runs on a worker. Costs one bool test per tick until it lands.
-        xrattach_begin_async();
-        if (!xrattach_ready()) {
-            static bool said = false;
-            if (!said) { said = true; logf("resolving UEVR's OpenXR entry points (loading symbols off-thread)..."); }
-            return;
+        // THE PDB IS FOR THE FALLBACK RUNG ONLY. When our API layer is in the process the entry
+        // points come from it, so loading ~142 MB of symbols would be pure cost -- and on a player
+        // install there is no UEVRBackend.pdb to load at all, which is the entire reason the layer
+        // exists. Probing the layer first is one GetModuleHandleW.
+        if (!xrbridge_available()) {
+            // Kick the PDB load onto its own thread and come back next tick. Loading ~142 MB of
+            // symbols on the game thread would not be a stutter, it would be a fault -- the same
+            // reason MemScan runs on a worker. Costs one bool test per tick until it lands.
+            xrattach_begin_async();
+            if (!xrattach_ready()) {
+                static bool said = false;
+                if (!said) { said = true; logf("resolving UEVR's OpenXR entry points (loading symbols off-thread)..."); }
+                return;
+            }
         }
-        if (!install_hook()) {
+        const Attach a = attach_submit_path();
+        if (a == Attach::Waiting) return;      // not yet is not never -- retried next tick
+        if (a == Attach::Failed) {
             g_state.store(State::Failed, std::memory_order_relaxed);
             return;
         }
         g_state.store(State::Pending, std::memory_order_relaxed);
-        logf("hook in place; waiting for the session to bring up the swapchain (space mode %d)", m.space);
+        logf("submit path attached via %s; waiting for the session to bring up the swapchain "
+             "(space mode %d)", tier_name(g_tier), m.space);
     }
 
     // Bring-up on the GAME THREAD, retried each tick until the session exists. Only a hard refusal
@@ -2789,7 +3948,23 @@ void xrlayer_tick() {
     // than from the first moment the call could occur condemns a healthy address -- addrcascade's
     // README records that failing exactly here, alarming 11 seconds before gameplay even started.
     // The call is only possible once the state is Armed and the runtime is presenting.
-    const uint32_t submitted = g_layers_submitted.exchange(0, std::memory_order_relaxed);
+    // WHERE `submitted` COMES FROM DEPENDS ON THE RUNG, and on the layer rung its number is the
+    // better one. We do the appending on the hook rung, so our own counter is authoritative there.
+    // On the layer rung the LAYER does the appending, the call-through AND the fail-open retry --
+    // so our producer returning a count only says we OFFERED quads. layers_appended() is the only
+    // thing that knows the runtime accepted a frame with them in it, and counting our offers
+    // instead would report the overlay live while every frame was being rejected.
+    uint32_t submitted;
+    if (g_tier == XrAttachTier::ApiLayer) {
+        const HaloVrLayerApi* api = xrbridge_api();
+        const uint64_t n = (api != nullptr && api->layers_appended != nullptr)
+                               ? api->layers_appended() : 0;
+        static uint64_t prev = 0;
+        submitted = (n >= prev) ? (uint32_t)(n - prev) : 0;
+        prev = n;
+    } else {
+        submitted = g_layers_submitted.exchange(0, std::memory_order_relaxed);
+    }
     const State now = g_state.load(std::memory_order_relaxed);
 
     // PENDING COUNTS, NOT JUST ARMED. This gate was Armed-only, and that made the watchdog
@@ -2807,14 +3982,35 @@ void xrlayer_tick() {
     // This caller ticks at the game-thread rate (~32 Hz); 96 ticks is ~3 s of frames that should
     // have happened and did not.
     static addrcascade::HookWatchdog watchdog{96};
-    if (watchdog.tick(possible, submitted > 0)) {
+    const bool alarm = watchdog.tick(possible, submitted > 0);
+    if (alarm && g_tier == XrAttachTier::ApiLayer) {
+        // THE LAYER RUNG SPLITS THE DIAGNOSIS FOR FREE, and the split is the useful half: it can
+        // say whether the layer is being called AT ALL, which the hook rung could only infer.
+        const HaloVrLayerApi* api = xrbridge_api();
+        const unsigned long long seen =
+            (api != nullptr && api->frames_seen != nullptr) ? api->frames_seen() : 0ull;
+        if (seen == 0) {
+            logf("WATCHDOG: the API layer accepted our callback but its xrEndFrame has NOT run once "
+                 "in ~3 s of live frames (frames_seen=0). The layer is loaded but is not on the "
+                 "chain this application submits through -- a second OpenXR runtime, or a layer "
+                 "ordered after the one UEVR calls. Layer marked not-live; the in-scene reticule is "
+                 "unaffected. Layer status: %s", xrbridge_status());
+        } else {
+            logf("WATCHDOG: the API layer IS running (frames_seen=%llu) but nothing of ours has "
+                 "reached the runtime in ~3 s. That is OUR end, not the attachment: either "
+                 "produce_layers is gating everything out (read the dark-reason line above) or the "
+                 "runtime is rejecting the frame with our quads in it. Layer status: %s",
+                 seen, xrbridge_status());
+        }
+    } else if (alarm) {
         logf("WATCHDOG: the xrEndFrame hook installed but has NOT been called once in ~3 s of live "
              "frames. MEASURED CAUSE (2026-08-23): UEVR STATICALLY LINKS the OpenXR loader into "
              "UEVRBackend.dll -- `dumpbin /imports` shows no openxr_loader.dll import at all -- so "
              "the loader export we hook is not on any path UEVR calls, even though openxr_loader.dll "
              "is loaded in the process by something else. Hooking that export can never work here. "
-             "The fix is an OpenXR API LAYER, which the statically-linked loader still loads. Layer "
-             "marked not-live; the in-scene reticule is unaffected.");
+             "The fix is an OpenXR API LAYER, which the statically-linked loader still loads -- it "
+             "is built in apilayer/ and registered with Register-XrApiLayer.ps1. Layer marked "
+             "not-live; the in-scene reticule is unaffected.");
     }
     g_live.store(possible && submitted > 0, std::memory_order_relaxed);
 
@@ -2838,9 +4034,11 @@ void xrlayer_tick() {
         uint32_t mask = 0;
         for (int s = 0; s < XRLAYER_SLOTS; ++s) if (xrlayer_slot_ready(s)) mask |= (1u << s);
 
-        logf("state=%d live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u ringfalls=%u "
-             "held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s",
-             (int)g_state.load(std::memory_order_relaxed), (int)g_live.load(), submitted,
+        logf("state=%d tier=%s live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u "
+             "ringfalls=%u held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s "
+             "cohskip=%u cohdrawn=%u drops[%s]",
+             (int)g_state.load(std::memory_order_relaxed), tier_name(g_tier),
+             (int)g_live.load(), submitted,
              g_cm_per_m.load(std::memory_order_relaxed),
              g_showing_ring.load(std::memory_order_relaxed)
                  ? "ring"
@@ -2851,7 +4049,45 @@ void xrlayer_tick() {
              g_m_hold_ms.load(std::memory_order_relaxed),
              g_sc_w, g_sc_h, mask,
              g_layer_drops.load(std::memory_order_relaxed),
-             (m.budget > 0) ? "FORCED" : "queried");
+             (m.budget > 0) ? "FORCED" : "queried",
+             g_coh_skips.load(std::memory_order_relaxed),
+             g_coh_drawn.load(std::memory_order_relaxed),
+             [] {
+                 // "0:ok 1:nopose ..." for every slot whose last verdict was not ok. Silent when
+                 // everything is being submitted, which is the common case.
+                 //
+                 // SIZED FOR THE WORST CASE, and it was not. Each entry grew from "N:nopose" (~9
+                 // bytes) to "N:cand=34567 drop=3024 last=nopose" (~36) when the counters landed,
+                 // and 256 bytes then held only the first eight slots -- the line ended mid-entry
+                 // at "8:]" and the GUIDE's counters, the one thing being investigated, were the
+                 // bytes that fell off the end. A truncated instrument does not read as broken; it
+                 // reads as "slot 10 is absent", which is a FINDING, and I nearly reported it as
+                 // one. 11 slots * 40 bytes + slack.
+                 static char buf[1400];
+                 buf[0] = 0;   // NUL terminator, written as 0: a char escape here has
+                 for (int s2 = 0; s2 < XRLAYER_SLOTS; ++s2) {
+                     const uint32_t cn = g_slot_cand[s2].load(std::memory_order_relaxed);
+                     // THE GUIDE IS NEVER OMITTED. Idle slots are skipped so eight unused navpoint
+                     // cells do not cry wolf every line -- but for the guide, cand=0 IS the answer
+                     // ("it never reached the admission loop") and suppressing it makes the absent
+                     // case indistinguishable from the healthy one.
+                     if (cn == 0 && s2 != XRLAYER_SLOT_GUIDE) continue;
+                     const uint32_t dn = g_slot_dropn[s2].load(std::memory_order_relaxed);
+                     const uint8_t  d  = g_slot_drop[s2].load(std::memory_order_relaxed);
+                     char one[128];
+                     _snprintf_s(one, sizeof(one), _TRUNCATE,
+                                 "%s%d:cand=%u drop=%u(stale=%u nocell=%u notfresh=%u incoh=%u budget=%u) last=%s",
+                                 buf[0] ? " " : "", s2, cn, dn,
+                                 g_slot_gate[s2][2].load(std::memory_order_relaxed),
+                                 g_slot_gate[s2][3].load(std::memory_order_relaxed),
+                                 g_slot_gate[s2][4].load(std::memory_order_relaxed),
+                                 g_slot_gate[s2][5].load(std::memory_order_relaxed),
+                                 g_slot_gate[s2][6].load(std::memory_order_relaxed),
+                                 drop_name(d));
+                     strncat_s(buf, sizeof(buf), one, _TRUNCATE);
+                 }
+                 return buf[0] ? buf : "none";
+             }());
     }
 }
 
@@ -3106,6 +4342,15 @@ bool xrlayer_capture_record(int slot) {
     src_back.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     src_back.Transition.StateAfter  = ENGINE_SRC_COLOR;
     g_gt_list->ResourceBarrier(1, &src_back);
+
+    // THE SCOPE PANE'S FEATHERED OVAL, immediately after its scene copy and while the atlas is
+    // still COPY_DEST (capture_begin put it there; capture_submit takes it out). The call makes and
+    // unmakes its own UNORDERED_ACCESS transition, so this sequence's state tracking is unchanged.
+    //
+    // Pane only: slots 0-8 are widgets whose alpha is authored on the CPU and already correct.
+    if (slot == XRLAYER_SLOT_PANE) {
+        scopemask_apply(g_device, g_gt_list, g_owned, c.x, c.y, c.dim);
+    }
 
     ++g_gt_recorded;
     g_gt_rec_mask |= (1u << slot);

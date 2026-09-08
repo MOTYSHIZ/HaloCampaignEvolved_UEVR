@@ -72,6 +72,63 @@ bool two_hand_bend_forward(Vec3* fwd);
 
 // True while the hold is engaged. For the reticule policy and the reload gesture's magazine
 // suppression -- you cannot pull a magazine with both hands on the gun.
+// ---- THE REACH, for the grab guide -------------------------------------------------------------
+//
+// Where the support hand is and where it would have to be to latch, published because the zone
+// geometry is computed here and must not be computed anywhere else. A guide that derived its own
+// zone would start pointing at a spot that no longer latches the first time twohandalong/radius
+// were retuned, and an affordance that lies is worse than none.
+//
+// VR SPACE, IN METRES, AND AS OFFSETS FROM THE AIM GRIP -- never as absolute positions.
+//
+// That is not a convenience, it is the bug-proofing. The caller (Plugin.cpp's rig block) holds the
+// aim hand HEAD-RELATIVE, while the poses here are raw tracking space; subtracting one from the
+// other silently adds the head position and puts the guide somewhere plausible but wrong. Both
+// endpoints are differenced HERE, against the same pose from the same read, so there is no frame
+// for the caller to get wrong -- it only has to rotate them, which is vr_to_rig()'s job.
+struct TwoHandReach {
+    bool  valid      = false;  // the poses were usable this tick; false means ignore every field
+    bool  in_zone    = false;  // a grip press RIGHT NOW would latch -- the guide's show condition
+    bool  latched    = false;  // already held, so the guide has done its job
+    float along_m    = 0.0f;   // hand's distance DOWN THE BARREL from the rig origin
+    float lateral_m  = 0.0f;   // hand's perpendicular distance off the barrel
+    float clamped_along_m = 0.0f;  // that distance pulled into the zone: where it would grab
+};
+
+// Game thread only, valid for the tick in which two_hand_update() last ran.
+const TwoHandReach& two_hand_reach();
+
+// ---- THE ZONE MEASUREMENT, taken in the GUN's frame ---------------------------------------------
+//
+// Published by Plugin.cpp's rig block, which is the only place that has both the blessed
+// VR-to-game transform (vr_to_rig) and the gun's world orientation (g_rigw_*). two_hand_update()
+// runs LATER in the same tick, so this is never stale.
+//
+// x = distance down the barrel from the rig origin, y/z = off it. CENTIMETRES, game space.
+// Everything the grab guide draws and everything the zone tests comes from this one measurement,
+// so the beam cannot promise a grab the latch would refuse.
+// ORIGIN IS THE AIM GRIP, axis is the GUN. Both halves matter and they were confused once:
+//
+// the AXIS moved to the gun deliberately -- the grab cylinder has to lie along the barrel the
+// player can see, not along the controller's ray, which is what was asked for.
+//
+// the ORIGIN stayed on the GRIP, because the zone bounds (0.08..0.80 m) are authored as "this far
+// FORWARD OF YOUR HAND". Moving the origin onto the rig component -- which sits further down the
+// weapon -- shifted every reading by that distance, and the field log showed along going NEGATIVE
+// (-0.088 to -0.217 m) while lateral stayed inside the radius. Axis right, origin wrong, and a
+// negative along can never satisfy along > 0.08, so the hold simply stopped latching.
+//
+// `rig_off` carries that grip-to-rig difference separately, for the GUIDE -- which draws relative
+// to the rig component and therefore does need it.
+struct TwoHandZoneMeas {
+    bool valid = false;
+    Vec3 hand_gun{};           // support hand from the AIM GRIP, in the gun's frame, game cm
+    Vec3 rig_off{};            // aim grip -> rig component, same frame. Drawing adds this; the
+                               // zone test must not.
+};
+void two_hand_set_zone_measurement(const TwoHandZoneMeas& m);
+const TwoHandZoneMeas& two_hand_zone_measurement();
+
 bool two_hand_latched();
 
 // How far into the hold we are, 0..1 -- the SAME ramp the orientation bend uses, so a consumer
