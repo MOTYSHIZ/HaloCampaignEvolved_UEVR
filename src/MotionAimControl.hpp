@@ -9,6 +9,9 @@
 // by Plugin.cpp. See UeObject.hpp.
 #include "uevr/API.hpp"
 #include "Math.hpp"
+// Dependency-free on purpose (it is compiled standalone by Verify-AimFreezeGuard.ps1); pulled in
+// here so the aim law and Plugin.cpp's AIM FROZEN log share one copy of the predicate.
+#include "AimPoseGuard.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -129,6 +132,35 @@ extern std::atomic<float> g_setpoint_rate_dps;
 // it in -- see the note in MotionAimControl.cpp.
 extern std::atomic<float> g_turn_offset;
 
+// THE VIEW-LOCK PAIR, defined in Plugin.cpp and declared here beside g_turn_offset because they are
+// the same kind of quantity: how the aim frame relates to the frame the player actually inhabits.
+//
+// g_dbg_view_in  = the game camera's yaw as UEVR offers it -- and since aimdirect DRIVES that yaw
+//                  from the aim controller, this is the AIM frame.
+// g_dbg_view_out = the yaw we write instead, i.e. the locked view -- the BODY frame.
+//
+// Their difference is exactly the aim-induced camera rotation the view lock cancels, already
+// measured every frame. palettearm needs it because elliotttate's arm rig hangs the shoulders off
+// palette[0] and assumes palette[0] IS the body -- true under his AimMethod::GAME, false under our
+// direct drive. Rotating the root by this delta hands his solver the frame it was written for.
+// Published by Plugin.cpp's view lock each frame. The lock's own g_dbg_view_in/out live in an
+// ANONYMOUS namespace (internal linkage) and cannot be externed, so the derived quantity is
+// mirrored here instead -- which is the better boundary anyway: consumers want the delta, not the
+// two raw yaws.
+extern std::atomic<float> g_view_lock_delta;
+
+// The ACHIEVED render pitch of the game camera, published from the same view-lock site and at the
+// same render rate as the delta above. The palette is local to THIS camera, so the arm frame must
+// be corrected by what the camera actually did.
+//
+// NOT g_desired_pitch: that is the control law SETPOINT. Its own header says the loop residual is
+// high-frequency jitter and that intent is published so the reticule can avoid showing it -- fine
+// for a reticule, wrong here. Subtracting a smoothed setpoint from a jittery frame LEAVES the
+// jitter in the arm, and during motion the setpoint LEADS the camera, so the correction overshoots
+// exactly while the controller is turning. Reported in-headset as "I can feel the compensations".
+// The setpoint is also only meaningful while the aim law is armed; this is always valid.
+extern std::atomic<float> g_view_pitch;
+
 // ---- adaptive gain ---------------------------------------------------------------------------
 // The loop drives a rate actuator whose deg/s per unit of stick is set by the GAME's controller
 // sensitivity, which no two players set alike. So it is measured live rather than assumed.
@@ -183,6 +215,22 @@ struct AimLawState {
 // jumps straight to `floor` so it actually crosses the game's deadzone, then rises to max_out.
 float shape(float err_deg);
 
+// THE CONTROLLER POSE IS EMPTY THIS FRAME -- position exactly (0,0,0) AND the orientation
+// quaternion's vector part exactly zero. Computed ONCE by update(), at the point the pose is read,
+// via aim_pose_is_empty(); the aim law and the AIM FROZEN log line both just read this.
+//
+// IT IS PUBLISHED FROM THE POSE, NOT RE-DERIVED FROM THE ANGLES, and that is load-bearing: the
+// angles handed to the law carry the accumulated snap-turn (see derive_ctrl_angles), so testing
+// them for zero makes the guard dead code the moment a player turns. That shipped once and sat
+// silent through nine field dropouts. AimPoseGuard.hpp has the full account.
+//
+// No run-length filter, deliberately -- the two consumers want opposite things:
+//   the RIG wants a filtered answer and uses its own `position_dead` (a 120-tick run); pinning the
+//   weapon on one odd frame would be a visible twitch.
+//   the AIM LAW wants the RAW frame, because its failure is asymmetric: one spurious frozen frame
+//   is invisible, one frame driven from an empty pose is a full-scale slam.
+extern std::atomic<bool> g_ctrl_pose_empty;
+
 // Error -> stick deflection. Writes out_rx/out_ry, each clamped to +-1.
 void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                      double aim_yaw, double aim_pitch, float dt,
@@ -194,7 +242,15 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
 // ridx_override lets a caller supply the controller index itself. Without it this reads
 // g_aim_law_ridx, which is only published by the STICK path -- so under direct drive it is -1 and
 // the derivation fails, taking any consumer down with it.
-bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override = -1);
+// allow_two_hand=false returns the RAW controller direction, unbent by the two-handed hold.
+//
+// Pass false anywhere the result becomes a stored REFERENCE rather than a live setpoint. The
+// control law is desired = ref_aim + (ctrl - ref_ctrl): capture the reference through the blend
+// and it cancels exactly, so the hold would do nothing at all. The aim calibration is worse still
+// -- it PERSISTS that pair to disk, so one hold live at the release edge bakes a two-hand offset
+// into every future one-handed session.
+bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override = -1,
+                        bool allow_two_hand = true);
 
 // Where the controller is asking the aim to be, RIGHT NOW, computed from a fresh pose in the
 // caller's own callback. Same quantity as g_desired_yaw but sampled rather than subscribed to --
@@ -228,4 +284,11 @@ bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
 // sites call this; see the definition for why an unleashed head cannot use the standing origin.
 bool aim_sightline_origin(Vec3* out);
 
+
+// ---- DIRECTIONAL MELEE AIM HOLD. Written by the melee detector (Gesture.cpp) and by the holster
+// veto; consumed inside MotionAimControl by substituting the CONTROLLER ANGLES. See the note at
+// apply_melee_aim_hold() for why it is applied there rather than to the published setpoint.
+extern std::atomic<long long> g_melee_aim_hold_until;   // 0 = no hold in effect
+extern std::atomic<float>     g_melee_aim_ctrl_yaw;
+extern std::atomic<float>     g_melee_aim_ctrl_pitch;
 } // namespace halo

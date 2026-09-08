@@ -399,6 +399,17 @@ void hit_trace_dev_shield_probe() {
 // ray reports only the biped, detection has to come from somewhere else.
 void hit_trace_dev_report() {
     auto* comp = g_last_hit_component;
+    // The capture above reads this out of the object array, so it was live THEN. This runs on a
+    // later tick and dereferences it (class_name_of, get_fname), so a teardown in between makes it
+    // a use-after-free -- the same class of fault that produced 0xC0000005 inside UEVR from three
+    // other lanes on 2026-09-04. Narrower window than those (it only derefs when the component
+    // CHANGES), but the check is one indexed compare and the failure mode is identical.
+    static int32_t s_hit_idx = -1;
+    if (comp != nullptr && !uobject_live(comp, &s_hit_idx)) {
+        g_last_hit_component = nullptr;
+        s_hit_idx = -1;
+        return;
+    }
     static void* last = nullptr;
     if (comp == last) return;
     last = comp;

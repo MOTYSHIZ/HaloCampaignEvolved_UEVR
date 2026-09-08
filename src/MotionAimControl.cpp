@@ -30,6 +30,7 @@
 // by Plugin.cpp. See UeObject.hpp.
 #include "uevr/API.hpp"
 #include "MotionAimControl.hpp"
+#include "TwoHandAim.hpp"
 #include "Config.hpp"
 #include "Math.hpp"
 #include "UeObject.hpp"
@@ -40,6 +41,7 @@
 #include "DevTools.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -62,9 +64,12 @@ std::atomic<void*>   g_aim_law_pc{nullptr};
 // Turning state rather than aim state, but derive_ctrl_angles folds it into the setpoint, and a
 // definition in Plugin.cpp could not be linked against: that file's body is an anonymous namespace.
 std::atomic<float> g_turn_offset{0.0f};
+std::atomic<float> g_view_lock_delta{0.0f};
+std::atomic<float> g_view_pitch{0.0f};
 std::atomic<float> g_desired_yaw{0.0f}, g_desired_pitch{0.0f};
 std::atomic<bool>  g_aim_calibrating{false};
 std::atomic<bool>  g_stick_mode_active{false};
+std::atomic<bool>  g_ctrl_pose_empty{false}; // see MotionAimControl.hpp -- raw, unfiltered
 std::atomic<bool>  g_menu_active{true};      // true until proven otherwise -- see MotionAimControl.hpp
 std::atomic<bool>  g_frontend_active{true};  // ditto: "not yet established" must never read as live
 std::atomic<void*> g_read_only_pc{nullptr};  // see MotionAimControl.hpp -- NOT the aim law's pointer
@@ -315,7 +320,8 @@ float shape(float err_deg, float dt) {
 // calibrated aim pose, the sightline through xdist (so hand TRANSLATION moves aim, not just
 // rotation), and the snap-turn offset. Everything it touches is either a UEVR API read (internally
 // locked) or an atomic, so it is callable from the XInput hook as well as the tick.
-bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override) {
+bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
+                        bool allow_two_hand) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
     if (ridx < 0) return false;
 
@@ -362,6 +368,16 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
     }
+
+    // ---- THE TWO-HANDED HOLD.
+    //
+    // Here, and not later: this is AFTER the aimsrc choice, so the blend rides whichever source is
+    // configured rather than silently disabling the option -- and BEFORE the snap-turn term below,
+    // which is the part that matters. g_turn_offset is added to both this angle and the reference
+    // it is differenced against, and cancels. Blending the ANGLES after that term would break the
+    // cancellation and bring back the v0.2 snap-turn bug, which is a discharged public promise.
+    // Blend the VECTOR, always.
+    if (allow_two_hand) two_hand_bend_forward(&fwd);
 
     Vec3 origin{};
     const bool have_origin = aim_sightline_origin(&origin);
@@ -442,11 +458,18 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override)
 // aim_control_law() below -- the hand's rotation since calibration, added to the aim captured at
 // calibration -- and BlamAim's controller_desired_aim() forwards here so the sim driver and every
 // consumer of the setpoint share one definition rather than three copies that can drift apart.
+// Defined below, next to the atomics it reads. Forward-declared because desired_aim_now() needs
+// the same hold and sits above that definition.
+static void apply_melee_aim_hold(float* cy, float* cp);
+
 bool desired_aim_now(float* out_yaw, float* out_pitch) {
     const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
                                              : API::VR::get_right_controller_index();
     float cy = 0.0f, cp = 0.0f;
     if (!derive_ctrl_angles(&cy, &cp, ridx)) return false;
+    // Same hold, same reason -- consumers of the setpoint must see the swing target too, or the
+    // strike and the reticule disagree about where the blow is going.
+    apply_melee_aim_hold(&cy, &cp);
     *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
     *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
     return true;
@@ -477,9 +500,80 @@ bool read_control_rotation_hook(double* out_pitch, double* out_yaw) {
 static unsigned g_direct_log_tick = 0;   // dev-only: paces the DIRECT diagnostic line
 #endif
 
+std::atomic<long long> g_melee_aim_hold_until{0};
+std::atomic<float>     g_melee_aim_ctrl_yaw{0.0f};
+std::atomic<float>     g_melee_aim_ctrl_pitch{0.0f};
+
+// ---- MELEE AIM HOLD, APPLIED TO THE CONTROLLER ANGLES rather than to the published setpoint.
+//
+// Every aim path here derives from these two numbers, so substituting at this level means ONE
+// definition of the hold, and it stays correct whatever the aim-direct sign knobs are set to --
+// which overriding the setpoint downstream would not.
+//
+// Full hold until the deadline, then a linear blend back to the live hand over melee_aim_ramp_ms.
+// The blend is not cosmetic: by the time the strike lands the hand has travelled a long way, and an
+// instant handback reads as a visible snap in the opposite direction.
+static void apply_melee_aim_hold(float* cy, float* cp) {
+    const long long until = g_melee_aim_hold_until.load(std::memory_order_relaxed);
+    if (until == 0) return;   // common case: one relaxed load of zero
+    // Same clock base as the writer in Gesture.cpp (steady_clock ticks) -- they compare directly,
+    // so this must not drift to a different clock.
+    const long long now  = std::chrono::steady_clock::now().time_since_epoch().count();
+    const long long ramp = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(g_cfg.melee_aim_ramp_ms > 0 ? g_cfg.melee_aim_ramp_ms : 1)).count();
+    if (now >= until + ramp) {
+        g_melee_aim_hold_until.store(0, std::memory_order_relaxed);
+        return;
+    }
+    float w = 1.0f;
+    if (now > until) w = 1.0f - (float)(now - until) / (float)ramp;
+    if (w < 0.0f) w = 0.0f;
+    if (w > 1.0f) w = 1.0f;
+    const float fy = g_melee_aim_ctrl_yaw.load(std::memory_order_relaxed);
+    const float fp = g_melee_aim_ctrl_pitch.load(std::memory_order_relaxed);
+    // wrap180 on the yaw term so the blend takes the short way round, not the long one.
+    *cy = *cy + wrap180(fy - *cy) * w;
+    *cp = *cp + (fp - *cp) * w;
+}
+
 void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
                      double aim_yaw, double aim_pitch, float dt,
                      float* out_rx, float* out_ry) {
+    // A melee swing in flight pins these to its own target (see apply_melee_aim_hold). Applied to
+    // the INPUTS so everything below inherits it without knowing a gesture exists.
+    apply_melee_aim_hold(&ctrl_yaw, &ctrl_pitch);
+
+    // ---- TRACKING DROPOUT: DO NOT DRIVE AIM FROM AN EMPTY POSE ----------------------------------
+    //
+    // When the OpenXR session loses FOCUS -- the runtime's own overlay, a loading stall that stops
+    // frame submission, the app leaving the foreground -- xrSyncActions fails with
+    // XR_SESSION_NOT_FOCUSED and NO action pose updates. UEVR still returns success from
+    // get_pose(); the pose it hands back is simply empty. So `have_pose` is true, the angles below
+    // are computed from an identity rotation, and the direct write at the bottom of this function
+    // assigns the aim to wherever identity happens to point.
+    //
+    // FIELD EVIDENCE (2026-09-02, from the shipped log, one frame apart):
+    //     20:40:59.164  hand_room=(p27.0,y-128.0)  ctrl_pos=(-0.573,0.037,-0.037)  aim=-83.3
+    //     20:41:00.390  hand_room=(p0.0, y-0.0)    ctrl_pos=( 0.000,0.000, 0.000)  aim= -7.4
+    //     20:41:03.801  PARENT-YAW step: worst 75.91 deg/tick
+    // A 76-degree aim slam, written by us, and then held there for the 3m38s the session stayed
+    // unfocused. The rig's own `position_dead` guard did not arm until 20:41:03.110 -- 2.7 s after
+    // the damage -- and would not have stopped this anyway: it gates the RIG, never the aim.
+    //
+    // THE FLAG IS READ, NOT RECOMPUTED. update() evaluates aim_pose_is_empty() against the raw
+    // pose and publishes the answer; deriving it again from ctrl_yaw/ctrl_pitch here is precisely
+    // the bug that made the first version of this guard dead code, because those angles carry the
+    // accumulated snap-turn and are not zero for an empty pose. See AimPoseGuard.hpp.
+    //
+    // Freezing means simply not writing: aim stays where the player left it, the reticule holds
+    // (g_desired_* is published below, so returning here leaves it untouched), and when focus
+    // returns the reference is still valid so aim resumes in place with no re-calibration.
+    if (g_cfg.aim_freeze_lost && g_ctrl_pose_empty.load(std::memory_order_relaxed)) {
+        *out_rx = 0.0f;
+        *out_ry = 0.0f;
+        return;
+    }
+
     // The hand's rotation SINCE CALIBRATION, kept as its own term because the direct-write path
     // needs to be able to mirror it independently of the reference it is added to.
     const float dctrl_yaw   = wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());

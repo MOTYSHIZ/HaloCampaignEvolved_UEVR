@@ -31,6 +31,13 @@ std::wstring s_last_weapon;
 // Armed by the Script UI (calib:wpnscope) or scopewpnarm. Consumed by the capture.
 std::atomic<bool> s_armed{false};
 
+// BASE (global-fit) calibration arm. Separate from s_armed on purpose: they are mutually exclusive
+// destinations for the same gesture, and one flag with two meanings is how a capture silently lands
+// in the wrong table. Its ONLY job is to hold the pane open -- the capture already writes the global
+// fit whenever the per-weapon arm is not set -- because the scope pane is no longer held open by the
+// calibration key alone, so DEL by itself had nothing to calibrate against.
+std::atomic<bool> s_base_armed{false};
+
 void publish_base() {
     g_cfg.scope_base_zoom  = s_base.zoom;
     g_cfg.scope_base_dist  = s_base.dist;
@@ -68,8 +75,18 @@ const ScopeAdjust* find_entry(const std::wstring& wpn) {
 
 } // namespace
 
-void scope_offset_arm(bool on)  { s_armed.store(on, std::memory_order_relaxed); }
+void scope_offset_arm(bool on)  {
+    s_armed.store(on, std::memory_order_relaxed);
+    if (on) s_base_armed.store(false, std::memory_order_relaxed);   // mutually exclusive
+}
 bool scope_offset_armed()       { return s_armed.load(std::memory_order_relaxed); }
+
+void scope_base_arm(bool on) {
+    s_base_armed.store(on, std::memory_order_relaxed);
+    if (on) s_armed.store(false, std::memory_order_relaxed);        // mutually exclusive
+}
+bool scope_base_armed()      { return s_base_armed.load(std::memory_order_relaxed); }
+void scope_base_arm_clear()  { s_base_armed.store(false, std::memory_order_relaxed); }
 
 void scope_offset_update() {
     if (!g_cfg.scope_offsets) {
@@ -120,12 +137,16 @@ void scope_offset_update() {
     restore_base();
 
     if (hit != nullptr) {
-        // Zoom is a MULTIPLIER on the base, not an addend: magnification is a ratio (the pane lens
-        // is scope_base_fov / zoom), so "+4" means something different at 2x than at 16x while
-        // "x1.5" does not. Stored as a delta around 0 so an all-zero line is still a no-op, which
-        // is what makes a hand-written entry with missing trailing fields behave.
-        if (hit->d_zoom != 0.0f) {
-            g_cfg.scope_zoom = clampf(s_base.zoom * (1.0f + hit->d_zoom), 1.0f, 64.0f);
+        // Zoom is a PLAIN MULTIPLIER on the base -- 1.5 means 1.5x -- because magnification is a
+        // ratio (the pane lens is scope_base_fov / zoom), so "+4" would mean something quite
+        // different at 2x than at 16x while "x1.5" does not.
+        //
+        // ZERO MEANS UNSET, not "no magnification". The parser is positional, so a line that names
+        // only a weapon ("wpnscope=FP_SniperRifle") leaves every field at 0 -- and 0x zoom is not a
+        // thing anyone can want, so treating it as "leave the global fit alone" costs no expressible
+        // value and makes a truncated line behave. 1.0 means unchanged too, and reads that way.
+        if (hit->d_zoom > 0.0f) {
+            g_cfg.scope_zoom = clampf(s_base.zoom * hit->d_zoom, 1.0f, 64.0f);
         }
         g_cfg.scope_dist  += hit->d_dist;
         g_cfg.scope_right += hit->d_right;
@@ -133,6 +154,40 @@ void scope_offset_update() {
         g_cfg.scope_rot_p += hit->d_rot_p;
         g_cfg.scope_rot_y += hit->d_rot_y;
         g_cfg.scope_rot_r += hit->d_rot_r;
+
+        // PLAUSIBILITY GUARD ON THE APPLIED RESULT, not on the writers.
+        //
+        // The parser clamps a hand-written scopedist to [25, 400]; NOTHING clamped base + delta. A
+        // bad trim could therefore land the pane on the camera with every upstream gate reporting
+        // healthy -- scope ON logs, ensure_components succeeds, captures run -- and the only symptom
+        // is "the scope doesn't come up".
+        //
+        // That is not hypothetical: on 2026-09-06 a sniper trim captured in the wrong frame carried
+        // d_dist = -63.260 against a base of 63.57, giving 0.31 cm. The log read `dist=0cm` and the
+        // pane was inside the near plane. Note where the failure was NOT: neither direct writer of
+        // scope_dist ever wrote a bad value, so a clamp on them would have missed this entirely --
+        // the arithmetic produced it. Guard the RESULT.
+        //
+        // Clamped rather than rejected: an out-of-range trim is still evidence of intent, and a pane
+        // at the near limit is visible and diagnosable, whereas one at 0 is neither. Says so once per
+        // change so a bad capture is discovered when it is made, not weeks later.
+        {
+            const float want = g_cfg.scope_dist;
+            g_cfg.scope_dist = clampf(want, 25.0f, 400.0f);
+            if (std::fabs(want - g_cfg.scope_dist) > 0.01f) {
+                static float s_said = 1e9f;
+                if (std::fabs(want - s_said) > 0.01f) {
+                    s_said = want;
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] SCOPEOFF IMPLAUSIBLE: '%s' trim d_dist=%.3f on base "
+                        "%.2f gives %.2f cm, outside [25,400] -- clamped to %.2f. A pane at that "
+                        "distance sits on the camera and reads as 'the scope will not come up' "
+                        "while every other gate reports healthy. This trim is almost certainly a "
+                        "capture taken in the wrong frame; delete its wpnscope line and re-take it.",
+                        hit->match, hit->d_dist, s_base.dist, want, g_cfg.scope_dist);
+                }
+            }
+        }
     }
 
     if (wpn != s_last_weapon) {
@@ -142,7 +197,7 @@ void scope_offset_update() {
                 API::get()->log_info("[Halo-CampE-UEVR] SCOPEOFF %ls -> '%s' zoom x%.3f "
                                      "d=(%.2f,%.2f,%.2f)cm rot=(%.2f,%.2f,%.2f)",
                                      wpn.empty() ? L"<none>" : wpn.c_str(), hit->match,
-                                     1.0f + hit->d_zoom, hit->d_dist, hit->d_right, hit->d_up,
+                                     hit->d_zoom, hit->d_dist, hit->d_right, hit->d_up,
                                      hit->d_rot_p, hit->d_rot_y, hit->d_rot_r);
             } else {
                 API::get()->log_info("[Halo-CampE-UEVR] SCOPEOFF %ls -> no entry, using the global fit",
@@ -172,13 +227,29 @@ bool scope_offset_capture() {
     // the freshly captured absolute values, and scope_offset_update() has been adding this weapon's
     // existing trim on top of the base all along -- so measuring from g_cfg would fold the old trim
     // into the new one and double it on every capture.
-    const float dz = (s_base.zoom > 0.0001f) ? (g_cfg.scope_zoom / s_base.zoom) - 1.0f : 0.0f;
+    const float dz = (s_base.zoom > 0.0001f) ? (g_cfg.scope_zoom / s_base.zoom) : 1.0f;
     const float dd = g_cfg.scope_dist  - s_base.dist;
     const float dr = g_cfg.scope_right - s_base.right;
     const float du = g_cfg.scope_up    - s_base.up;
-    const float dp = g_cfg.scope_rot_p - s_base.rot_p;
-    const float dy = g_cfg.scope_rot_y - s_base.rot_y;
-    const float dl = g_cfg.scope_rot_r - s_base.rot_r;
+    // ANGLE DELTAS ARE WRAPPED TO [-180, 180]. A plain subtraction of two rotator components is
+    // arithmetically fine and semantically wrong: capturing rot_y = -169.4 against a base of 174
+    // stored -343.209, which is the same rotation as +16.8 and reproduces it exactly -- but only for
+    // as long as the base never moves. Re-apply that delta against ANY other base (a re-canonicalised
+    // global fit, a different weapon's) and it lands 343 degrees away from what the player chose
+    // rather than 17. It also defeats the outlier warning below, which cannot tell a wild capture
+    // from a wrapped one, and it makes the stored file unreadable to a human trying to sanity-check
+    // a weapon by eye.
+    //
+    // Measured 2026-09-06: two sniper captures a minute apart stored -206.37 and -343.21 for what
+    // was nearly the same hand placement. Both were self-consistent; neither was inspectable.
+    auto wrap180 = [](float d) {
+        while (d >  180.0f) d -= 360.0f;
+        while (d < -180.0f) d += 360.0f;
+        return d;
+    };
+    const float dp = wrap180(g_cfg.scope_rot_p - s_base.rot_p);
+    const float dy = wrap180(g_cfg.scope_rot_y - s_base.rot_y);
+    const float dl = wrap180(g_cfg.scope_rot_r - s_base.rot_r);
 
     // Replace an existing entry rather than appending a second one -- otherwise the first match
     // wins for ever and re-calibrating that weapon appears to do nothing.
@@ -202,12 +273,12 @@ bool scope_offset_capture() {
     {
         const char* why = nullptr;
         if (std::fabs(dd) > 60.0f || std::fabs(dr) > 60.0f || std::fabs(du) > 60.0f) why = "placement over 60cm";
-        else if (std::fabs(dz) > 3.0f)                                               why = "zoom over 4x the global";
+        else if (dz > 4.0f || dz < 0.25f)                                            why = "zoom over 4x or under a quarter of the global";
         if (why != nullptr) {
             API::get()->log_info("[Halo-CampE-UEVR] SCOPECAL WARNING '%s': %s -- zoom x%.3f "
                                  "d=(%.2f,%.2f,%.2f)cm. Almost certainly a bad capture; re-do it, "
                                  "or delete the wpnscope line for this weapon.",
-                                 key.c_str(), why, 1.0f + dz, dd, dr, du);
+                                 key.c_str(), why, dz, dd, dr, du);
         }
     }
 
@@ -220,7 +291,51 @@ bool scope_offset_capture() {
     wpn_calib_write_file();
     API::get()->log_info("[Halo-CampE-UEVR] SCOPECAL '%s': zoom x%.3f d=(%.2f,%.2f,%.2f)cm "
                          "rot=(%.2f,%.2f,%.2f)  [slot %d of %d]",
-                         key.c_str(), 1.0f + dz, dd, dr, du, dp, dy, dl, slot, g_cfg.scope_count);
+                         key.c_str(), dz, dd, dr, du, dp, dy, dl, slot, g_cfg.scope_count);
+    return true;
+}
+
+// DROP THE CURRENTLY-EQUIPPED WEAPON'S SCOPE TRIM, sending it back to the global fit.
+//
+// The counterpart to the capture above, and the reason it exists: a bad capture is easy to take
+// (hold the gesture at the wrong moment and you get a 60 cm placement or a 4x zoom), and until now
+// the only way out was to quit, hand-edit halo_vr_weapons.cfg, and relaunch -- which the file
+// itself warns against, since it is machine-owned and rewritten in full on every capture. The
+// capture's own WARNING line has been telling players to "delete the wpnscope line for this
+// weapon" with no supported way to do it.
+//
+// REMOVES ONLY THIS WEAPON'S wpnscope ENTRY. wpnoff (the weapon POSE calibration) lives in the
+// same file and is a different gesture with a different fix; compacting the scope table and
+// rewriting through wpn_calib_write_file() leaves it untouched, exactly as a capture does.
+//
+// Takes effect on the next tick with no reload: scope_offset_update() assigns the base fit first
+// and adds a trim only if one is found, so removing the entry IS the revert.
+bool scope_offset_clear_current() {
+    const std::string key = weapon_key();
+    if (key.empty()) {
+        API::get()->log_info("[Halo-CampE-UEVR] SCOPECAL: no weapon in hand -- nothing to reset. "
+                             "Equip the weapon whose scope trim you want cleared, then press it "
+                             "again.");
+        return false;
+    }
+    int slot = -1;
+    for (int i = 0; i < g_cfg.scope_count; ++i) {
+        if (_stricmp(g_cfg.wpn_scope[i].match, key.c_str()) == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] SCOPECAL: '%s' has no per-weapon scope trim -- it "
+                             "is already on the global fit.", key.c_str());
+        return false;
+    }
+    // Compact, then clear the vacated tail entry: leaving the old struct in place past
+    // scope_count would resurrect it the moment the count grew again for a different weapon.
+    for (int i = slot; i + 1 < g_cfg.scope_count; ++i) g_cfg.wpn_scope[i] = g_cfg.wpn_scope[i + 1];
+    --g_cfg.scope_count;
+    g_cfg.wpn_scope[g_cfg.scope_count] = {};
+    wpn_calib_write_file();
+    API::get()->log_info("[Halo-CampE-UEVR] SCOPECAL: cleared the per-weapon scope trim for '%s' "
+                         "-- back on the global fit. %d weapon trim(s) remain.",
+                         key.c_str(), g_cfg.scope_count);
     return true;
 }
 

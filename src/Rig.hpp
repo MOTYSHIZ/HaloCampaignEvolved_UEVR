@@ -208,6 +208,14 @@ bool rig_set_world_location(uevr::API::UObject* rig, double x, double y, double 
 
 bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
 
+// A named SOCKET's world location on a mesh component. Exposed for the scope's space-switch
+// handshake, which must not take its KeepWorld conversion while the bone is mid-animation.
+//
+// Use this rather than K2_GetComponentLocation with a socket name: GetSocketLocation(None) quietly
+// returns the COMPONENT'S OWN location, so a mis-built FName makes every lookup succeed with the
+// wrong answer. The implementation builds the FName correctly; see its comment.
+bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3* out);
+
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);
 void attach_release(uevr::API::UObject* rig, const char* why);

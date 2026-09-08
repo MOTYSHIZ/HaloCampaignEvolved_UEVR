@@ -10,7 +10,8 @@
 // until something is captured. That is what makes it safe to ship enabled.
 //
 // WHAT IT TRIMS. The in-scene pane path in Scope.cpp:
-//     scope_zoom                          magnification (pane lens = scope_base_fov / zoom)
+//     scope_zoom                          magnification (pane lens = scope_base_fov / zoom),
+//                                         trimmed by a PLAIN MULTIPLIER: 1.5 = 1.5x. 0 = unset.
 //     scope_dist / scope_right / scope_up placement along/around the aim ray, cm
 //     scope_rot_p / scope_rot_y / scope_rot_r  pane facing, degrees
 //
@@ -38,5 +39,15 @@ bool scope_offset_capture();
 // fit. Cleared by the capture. Set from the Script UI bridge (calib:wpnscope) or the config key.
 void scope_offset_arm(bool on);
 bool scope_offset_armed();
+
+// Arm a BASE (global-fit) calibration. Holds the scope pane open for the gesture -- which the
+// calibration key alone no longer does -- and routes nothing: the capture already writes the global
+// fit when the per-weapon arm is clear. Mutually exclusive with scope_offset_arm().
+void scope_base_arm(bool on);
+bool scope_base_armed();
+void scope_base_arm_clear();
+// Drop the equipped weapon's wpnscope trim (back to the global fit). false = nothing to clear:
+// no weapon in hand, or that weapon never had one. Rewrites halo_vr_weapons.cfg.
+bool scope_offset_clear_current();
 
 } // namespace halo

@@ -54,12 +54,41 @@ extern std::atomic<uint32_t> g_scope_captures;
 // allocation -- same rule as everything else in that callback.
 bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode);
 
+// Same, for a button bound to the scope in the Controls panel (bindscope). Nothing to eat -- the
+// caller already consumes the mask -- so this returns nothing. Both paths stay live at once, so
+// binding a button never removes the trigger.
+void scope_handle_button(bool down, bool in_menu, bool stick_mode);
+
 // Tick side. notice_ray() is called from the on-foot rig block with the RAW aim ray (origin ->
 // target, unsmoothed -- the reticule's own display smoothing read as pane lag in the headset)
 // and the rig component (its outer owns our components); it applies placement and capture
 // IMMEDIATELY, same tick. frame_end() runs every update() tick above the early-outs and only
 // parks the pane when no ray arrived, which is what makes menus, seats and death safe by
 // construction.
+// THE REAL TRACED HIT, for the capture camera's CONVERGENCE only.
+//
+// scope_notice_ray's `target` is deliberately an arbitrary point 500 cm down the aim ray -- its own
+// call site says "only the direction matters" -- because the reticule's real target carries display
+// smoothing tuned for a floating dot, and using it made the whole pane trail the hand.
+//
+// That is fine for DIRECTION and wrong for CONVERGENCE. A camera aimed at the 5 m point does not
+// look at a target 3 m away, and the two diverge as you translate: the miss grows with the distance
+// error times the sideways offset. Measured in a headset 2026-09-07 as the world-space reticule
+// staying correctly ON the target while the target itself slid out of the pane during a strafe --
+// the reticule was at the true hit, the camera was not.
+//
+// So the ray keeps supplying the direction and this supplies the DISTANCE to converge at. Publish
+// it every tick the ray is published; valid=false falls back to the ray point, i.e. the old
+// behaviour.
+// The world point the capture should CONVERGE on -- the traced hit the reticule is drawn at.
+//
+// `tick` is required, and the reason is the bug it fixes: the valid flag used to be set true and
+// never cleared anywhere, so a tick that did not reach this call site left the capture aiming at a
+// world point from an arbitrary earlier moment FOREVER -- silently, with no self-correction and
+// nothing in the log. The ray path has carried a staleness tick for exactly this reason since it
+// was written; the focus path was the half that did not.
+void scope_notice_focus(const Vec3& world_hit, bool valid, uint32_t tick);
+
 void scope_notice_ray(const Vec3& origin, const Vec3& target, uevr::API::UObject* rig,
                       uint32_t tick);
 void scope_frame_end(uint32_t tick);
