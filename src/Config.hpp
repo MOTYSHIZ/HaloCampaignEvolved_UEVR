@@ -4204,10 +4204,19 @@ struct Config {
     float holster_neck_down = 0.15f;   // eyes to neck pivot, straight down in the head frame
     float holster_neck_back = 0.08f;   // ...and slightly behind the eyes
 
-    // With holsters on, the PHYSICAL buttons for weapon swap / grenade switch / grenade throw are
-    // swallowed (the gesture system owns those actions; a stray Y press must not swap). Synthetic
-    // holster presses are injected AFTER the mask, so they still work. Menus and stick mode keep
-    // the buttons -- Y navigates UI, and stick mode has no holsters to replace it.
+    // With holsters on, the PHYSICAL buttons for grenade switch / grenade throw are swallowed --
+    // the gesture system owns those actions. Synthetic holster presses are injected AFTER the
+    // steal, so they still work. Menus and stick mode keep the buttons, since Y navigates UI and
+    // stick mode has no holsters to replace them with.
+    //
+    // SWAP (Y) IS NO LONGER IN THE STEAL SET, whatever this is set to. The original text here read
+    // "a stray Y press must not swap", which sounds right and was not: the reach gesture needs no
+    // button, so taking Y away bought nothing and simply deleted the game's native weapon switch.
+    // Both work independently now -- press Y, or reach over your shoulder.
+    //
+    // Turning this off is ALSO not the cure for a missing grenade throw. throw_mask is 0x0100,
+    // shared with the trigger grenade, and that fault was ordering: the trigger injected the mask
+    // and this steal stripped it a few lines later. The injector now runs after the steal.
     int   holster_steal_buttons = 1;
     // WHICH HAND WORKS THE GRENADE POUCHES. 2 = BOTH (default): either grip grabs, and the
     // behaviour follows the hand that is carrying -- in the OFF hand the gun stays live and
@@ -4215,6 +4224,29 @@ struct Config {
     // and fire suppresses while the grenade shares it (the original single-hand behaviour).
     // 1 = off hand only; 0 = aim hand only. Weapon-swap holsters stay on the aim hand
     // regardless -- only the pouches are handed.
+    // ---- MOTION GRENADES: OFF BY DEFAULT, AND THAT IS A DELIBERATE CANONICALISATION -----------
+    //
+    // The pouch-grab/throw half of the holster system (blindcowboy24's) is a GESTURE feature: a grip
+    // closing inside a chest pouch arms a grenade and a throw motion releases it. Reported
+    // 2026-09-07 firing unprompted during release-candidate testing -- a grenade thrown by an
+    // ordinary hand movement is not a cosmetic surprise, it is a wasted resource and possibly a
+    // suicide, and it happens with no button pressed.
+    //
+    // WHY THIS KEY EXISTS AT ALL: until now the only lever was `holster`, the MASTER switch, which
+    // also disables over-the-shoulder weapon switching -- a separate feature that was merged
+    // deliberately and works. Turning off an unwanted gesture should not cost a wanted one, so the
+    // two halves are now independently switchable.
+    //
+    // Off by default because a gesture that fires unbidden must be opted INTO, not out of. Weapon
+    // switching keeps its existing default; only the pouches change.
+    //
+    // NO RELEASE-NOTES MIGRATION LINE IS OWED FOR THIS. The pouch gesture has never appeared in a
+    // shipped release, so no player has it to lose -- the settings-invalidation rule protects
+    // behaviour people ALREADY HAVE, and defaulting an unshipped feature off strands nobody. Noted
+    // because the rule is easy to over-apply: a default change that looks alarming in a diff is not
+    // automatically a promise being broken.
+    bool  holster_grenades = false;
+
     int   holster_gren_hand = 2;
 
     int   holster_swap_mask  = 0x8000;                // Y = switch weapon on the default pad map

@@ -256,8 +256,12 @@ const char* slot_name(HolsterSlot s) {
 // 2 = both, with the carrying hand deciding the armed behaviour.
 bool aim_is_right() { return !g_cfg.aim_left_hand; }
 bool off_is_right() { return g_cfg.aim_left_hand; }
-bool aim_can_grab() { return g_cfg.holster_gren_hand != 1; }
-bool off_can_grab() { return g_cfg.holster_gren_hand != 0; }
+// holster_grenades gates BOTH, so the pouches can be switched off without losing the
+// over-the-shoulder weapon swap. Checked here rather than at the call sites because every path into
+// the pouches -- grab, arm, throw, and the pouch markers -- already asks one of these two, so a gate
+// here cannot be walked around by a path someone adds later.
+bool aim_can_grab() { return g_cfg.holster_grenades && g_cfg.holster_gren_hand != 1; }
+bool off_can_grab() { return g_cfg.holster_grenades && g_cfg.holster_gren_hand != 0; }
 
 void haptic_on(bool right, float dur, float amp) {
     if (!g_cfg.holster_haptic) return;

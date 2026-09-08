@@ -1090,6 +1090,7 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "holsterneckback") == 0) { g_cfg.holster_neck_back = clampf((float)v, 0.0f, 0.5f); return true; }
     if (_stricmp(key, "holsterswapmask")  == 0) { g_cfg.holster_swap_mask  = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "holsterstealbtns") == 0) { g_cfg.holster_steal_buttons = (int)v; return true; }
+    if (_stricmp(key, "holstergren")    == 0) { g_cfg.holster_grenades = (v != 0.0); return true; }
     if (_stricmp(key, "holstergrenhand") == 0) { g_cfg.holster_gren_hand = (int)v; return true; }
     if (_stricmp(key, "holsterthrowmask") == 0) { g_cfg.holster_throw_mask = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "holsterpressms")   == 0) { g_cfg.holster_press_ms   = (int)clampf((float)v, 30.0f, 500.0f); return true; }
