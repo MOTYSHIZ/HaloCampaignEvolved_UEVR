@@ -3171,6 +3171,32 @@ struct Config {
     // Quad size as a fraction of frame HEIGHT, and its centre within each eye's half, normalised.
     float scope_blit_size = 0.35f;
     float scope_blit_x    = 0.5f;
+    // ---- CUTSCENE BLIT (cutsceneblit, default OFF) --------------------------------------------
+    //
+    // The other half of the cutscene problem. docs\CUTSCENE_FINDINGS.md establishes that the
+    // campaign cutscenes are pre-rendered MP4s drawn by the engine's native MoviePlayer through
+    // its own Slate pass, OUTSIDE the per-eye 3D render -- so there is no MediaTexture to host on
+    // a world quad, and the per-eye composite arrives doubled. It also establishes that a CLEAN
+    // MONO FRAME EXISTS every frame (the desktop mirror is a clean letterboxed image).
+    //
+    // WHY THIS LANE RATHER THAN AN XR COMPOSITOR QUAD. A quad puts a screen in FRONT of the
+    // doubled image; it does not remove it, so the eyes still carry the doubled composite around
+    // and behind the quad, and blanking them means VR_2DScreenMode -- which reallocates the view
+    // target mid-scene (the 2026-08-05 oscillation incident) and submits the per-eye-visibility
+    // quad type SteamVR drops in normal presentation, which is exactly why cutscene2d=1 failed.
+    // This callback's destination IS the frame about to be submitted, so we OVERWRITE the doubled
+    // image instead of hiding it: no 2D screen mode, no reallocation, no exotic layer type.
+    //
+    // UNVERIFIED, AND THE UNKNOWN IS ONE MEASUREMENT: whether the scene render target we sample
+    // actually contains the movie at this point in the frame. The findings doc proves the clean
+    // pixels exist somewhere each frame but never established WHICH resource holds them. If this
+    // shows the movie full-eye, the lane is right. If it shows black, the movie composites later
+    // and the sample point must move to the swapchain backbuffer (renderer_data.swapchain) on
+    // on_present. The attempt IS the measurement -- one cutscene answers it.
+    bool  cutscene_blit   = false;
+    // Fraction of the eye the movie fills (1.0 = edge to edge). Below 1.0 it is centred, which is
+    // the comfortable option for a wide letterboxed image on a narrow FOV.
+    float cutscene_blit_fill = 1.0f;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------

@@ -109,6 +109,7 @@
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
 #include "Scope.hpp"
+#include "ScopeBlit.hpp"   // cutscene_blit_set_active / scope_blit_tick (render-thread blit)
 // For scopelayer_configure_cell_early() only -- the pane's atlas cell must be requested from
 // update() BEFORE xrlayer_tick() builds the atlas. Everything else in the scope lane is reached
 // through Scope.hpp.
@@ -6749,6 +6750,22 @@ void update() {
             // consulted only on a build where the subsystem is missing.
             const bool cine_signal = s_cin_ok ? s_cin_active
                                               : (g_stick_mode.load() && cine_recent);
+
+            // PUBLISH THE SAME PREDICATE TO THE RENDER THREAD for the cutscene blit, and register
+            // the callback from a NON-DEV path.
+            //
+            // Deliberately the identical expression the flat-view actuator uses rather than a
+            // second reading of the subsystem: two conditions that disagree in any overlapping
+            // state are an oscillator, and this one drives something the eyes see (the 2026-08-05
+            // thrash incident is the worked example, a few lines below).
+            //
+            // scope_blit_tick() is idempotent (it returns immediately once registered, or when
+            // both lanes are off) and is called here because its OTHER call site in Scope.cpp sits
+            // inside #if HALO_VR_DEV -- which would have made cutsceneblit silently inert in
+            // exactly the builds players run. That is the same failure un-gated in XrSource.cpp on
+            // 2026-09-07; see the note above probe() there.
+            halo::cutscene_blit_set_active(cine_signal);
+            halo::scope_blit_tick();
 
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited

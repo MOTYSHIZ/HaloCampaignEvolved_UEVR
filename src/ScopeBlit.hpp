@@ -35,4 +35,15 @@ namespace halo {
 // without touching a file other sessions are editing.
 void scope_blit_tick();
 
+// CUTSCENE MODE. Published from the game thread by the ONE cutscene predicate in Plugin.cpp
+// (cine_signal -- see the oscillation note there: engage and release must derive from the same
+// expression), read on the RENDER thread by the blit callback. Atomic because those are two
+// different threads; a plain bool here would be the two-clocks bug in miniature.
+//
+// Shares this file's device/root-signature/PSO/SRV state deliberately rather than standing up a
+// second copy in its own translation unit: the callback list is additive (PluginLoader
+// push_back + dispatch loop), so a separate file WOULD work -- it would just duplicate ~200 lines
+// of D3D12 setup for no gain, which this repo's one-copy rule exists to prevent.
+void cutscene_blit_set_active(bool on);
+
 } // namespace halo

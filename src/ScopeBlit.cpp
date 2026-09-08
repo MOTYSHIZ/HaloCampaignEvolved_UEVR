@@ -6,6 +6,7 @@
 
 #include <Windows.h>
 #include <d3d12.h>
+#include <atomic>
 #include <cstring>
 
 using namespace uevr;
@@ -186,8 +187,19 @@ bool create_pipeline(ID3D12Device* dev) {
 }
 
 // The render callback. Runs on the render thread with a live command list.
+// Set on the game thread, read on the render thread. See the header.
+std::atomic<bool> g_cine_on{false};
+
+// Is the cutscene lane asking to draw THIS frame? Kept as one expression so the entry gate and
+// the draw both ask the identical question -- the same discipline the cutscene detector itself
+// had to learn (two conditions that disagree in any overlapping state are an oscillator).
+inline bool cutscene_wants_blit() {
+    return g_cfg.cutscene_blit && g_cine_on.load(std::memory_order_relaxed);
+}
+
 void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* rtv_v) {
-    if (g_dead || !g_cfg.scope_blit) return;
+    const bool cine = cutscene_wants_blit();
+    if (g_dead || (!g_cfg.scope_blit && !cine)) return;
     auto* cmd = (ID3D12GraphicsCommandList*)cmd_list_v;
     auto* dst = (ID3D12Resource*)rt_resource_v;
     auto* rtv = (D3D12_CPU_DESCRIPTOR_HANDLE*)rtv_v;
@@ -244,7 +256,10 @@ void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* rtv_v) {
     // quad comes out garbage rather than absent, THAT is the thing to fix here.
 
     const float mag = (g_cfg.scope_blit_mag < 1.05f) ? 1.05f : g_cfg.scope_blit_mag;
-    const float half = 0.5f / mag;                       // crop half-size in UV, per eye
+    // Crop half-size in UV, per eye. The scope magnifies (a small centred crop); the cutscene lane
+    // takes the eye WHOLE (half = 0.5 => the full half-width, full height), because it is
+    // reproducing the frame rather than zooming into it.
+    const float half = cine ? 0.5f : (0.5f / mag);
     const bool  side_by_side = (sd.Width >= sd.Height * 2u);
     const int   eyes = side_by_side ? 2 : 1;
 
@@ -257,22 +272,37 @@ void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* rtv_v) {
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     for (int e = 0; e < eyes; ++e) {
-        // Destination rect: a square of scopeblitsize (fraction of frame height), centred at
-        // (scopeblitx, scopeblity) within this eye's half of the frame.
+        // Destination rect. Two modes share this loop:
+        //   scope    -- a square of scopeblitsize (fraction of frame height) centred at
+        //               (scopeblitx, scopeblity) within this eye's half.
+        //   cutscene -- the WHOLE eye (or cutsceneblitfill of it, centred). Filling the eye is
+        //               the point: the doubled native composite is not hidden behind this, it is
+        //               overwritten by it, which is what makes the lane work without
+        //               VR_2DScreenMode.
         const float eye_w = (float)dd.Width / (float)eyes;
-        const float side  = (float)dd.Height * g_cfg.scope_blit_size;
-        const float cx    = eye_w * (float)e + eye_w * g_cfg.scope_blit_x;
-        const float cy    = (float)dd.Height * g_cfg.scope_blit_y;
+        float w, h, cx, cy;
+        if (cine) {
+            const float fill = (g_cfg.cutscene_blit_fill <= 0.0f) ? 1.0f : g_cfg.cutscene_blit_fill;
+            w  = eye_w * fill;
+            h  = (float)dd.Height * fill;
+            cx = eye_w * ((float)e + 0.5f);
+            cy = (float)dd.Height * 0.5f;
+        } else {
+            const float side = (float)dd.Height * g_cfg.scope_blit_size;
+            w = side; h = side;
+            cx = eye_w * (float)e + eye_w * g_cfg.scope_blit_x;
+            cy = (float)dd.Height * g_cfg.scope_blit_y;
+        }
 
         D3D12_VIEWPORT vp{};
-        vp.TopLeftX = cx - side * 0.5f;
-        vp.TopLeftY = cy - side * 0.5f;
-        vp.Width = side;
-        vp.Height = side;
+        vp.TopLeftX = cx - w * 0.5f;
+        vp.TopLeftY = cy - h * 0.5f;
+        vp.Width = w;
+        vp.Height = h;
         vp.MaxDepth = 1.0f;
         D3D12_RECT sc{};
         sc.left = (LONG)vp.TopLeftX; sc.top = (LONG)vp.TopLeftY;
-        sc.right = (LONG)(vp.TopLeftX + side); sc.bottom = (LONG)(vp.TopLeftY + side);
+        sc.right = (LONG)(vp.TopLeftX + w); sc.bottom = (LONG)(vp.TopLeftY + h);
         cmd->RSSetViewports(1, &vp);
         cmd->RSSetScissorRects(1, &sc);
 
@@ -288,8 +318,15 @@ void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* rtv_v) {
 
 } // namespace
 
+void cutscene_blit_set_active(bool on) {
+    g_cine_on.store(on, std::memory_order_relaxed);
+}
+
 void scope_blit_tick() {
-    if (g_registered || g_dead || !g_cfg.scope_blit) return;
+    // Register when EITHER lane is enabled. Gating registration on scope_blit alone would leave
+    // cutsceneblit=1 silently inert on a build where the scope blit is off -- a setting that
+    // appears to do nothing, which is the failure this project keeps re-learning.
+    if (g_registered || g_dead || (!g_cfg.scope_blit && !g_cfg.cutscene_blit)) return;
     // The renderer callbacks live on UEVR_PluginCallbacks (param->callbacks), NOT on
     // param->functions -- functions is the log/hook/version surface.
     auto* param = API::get()->param();
