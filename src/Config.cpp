@@ -1062,6 +1062,9 @@ static bool parse_xrlayer_key(const char* key, double v) {
     // the runtime accepts would just make xrEndFrame reject the frame, which is a worse way to
     // learn the number than reading the ARMED line.
     if (_stricmp(key, "xrlayerbudget")   == 0) { g_cfg.xr_layer_budget    = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    return false;
+}
+
 // Holster / grenade-pouch keys (blindcowboy24 PR-1, taken alone). Early-return parser for the
 // same C1061 reason as its siblings above.
 static bool parse_holster_key(const char* key, const char* val, double v) {

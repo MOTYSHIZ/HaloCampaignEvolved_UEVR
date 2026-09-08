@@ -50,11 +50,6 @@ using namespace uevr;
 namespace halo {
 
 // ---- aim reference ---------------------------------------------------------------------------
-// Melee aim hold: DECLARED INERT. See MotionAimControl.hpp -- the swing-aimed melee that writes
-// these was not taken with the holster extraction.
-std::atomic<float>     g_melee_aim_ctrl_yaw{0.0f};
-std::atomic<float>     g_melee_aim_ctrl_pitch{0.0f};
-std::atomic<long long> g_melee_aim_hold_until{0};
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
 std::atomic<float> g_ref_ctrl_pitch{0.0f}, g_ref_aim_pitch{0.0f};
 

@@ -4176,10 +4176,6 @@ struct Config {
     // needs is NOT measured -- raise this first if grenades fly off-line.
     int   holster_aim_hold_ms = 350;
 
-    // Gesture aim-hold shape (shared with later gesture features): how long the pinned aim holds
-    // past the gesture, and the ramp back to the live hand so the reticle returns, not teleports.
-    int   melee_aim_hold_ms = 250;
-    int   melee_aim_ramp_ms = 150;
 
     // ---- THE ZONES HANG ON A TORSO, NOT ON THE HEAD. From the headset: turn your head
     // right and the plasma pouch is inside your body -- because the zones rotated one-to-one with
