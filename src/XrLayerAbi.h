@@ -170,6 +170,26 @@ typedef struct HaloVrLayerApi {
     const char* (XRAPI_PTR *status)(void);
 
     // APPEND NEW FIELDS BELOW THIS LINE ONLY.
+
+    // ---- appended 2026-09-08 (pure append: ABI version unchanged, struct_size grows) -----------
+    //
+    // MONO PROJECTION. While `on` is non-zero the layer rewrites every submitted
+    // XrCompositionLayerProjection so that view[1..n].subImage == view[0].subImage -- the LEFT
+    // eye's image is shown to every eye, poses and FOVs untouched. Zero GPU work: it is a struct
+    // edit on a clone made inside xrEndFrame.
+    //
+    // Exists for the cutscenes, which the game presents as a stereo pair that does not fuse
+    // (docs\CUTSCENE_FINDINGS.md). Every plugin-side render hook fires AFTER UEVR has copied and
+    // submitted the eyes (Framework::on_frame_d3d12 runs mods->on_present -- the VR copy -- before
+    // any plugin callback, and VR precedes PluginLoader in the mod list), so the eye images cannot
+    // be edited from the plugin. The API layer sees them on the way to the runtime; this is the
+    // one place the plugin owns that is downstream of the copy.
+    //
+    // A CALLER MUST CHECK struct_size BEFORE TOUCHING THIS: a layer built before the append reports
+    // the same abi_version with a smaller struct, and this slot is then past its end. The bridge
+    // (XrLayerBridge.cpp: xrbridge_set_projection_mono) does that check; call through it.
+    // Returns 1 when applied, 0 when the layer is gated off.
+    int (XRAPI_PTR *set_projection_mono)(int on);
 } HaloVrLayerApi;
 
 // The single export. Returns null -- deliberately, loudly, and without touching anything -- when

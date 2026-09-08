@@ -129,6 +129,19 @@ const HaloVrLayerApi* xrbridge_api() {
     return xrbridge_available() ? g_api : nullptr;
 }
 
+bool xrbridge_set_projection_mono(bool on) {
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr) return false;
+    // THE SIZE CHECK IS THE WHOLE POINT OF THIS WRAPPER. set_projection_mono was appended after ABI
+    // 1 shipped, so an older layer negotiates the same version with a struct that ENDS before this
+    // slot; reading it there is reading past the layer's data. A same-version, smaller struct is
+    // "the call does not exist", not an error.
+    constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_projection_mono)
+                           + sizeof(((HaloVrLayerApi*)nullptr)->set_projection_mono);
+    if (api->struct_size < kNeed || api->set_projection_mono == nullptr) return false;
+    return api->set_projection_mono(on ? 1 : 0) == 1;
+}
+
 const char* xrbridge_status() {
     if (g_state.load(std::memory_order_acquire) < 0) return "not probed";
     if (g_api != nullptr && g_api->status != nullptr) {

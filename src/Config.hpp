@@ -3179,24 +3179,40 @@ struct Config {
     // a world quad, and the per-eye composite arrives doubled. It also establishes that a CLEAN
     // MONO FRAME EXISTS every frame (the desktop mirror is a clean letterboxed image).
     //
-    // WHY THIS LANE RATHER THAN AN XR COMPOSITOR QUAD. A quad puts a screen in FRONT of the
-    // doubled image; it does not remove it, so the eyes still carry the doubled composite around
-    // and behind the quad, and blanking them means VR_2DScreenMode -- which reallocates the view
-    // target mid-scene (the 2026-08-05 oscillation incident) and submits the per-eye-visibility
-    // quad type SteamVR drops in normal presentation, which is exactly why cutscene2d=1 failed.
-    // This callback's destination IS the frame about to be submitted, so we OVERWRITE the doubled
-    // image instead of hiding it: no 2D screen mode, no reallocation, no exotic layer type.
+    // ** THE PREMISE THIS KEY WAS BUILT ON WAS WRONG, MEASURED 2026-09-08. ** It assumed the
+    // on_post_render_vr_framework_dx12 destination is the frame about to be submitted to the eyes.
+    // It is D3D12::RTV::IMGUI -- UEVR's UI overlay render target (Framework.cpp:838), which UEVR
+    // composites as a flat quad OVER the scene. Worse, every plugin render hook fires AFTER UEVR
+    // has already copied and submitted the eyes (mods->on_present runs before any plugin callback,
+    // and VR precedes PluginLoader in the mod list), so NO plugin-side hook can touch the eye
+    // images at all. With cutsceneblit=1 the blit ran every cutscene frame, drew the scene into
+    // the overlay target, and the doubled image was untouched -- exactly as this now predicts.
     //
-    // UNVERIFIED, AND THE UNKNOWN IS ONE MEASUREMENT: whether the scene render target we sample
-    // actually contains the movie at this point in the frame. The findings doc proves the clean
-    // pixels exist somewhere each frame but never established WHICH resource holds them. If this
-    // shows the movie full-eye, the lane is right. If it shows black, the movie composites later
-    // and the sample point must move to the swapchain backbuffer (renderer_data.swapchain) on
-    // on_present. The attempt IS the measurement -- one cutscene answers it.
+    // KEPT, default OFF, as the honest record of that measurement: it is the only thing that
+    // draws game pixels into UEVR's overlay, which may yet be useful. It is NOT a cutscene fix.
+    // The fix lives one layer down -- see cutscene_mono.
     bool  cutscene_blit   = false;
-    // Fraction of the eye the movie fills (1.0 = edge to edge). Below 1.0 it is centred, which is
-    // the comfortable option for a wide letterboxed image on a narrow FOV.
+    // Fraction of the eye the overlay draw fills (1.0 = edge to edge), centred below 1.0.
     float cutscene_blit_fill = 1.0f;
+
+    // ---- CUTSCENE MONO (cutscenemono, default OFF until verified) ------------------------------
+    //
+    // The lane that CAN reach the eyes: our OpenXR API layer, which sits between UEVR and the
+    // runtime and sees the projection layer at xrEndFrame -- downstream of every copy the plugin
+    // is upstream of. While a cutscene plays, the layer gives the RIGHT eye's view the LEFT eye's
+    // sub-image (XrLayerAbi.h: set_projection_mono). Zero GPU work; one struct field on a clone.
+    // The 3D scene goes mono for the duration, which a cutscene does not care about.
+    //
+    // WHY THIS IS ALSO THE DISCRIMINATOR. docs\CUTSCENE_FINDINGS.md never established WHERE the
+    // doubling enters. If it is baked into the submitted eye images, this removes it outright and
+    // the lane is the fix. If the movie still doubles while the world has gone mono, the doubling
+    // arrives via a layer OTHER than the projection (a quad UEVR submits, or the runtime), and we
+    // will finally have located it. Either result moves the problem; only a headset can read it.
+    //
+    // Driven by the SAME cine_signal predicate as the flat-view actuator, on change only. Requires
+    // the API layer build that carries set_projection_mono; an older layer negotiates fine and
+    // simply cannot do this, which the plugin logs once rather than pretending.
+    bool  cutscene_mono   = false;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------

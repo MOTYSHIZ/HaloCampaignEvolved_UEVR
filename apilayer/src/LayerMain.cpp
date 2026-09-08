@@ -109,6 +109,12 @@ std::atomic<uint32_t>              g_cb_inflight{0};
 // Watchdog counters. "Installed is not running" -- these are how the plugin proves the difference.
 std::atomic<uint64_t> g_frames_seen{0};
 std::atomic<uint64_t> g_layers_appended{0};
+// MONO PROJECTION (see XrLayerAbi.h, set_projection_mono). Set by the plugin on the game thread,
+// read here on the app's render/submit thread; relaxed is enough because a frame late is invisible
+// and there is nothing to order against. g_mono_patched counts projection layers actually rewritten
+// -- the number a caller must see MOVING before claiming the mono path is live.
+std::atomic<int>      g_projection_mono{0};
+std::atomic<uint64_t> g_mono_patched{0};
 std::atomic<uint64_t> g_batch_refused{0};   // callback returned more than it was offered
 std::atomic<uint64_t> g_runtime_rejects{0}; // runtime refused the frame WITH our layers in it
 std::atomic<uint64_t> g_passthrough_rejects{0}; // refused for a reason that is NOT ours; returned as-is
@@ -252,16 +258,21 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
     XrResult result = XR_SUCCESS;
     bool     handled = false;
 
-    if (cb != nullptr && info != nullptr) {
+    // MONO is a reason to rebuild the layer list on its own, with or without a plugin callback and
+    // with or without extra quads -- so it is read here, ahead of the callback, and folded into the
+    // same "do we patch this frame" decision the quads use. One rebuild path, not two.
+    const int mono = g_projection_mono.load(std::memory_order_relaxed);
+
+    if (info != nullptr && (cb != nullptr || mono != 0)) {
         const XrCompositionLayerBaseHeader* extra[HALOVR_LAYER_MAX_EXTRA_LAYERS];
-        const uint32_t n = cb(session, info, extra, HALOVR_LAYER_MAX_EXTRA_LAYERS, user);
+        const uint32_t n = (cb != nullptr) ? cb(session, info, extra, HALOVR_LAYER_MAX_EXTRA_LAYERS, user) : 0u;
 
         if (n > HALOVR_LAYER_MAX_EXTRA_LAYERS) {
             // A caller that returned more than it was offered has miscounted, and the array it wrote
             // into is ours. Discard the whole batch rather than trusting any of it: presenting the
             // application's own frame is always a safe answer, and clamping would hide the bug.
             g_batch_refused.fetch_add(1, std::memory_order_relaxed);
-        } else if (n > 0) {
+        } else if (n > 0 || mono != 0) {
             // One combined array. Sized for the runtime's realistic ceiling plus our own; anything
             // beyond it falls through to the untouched frame rather than truncating the
             // APPLICATION's layers, which would be a visible regression for the player.
@@ -271,7 +282,52 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
             if (n <= kMaxTotal && info->layerCount <= kMaxTotal - n && info->layers != nullptr) {
                 const XrCompositionLayerBaseHeader* combined[kMaxTotal];
                 uint32_t w = 0;
-                for (uint32_t i = 0; i < info->layerCount; ++i) combined[w++] = info->layers[i];
+
+                // ---- MONO PROJECTION: clone-and-patch, never edit the app's memory --------------
+                //
+                // The application's layer structs are const and it may reuse them next frame, so
+                // the rewrite happens on a copy that lives on THIS stack frame -- valid for exactly
+                // as long as next() needs it (xrEndFrame is synchronous; the runtime has consumed
+                // the structs by the time it returns). The copy is shallow on purpose: `next`
+                // chains and the subImage swapchain handle are borrowed, not owned.
+                //
+                // The patch itself is one field per extra view: every view after the first is
+                // given view[0]'s subImage (swapchain + array index + imageRect), so the runtime
+                // composites the LEFT eye's pixels for both eyes. Pose and fov are left as the app
+                // set them -- each eye is still reprojected from its own position, which is what
+                // keeps head movement correct; only the CONTENT is shared.
+                //
+                // Bounded scratch: at most kMonoMaxLayers projection layers with kMonoMaxViews
+                // views each. Anything beyond that is passed through UNPATCHED rather than refused
+                // -- a cutscene with a stray extra layer must never lose the frame, only the fix.
+                constexpr uint32_t kMonoMaxLayers = 4;
+                constexpr uint32_t kMonoMaxViews  = 4;
+                XrCompositionLayerProjection     mono_layer[kMonoMaxLayers];
+                XrCompositionLayerProjectionView mono_view[kMonoMaxLayers][kMonoMaxViews];
+                uint32_t mono_used = 0;
+
+                for (uint32_t i = 0; i < info->layerCount; ++i) {
+                    const XrCompositionLayerBaseHeader* base = info->layers[i];
+                    if (mono != 0 && base != nullptr
+                        && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
+                        && mono_used < kMonoMaxLayers) {
+                        const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                        if (src->views != nullptr && src->viewCount >= 2 && src->viewCount <= kMonoMaxViews) {
+                            XrCompositionLayerProjection& dst = mono_layer[mono_used];
+                            dst = *src;                                        // shallow clone
+                            for (uint32_t v = 0; v < src->viewCount; ++v) {
+                                mono_view[mono_used][v] = src->views[v];       // clone each view
+                                if (v > 0) mono_view[mono_used][v].subImage = src->views[0].subImage;
+                            }
+                            dst.views = mono_view[mono_used];
+                            combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dst);
+                            ++mono_used;
+                            g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                            continue;
+                        }
+                    }
+                    combined[w++] = base;
+                }
                 // OURS LAST, therefore topmost. The reticule must draw over the scene projection,
                 // never under it.
                 for (uint32_t i = 0; i < n; ++i) combined[w++] = extra[i];
@@ -284,7 +340,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                 handled = true;
 
                 if (XR_SUCCEEDED(result)) {
-                    g_layers_appended.fetch_add(1, std::memory_order_relaxed);
+                    // Only a frame that actually carried our quads counts as "appended"; a
+                    // mono-only rebuild is tallied by g_mono_patched instead.
+                    if (n > 0) g_layers_appended.fetch_add(1, std::memory_order_relaxed);
                 } else if (result == XR_ERROR_LAYER_INVALID
                         || result == XR_ERROR_LAYER_LIMIT_EXCEEDED
                         || result == XR_ERROR_SWAPCHAIN_RECT_INVALID) {
@@ -533,7 +591,7 @@ XRAPI_ATTR uint64_t XRAPI_CALL api_layers_appended(void) {
 XRAPI_ATTR const char* XRAPI_CALL api_status(void) {
     _snprintf_s(g_status_line, sizeof(g_status_line), _TRUNCATE,
                 "%s | gate=%s | instance=%p session=%p next_end_frame=%p | frames=%llu "
-                "appended=%llu refused=%llu rejects=%llu | cb=%s",
+                "appended=%llu refused=%llu rejects=%llu | cb=%s | mono=%d patched=%llu",
                 g_build_stamp, g_gate_reason,
                 (void*)g_instance.load(), (void*)g_session.load(),
                 (void*)g_next_end_frame.load(),
@@ -541,8 +599,18 @@ XRAPI_ATTR const char* XRAPI_CALL api_status(void) {
                 (unsigned long long)g_layers_appended.load(),
                 (unsigned long long)g_batch_refused.load(),
                 (unsigned long long)g_runtime_rejects.load(),
-                g_cb.load() != nullptr ? "set" : "none");
+                g_cb.load() != nullptr ? "set" : "none",
+                g_projection_mono.load(std::memory_order_relaxed),
+                (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
     return g_status_line;
+}
+
+XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
+    // Behind the gate like everything else: an inert layer must not start rewriting a stranger's
+    // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
+    if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
+    g_projection_mono.store(on != 0 ? 1 : 0, std::memory_order_relaxed);
+    return 1;
 }
 
 const HaloVrLayerApi g_api = {
@@ -556,6 +624,7 @@ const HaloVrLayerApi g_api = {
     api_frames_seen,
     api_layers_appended,
     api_status,
+    api_set_projection_mono,   // appended after ABI 1; callers size-check before use
 };
 
 }   // namespace

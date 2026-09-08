@@ -109,7 +109,8 @@
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
 #include "Scope.hpp"
-#include "ScopeBlit.hpp"   // cutscene_blit_set_active / scope_blit_tick (render-thread blit)
+#include "ScopeBlit.hpp"     // cutscene_blit_set_active / scope_blit_register (render-thread blit)
+#include "XrLayerBridge.hpp" // xrbridge_set_projection_mono (cutscene mono via the API layer)
 // For scopelayer_configure_cell_early() only -- the pane's atlas cell must be requested from
 // update() BEFORE xrlayer_tick() builds the atlas. Everything else in the scope lane is reached
 // through Scope.hpp.
@@ -6769,6 +6770,28 @@ void update() {
             // from this tick took a unique_lock on the shared_mutex whose shared_lock UEVR is
             // already holding on this thread to dispatch us, and hung the game. Publishing the
             // flag is a relaxed atomic store and is safe anywhere.
+
+            // CUTSCENE MONO via the API layer -- the lane that can actually reach the eyes (see
+            // Config.hpp, cutscene_mono). Same predicate as everything else in this block, applied
+            // ON CHANGE: the bridge call is cheap, but a VR-visible actuator driven every tick is
+            // the shape of the 2026-08-05 oscillation, so it is not given the chance.
+            {
+                static int s_mono_sent = -1;
+                const int want = (g_cfg.cutscene_mono && cine_signal) ? 1 : 0;
+                if (want != s_mono_sent) {
+                    const bool applied = halo::xrbridge_set_projection_mono(want != 0);
+                    s_mono_sent = want;
+                    // Say what the LAYER did, not what we asked: "applied" means the layer is live
+                    // and new enough to know the call. false on an old layer is the whole reason
+                    // the bridge size-checks -- it is "cannot", not "did not", and must read so.
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO %s -> %s",
+                                         want ? "ON" : "OFF",
+                                         applied ? "applied by the API layer"
+                                                 : "NOT applied (layer absent, gated off, or built "
+                                                   "before set_projection_mono -- rebuild/redeploy "
+                                                   "the layer)");
+                }
+            }
 
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
