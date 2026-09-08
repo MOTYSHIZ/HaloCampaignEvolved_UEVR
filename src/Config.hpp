@@ -2833,7 +2833,7 @@ struct Config {
     // This copies the grading fields individually -- all POD or one object pointer, never the array.
     bool  scope_pp_grade = false;
     // scopegain -> ColorGain on the capture: a flat brightness multiply in the grading chain.
-    // 0 = do not touch (DEFAULT). 1.0 = neutral.
+    // 0 = do not touch. 1.0 = neutral. See the CANON note below for what ships.
     //
     // This is the COMPOSITOR QUAD's equivalent of scopebright. scopebright tints the in-world
     // pane's MATERIAL, so it does nothing once the layer presents and the mesh is hidden, and the
@@ -2846,12 +2846,21 @@ struct Config {
     // exposure decision alone. Reach for bias first (it uses the curve's range properly) and this
     // only when you want a plain multiply on top.
     //
-    // CANON 5.0, raised from 4.0 in a headset 2026-09-07: the scope pane read dim through the
-    // compositor quad at 4. This initialiser IS the shipped value -- no cfg file sets scopegain,
-    // so changing it here is the whole change. (The "0 = do not touch (DEFAULT)" line above dates
-    // from when 0 was the default and has been wrong since it became non-zero; 0 still MEANS
-    // do-not-touch, it is simply no longer what ships.)
-    float scope_gain = 5.0f;
+    // CANON 5.5, and the value is BRACKETED rather than guessed: 4.0 read dim through the
+    // compositor quad (headset, 2026-09-07), 6.0 read too bright (headset, 0.4.0 release prep),
+    // so it sits between two judged-in-headset endpoints rather than at one.
+    //
+    // This initialiser IS the shipped value -- no cfg file sets scopegain -- so changing it here
+    // is the whole change, and the dev catalog's commented `#scopegain=` line is documentation
+    // that must move with it or it starts lying about the default (it sat at 4 through the whole
+    // 5.0 era, which is exactly how that happens).
+    //
+    // Mind the release known-issue this interacts with: the scope can read too bright in some
+    // lighting AND its grade does not match the surrounding scene. A flat multiply cannot fix the
+    // second problem and trades one half of the first for the other -- it lifts the dim case and
+    // the blown case equally. If the too-bright report sharpens, the answer is likely
+    // scopeautoexposurebias or the grade chain, not another move on this number.
+    float scope_gain = 5.5f;
     // scopelayerfollowpane: place the compositor quad AT the in-world pane's own world transform
     // instead of from scopelayerfwd/right/up/width. 1 = follow (default), 0 = use the offsets.
     //
