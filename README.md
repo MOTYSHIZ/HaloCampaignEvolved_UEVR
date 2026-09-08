@@ -431,6 +431,9 @@ limitation on our side, not a defect in his approach.
 of these projects stands on, for the nonstandard 5.5.4 fix that had this game rendering in VR within
 days of its release, and for the plugin SDK this mod is written against. Hail to the king.
 
+**Special thanks to [blindcowboy24](https://github.com/blindcowboy24)** — My main direct contributor to the project! He's responsible for many neat feature additions and fixes (per-weapon calibration, directional melee, over the shoulder holster, and more on the way). 
+Unparalleled patience and politeness in his manner of contribution, with great communication and flexibility in direction. Honestly wasn't expecting this kind of big help. Can't thank you enough, bro! 
+
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
 - **[pancreations / Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR)** — independent prior
   art for Halo VR aim doctrine ("steer the game's own aim") and the authored-reticle approach. The
@@ -448,16 +451,6 @@ days of its release, and for the plugin SDK this mod is written against. Hail to
   more usefully than the report itself — for pinning it to *this* profile rather than his own. That
   one observation is what turned an open-ended performance hunt into a search of our own plugin,
   where the cause turned out to be two full object-array sweeps burning ~5% of game-thread time.
-- **[blindcowboy24](https://github.com/blindcowboy24)** — for
-  [PR #6](https://github.com/MOTYSHIZ/HaloCampaignEvolved_UEVR/pull/6), the first outside code
-  contribution to this mod: a second, unrelated set of periodic game-thread stalls, found by
-  *measuring* rather than reasoning — `QueryPerformanceCounter` around each site across a 78-minute
-  session, reported with before-and-after numbers. The largest was invisible to code review:
-  `load_config` re-read the config files off disk every ~60 ticks, forever — normally ~0.45 ms and
-  unnoticeable, but 143.9 ms under disk contention. The other two were the same mistake in two
-  full-array sweeps, rebuilding a class-name string for every one of ~296,000 objects, cut from
-  83.9 ms to 29.8 ms and from 78.5 ms to 21.4 ms. That technique is now used in two further sweeps
-  he never touched.
 
 ### Referenced mod credit
 
