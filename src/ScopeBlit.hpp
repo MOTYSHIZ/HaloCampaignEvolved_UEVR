@@ -33,7 +33,25 @@ namespace halo {
 // Called from the game-thread tick. Registers the render callback exactly once, the first time
 // the feature is switched on -- kept out of Plugin.cpp deliberately so this feature can land
 // without touching a file other sessions are editing.
-void scope_blit_tick();
+// REGISTER THE RENDER CALLBACK. Call ONCE, FROM on_initialize, AND NEVER FROM A TICK.
+//
+// This was scope_blit_tick() and was called from update(). That is a GUARANTEED SELF-DEADLOCK and
+// it hung the game twice on 2026-09-08:
+//
+//   PluginLoader::on_pre_engine_tick()  takes std::shared_lock{m_api_cb_mtx}
+//     -> our update() runs INSIDE that lock
+//       -> add_on_post_render_vr_framework_dx12() takes std::unique_lock{m_api_cb_mtx}
+//
+// Same std::shared_mutex, same thread. It is neither recursive nor upgradeable, so the writer waits
+// for every reader to release and one of those readers is the thread now blocked in the writer.
+// The general rule, and it is not specific to this callback: YOU CANNOT REGISTER A UEVR API
+// CALLBACK FROM INSIDE A UEVR API CALLBACK. All 17 dispatchers share that one mutex.
+//
+// Registration is UNCONDITIONAL -- deliberately not gated on scopeblit/cutsceneblit. The callback
+// body already tests both, so an unused registration costs one bool per frame, and gating it here
+// is what made the feature need a tick-time registration in the first place. It also means either
+// key can be switched on at RUNTIME and simply start working.
+void scope_blit_register();
 
 // CUTSCENE MODE. Published from the game thread by the ONE cutscene predicate in Plugin.cpp
 // (cine_signal -- see the oscillation note there: engage and release must derive from the same

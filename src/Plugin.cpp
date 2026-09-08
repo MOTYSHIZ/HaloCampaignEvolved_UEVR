@@ -6765,7 +6765,10 @@ void update() {
             // exactly the builds players run. That is the same failure un-gated in XrSource.cpp on
             // 2026-09-07; see the note above probe() there.
             halo::cutscene_blit_set_active(cine_signal);
-            halo::scope_blit_tick();
+            // NO REGISTRATION HERE. scope_blit_register() is called from on_initialize; calling it
+            // from this tick took a unique_lock on the shared_mutex whose shared_lock UEVR is
+            // already holding on this thread to dispatch us, and hung the game. Publishing the
+            // flag is a relaxed atomic store and is safe anywhere.
 
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
@@ -10472,6 +10475,13 @@ const ApiLayerEarlyInit g_api_layer_early_init;
 class HaloAimDriverPlugin : public uevr::Plugin {
 public:
     void on_initialize() override {
+        // REGISTER RENDER CALLBACKS HERE AND ONLY HERE. UEVR calls uevr_plugin_initialize from its
+        // plugin-load loop, before any dispatch has taken m_api_cb_mtx (PluginLoader.cpp: init at
+        // ~1876, first lock at 1899). Registering from a TICK instead takes a unique_lock on the
+        // shared_mutex that on_pre_engine_tick's dispatch already holds shared on this thread --
+        // a self-deadlock that hung the game twice on 2026-09-08. See ScopeBlit.hpp.
+        halo::scope_blit_register();
+
         // ALREADY DONE, AT DLL LOAD -- see enable_api_layer_for_this_process. All that is left here
         // is to say what happened, because logging was impossible that early.
         //

@@ -322,49 +322,19 @@ void cutscene_blit_set_active(bool on) {
     g_cine_on.store(on, std::memory_order_relaxed);
 }
 
-void scope_blit_tick() {
-    // Register when EITHER lane is enabled. Gating registration on scope_blit alone would leave
-    // cutsceneblit=1 silently inert on a build where the scope blit is off -- a setting that
-    // appears to do nothing, which is the failure this project keeps re-learning.
-    if (g_registered || g_dead || (!g_cfg.scope_blit && !g_cfg.cutscene_blit)) return;
+void scope_blit_register() {
+    // CALLED ONCE FROM on_initialize, NEVER FROM A TICK. See the header for the deadlock this
+    // shape exists to avoid; in short, add_on_post_render_vr_framework_dx12() takes a unique_lock
+    // on the same shared_mutex that on_pre_engine_tick's dispatch is already holding shared on
+    // this very thread, and std::shared_mutex is neither recursive nor upgradeable.
+    if (g_registered || g_dead) return;
 
-    // SAY THAT WE ARE TRYING, ONCE. Without this line the two ways of failing are indistinguishable
-    // from outside: "this function was never called" and "it was called and could not register"
-    // both produce a log with no SCOPEBLIT in it at all. Measured 2026-09-08 -- cutsceneblit=1 was
-    // set, the game hung, and the first question (did my code even run?) could not be answered from
-    // the log, only from the ABSENCE of lines, which is a weak reading of a strong claim.
-    //
-    // ARMING is therefore the positive marker: see it and the call site is live and the gate open;
-    // do not see it and nothing below this point ever executed. That distinction is the whole
-    // reason the line exists -- see feedback_prove_the_tick_not_the_init.
-    {
-        static bool s_said_arming = false;
-        if (!s_said_arming) {
-            s_said_arming = true;
-            API::get()->log_info("[Halo-CampE-UEVR] SCOPEBLIT: ARMING (scopeblit=%d cutsceneblit=%d) "
-                                 "-- registering the render callback. A 'registered' line should "
-                                 "follow immediately; if it does not, read the reason logged next.",
-                                 (int)g_cfg.scope_blit, (int)g_cfg.cutscene_blit);
-        }
-    }
-
-    // The renderer callbacks live on UEVR_PluginCallbacks (param->callbacks), NOT on
-    // param->functions -- functions is the log/hook/version surface.
     auto* param = API::get()->param();
     if (param == nullptr || param->callbacks == nullptr) {
-        // NOT die() -- this is legitimately transient. We are called every tick, and the plugin
-        // param can be unavailable early; the next tick may well succeed. But it must not be
-        // SILENT, which is what it was: an enabled feature that never registers and never explains
-        // itself is indistinguishable from a key that does nothing.
-        //
-        // Rate-limited rather than once-only, so a PERMANENT null (the case that actually strands
-        // the feature) keeps saying so instead of scrolling away after one line at start-up.
-        static uint32_t s_quiet = 0;
-        if ((s_quiet++ % 512u) == 0) {
-            API::get()->log_info("[Halo-CampE-UEVR] SCOPEBLIT: cannot register yet -- %s is null. "
-                                 "Retrying every tick; the feature is INERT until this clears.",
-                                 (param == nullptr) ? "the plugin param" : "param->callbacks");
-        }
+        // At init this is fatal rather than transient: the param IS what UEVR just handed us, so a
+        // null here means the surface is not what this build expects, and no later tick will fix
+        // it. die() disables the feature loudly instead of leaving it silently inert.
+        die("no plugin param/callbacks at initialize -- cannot register the render callback");
         return;
     }
     if (param->callbacks->on_post_render_vr_framework_dx12 == nullptr) {
@@ -373,9 +343,11 @@ void scope_blit_tick() {
     }
     g_registered = true;
     param->callbacks->on_post_render_vr_framework_dx12(&on_post_render_dx12);
-    API::get()->log_info("[Halo-CampE-UEVR] SCOPEBLIT: render callback registered "
-                         "(mag=%.2f size=%.2f at %.2f,%.2f)", g_cfg.scope_blit_mag,
-                         g_cfg.scope_blit_size, g_cfg.scope_blit_x, g_cfg.scope_blit_y);
+    // UNCONDITIONAL registration, so this line says the callback is live but idle -- it is not a
+    // claim that either lane is switched on. Both are read per frame inside the callback.
+    API::get()->log_info("[Halo-CampE-UEVR] SCOPEBLIT: render callback registered at init "
+                         "(scopeblit=%d cutsceneblit=%d -- inert until one of them is set)",
+                         (int)g_cfg.scope_blit, (int)g_cfg.cutscene_blit);
 }
 
 } // namespace halo
