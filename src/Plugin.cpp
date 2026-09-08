@@ -709,6 +709,15 @@ inline bool lane_cooling(PerfSite site, uint32_t tick) {
     return tick < g_lane_retry_at[site].load(std::memory_order_relaxed);
 }
 std::atomic<bool> g_tick_finished{true};
+
+// DID THE LAST TICK ABORT? Set by the __except FILTER, which runs before any unwinding and so
+// cannot be undone by it. g_tick_finished cannot answer this: its only writer is ~TickDoneGuard,
+// a destructor, and that destructor also runs while the frame unwinds -- so an aborted tick marks
+// itself "finished" on the way out and the detector reads a clean run. That is why TICK FAULTED
+// reported 0 against 8 observed faults on 2026-09-08 (and 0 against 8,477 before it): not a quiet
+// system, a blinded one. An instrument whose signal is erased by the very event it measures will
+// always read "nothing happened", which is the most convincing wrong answer there is.
+std::atomic<bool> g_tick_aborted{false};
 std::atomic<bool> g_tick_ever{false};    // suppress the report for the very first tick
 
 struct PerfScope {
@@ -3506,10 +3515,22 @@ void navw_hide_all() {
         halo::xrlayer_retire_quad(halo::XRLAYER_SLOT_NAV_BASE + i);
         halo::xrsource_set_slot_component(halo::XRLAYER_SLOT_NAV_BASE + i, nullptr, 0);
 
+        // MARKED, because this whole function was a BLIND SPOT and the fault reports said so.
+        // Every report from the 2026-09-08 playthrough read `step '-'` -- the marker was null,
+        // meaning the fault beat the first marked call in the tick. The marks all live from the
+        // projection onward, so "before the first mark" is exactly this gate-disengage path plus
+        // the entry, and neither had one. A blank breadcrumb is not "no information", it is a gap
+        // in the trail, and reading it as "not in a marked call" is only useful once the calls
+        // that COULD fault are all marked.
+        NAVW_MARK("hide_all:get_checked");
         auto* c = g_navw_pool[i].get_checked(L"WidgetComponent");
         if (c == nullptr) continue;
         alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
         p[0] = 0;
+        // The prime suspect. get_checked proves the array slot still holds this pointer and that
+        // the class still matches -- neither of which proves the component is not MID-TEARDOWN,
+        // which is the state that would have SetVisibility dereference freed internals.
+        NAVW_MARK("hide_all:SetVisibility");
         c->call_function(L"SetVisibility", p);
     }
     // Free every stable slot: the whole lane is down, so the next engage re-assigns from scratch.
@@ -3732,11 +3753,15 @@ void nav_world_tick(bool engaged, uint32_t tick) {
     static bool tried = false;
     if (!tried) {
         tried = true;
+        NAVW_MARK("entry:resolve_CDOs");
         if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.GameplayStatics"))
             gps = c->get_class_default_object();
         if (auto* c = API::get()->find_uobject<API::UClass>(L"Class /Script/UMG.WidgetLayoutLibrary"))
             wll = c->get_class_default_object();
     }
+    // The only engine call on the entry path that runs EVERY tick, and until now unmarked -- so a
+    // fault here was indistinguishable from a fault in the gate-disengage path above.
+    NAVW_MARK("entry:get_player_controller");
     auto* pc = API::get()->get_player_controller(0);
 
     // Every remaining exit says WHY, rate-limited -- the v1 of this function went dark instead,
@@ -6337,7 +6362,28 @@ void update() {
         // sees "disengaged" and releases, so the flat markers stay game-native under the
         // world-space ones.
         hud_navpoint_follow(fixes_ok && !g_cfg.nav_world, vf_pitch, vf_yaw, tick);
-        { PerfScope _perf(PERF_NAVWORLD); nav_world_tick(fixes_ok, tick); }
+        // HONOUR THE BACK-OFF THE FAULT FILTER ALREADY WROTE FOR THIS LANE.
+        //
+        // report_tick_fault has always recorded a fault against its lane and written an escalating
+        // g_lane_retry_at for it. Nothing here ever read that, so navworld kept walking back into
+        // the same faulting call -- and because a fault propagates out of on_pre_engine_tick, it
+        // takes EVERY LANE BELOW IT with it: the rig, arms, hands, palette arm, two-hand and
+        // gestures all run after this line and simply do not execute on a faulting tick. Aim
+        // survives only because it rides the XInput hook's separate dispatch, which is why the
+        // player's report is "the arms stopped tracking but I could still shoot".
+        //
+        // MEASURED 2026-09-08, release playthrough: 42 aborted ticks in 32 minutes, in bursts, all
+        // 8 reports (the cap) identical -- 0xC0000005 reading 0x40400018 at +0x36FD8A6, lane
+        // navworld_tick. The same shape as the 9,625-fault reticule_trace episode this filter was
+        // built for; the mechanism was already there and simply unread on this lane.
+        //
+        // A COOLDOWN, NOT A KILL. The escalation (96*n ticks, capped at 1024) parks a genuinely
+        // broken lane without ever needing a "disable forever" rule, and lets a lane that faulted
+        // once on a transition come back on its own. Markers are cosmetic; the hands are not.
+        if (!lane_cooling(PERF_NAVWORLD, tick)) {
+            PerfScope _perf(PERF_NAVWORLD);
+            nav_world_tick(fixes_ok, tick);
+        }
         // CLEAR THE STEP MARKER ON THE WAY OUT. Without this a fault anywhere later in the tick
         // would report navworld's last engine call and read as damning evidence about a lane it
         // had already left -- which is precisely the trap PerfScope's missing restore set for the
@@ -10721,6 +10767,9 @@ public:
         // working because it rides the XInput hook's separate dispatch. The player saw "arm
         // tracking and reticle are dead but my shots still follow my controller" -- and nothing
         // recovered it short of restarting the process.
+        // Set BEFORE anything can unwind -- see g_tick_aborted. This is the abort signal;
+        // g_tick_finished is not, and never could be.
+        g_tick_aborted.store(true, std::memory_order_relaxed);
         const int flt_lane = g_tick_lane.load(std::memory_order_relaxed);
         if (flt_lane >= 0 && flt_lane < (int)PERF_COUNT) {
             const uint32_t n  = g_lane_faults[flt_lane].fetch_add(1, std::memory_order_relaxed) + 1;
@@ -10741,8 +10790,21 @@ public:
             g_reflect_ok_at.store(tk + 32u, std::memory_order_relaxed);   // ~1 s at ~32 Hz
             if (flt_lane == (int)PERF_TRACE) g_trace_faults.fetch_add(1, std::memory_order_relaxed);
         }
+        // A CAP THAT GOES SILENT FOR THE REST OF THE PROCESS HIDES THE BURST YOU CARE ABOUT.
+        //
+        // This stopped dead at 8, so the 2026-09-08 release playthrough logged 8 reports against
+        // 42 aborted ticks -- and the 34 it swallowed were every one after the first four minutes.
+        // The silence then reads as "the fault stopped", which is the exact opposite of what had
+        // happened, and it cost a round of this investigation reasoning about why the reports
+        // ended. Reporting the ORDINAL as well means a single line now says how bad it is.
+        //
+        // First 8 in full, then one in every 64: enough to show a burst without a fault storm
+        // turning the log into its own performance problem.
         static uint32_t said = 0;
-        if (said >= 8 || xp == nullptr || xp->ExceptionRecord == nullptr) return;
+        static uint32_t seen = 0;
+        if (xp == nullptr || xp->ExceptionRecord == nullptr) return;
+        const uint32_t nth = ++seen;
+        if (said >= 8 && (nth % 64u) != 0u) return;
         ++said;
         const auto* er = xp->ExceptionRecord;
         void* addr = er->ExceptionAddress;
@@ -10774,9 +10836,10 @@ public:
         const int   lane = g_tick_lane.load(std::memory_order_relaxed);
         const char* mark = g_navw_mark.load(std::memory_order_relaxed);
         API::get()->log_info(
-            "[Halo-CampE-UEVR] TICK FAULT: code 0x%08X at %p in %s (base %p, +0x%llX)%s | lane '%s'"
-            " step '%s'. Observed only -- the exception is passed on untouched.",
-            (unsigned)er->ExceptionCode, addr, leaf, modbase,
+            "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s | "
+            "lane '%s' step '%s'. Observed only -- the exception is passed on untouched, so this "
+            "tick's remaining lanes (rig, arms, hands, two-hand, gestures) did NOT run.",
+            (unsigned)nth, (unsigned)er->ExceptionCode, addr, leaf, modbase,
             (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra,
             (lane >= 0 && lane < PERF_COUNT) ? kPerfName[lane] : "(none)",
             (mark != nullptr) ? mark : "-");
@@ -10796,8 +10859,12 @@ public:
 
         // ---- DID THE PREVIOUS TICK COME BACK? See g_tick_lane. ----
         {
-            const bool prev_ok = g_tick_finished.exchange(false, std::memory_order_relaxed);
-            if (!prev_ok && g_tick_ever.load(std::memory_order_relaxed)) {
+            const bool prev_ok      = g_tick_finished.exchange(false, std::memory_order_relaxed);
+            // The authoritative half. prev_ok alone is unreliable in exactly the case this exists
+            // to catch -- see g_tick_aborted -- so an abort observed by the filter counts even
+            // when the guard has already declared the tick finished.
+            const bool prev_aborted = g_tick_aborted.exchange(false, std::memory_order_relaxed);
+            if ((!prev_ok || prev_aborted) && g_tick_ever.load(std::memory_order_relaxed)) {
                 const int lane = g_tick_lane.load(std::memory_order_relaxed);
                 const char* name = (lane >= 0 && lane < PERF_COUNT) ? kPerfName[lane] : "(before any lane)";
                 static uint32_t said = 0;
