@@ -9228,6 +9228,15 @@ void update() {
                             // handful of lines per grab rather than a stream. Reports the geometry
                             // it is derived from as well, so a constant `len` can be attributed to
                             // a constant lateral rather than guessed at.
+                            //
+                            // DEV-ONLY. This answers a question rather than playing the game, so
+                            // per DevTools.hpp it is not compiled into a player build at all. It
+                            // shipped un-gated at first and a RELEASE build was caught emitting
+                            // ten of these lines in one three-minute session -- harmless in cost
+                            // (a 2 s throttle, in-zone only, no array walk) but exactly the kind
+                            // of thing the compile-time gate exists to make impossible rather than
+                            // unlikely. A throttle is not a gate.
+#if HALO_VR_DEV
                             {
                                 static uint32_t s_last = 0;
                                 if (tick - s_last >= 120u) {
@@ -9259,6 +9268,7 @@ void update() {
                                         meas.rig_off.x, meas.rig_off.y, meas.rig_off.z);
                                 }
                             }
+#endif  // HALO_VR_DEV -- GRABGUIDE periodic sampler
 
                             // hold_cm 0 throughout = draw it AT its world position: it is a real
                             // thing at a real distance, an arm's length away, and vergence should
@@ -11824,6 +11834,12 @@ public:
         //
         // The consequence is deliberate and worth stating: while gripping, you have no grenade.
         // Let go, throw, re-grip. That is the trade for one button doing both jobs.
+        //
+        // DEFERRED, NOT INJECTED HERE -- see where this is consumed, below the holster steal. The
+        // throw used to be written straight into wButtons at the edge, and the holster block then
+        // stripped it right back out again a few lines later, because holster_throw_mask is the
+        // SAME 0x0100. Trigger grenades therefore never reached the game at all.
+        bool lt_throw_pending = false;
         {
             const bool gripping = g_cfg.grip_zoom && halo::two_hand_latched();
 
@@ -11869,8 +11885,7 @@ public:
                 const bool blocked  = g_in_menu.load() || g_stick_mode.load();
                 if (!blocked && !s_lt_down && lt >= on_t) {
                     s_lt_down = true;
-                    if (g_cfg.grenade_action != 0)
-                        state->Gamepad.wButtons |= (WORD)g_cfg.grenade_action;
+                    lt_throw_pending = true;   // injected below the holster steal, not here
                 } else if (s_lt_down && lt <= off_t) {
                     s_lt_down = false;
                 }
@@ -11896,8 +11911,16 @@ public:
         if (g_cfg.holster_steal_buttons != 0 && g_cfg.holster_enabled
             && !g_in_menu.load(std::memory_order_relaxed)
             && !g_stick_mode.load(std::memory_order_relaxed)) {
-            const WORD steal = (WORD)((WORD)g_cfg.holster_swap_mask
-                                    | (WORD)g_cfg.holster_throw_mask
+            // SWAP IS DELIBERATELY NOT STOLEN. holster_swap_mask is Y, the game's own weapon
+            // switch, and stealing it was pure loss: the over-the-shoulder gesture does not
+            // require a button, so taking Y away bought nothing and simply removed the native
+            // switch. Both work now, independently -- press Y, or reach over your shoulder.
+            //
+            // The inherited comment above ("reaching for a shoulder both stows the weapon and
+            // does whatever that button natively does") describes a gesture that is triggered BY
+            // that button. Ours is body-frame only, so the premise does not hold here. That is
+            // what made this steal look justified while it was quietly disabling a control.
+            const WORD steal = (WORD)((WORD)g_cfg.holster_throw_mask
                                     | (WORD)g_cfg.holster_gswitch_mask);
             const WORD before = state->Gamepad.wButtons;
             state->Gamepad.wButtons &= (WORD)~steal;
@@ -11924,6 +11947,20 @@ public:
             state->Gamepad.wButtons |= (WORD)g_cfg.holster_throw_mask;
         if (g_cfg.holster_gswitch_mask != 0 && holster_gswitch_press_active())
             state->Gamepad.wButtons |= (WORD)g_cfg.holster_gswitch_mask;
+
+        // ---- THE TRIGGER'S GRENADE, landing here rather than at the edge that decided it.
+        //
+        // Same reason melee and the holster re-injects sit below the steal: a synthetic press has
+        // to be written AFTER anything that strips its mask, or it is removed before the game ever
+        // sees it. This one was written above and stripped here, because grenade_action and
+        // holster_throw_mask are both 0x0100 -- so the throw was injected and eaten every time,
+        // and trigger grenades did not work at all.
+        //
+        // It is deliberately NOT re-ordered by moving the steal instead: the steal must stay ahead
+        // of the holster injections that follow it. Deferring the one injector that was on the
+        // wrong side is the change that leaves every other ordering intact.
+        if (lt_throw_pending && g_cfg.grenade_action != 0)
+            state->Gamepad.wButtons |= (WORD)g_cfg.grenade_action;
 
         // ---- VR RELOAD.
         //
@@ -12155,6 +12192,34 @@ public:
             } else if (g_cfg.brake_mode == 3 && g_cfg.brake_mask != 0) {
                 state->Gamepad.wButtons |= (WORD)g_cfg.brake_mask;
                 state->dwPacketNumber++;
+            }
+        }
+
+        // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the
+        // whole reason it needed one.
+        //
+        // That logger samples BEFORE any of our injections, so every mask this mod SYNTHESISES --
+        // the trigger's grenade, equipment, crouch, melee, the d-pad the shift makes -- is
+        // invisible to it by construction. That blind spot was read as evidence twice in one day:
+        // once concluding a head-prox d-pad press "reported 0x0200" when the injection it should
+        // have shown happens later, and once leaving a grenade fix unverifiable because the mask
+        // we inject could never appear. A logger that cannot see the thing you changed is worse
+        // than no logger, because its silence looks like data.
+        //
+        // Placed after the last write to wButtons and before the aim work, which touches sticks
+        // only. Prints on a change of the FINAL mask and names the DIFFERENCE from the physical
+        // press, so +0x0100 is us injecting a throw and -0x8000 would be us eating a Y.
+        if (g_cfg.map_btn_log) {
+            static WORD s_prev_final = 0;
+            const WORD final_btn = state->Gamepad.wButtons;
+            if (final_btn != s_prev_final) {
+                s_prev_final = final_btn;
+                const WORD added   = (WORD)(final_btn & (WORD)~raw_btn);
+                const WORD removed = (WORD)(raw_btn & (WORD)~final_btn);
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] BTN final=0x%04X (raw 0x%04X)  added=0x%04X removed=0x%04X%s",
+                    (unsigned)final_btn, (unsigned)raw_btn, (unsigned)added, (unsigned)removed,
+                    (added == 0 && removed == 0) ? "  [untouched]" : "");
             }
         }
 

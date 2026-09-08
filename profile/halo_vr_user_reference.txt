@@ -666,6 +666,70 @@
 #   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
 #wpncalibkey=0x2D
 
+# ------------------------------------------------- HOLSTERS: REACH FOR YOUR GEAR
+# Weapons live over your shoulders and grenades on your chest. Reach to a spot and squeeze the
+# grip: over a shoulder stows, draws or exchanges a weapon; at a chest pouch takes a grenade.
+# Y still switches weapons the ordinary way -- the reach is an addition, not a replacement.
+#
+# The zones hang on your TORSO, not your head, so glancing around does not drag your gear with
+# you. If they feel like they are in the wrong place, fix the SIZE first (holsterradius /
+# holstergradius) and only then move the positions -- a near miss is far more common than a
+# wrong spot.
+#
+# All positions are in METRES, measured from your head: x = right, y = up, z = BACK. So a
+# negative y is below your head, and a positive z is behind you.
+#
+# Master switch. 0 turns off every reach gesture below.
+#holster=1
+# How close your hand must get to a WEAPON slot (shoulders, hip), in metres.
+#holsterradius=0.16
+# ...and to a GRENADE pouch. Larger than it sounds for a good reason: most missed grabs were
+# near misses that landed a little behind the pouch, because the hand settles back against your
+# chest before you squeeze. Raise this before you move the pouches.
+#holstergradius=0.13
+# Right shoulder -- behind you. Weapon slot.
+#holsterrs=0.20,-0.10,0.22
+# Left shoulder -- behind you. Weapon slot.
+#holsterls=-0.20,-0.10,0.22
+# Right hip. Weapon slot.
+#holsterrh=0.22,-0.65,0.05
+# Left chest, in front: FRAG grenades.
+#holsterlc=-0.12,-0.30,-0.12
+# Right chest, in front: PLASMA grenades.
+#holsterrc=0.12,-0.30,-0.12
+# Which hand works the grenade pouches. 2 = either (default): with the off hand your gun stays
+# up and live, with the aim hand the weapon hides while the grenade shares it. 1 = off hand
+# only, 0 = aim hand only. Weapon slots always use the aim hand.
+#holstergrenhand=2
+# Show spheres marking the pouches. 1 = they appear as your hand nears (default), 2 = always
+# visible, 0 = off. A sphere also appears in your hand once a grenade is actually grabbed, which
+# is the quickest way to tell a successful grab from a near miss.
+#holstermarkers=1
+# Size of those spheres, metres across.
+#holstermarkerscale=0.08
+# Throw a grenade where you THREW it, not where you were looking. The game normally lobs along
+# your aim, and during a throw your aim is the moving hand. This pins the direction to the
+# swing for this many milliseconds. 0 = old behaviour. Raise it first if grenades fly off-line.
+#holsteraimhold=350
+# How far you can turn your head before your body follows, in degrees. Inside this cone your
+# gear stays put while you look around.
+#holsteryawdead=45
+# How quickly your body then re-centres toward where you are facing, degrees per second. A
+# glance moves nothing; a sustained turn brings your gear around. 0 = never re-centre on its own.
+#holsteryawrate=10
+# Where your neck pivot sits relative to your eyes, metres. This is why looking down does not
+# drag the pouches forward off your chest. Both 0 restores the old head-anchored behaviour.
+#holsterneckdown=0.15
+#holsterneckback=0.08
+# Buzz the controller on a successful grab or stow.
+#holsterhaptic=1
+# The pad buttons these gestures press for you. Change them only if your controller reports
+# different masks -- measure with mapbtnlog=1 rather than guessing.
+#holsterswapmask=0x8000
+#holsterthrowmask=0x0100
+# "Switch grenade type" -- not wired up yet, so 0.
+#holstergswitchmask=0x0000
+
 # ===================================== PER-WEAPON SCOPE TRIM ====================================
 # One scope calibration cannot suit a pistol, a battle rifle and a sniper. These let a weapon
 # differ from your global scope fit WITHOUT re-fitting everything: each entry is a DELTA, and a
