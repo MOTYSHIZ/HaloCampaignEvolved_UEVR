@@ -309,6 +309,11 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                 XrCompositionLayerProjectionView mono_view[kMonoMaxLayers][kMonoMaxViews];
                 uint32_t mono_used = 0;
 
+                // MODE 6 builds ONE quad here and drops the projection; it must outlive the loop
+                // (next() reads it after), so it lives on this stack frame beside the mono clones.
+                XrCompositionLayerQuad movie_quad{};
+                bool                   have_movie = false;
+
                 for (uint32_t i = 0; i < info->layerCount; ++i) {
                     const XrCompositionLayerBaseHeader* base = info->layers[i];
 
@@ -332,6 +337,79 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                     if (base != nullptr && mono == 4 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                         static bool s_said4 = false;
                         if (!s_said4) { s_said4 = true; logf("mono mode 4: dropping the projection layer (first of them); quads carry the frame"); }
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    // MODE 6 -- THE SHIPPING FIX (2026-09-08 22:xx), and the one the user asked for:
+                    // "target the cutscene image specifically without altering per-eye draw
+                    // wholesale, so all other elements stay correct." Mode 5 re-centred the
+                    // projection's per-eye fov and computed a convergence depth, but SteamVR did not
+                    // honour that shift AS depth: the movie fused, yet the subtitles and pause menu
+                    // -- UEVR's own quad, already stereo-correct at UI_Distance -- still doubled,
+                    // because the eyes rested wherever the fov trick actually landed the movie, not
+                    // at the UI. (Logs 21:56 confirmed the shift applied exactly as designed and the
+                    // doubling stayed, which is what falsifies the fov-shift-as-convergence model.)
+                    //
+                    // So mode 6 stops touching the projection's stereo at all. It DROPS the
+                    // projection (the doubled movie) and submits the movie as ITS OWN quad -- the
+                    // same layer type the subtitles use, placed at a real pose. A quad is
+                    // stereo-correct by construction: the runtime renders it to both eyes from its
+                    // single pose, so it fuses at its distance the way the subtitle quad fuses at
+                    // UI_Distance. Set the quad's distance = UI_Distance and the movie and the
+                    // subtitles share one depth and one convergence. Every other layer -- subtitles,
+                    // menu, our reticule -- is passed through untouched, which is the whole point.
+                    //
+                    // Source = view[0]'s sub-image (the left eye's render: the movie centred on
+                    // black), shown to BOTH eyes. Head-locked: recomputed in front of the head every
+                    // frame (the layer runs every xrEndFrame), which is how UEVR's follow-view UI
+                    // behaves too. Sized to subtend the same angle the movie does now, so it looks
+                    // the same but sits at a real depth; `size` frames it, `distance` moves it.
+                    if (base != nullptr && mono == 6 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                        if (!have_movie && src->views != nullptr && src->viewCount >= 2) {
+                            const XrCompositionLayerProjectionView& v0 = src->views[0];
+                            const XrFovf f = v0.fov;
+                            const float half_h = 0.5f * (tanf(f.angleRight) - tanf(f.angleLeft));
+                            const float half_v = 0.5f * (tanf(f.angleUp)    - tanf(f.angleDown));
+                            const float size = g_mono_size.load(std::memory_order_relaxed);
+                            float D = g_mono_distance.load(std::memory_order_relaxed);
+                            if (!(D > 0.3f)) D = 2.43f;   // 0/infinity is meaningless for a real screen; UI default
+                            // Head = midpoint of the two eye positions; facing = view[0]'s
+                            // orientation. Forward is that orientation applied to local -Z.
+                            const XrVector3f a = src->views[0].pose.position;
+                            const XrVector3f b = src->views[1].pose.position;
+                            const XrQuaternionf q = v0.pose.orientation;
+                            const float fwdx = -2.f * (q.x * q.z + q.w * q.y);
+                            const float fwdy = -2.f * (q.y * q.z - q.w * q.x);
+                            const float fwdz = -(1.f - 2.f * (q.x * q.x + q.y * q.y));
+                            const float hx = 0.5f * (a.x + b.x), hy = 0.5f * (a.y + b.y), hz = 0.5f * (a.z + b.z);
+                            movie_quad.type          = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                            movie_quad.next          = nullptr;
+                            movie_quad.layerFlags    = 0;   // opaque: the movie's black surround is the screen's border
+                            movie_quad.space         = src->space;
+                            movie_quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                            movie_quad.subImage      = v0.subImage;
+                            movie_quad.pose.orientation = q;
+                            movie_quad.pose.position    = XrVector3f{ hx + fwdx * D, hy + fwdy * D, hz + fwdz * D };
+                            movie_quad.size          = XrExtent2Df{ 2.f * D * half_h * size, 2.f * D * half_v * size };
+                            // Placed AT the projection's slot (first), so the subtitle/menu quads
+                            // that come after it in the list draw ON TOP -- never occluded by the
+                            // movie's opaque border.
+                            combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&movie_quad);
+                            have_movie = true;
+                            g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                            static float s_logD6 = -1.f, s_logS6 = -1.f;
+                            if (fabsf(D - s_logD6) > 1e-4f || fabsf(size - s_logS6) > 1e-4f) {
+                                s_logD6 = D; s_logS6 = size;
+                                logf("mono mode 6: movie as a head-locked quad at %.2f m, size x%.2f -> %.2f x %.2f m; "
+                                     "projection dropped, subtitles/menu/reticule untouched",
+                                     D, size, movie_quad.size.width, movie_quad.size.height);
+                            }
+                            continue;
+                        }
+                        // A second projection this frame, or degenerate views: drop it too; the one
+                        // quad already carries the movie.
                         g_mono_patched.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
@@ -784,7 +862,8 @@ const char* mono_mode_name(int m) {
         case 2:  return "ON mode 2: right eye's image to every view";
         case 3:  return "ON mode 3: app QUAD layers dropped, projection kept";
         case 4:  return "ON mode 4: PROJECTION dropped, app quad layers kept";
-        case 5:  return "ON mode 5: view[0] to every eye through one re-centred symmetric fov (the fix)";
+        case 5:  return "ON mode 5: view[0] to every eye through one re-centred symmetric fov (fov-shift attempt)";
+        case 6:  return "ON mode 6: movie as its own head-locked quad, projection dropped (the fix)";
         default: return "OFF";
     }
 }
@@ -794,9 +873,9 @@ XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
     // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
     if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
     // 0 = off, 1/2 = left/right eye to every view, 3 = drop app quads, 4 = drop the projection,
-    // 5 = one view, one re-centred fov, for every eye (the fix). Anything outside clamps. See
-    // mono_mode_name().
-    const int want = (on <= 0) ? 0 : ((on >= 5) ? 5 : on);
+    // 5 = one view/one re-centred fov (fov-shift attempt), 6 = movie as its own quad (the fix).
+    // Anything outside clamps. See mono_mode_name().
+    const int want = (on <= 0) ? 0 : ((on >= 6) ? 6 : on);
     const int prev = g_projection_mono.exchange(want, std::memory_order_relaxed);
     // Say so in the LAYER's log, on change only. The plugin logs what it asked for; this is the
     // record of what the layer actually accepted, plus how many frames it had rewritten up to the

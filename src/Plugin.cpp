@@ -6790,7 +6790,8 @@ void update() {
                                        : (want == 2) ? "ON mode 2 (right eye to both)"
                                        : (want == 3) ? "ON mode 3 (app quads DROPPED, projection kept)"
                                        : (want == 4) ? "ON mode 4 (projection DROPPED, app quads kept)"
-                                                     : "ON mode 5 (one view, one re-centred fov, for every eye)",
+                                       : (want == 5) ? "ON mode 5 (one view, one re-centred fov, for every eye)"
+                                                     : "ON mode 6 (movie as its own head-locked quad; projection dropped)",
                                          applied ? "applied by the API layer"
                                                  : "NOT applied (layer absent, gated off, or built "
                                                    "before set_projection_mono -- rebuild/redeploy "

@@ -3242,18 +3242,27 @@ struct Config {
     // model -- Slate quad, movie-twice, left/right image mismatch -- was wrong, and mode 2 of
     // cutscene_2d (mono collapse) could never have worked: the difference is angular, not
     // translational.
-    // 5 = THE FIX. Every eye gets view[0] -- image, pose, depth chain -- through ONE symmetric
-    //     fov re-centred on the forward axis with the tangent extents the image was rendered
-    //     at. Pixel-to-angle now matches in both eyes: the movie fuses as a single picture dead
-    //     ahead at infinity, nothing stretched (same tangent width, only shifted). The 3D world
-    //     is mono for the duration. Zero GPU work, no UEVR setting touched, cutscene-scoped.
-    //     (UEVR's own Horizontal Projection = Symmetrical does the same thing for the whole
-    //     session at a ~20% angular-resolution cost in gameplay, and a plugin cannot flip it
-    //     live: set_mod_value changes the value but only the UEVR menu raises the runtime's
-    //     should_recalculate_eye_projections flag. It remains the zero-build A/B: flip it in the
-    //     UEVR menu mid-cutscene and the doubling should vanish on the spot.)
-    // CONFIRMED IN HEADSET 2026-09-08 21:15 ("That worked for the cutscene image"), so 5 ships.
-    int   cutscene_mono   = 5;
+    // 5 = FOV-SHIFT ATTEMPT (kept for the record; NOT the fix). Every eye gets view[0]'s image
+    //     through one symmetric fov re-centred on the forward axis, shifted per-eye toward a
+    //     computed convergence depth. MEASURED 2026-09-08 21:56: the movie fused, but the
+    //     subtitles and pause menu (UEVR's stereo-correct UI quad) still doubled, and the layer
+    //     log proved the shift applied exactly as designed. So SteamVR did not honour a projection
+    //     fov shift as depth -- the movie sat wherever the trick landed it, not at the UI.
+    //     (UEVR's own Horizontal Projection = Symmetrical fuses the movie the same way, session-
+    //     wide, at a ~20% angular-resolution cost, and a plugin cannot flip it live: set_mod_value
+    //     changes the value but only the UEVR menu raises should_recalculate_eye_projections. Still
+    //     the zero-build A/B from the UEVR menu.)
+    // 6 = THE FIX (2026-09-08). Drop the doubled projection and present the movie as ITS OWN quad
+    //     -- the same layer type the subtitles use, at a real pose. A quad is stereo-correct by
+    //     construction (the runtime renders it to both eyes from one pose), so it fuses at its
+    //     distance the way the subtitle quad fuses at UI_Distance. The quad's distance IS
+    //     UI_Distance, so the movie and the subtitles share one depth and one convergence, and
+    //     every other layer passes through untouched -- exactly what the user asked for ("target
+    //     the cutscene image specifically without altering per-eye draw wholesale"). Head-locked,
+    //     recomputed each frame; zero GPU work; cutscene-scoped.
+    // Mode 5 was confirmed in headset to fuse the movie (2026-09-08 21:15) but left the UI
+    // doubled, so 6 supersedes it; default 6 pending a headset confirm of 6 specifically.
+    int   cutscene_mono   = 6;
     // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
     // should hinge convergence on the distance of the cutscene pane").
     //
