@@ -103,6 +103,10 @@ local HINTS = {
     hmdleash       = { t = "bool" },
     hmdleashlat    = { t = "slider", min = 0, max = 100 },   -- cm
     hmdleashvert   = { t = "slider", min = 0, max = 100 },   -- cm
+    -- Cutscenes. Only the SIZE is a player tunable; cutscenemono is the on/off + diagnostic
+    -- modes and is hidden so the menu does not invite flipping the fix off (cfg still can).
+    cutscenemono   = { t = "hide" },
+    cutscenesize   = { t = "slider", min = 0.25, max = 1.5 },
     aimreticule    = { t = "bool" },
     aimreticuletrace = { t = "bool" },
     aimreticulemaxdist    = { t = "drag", min = 50, max = 100000 },
