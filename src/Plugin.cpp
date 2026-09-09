@@ -92,6 +92,9 @@
 // Live config + calibration persistence. Defines g_cfg, which nearly everything below reads.
 #include "Config.hpp"
 #include "DevTools.hpp"
+// The address-verification harness (signature scan that refuses ambiguity, PE identity). Used
+// here by the tick-fault reporter, so a fault can name its function and its build.
+#include "addrcascade/AddressCascade.hpp"
 
 // UE object/name helpers: TrackedObject (recycle-safe handles), FName resolution, class names.
 #include "UeObject.hpp"
@@ -718,6 +721,128 @@ std::atomic<bool> g_tick_finished{true};
 // system, a blinded one. An instrument whose signal is erased by the very event it measures will
 // always read "nothing happened", which is the most convincing wrong answer there is.
 std::atomic<bool> g_tick_aborted{false};
+
+// ---- NAME THE FUNCTION A TICK FAULT LANDED IN, WITHOUT RECORDING ITS ADDRESS ------------------
+//
+// Every report from the 2026-09-08 release playthrough landed at the same RVA, +0x36FD8A6. Resolved
+// OFFLINE from the exe's own .pdata (Scripts\Resolve-ExeRva.py, no session needed) that is
+// FName::ToString(FString&)+0x16 -- the `mov ecx,[rcx]` that reads the FName it was handed. UEVR's
+// own resolver, which shares no code with that script, logged the same function at the same RVA
+// ("FName::get_to_string (inlined alternative): result=...d890" against "Game Module Addr:
+// ...240000", log 2026-09-08). Two resolvers agreeing is the standard the Direct Drive lane set.
+//
+// So the fault was never "a field read at +0x18 off a poisoned base" INSIDE the game. The faulting
+// read is of the FName pointer ITSELF, and 0x40400018 is &((UObject*)0x40400000)->NamePrivate:
+// some caller asked for the name of an object whose pointer was 0x40400000 -- the float 3.0f, i.e.
+// a recycled block, not an object. Which caller is what the return chain below now records.
+//
+// THAT RVA IS A MEASUREMENT OF ONE BUILD and is deliberately NOT written into this file. The
+// function is found by SHAPE at startup, the scan refuses an ambiguous match, and a fault is named
+// only when the OS's own unwind metadata says its function begins exactly where the scan landed.
+// On a build where the scan fails the report carries the bare RVA -- the previous behaviour, which
+// eight real faults have already exercised, so the fallback is not untested code.
+//
+// The signature is the prologue through the first FNameEntry header decode (`shr r9d,6` is the
+// 10-bit length field); the one rel32 (the FNamePool resolve call) is wildcarded. Verified unique
+// in the exe on disk at 0x18, 0x30, 0x48 and the full 0x81-byte body (2026-09-08).
+// ADDR-HYGIENE: resolved -- scan_signature at on_initialize; there is no fallback constant at all.
+constexpr unsigned char FNAME_TOSTRING_SIG[] = {
+    0x48,0x89,0x5C,0x24,0x10,  0x48,0x89,0x7C,0x24,0x18,  0x41,0x56,  0x48,0x83,0xEC,0x20,
+    0x4C,0x8B,0xF1,  0x48,0x8B,0xDA,  0x8B,0x09,  0xE8,0x00,0x00,0x00,0x00,  0x45,0x8B,0x46,0x04,
+    0x48,0x8B,0xF8,  0x44,0x8B,0x53,0x0C,  0x44,0x0F,0xB7,0x08,  0x41,0xC1,0xE9,0x06 };
+constexpr char FNAME_TOSTRING_MASK[] =
+    "xxxxx" "xxxxx" "xx" "xxxx" "xxx" "xxx" "xx" "x????" "xxxx" "xxx" "xxxx" "xxxx" "xxxx";
+static_assert(sizeof(FNAME_TOSTRING_SIG) == sizeof(FNAME_TOSTRING_MASK) - 1,
+              "signature and mask must pair up");
+
+std::atomic<uintptr_t> g_fname_tostring{0};   // absolute address in this process, 0 = unresolved
+
+void fault_names_init() {
+    void* exe = (void*)GetModuleHandleW(nullptr);
+    if (exe == nullptr) return;
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    const addrcascade::Signature  sig{FNAME_TOSTRING_SIG, FNAME_TOSTRING_MASK, sizeof(FNAME_TOSTRING_SIG)};
+    const addrcascade::ScanResult hit = addrcascade::scan_signature(exe, sig);
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * perf_tick_ms();
+    if (hit.unique()) {
+        g_fname_tostring.store(hit.address, std::memory_order_relaxed);
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] FAULTNAMES: FName::ToString resolved by signature at +0x%llX "
+            "(unique match, %.1f ms scan). A tick fault landing inside it will say so by name.",
+            (unsigned long long)(hit.address - (uintptr_t)exe), ms);
+    } else {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] FAULTNAMES: FName::ToString NOT resolved -- %s (%zu match(es), "
+            "%.1f ms). Tick faults will carry the bare RVA only, exactly as before.",
+            hit.matches > 1 ? "ambiguous signature, refusing to guess" : "no match on this build",
+            hit.matches, ms);
+    }
+}
+
+// Basename of a module path. Written without a backslash literal on purpose: this file has been
+// mangled twice by tooling that collapses escapes, and 92 is unambiguous. The inline version this
+// replaces advanced one character past the separator, which is why every report so far has read
+// "in aloCampaignEvolved.exe".
+const char* fault_module_leaf(const char* path) {
+    const char* leaf = path;
+    for (const char* q = path; *q != '\0'; ++q) {
+        if (*q == '/' || *q == (char)92) leaf = q + 1;
+    }
+    return leaf;
+}
+
+// THE RETURN-ADDRESS CHAIN ABOVE A FAULT, as module+RVA so each frame resolves against that
+// module's PDB afterwards. Walked with the same unwind metadata the OS uses (RtlLookupFunctionEntry
+// + RtlVirtualUnwind on a COPY of the faulting context) -- no recorded address anywhere.
+//
+// This is what finally names the CALLER of a fault that lands in a shared engine utility.
+// FName::ToString has 2,521 call sites in the exe, and "which one" is not something a step marker
+// in our own lane can answer when the call is made from inside UEVR's SDK on our behalf.
+//
+// Filter-safe by construction: fixed-size stack buffers, no allocation, no dbghelp, and its own
+// __try so a torn stack ends the walk instead of nesting a second exception inside the first.
+// Only PODs live in here, which is what lets it contain __try at all.
+void fault_return_chain(const CONTEXT* in, char* out, size_t cap) {
+    out[0] = '\0';
+    if (in == nullptr || cap < 8) return;
+    CONTEXT ctx = *in;
+    size_t used = 0;
+    __try {
+        for (int frame = 0; frame < 8; ++frame) {
+            DWORD64 img = 0;
+            RUNTIME_FUNCTION* rf = RtlLookupFunctionEntry(ctx.Rip, &img, nullptr);
+            if (rf == nullptr) {
+                // A leaf function: its return address is at the top of the stack.
+                if (IsBadReadPtr((const void*)(uintptr_t)ctx.Rsp, sizeof(DWORD64))) break;
+                ctx.Rip = *(const DWORD64*)(uintptr_t)ctx.Rsp;
+                ctx.Rsp += sizeof(DWORD64);
+            } else {
+                PVOID   handler = nullptr;
+                DWORD64 est     = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, ctx.Rip, rf, &ctx, &handler, &est, nullptr);
+            }
+            if (ctx.Rip == 0) break;
+            HMODULE   hm = nullptr;
+            char      name[MAX_PATH] = "?";
+            uintptr_t rva = (uintptr_t)ctx.Rip;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                 | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)(uintptr_t)ctx.Rip, &hm) && hm != nullptr) {
+                GetModuleFileNameA(hm, name, MAX_PATH);
+                rva = (uintptr_t)ctx.Rip - (uintptr_t)hm;
+            }
+            const int n = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s%s+0x%llX",
+                                      frame ? " < " : "", fault_module_leaf(name),
+                                      (unsigned long long)rva);
+            if (n < 0) break;
+            used += (size_t)n;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _snprintf_s(out + used, cap - used, _TRUNCATE, "%s(walk faulted)", used ? " < " : "");
+    }
+}
 std::atomic<bool> g_tick_ever{false};    // suppress the report for the very first tick
 
 struct PerfScope {
@@ -10520,6 +10645,10 @@ public:
                 (unsigned long long)ago);
         }
 
+        // Name-the-fault table: ONE signature scan of the exe, so a TICK FAULT line can say
+        // which engine function it landed in without a recorded RVA. See FNAME_TOSTRING_SIG.
+        fault_names_init();
+
         // Config lives beside the UEVR profile so it is where a user would look for it.
         char appdata[MAX_PATH] = {0};
         DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
@@ -10818,13 +10947,7 @@ public:
             GetModuleFileNameA(hm, modname, MAX_PATH);
             modbase = (void*)hm;
         }
-        // Last path separator, without writing a backslash literal: this file has been
-        // mangled twice by tooling that collapses escapes, and 92 is unambiguous.
-        const char* leaf = modname;
-        for (const char* q = modname; *q != '\0'; ++q) {
-            if (*q == '/' || *q == (char)92) leaf = q + 1;
-        }
-        leaf = (leaf != nullptr) ? leaf + 1 : modname;
+        const char* leaf = fault_module_leaf(modname);
 
         char extra[128] = "";
         if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
@@ -10833,16 +10956,51 @@ public:
                         (er->ExceptionInformation[0] == 1) ? "WRITING" : "executing",
                         (void*)er->ExceptionInformation[1]);
         }
+        // WHICH FUNCTION, from the unwind metadata the OS itself dispatches with -- never a recorded
+        // address. Named only when its start coincides with the signature-resolved FName::ToString
+        // (see FNAME_TOSTRING_SIG); "?" otherwise, with the function's own start RVA so an offline
+        // resolve (Scripts\Resolve-ExeRva.py against that build's exe) can finish the job.
+        char fn[96] = "";
+        {
+            DWORD64 img = 0;
+            const RUNTIME_FUNCTION* rf = RtlLookupFunctionEntry((DWORD64)(uintptr_t)addr, &img, nullptr);
+            if (rf != nullptr) {
+                const uintptr_t begin = (uintptr_t)img + rf->BeginAddress;
+                const uintptr_t ts    = g_fname_tostring.load(std::memory_order_relaxed);
+                _snprintf_s(fn, sizeof(fn), _TRUNCATE, " fn=%s+0x%llX (fn starts +0x%llX)",
+                            (ts != 0 && begin == ts) ? "FName::ToString" : "?",
+                            (unsigned long long)((uintptr_t)addr - begin),
+                            (unsigned long long)(begin - (uintptr_t)img));
+            }
+        }
+        // WHICH BUILD. The RVA is a measurement of THIS binary and means nothing against another,
+        // and every field report so far has cost a round trip to establish which one it was. Same
+        // fields, same order as the BLAMDRIVE line for the sim module, so the two compare.
+        char build[128] = "";
+        {
+            addrcascade::ModuleIdentity id{};
+            if (modbase != nullptr && addrcascade::module_identity(modbase, &id)) {
+                _snprintf_s(build, sizeof(build), _TRUNCATE,
+                            " build{SizeOfImage=0x%X stamp=0x%08X pdb=%s age=%u}",
+                            id.size_of_image, id.timestamp, id.pdb_guid, id.pdb_age);
+            }
+        }
+        // WHO CALLED IT. See fault_return_chain.
+        char chain[512] = "";
+        fault_return_chain(xp->ContextRecord, chain, sizeof(chain));
+
         const int   lane = g_tick_lane.load(std::memory_order_relaxed);
         const char* mark = g_navw_mark.load(std::memory_order_relaxed);
         API::get()->log_info(
-            "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s | "
-            "lane '%s' step '%s'. Observed only -- the exception is passed on untouched, so this "
-            "tick's remaining lanes (rig, arms, hands, two-hand, gestures) did NOT run.",
+            "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s%s%s | "
+            "lane '%s' step '%s' | called from %s. Observed only -- the exception is passed on "
+            "untouched, so this tick's remaining lanes (rig, arms, hands, two-hand, gestures) did "
+            "NOT run.",
             (unsigned)nth, (unsigned)er->ExceptionCode, addr, leaf, modbase,
-            (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra,
+            (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra, fn, build,
             (lane >= 0 && lane < PERF_COUNT) ? kPerfName[lane] : "(none)",
-            (mark != nullptr) ? mark : "-");
+            (mark != nullptr) ? mark : "-",
+            chain[0] ? chain : "(no chain)");
     }
 
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
