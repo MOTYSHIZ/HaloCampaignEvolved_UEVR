@@ -11002,6 +11002,74 @@ public:
                 // latch. The palette itself is rewritten later, on the game's own thread, inside the
                 // detour -- which is exactly why this site must stay cheap.
                 { PerfScope _perf(PERF_PALARM); palettearm_update(delta); }
+
+                // ---- TORSO FRAME A/B. Answers patorsoframe 3-vs-4-vs-5 with a number.
+                //
+                // The modes differ by a SIGN, and the note in PaletteArm.cpp says plainly that
+                // handedness between the UE rotator and the Blam basis is a coin-flip which costs
+                // a headset round-trip to settle. It has already cost one. The failure of the last
+                // attempt was not the test, it was the READOUT: "which felt steadier" cannot
+                // separate a torso that is nearly right from one that is exactly right, and it
+                // cannot be reported to anyone else.
+                //
+                // WHAT MAKES IT DECIDABLE. Every frame, the torso yaw either moves with the BODY
+                // (the locked rendered view) or with the AIM (the yaw the aim drove). Those two
+                // separate only while you turn the controller without turning your head -- so the
+                // window SELECTS ITSELF rather than relying on the player performing the gesture
+                // precisely. When they have not separated this frame there is nothing to learn,
+                // and the sample is discarded instead of diluting the answer.
+                //
+                // Read at ONE INSTANT ON ONE CLOCK: all three yaws are sampled here, right after
+                // the palette wrote its torso. The obvious alternative -- correlating in the view
+                // callback -- would compare a ~32 Hz torso against 90+ Hz view yaws and alias, and
+                // the error would scale with turn speed, which is this project's oldest trap.
+                if (g_cfg.pa_torso_ab) {
+                    static float    ab_prev_torso = 0.0f, ab_prev_aim = 0.0f, ab_prev_body = 0.0f;
+                    static double   ab_err_body = 0.0, ab_err_aim = 0.0;
+                    static uint32_t ab_n = 0, ab_said = 0;
+                    static int      ab_mode = -1;
+                    static bool     ab_have = false;
+
+                    const float t_now = ::halo::g_pa_torso_yaw.load(std::memory_order_relaxed);
+                    const float a_now = g_dbg_view_in.load();
+                    const float b_now = g_dbg_view_out.load();
+
+                    // A mode change invalidates everything accumulated under the old one.
+                    if (ab_mode != g_cfg.pa_torso_frame) {
+                        ab_mode = g_cfg.pa_torso_frame;
+                        ab_err_body = ab_err_aim = 0.0; ab_n = 0; ab_said = 0; ab_have = false;
+                    }
+
+                    if (ab_have) {
+                        const float d_torso = wrap180(t_now - ab_prev_torso);
+                        const float d_aim   = wrap180(a_now - ab_prev_aim);
+                        const float d_body  = wrap180(b_now - ab_prev_body);
+                        // Only informative while aim and body actually diverged.
+                        if (std::fabs(d_aim - d_body) > 0.05f) {
+                            ab_err_body += std::fabs(d_torso - d_body);
+                            ab_err_aim  += std::fabs(d_torso - d_aim);
+                            ++ab_n;
+                        }
+                    }
+                    ab_prev_torso = t_now; ab_prev_aim = a_now; ab_prev_body = b_now;
+                    ab_have = true;
+
+                    // Enough separation to be worth reporting, then every ~64 further samples.
+                    if (ab_n >= 60 && (ab_n % 64u) == 0 && ab_said < 40) {
+                        ++ab_said;
+                        const double eb = ab_err_body / (double)ab_n;
+                        const double ea = ab_err_aim  / (double)ab_n;
+                        // Whichever frame the torso tracked shows the SMALLER residual. The margin
+                        // is what says whether the answer is real or a coin toss on noise.
+                        const char* verdict = (eb < ea * 0.5) ? "LOCKED TO BODY  <-- this mode is correct"
+                                            : (ea < eb * 0.5) ? "FOLLOWS THE AIM <-- wrong sign for this mode"
+                                                              : "INCONCLUSIVE -- keep turning, or the margin is noise";
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | residual vs BODY=%.3f "
+                            "vs AIM=%.3f deg/frame over %u separated frames | %s",
+                            g_cfg.pa_torso_frame, eb, ea, ab_n, verdict);
+                    }
+                }
             }
         }
         perf_hitch_report();

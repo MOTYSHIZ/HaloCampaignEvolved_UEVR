@@ -3497,6 +3497,19 @@ struct Config {
     //   2 = root composed with the inverse HEAD, i.e. actively removing head yaw.
     int   pa_torso_frame  = 6;
 
+    // TORSO FRAME A/B INSTRUMENT. Off by default; costs one atomic load and a branch per tick.
+    //
+    // Modes 3 and 4 are the same rotation and its negation, and PaletteArm.cpp says outright that
+    // which one is right is a coin-flip settled only in a headset. The previous attempt to settle
+    // it failed on the READOUT rather than the test: "which felt steadier" cannot separate nearly
+    // right from exactly right, and cannot be handed to anyone else.
+    //
+    // With this on, the tick reports the torso's residual against the BODY frame and against the
+    // AIM frame, over frames where those two actually diverged. The smaller residual names the
+    // frame the torso is locked to, which is the whole question. See the note at its site in
+    // Plugin.cpp for why the comparison lives there and not in the view callback.
+    bool  pa_torso_ab     = false;
+
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends
     // the two along the shortest arc.

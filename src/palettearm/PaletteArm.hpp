@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <atomic>   // g_pa_torso_yaw
+
 namespace halo {
 
 // Game thread, once per tick. Installs or removes the hook to match the mode, advances the
@@ -51,6 +53,11 @@ const char* palettearm_status_jitter();
 // would come straight back and this would become a retry-and-log loop. BlamDrive.cpp records the
 // same trap.
 bool palettearm_unavailable();
+
+// The solved torso yaw in degrees -- the frame the shoulders hang from. Published so the tick can
+// answer "does this basis stay with the body, or follow the aim?" against the two view yaws, which
+// keep internal linkage in Plugin.cpp. Only meaningful while the palette arm driver is running.
+extern std::atomic<float> g_pa_torso_yaw;
 
 // True when the palette owns the weapon, so the legacy MESH drive must stand down -- otherwise the
 // container displaces the gun and the palette displaces it again, and the two compose.

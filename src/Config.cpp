@@ -1166,6 +1166,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paarms")         == 0) { g_cfg.pa_arms       = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "headshouldersyawinfluence") == 0) { g_cfg.pa_head_shoulders_yaw_influence = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "patorsoframe")   == 0) { g_cfg.pa_torso_frame= (int)clampf((float)v, 0.0f, 6.0f); return true; }   // 0..4: adding a mode means widening THIS clamp too -- 3 and 4 silently became 2 for a whole session
+    if (_stricmp(key, "patorsoab")      == 0) { g_cfg.pa_torso_ab   = (v != 0.0); return true; }
     if (_stricmp(key, "twohand")        == 0) { g_cfg.two_hand      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "twohandaim")     == 0) { g_cfg.two_hand_aim  = (v != 0.0); return true; }
     if (_stricmp(key, "twohandrig")     == 0) { g_cfg.two_hand_rig  = (v != 0.0); return true; }
