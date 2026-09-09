@@ -112,6 +112,80 @@ inline Vec3 quat_forward(const Quat& q) {
     };
 }
 
+// VR-space up: (0,1,0) rotated by q -- the rotation matrix's SECOND column, exactly as
+// quat_forward() above is the negated third. Guaranteed perpendicular to quat_forward(q) for a unit
+// q, which is what lets the roll construction in MotionAimControl.cpp measure a twist angle in the
+// plane normal to the handle without re-orthogonalising anything.
+inline Vec3 quat_up(const Quat& q) {
+    return Vec3{
+        2.0f * (q.x * q.y - q.w * q.z),
+        1.0f - 2.0f * (q.x * q.x + q.z * q.z),
+        2.0f * (q.y * q.z + q.w * q.x)
+    };
+}
+
+// Rodrigues: rotate v about a UNIT axis by `radians`, right-hand rule.
+//
+// Deliberately a vector rotation and not a quaternion one. The caller has a direction and an axis
+// and wants a direction back; going through a quaternion would mean building one, multiplying
+// three times and normalising, to arrive at the same three lines.
+inline Vec3 rotate_about_axis(const Vec3& v, const Vec3& axis, float radians) {
+    const float c = std::cos(radians), s = std::sin(radians);
+    const Vec3  cr{axis.y * v.z - axis.z * v.y,
+                   axis.z * v.x - axis.x * v.z,
+                   axis.x * v.y - axis.y * v.x};
+    const float d = axis.x * v.x + axis.y * v.y + axis.z * v.z;
+    const float k = 1.0f - c;
+    return Vec3{v.x * c + cr.x * s + axis.x * d * k,
+                v.y * c + cr.y * s + axis.y * d * k,
+                v.z * c + cr.z * s + axis.z * d * k};
+}
+
+// ---- WRIST TWIST, MEASURED AGAINST UPRIGHT ----------------------------------------------------
+//
+// The signed angle (radians) by which `q` is rolled about `axis`, taking "zero roll" to mean the
+// controller's own up lines up with world up. Both that reference and the controller's up are
+// perpendicular to the axis, so the atan2 below is the exact angle between them in that plane --
+// no decomposition, no small-angle assumption, and nothing that degenerates with pitch. That last
+// point is the reason this exists: the first attempt at measuring this took roll from a Tait-Bryan
+// decomposition, whose yaw/roll split comes apart as 1/cos(pitch), and half its samples sat past 60
+// degrees of pitch. Every number that run produced was measuring the instrument.
+//
+// `axis` MUST be unit. Pass the forward of the same pose `q` came from: quat_up(q) is exactly
+// perpendicular to quat_forward(q), which is what makes the plane projection free.
+//
+// `out_fade` is the strength multiplier for the POLE. World up has no component perpendicular to a
+// vertical axis, so the reference -- and with it the whole notion of an unrolled controller --
+// stops existing as the axis approaches vertical. It is cos(elevation), scaled so a caller gets
+// full strength up to (90 - vert_fade_deg) degrees of elevation and a linear fade to nothing at
+// vertical. You cannot comb a sphere: every roll-free frame has this hole somewhere.
+//
+// Returns false only where the reference has collapsed entirely and there is no angle to report.
+inline bool wrist_twist_upright(const Quat& q, const Vec3& axis, float vert_fade_deg,
+                                float* out_rad, float* out_fade) {
+    *out_rad = 0.0f; *out_fade = 0.0f;
+
+    // World up is +Y in VR space, so its perpendicular component is up - axis*(axis.y) and the
+    // length of that is cos(elevation) outright -- no second trig call to find the fade.
+    const float ay = axis.y;
+    Vec3 up_ref{-axis.x * ay, 1.0f - axis.y * ay, -axis.z * ay};
+    const float n = std::sqrt(up_ref.x * up_ref.x + up_ref.y * up_ref.y + up_ref.z * up_ref.z);
+    if (n < 1e-4f) return false;                        // axis is vertical: no upright to refer to
+    const float inv = 1.0f / n;
+    up_ref.x *= inv; up_ref.y *= inv; up_ref.z *= inv;
+
+    const Vec3 up_c = quat_up(q);
+    const Vec3 cr{up_ref.y * up_c.z - up_ref.z * up_c.y,
+                  up_ref.z * up_c.x - up_ref.x * up_c.z,
+                  up_ref.x * up_c.y - up_ref.y * up_c.x};
+    *out_rad = std::atan2(cr.x * axis.x + cr.y * axis.y + cr.z * axis.z,
+                          up_ref.x * up_c.x + up_ref.y * up_c.y + up_ref.z * up_c.z);
+
+    const float t = std::sin(clampf(vert_fade_deg, 1.0f, 89.0f) * DEG2RAD);
+    *out_fade = clampf(n / t, 0.0f, 1.0f);
+    return true;
+}
+
 // ---- quaternion algebra, needed to express the rig in its PARENT's frame.
 //
 // A relative transform composes on top of its parent, and the rig's parent is rotated by the game's

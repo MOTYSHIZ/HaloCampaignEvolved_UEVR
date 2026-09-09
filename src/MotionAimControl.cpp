@@ -369,6 +369,55 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
         }
     }
 
+    // ---- WRIST-ROLL CANCELLATION (aimrollfix) -------------------------------------------------
+    //
+    // Rotate the aim direction back about the handle axis by the twist the wrist is carrying, so
+    // the direction depends on WHERE THE HANDLE POINTS and not on how the hand is rolled around it.
+    // Exact rather than approximate: rolling the wrist is a rotation about this very axis, so it
+    // changes the twist and leaves the axis alone, and undoing it lands back on the same vector.
+    //
+    // Config.hpp carries the geometry and the reason the reference is world up rather than a stored
+    // pose. Two things worth knowing at the call site:
+    //   * With aimsrc=1 this is a NO-OP by construction -- the direction IS the axis, and rotating
+    //     a vector about itself changes nothing. Correct: grip forward is already roll-invariant.
+    //   * It sits ABOVE the two-hand blend and the sightline on purpose, so both consume a
+    //     direction the roll has already been taken out of, exactly as they consume the aimsrc
+    //     choice above.
+    float roll_corr_deg = 0.0f;   // read by the AIMROLL instrument below
+    if (g_cfg.aim_roll_fix > 0.0f) {
+        // The pose whose forward is the roll axis, and whose up therefore measures the twist. Both
+        // must come from the SAME pose or the up is not perpendicular to the axis.
+        Quat rq = cq;
+        bool have_axis = true;
+        if (g_cfg.aim_roll_axis != 1) {
+            Vec3 gpos{};
+            have_axis = get_pose(ridx, &gpos, &rq, /*use_aim=*/false);
+        }
+        if (have_axis) {
+            Vec3 axis = quat_forward(rq);
+            const float al = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (al > 1e-4f) {
+                axis.x /= al; axis.y /= al; axis.z /= al;   // Rodrigues needs a unit axis
+                float tw = 0.0f, fade = 0.0f;
+                if (wrist_twist_upright(rq, axis, g_cfg.aim_roll_vert_deg, &tw, &fade)) {
+                    const float applied = -tw * g_cfg.aim_roll_fix * fade;
+                    fwd = rotate_about_axis(fwd, axis, applied);
+                    roll_corr_deg = applied * RAD2DEG;
+                }
+            }
+        } else {
+            // No grip pose means no handle axis, so there is nothing to roll about. Leave the
+            // direction alone rather than inventing an axis -- and say so once, because silently
+            // running uncorrected is exactly the failure this whole lane exists to remove.
+            static std::atomic<bool> s_said{false};
+            if (!s_said.exchange(true)) {
+                API::get()->log_info("[Halo-CampE-UEVR] aimrollfix: no GRIP pose on controller %d -- "
+                                     "roll cancellation inert this session (aimrollaxis=1 uses the aim pose)",
+                                     (int)ridx);
+            }
+        }
+    }
+
     // ---- THE TWO-HANDED HOLD.
     //
     // Here, and not later: this is AFTER the aimsrc choice, so the blend rides whichever source is
@@ -397,13 +446,21 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
 #if HALO_VR_DEV
     // AIMROLL -- measure the roll->aim coupling instead of arguing about it.
     //
-    // Hold the controller pointing at one spot and roll the wrist left, then right. Read `roll`
-    // against `aimYaw`/`gripYaw`:
-    //   aimYaw moves a lot with roll, gripYaw does not  -> the cone; aimsrc=1 removes it
-    //   BOTH move                                       -> the coupling is upstream of the source
-    //                                                      choice and aimsrc=1 will not help
-    //   |dYaw per degree of roll| differs left vs right -> the atan2 amplification, and `pitch`
-    //                                                      will show which side is steeper
+    // THE TEST: point at one fixed spot, hold the wrist still, then roll it left and right without
+    // re-aiming. `roll` is the wrist twist about the handle, measured against upright by the very
+    // same helper the fix uses, so the two can never disagree about what roll means.
+    //
+    //   aimrollfix=0 -- `dyaw` should track `roll`. That is the cone, and it is the bug. The old
+    //                   figure of ~0.19 deg per degree is NOT a usable baseline: it was measured
+    //                   against a Tait-Bryan roll that degenerates with pitch. Re-measure here.
+    //   aimrollfix=1 -- `dyaw` should stay put while `roll` swings, and `corr` should mirror
+    //                   `roll`. Any residual dyaw is what the construction did not remove.
+    //   aimrollaxis=1 (null control) -- `corr` still moves, `dyaw` must NOT change versus
+    //                   aimrollfix=0. If it does, the correction is reaching something it does not
+    //                   own and no reading from axis=0 can be trusted.
+    //
+    // `fade` is the pole term: below 1 the handle is steep enough that the upright reference is
+    // being wound down, so a partial `corr` there is the design and not a fault.
     if (g_cfg.aim_roll_log > 0) {
         static std::atomic<uint32_t> n{0};
         if ((n.fetch_add(1, std::memory_order_relaxed) % (uint32_t)g_cfg.aim_roll_log) == 0) {
@@ -412,40 +469,30 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
             const Vec3 afwd = quat_forward(cq);
             const Vec3 gfwd = have_grip ? quat_forward(gq) : Vec3{0.0f, 0.0f, 0.0f};
 
-            // ROLL BY SWING-TWIST, NOT BY quat_to_rotator.
-            //
-            // The first version took roll from a Tait-Bryan decomposition. Yaw and roll DEGENERATE
-            // as pitch steepens -- the split amplifies as 1/cos(pitch), so 2x at 60 deg and ~6x at
-            // 80 -- and the measured grip pitch runs past 60 deg in HALF of all samples. The first
-            // 27k-sample run produced "grip yaw swings 1.08 deg per degree of roll", which is the
-            // decomposition coming apart near gimbal lock rather than the vector moving. Every
-            // conclusion drawn against that axis was measuring the instrument.
-            //
-            // The twist of q about an axis a is well-conditioned at any pitch:
-            //   proj  = (q.xyz . a) a ,  twist = normalize(quat(proj, q.w))
-            // Taken about the GRIP FORWARD, which is the axis the wrist actually rolls about, so
-            // this is the physical quantity the whole question is about.
-            float gp = 0.0f, gy = 0.0f, gr = 0.0f;
+            // Measured even when the fix is off -- that is the whole point of a baseline run.
+            float tw_deg = 0.0f, fade = 0.0f;
             if (have_grip) {
-                float discard_roll = 0.0f;   // quat_to_rotator dereferences all three unconditionally
-                quat_to_rotator(-gq.z, gq.x, gq.y, -gq.w, &gp, &gy, &discard_roll);
-                const float d = gq.x * gfwd.x + gq.y * gfwd.y + gq.z * gfwd.z;
-                const float px = gfwd.x * d, py = gfwd.y * d, pz = gfwd.z * d;
-                const float n  = std::sqrt(px * px + py * py + pz * pz);
-                gr = 2.0f * std::atan2(n, std::fabs(gq.w)) * RAD2DEG;
-                if (d < 0.0f) gr = -gr;
+                Vec3 axis = gfwd;
+                const float al = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                if (al > 1e-4f) {
+                    axis.x /= al; axis.y /= al; axis.z /= al;
+                    float tw = 0.0f;
+                    if (wrist_twist_upright(gq, axis, g_cfg.aim_roll_vert_deg, &tw, &fade))
+                        tw_deg = tw * RAD2DEG;
+                }
             }
+            const float aim_yaw_raw = std::atan2(afwd.x, -afwd.z) * RAD2DEG;
             API::get()->log_info(
-                "[Halo-CampE-UEVR] AIMROLL src=%d roll=%.1f | aim=(y%.2f,p%.2f) grip=(y%.2f,p%.2f) "
-                "| out=(y%.2f,p%.2f) sightline_dyaw=%.2f haveGrip=%d",
-                g_cfg.aim_src, gr,
-                std::atan2(afwd.x, -afwd.z) * RAD2DEG,
+                "[Halo-CampE-UEVR] AIMROLL fix=%.2f axis=%d src=%d | roll=%.1f fade=%.2f corr=%.2f "
+                "| aim=(y%.2f,p%.2f) grip=(y%.2f,p%.2f) | out=(y%.2f,p%.2f) dyaw=%.2f haveGrip=%d",
+                g_cfg.aim_roll_fix, g_cfg.aim_roll_axis, g_cfg.aim_src,
+                tw_deg, fade, roll_corr_deg,
+                aim_yaw_raw,
                 std::asin(clampf(afwd.y, -1.0f, 1.0f)) * RAD2DEG,
                 have_grip ? std::atan2(gfwd.x, -gfwd.z) * RAD2DEG : 0.0f,
                 have_grip ? std::asin(clampf(gfwd.y, -1.0f, 1.0f)) * RAD2DEG : 0.0f,
                 *out_yaw, *out_pitch,
-                wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG
-                        - std::atan2(afwd.x, -afwd.z) * RAD2DEG),
+                wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG - aim_yaw_raw),
                 (int)have_grip);
         }
     }
