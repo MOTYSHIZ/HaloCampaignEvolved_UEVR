@@ -4017,6 +4017,12 @@ void nav_world_tick(bool engaged, uint32_t tick) {
         // markers on each path with no way to tell from the log which.
         const bool layer_owns = navw_layer_owns();
 
+        // MARKED FROM HERE DOWN. The shipped lane (navworldsrc=2) never enters the projection block
+        // above, so the first mark a shipping build could reach was SetVisibility in the PLACE pass
+        // -- everything between the entry and that point, including this whole sweep, read as
+        // `step '-'`. The 2026-09-08 handoff took '-' to mean "before line ~3794"; on the shipped
+        // path it meant "anywhere in the next ~600 lines".
+        NAVW_MARK("lane2:manager_lookup");
         API::UObject* mgr = nullptr;
         for (int i = 0; i < g_nav_count; ++i) {
             auto* w = g_navpoints[i].get();
@@ -4034,6 +4040,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             return;
         }
         struct FMapRaw { void* data; int32_t num; int32_t max; };
+        NAVW_MARK("lane2:NavpointInstances");
         auto* map = mgr->get_property_data<FMapRaw>(L"NavpointInstances");
         if (map == nullptr || map->data == nullptr || map->num <= 0) {
             if (g_navw_shown) { g_navw_shown = false; navw_hide_all(); g_navw_placed_n = 0; }
@@ -4238,6 +4245,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             //   * prio below is (kind == NAVW_OBJECTIVE) ? 1 : 2, so the OBJECTIVE never got
             //     priority 1 and could be shed by a short slot budget like any floor item -- one of
             //     the two reasons the objective marker goes missing while item markers do not.
+            NAVW_MARK("ecls:to_string");
             const std::wstring ecn = (ecls != nullptr && ecls->get_fname() != nullptr)
                                    ? ecls->get_fname()->to_string() : std::wstring();
             const NavwKind kind = ecn.empty() ? NAVW_OTHER : navw_classify(ecn);
@@ -4358,6 +4366,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
 
             // ---- BUG 2: draw only navpoints the game's own HUD is showing. See navw_entry_shown.
             int vis_dbg = -1;
+            NAVW_MARK("entry_shown:reflect");
             const bool shown = navw_entry_shown_w(ewidget, &vis_dbg, kind);
 
             // A FIFTH NAVPOINT CLASS WOULD OTHERWISE VANISH IN SILENCE. The gate above is an
