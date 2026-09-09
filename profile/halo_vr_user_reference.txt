@@ -130,6 +130,17 @@
 #hmdleashlat=0
 #hmdleashvert=0
 
+# ---- Cutscenes. The game draws its pre-rendered cutscenes flat, at the same spot in both eyes,
+# but a headset's two eye views do not point the same way -- so the raw picture lands in two
+# different places and cannot be fused. While a cutscene plays, the mod shows one picture to
+# both eyes as if on a flat screen in front of you (the 3D world is flat for the duration).
+# 5 = on (default). 0 = off: the doubled picture exactly as the game presents it.
+#cutscenemono=5
+# How big that screen is. 1.0 = as the game draws it, edge to edge; smaller values shrink it,
+# like a screen further away (0.7 is a comfortable cinema). Your eyes always focus on it at the
+# same distance as the subtitles and menus, whatever the size, so nothing doubles.
+#cutscenesize=1.0
+
 # ==================================== RETICULE (world-space) ====================================
 # The mod draws the game's own crosshair out in the world, exactly where your shots will land
 # -- hit marker included.

@@ -3252,9 +3252,26 @@ struct Config {
     //     live: set_mod_value changes the value but only the UEVR menu raises the runtime's
     //     should_recalculate_eye_projections flag. It remains the zero-build A/B: flip it in the
     //     UEVR menu mid-cutscene and the doubling should vanish on the spot.)
-    // Default stays 0 until one headset confirms 5; then 5 ships and the key moves to the
-    // player catalog.
-    int   cutscene_mono   = 0;
+    // CONFIRMED IN HEADSET 2026-09-08 21:15 ("That worked for the cutscene image"), so 5 ships.
+    int   cutscene_mono   = 5;
+    // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
+    // should hinge convergence on the distance of the cutscene pane").
+    //
+    // CONVERGENCE is not a comfort choice, and there is no way round it: eyes converge on ONE
+    // depth, and anything at another depth is seen double -- hold a finger up and look past it.
+    // UEVR's UI quad (subtitles, pause menu) sits at UI_Distance (2.43 m shipped); the first
+    // mode-5 run put the picture at infinity, the movie fused, and everything at 2.43 m carried
+    // ~1.5 deg of disparity and doubled. So the picture converges exactly where the UI is, read
+    // live from UEVR (a player who moves the UI keeps the match). cutscenedist, cm, is the DEV
+    // override for experiments only: 0 = match UI_Distance (shipped and the only sane value).
+    // The layer turns it into a uniform per-eye fov shift of (ipd/2)/D, IPD from the submitted
+    // eye poses.
+    float cutscene_dist   = 0.0f;
+    // FRAMING is the comfort choice, and for a flat picture it is entirely SIZE: 1.0 = as the
+    // game draws it (edge to edge, ~96 deg wide), 0.7 reads as a screen further off, focus
+    // unchanged. Scales the declared tangent extents, which is exactly how a real screen shrinks
+    // with distance. Live (~2 s). 0.25..1.5.
+    float cutscene_size   = 1.0f;
     // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
     // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
     // side-by-side scene render target and writes it as a BMP into the profile's data\ folder,

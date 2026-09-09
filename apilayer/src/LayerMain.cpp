@@ -115,6 +115,8 @@ std::atomic<uint64_t> g_layers_appended{0};
 // and there is nothing to order against. g_mono_patched counts projection layers actually rewritten
 // -- the number a caller must see MOVING before claiming the mono path is live.
 std::atomic<int>      g_projection_mono{0};
+std::atomic<float>    g_mono_distance{0.f};    // mode 5: convergence depth, metres; 0 = infinity
+std::atomic<float>    g_mono_size{1.f};        // mode 5: picture scale; 1 = as rendered
 std::atomic<uint64_t> g_mono_patched{0};
 std::atomic<uint64_t> g_batch_refused{0};   // callback returned more than it was offered
 std::atomic<uint64_t> g_runtime_rejects{0}; // runtime refused the frame WITH our layers in it
@@ -375,12 +377,61 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                                 const XrFovf f  = src->views[sv].fov;
                                 const float  tl = tanf(f.angleLeft), tr = tanf(f.angleRight);
                                 const float  tu = tanf(f.angleUp),   td = tanf(f.angleDown);
+                                // SIZE (set_mono_screen): scaling the declared tangent extents scales
+                                // the picture uniformly, exactly as a flat screen shrinks with distance
+                                // -- framing, with no effect on convergence, which is set separately
+                                // below and for a different reason.
+                                const float size   = g_mono_size.load(std::memory_order_relaxed);
+                                const float half_h = 0.5f * (tr - tl) * size, half_v = 0.5f * (tu - td) * size;
                                 XrFovf c = f;
-                                c.angleRight = atanf(0.5f * (tr - tl)); c.angleLeft = -c.angleRight;
-                                c.angleUp    = atanf(0.5f * (tu - td)); c.angleDown = -c.angleUp;
+                                c.angleRight = atanf(half_h); c.angleLeft = -c.angleRight;
+                                c.angleUp    = atanf(half_v); c.angleDown = -c.angleUp;
+                                // DISTANCE (set_mono_distance). With one identical frame per eye the
+                                // picture has zero disparity, i.e. it sits at infinity -- and that
+                                // is what doubled the SUBTITLES on 2026-09-08 21:15: UEVR's UI quad
+                                // (subtitles, pause menu) sits 2.43 m away, and eyes converged on
+                                // the movie see everything at 2.43 m ~1.5 deg apart. A finite D is
+                                // one uniform disparity: the picture's centre is declared (ipd/2)/D
+                                // to the RIGHT of forward in the left eye and the same to the LEFT
+                                // in the right eye, so the eyes converge on it at D exactly as on a
+                                // flat screen there. The IPD comes from the app's own two eye poses
+                                // in the layer's metres, so no setting has to know it. Still a shift,
+                                // never a stretch, and still rotation-only under the compositor.
+                                float t = 0.f, ipd = 0.f;
+                                const float D = g_mono_distance.load(std::memory_order_relaxed);
+                                if (D > 0.f) {
+                                    const XrVector3f& a = src->views[0].pose.position;
+                                    const XrVector3f& b = src->views[1].pose.position;
+                                    const float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+                                    ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+                                    if (!(ipd > 0.045f && ipd < 0.085f)) ipd = 0.064f;   // collapsed or absurd poses: a typical IPD
+                                    t = (0.5f * ipd) / D;
+                                    // Which view is the LEFT eye? The one the other sits to the right
+                                    // of, in view[0]'s own frame: rotate +X by view[0]'s orientation
+                                    // and project the eye-to-eye vector onto it.
+                                    const XrQuaternionf& q = src->views[0].pose.orientation;
+                                    const float rx = 1.f - 2.f * (q.y * q.y + q.z * q.z);
+                                    const float ry = 2.f * (q.x * q.y + q.w * q.z);
+                                    const float rz = 2.f * (q.x * q.z - q.w * q.y);
+                                    if (dx * rx + dy * ry + dz * rz < 0.f) t = -t;     // view[1] is on the LEFT: mirror the shift
+                                }
                                 for (uint32_t v = 0; v < src->viewCount; ++v) {
-                                    mono_view[mono_used][v]     = src->views[sv];   // image, pose, next (depth) -- one view for every eye
-                                    mono_view[mono_used][v].fov = c;
+                                    mono_view[mono_used][v] = src->views[sv];   // image, pose, next (depth) -- one view for every eye
+                                    XrFovf fv = c;
+                                    const float s = (v == 0) ? t : -t;          // left eye's centre to the right, right eye's to the left
+                                    fv.angleLeft  = atanf(-half_h + s);
+                                    fv.angleRight = atanf( half_h + s);
+                                    mono_view[mono_used][v].fov = fv;
+                                }
+                                // On every CHANGE of distance (the plugin sends on change only, so this
+                                // is bounded): the depth actually applied, with the IPD it was derived
+                                // from -- the one number that says whether the poses were believable.
+                                static float s_logged_D = -1.f, s_logged_size = -1.f;
+                                if (fabsf(D - s_logged_D) > 1e-4f || fabsf(size - s_logged_size) > 1e-4f) {
+                                    s_logged_D = D; s_logged_size = size;
+                                    if (D > 0.f) logf("mono mode 5: picture converges at %.2f m (ipd %.4f m from the submitted eye "
+                                                      "poses, per-eye centre shift %.3f deg), size x%.2f", D, ipd, atanf(t) * 57.29578f, size);
+                                    else         logf("mono mode 5: picture at infinity (no per-eye shift), size x%.2f", size);
                                 }
                                 static bool s_said5 = false;
                                 if (!s_said5) {
@@ -757,6 +808,21 @@ XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
     return 1;
 }
 
+XRAPI_ATTR int XRAPI_CALL api_set_mono_screen(float meters, float size) {
+    if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
+    // Depth: 0 (or nonsense) = infinity; otherwise a sane screen -- nearer than 0.3 m is a wall
+    // of pixels and past 100 m is infinity to the eye anyway. Size: 0.25..1.5 of as-rendered;
+    // beyond 1.5 the declared frustum nears 60 deg half-angles and the picture's edges leave the
+    // display. Both logged where they are APPLIED (xrEndFrame, on change), with the IPD the
+    // depth was derived from, rather than here.
+    const bool  finite = (meters == meters) && meters > 0.f;
+    const float want_d = !finite ? 0.f : ((meters < 0.3f) ? 0.3f : ((meters > 100.f) ? 100.f : meters));
+    const float want_s = !(size == size) ? 1.f : ((size < 0.25f) ? 0.25f : ((size > 1.5f) ? 1.5f : size));
+    g_mono_distance.store(want_d, std::memory_order_relaxed);
+    g_mono_size.store(want_s, std::memory_order_relaxed);
+    return 1;
+}
+
 const HaloVrLayerApi g_api = {
     (uint32_t)sizeof(HaloVrLayerApi),
     HALOVR_LAYER_ABI_VERSION,
@@ -769,6 +835,7 @@ const HaloVrLayerApi g_api = {
     api_layers_appended,
     api_status,
     api_set_projection_mono,   // appended after ABI 1; callers size-check before use
+    api_set_mono_screen,       // second append; same discipline
 };
 
 }   // namespace

@@ -142,6 +142,17 @@ bool xrbridge_set_projection_mono(int mode) {
     return api->set_projection_mono(mode) == 1;
 }
 
+bool xrbridge_set_mono_screen(float meters, float size) {
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr) return false;
+    // Second append after ABI 1; a layer built between the two appends has set_projection_mono
+    // but ENDS before this slot. Same check, same meaning: absent is "cannot", not an error.
+    constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_mono_screen)
+                           + sizeof(((HaloVrLayerApi*)nullptr)->set_mono_screen);
+    if (api->struct_size < kNeed || api->set_mono_screen == nullptr) return false;
+    return api->set_mono_screen(meters, size) == 1;
+}
+
 const char* xrbridge_status() {
     if (g_state.load(std::memory_order_acquire) < 0) return "not probed";
     if (g_api != nullptr && g_api->status != nullptr) {

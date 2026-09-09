@@ -6809,6 +6809,46 @@ void update() {
 #endif
             }
 
+            // CUTSCENE SCREEN -> the layer, ON CHANGE: convergence depth and picture size.
+            // CONVERGENCE IS NOT A TUNABLE. UEVR's UI quad (subtitles, pause menu) sits at
+            // UI_Distance, and eyes converged on a picture at any other depth see that quad
+            // doubled -- so the picture converges exactly there, read live from UEVR so a player
+            // who moves the UI keeps the match. cutscenedist (dev) overrides it for experiments.
+            // SIZE is the framing knob (cutscenesize): a smaller picture reads as a screen further
+            // off while the focus stays put. Read on the cfg poll's ~2 s cadence, never per tick;
+            // sent BEFORE any cutscene so the first one has it; the layer uses it only in mode 5.
+            // A send the layer could not take (not up yet, or older than the call) is retried on
+            // the next poll and complained about once, not every 2 s.
+            {
+                static float s_dist_sent = -1.0f;
+                static float s_size_sent = -1.0f;
+                static bool  s_warned    = false;
+                if (tick > 300 && ((tick % 64) == 5 || s_dist_sent < 0.0f)) {
+                    float       want_m = g_cfg.cutscene_dist * 0.01f;
+                    const char* from   = "cutscenedist override";
+                    if (want_m <= 0.0f) {
+                        char cur[32]{};
+                        API::get()->param()->vr->get_mod_value("UI_Distance", cur, sizeof(cur));
+                        want_m = (float)atof(cur);
+                        from   = "UEVR UI_Distance";
+                    }
+                    const float want_size = g_cfg.cutscene_size;
+                    if (fabsf(want_m - s_dist_sent) > 1e-4f || fabsf(want_size - s_size_sent) > 1e-4f) {
+                        if (halo::xrbridge_set_mono_screen(want_m, want_size)) {
+                            s_dist_sent = want_m;
+                            s_size_sent = want_size;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen -> converge at %.2f m (%s), "
+                                                 "size x%.2f -- applied by the API layer", want_m, from, want_size);
+                        } else if (!s_warned) {
+                            s_warned = true;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen NOT applied (layer absent, "
+                                                 "gated off, or older than set_mono_screen) -- retrying quietly; "
+                                                 "the picture sits at infinity, full size, meanwhile");
+                        }
+                    }
+                }
+            }
+
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
             // after any transition (release never is -- being stuck flat is far better than

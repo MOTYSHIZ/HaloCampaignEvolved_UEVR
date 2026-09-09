@@ -190,6 +190,16 @@ typedef struct HaloVrLayerApi {
     // (XrLayerBridge.cpp: xrbridge_set_projection_mono) does that check; call through it.
     // Returns 1 when applied, 0 when the layer is gated off.
     int (XRAPI_PTR *set_projection_mono)(int on);
+    // THE MODE-5 SCREEN. `meters` is the depth the eyes converge on (0 = infinity); `size` is the
+    // picture's scale (1 = as rendered; 0.7 reads as a screen further off, same convergence).
+    // Two knobs on purpose. Convergence is NOT a comfort choice: UEVR's UI quad -- subtitles,
+    // pause menu -- sits at UI_Distance (2.43 m), and eyes converged on a picture at any OTHER
+    // depth see that quad ~1.5 deg doubled (measured at infinity, 2026-09-08 21:15), so the
+    // plugin sends UI_Distance. Framing IS a comfort choice, and for a flat picture size is the
+    // whole of it. Used only while mode 5 is on. Appended after set_projection_mono under the
+    // same struct_size discipline: call through XrLayerBridge.cpp: xrbridge_set_mono_screen.
+    // Returns 1 when accepted, 0 when the layer is gated off.
+    int (XRAPI_PTR *set_mono_screen)(float meters, float size);
 } HaloVrLayerApi;
 
 // The single export. Returns null -- deliberately, loudly, and without touching anything -- when
