@@ -446,8 +446,11 @@ struct Config {
     // view and restores it when gameplay returns.
     //
     // MODES -- what "flatten" means. The movies are PRE-RENDERED MP4s (Content\Movies\
-    // CinematicsPreRenders) drawn by the engine's NATIVE fullscreen movie player, outside the
-    // per-eye 3D render -- which is why they double in stereo and why no in-world fix exists.
+    // CinematicsPreRenders). CORRECTED 2026-09-08 by an eye dump: they are NOT drawn outside
+    // the per-eye render. Each eye image carries one copy, composited in screen space at the
+    // same pixel coordinates in both views, and the doubling is the headset's asymmetric FOV
+    // declaring those identical pixels 30 deg apart. The fix that follows from that lives in
+    // cutscene_mono (mode 5, via the API layer); the two modes below predate it.
     //   1 = UEVR's 2D SCREEN MODE (VR_2DScreenMode). THE DEFAULT -- the community-preferred
     //       behaviour. CAVEAT, field-tested: over SteamVR's OpenXR runtime the screen never
     //       composites in-headset (SteamVR drops UEVR's eye-visibility quad layers; they DO
@@ -3225,6 +3228,32 @@ struct Config {
     // 3 = DROP the app's quad layers (UEVR's Slate-UI quad), keep the projection.
     // 4 = DROP the projection, keep the app's quads -- the movie alone on a flat mono screen.
     //     If the doubling is "the movie twice, once in each place", 4 is the fix outright.
+    //
+    // MEASURED 2026-09-08 20:37-20:51, and this settles it. Modes 1-3: no change. Mode 4: the
+    // movie GONE, subtitles only -- so the movie is inside the projection eye images. The eye
+    // dump (cutscenedump, below) then showed each eye holding ONE copy of the movie, letterboxed
+    // mid-frame, and the two eyes PIXEL-IDENTICAL (mean abs diff 0.00 over the whole frame).
+    // The game composites the movie in screen space, at the same pixel coordinates in both
+    // views. What doubles it is the headset's ASYMMETRIC FOV: UEVR renders and submits each eye
+    // through its own frustum (this rig: left eye tan -1.376..+0.839, right eye mirrored), so
+    // the pixel centre points ~15 deg LEFT of forward in the left eye and ~15 deg RIGHT in the
+    // right eye. Same pixels, 30 deg apart -- unfusable, two ships. Vertically both eyes agree
+    // (~13 deg below the axis), which is why the doubling is horizontal only. Every earlier
+    // model -- Slate quad, movie-twice, left/right image mismatch -- was wrong, and mode 2 of
+    // cutscene_2d (mono collapse) could never have worked: the difference is angular, not
+    // translational.
+    // 5 = THE FIX. Every eye gets view[0] -- image, pose, depth chain -- through ONE symmetric
+    //     fov re-centred on the forward axis with the tangent extents the image was rendered
+    //     at. Pixel-to-angle now matches in both eyes: the movie fuses as a single picture dead
+    //     ahead at infinity, nothing stretched (same tangent width, only shifted). The 3D world
+    //     is mono for the duration. Zero GPU work, no UEVR setting touched, cutscene-scoped.
+    //     (UEVR's own Horizontal Projection = Symmetrical does the same thing for the whole
+    //     session at a ~20% angular-resolution cost in gameplay, and a plugin cannot flip it
+    //     live: set_mod_value changes the value but only the UEVR menu raises the runtime's
+    //     should_recalculate_eye_projections flag. It remains the zero-build A/B: flip it in the
+    //     UEVR menu mid-cutscene and the doubling should vanish on the spot.)
+    // Default stays 0 until one headset confirms 5; then 5 ships and the key moves to the
+    // player catalog.
     int   cutscene_mono   = 0;
     // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
     // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole

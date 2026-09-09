@@ -70,6 +70,7 @@
 #include "thirdparty/openxr/loader_interfaces.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -333,7 +334,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                         continue;
                     }
 
-                    if ((mono == 1 || mono == 2) && base != nullptr
+                    if ((mono == 1 || mono == 2 || mono == 5) && base != nullptr
                         && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
                         && mono_used < kMonoMaxLayers) {
                         const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
@@ -348,6 +349,48 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                             for (uint32_t v = 0; v < src->viewCount; ++v) {
                                 mono_view[mono_used][v] = src->views[v];       // clone each view
                                 if (v != sv) mono_view[mono_used][v].subImage = src->views[sv].subImage;
+                            }
+                            if (mono == 5) {
+                                // MODE 5 -- THE FIX, built on what the eye dump of 2026-09-08
+                                // 20:51 showed. Each eye image holds ONE copy of the movie, and
+                                // the two eyes are PIXEL-IDENTICAL: the game composites the movie
+                                // in screen space, at the same pixel coordinates in both views.
+                                // The doubling is the headset's ASYMMETRIC FOV. UEVR renders and
+                                // submits each eye with its own frustum -- on this rig the left
+                                // eye spans tan -1.376..+0.839 and the right eye +0.839..-1.376
+                                // mirrored -- so the PIXEL centre sits ~15 deg left of forward in
+                                // the left eye and ~15 deg right in the right eye. Identical
+                                // pixels, 30 deg apart: no pair of eyes can fuse that, and the
+                                // player sees two ships. (Vertically both eyes agree, ~13 deg
+                                // below the axis, which is why the doubling is horizontal only.)
+                                //
+                                // So the fix is not the pixels, it is the FRAME they are declared
+                                // in: give every eye the SAME view -- view[0]'s image, pose and
+                                // depth chain -- through the SAME symmetric fov, re-centred on the
+                                // forward axis with the tangent extents the image was rendered at.
+                                // The mapping from pixel to angle then matches in both eyes, the
+                                // movie fuses as one picture dead ahead at infinity, and nothing
+                                // is stretched (same tangent width, only shifted). The 3D world
+                                // is mono for the duration; a cutscene does not care.
+                                const XrFovf f  = src->views[sv].fov;
+                                const float  tl = tanf(f.angleLeft), tr = tanf(f.angleRight);
+                                const float  tu = tanf(f.angleUp),   td = tanf(f.angleDown);
+                                XrFovf c = f;
+                                c.angleRight = atanf(0.5f * (tr - tl)); c.angleLeft = -c.angleRight;
+                                c.angleUp    = atanf(0.5f * (tu - td)); c.angleDown = -c.angleUp;
+                                for (uint32_t v = 0; v < src->viewCount; ++v) {
+                                    mono_view[mono_used][v]     = src->views[sv];   // image, pose, next (depth) -- one view for every eye
+                                    mono_view[mono_used][v].fov = c;
+                                }
+                                static bool s_said5 = false;
+                                if (!s_said5) {
+                                    s_said5 = true;
+                                    logf("mono mode 5: view[0] to every eye through one re-centred fov -- raw tan L/R/U/D "
+                                         "%.3f/%.3f/%.3f/%.3f -> +-%.3f horizontal, +-%.3f vertical (the pixel centre was "
+                                         "%.1f deg off-axis horizontally, %.1f deg vertically)",
+                                         tl, tr, tu, td, tanf(c.angleRight), tanf(c.angleUp),
+                                         atanf(0.5f * (tl + tr)) * 57.29578f, atanf(0.5f * (tu + td)) * 57.29578f);
+                                }
                             }
                             dst.views = mono_view[mono_used];
                             combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dst);
@@ -690,6 +733,7 @@ const char* mono_mode_name(int m) {
         case 2:  return "ON mode 2: right eye's image to every view";
         case 3:  return "ON mode 3: app QUAD layers dropped, projection kept";
         case 4:  return "ON mode 4: PROJECTION dropped, app quad layers kept";
+        case 5:  return "ON mode 5: view[0] to every eye through one re-centred symmetric fov (the fix)";
         default: return "OFF";
     }
 }
@@ -698,9 +742,10 @@ XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
     // Behind the gate like everything else: an inert layer must not start rewriting a stranger's
     // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
     if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
-    // 0 = off, 1/2 = left/right eye to every view, 3 = drop app quads, 4 = drop the projection.
-    // Anything outside clamps. See mono_mode_name().
-    const int want = (on <= 0) ? 0 : ((on >= 4) ? 4 : on);
+    // 0 = off, 1/2 = left/right eye to every view, 3 = drop app quads, 4 = drop the projection,
+    // 5 = one view, one re-centred fov, for every eye (the fix). Anything outside clamps. See
+    // mono_mode_name().
+    const int want = (on <= 0) ? 0 : ((on >= 5) ? 5 : on);
     const int prev = g_projection_mono.exchange(want, std::memory_order_relaxed);
     // Say so in the LAYER's log, on change only. The plugin logs what it asked for; this is the
     // record of what the layer actually accepted, plus how many frames it had rewritten up to the
