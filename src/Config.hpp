@@ -446,8 +446,11 @@ struct Config {
     // view and restores it when gameplay returns.
     //
     // MODES -- what "flatten" means. The movies are PRE-RENDERED MP4s (Content\Movies\
-    // CinematicsPreRenders) drawn by the engine's NATIVE fullscreen movie player, outside the
-    // per-eye 3D render -- which is why they double in stereo and why no in-world fix exists.
+    // CinematicsPreRenders). CORRECTED 2026-09-08 by an eye dump: they are NOT drawn outside
+    // the per-eye render. Each eye image carries one copy, composited in screen space at the
+    // same pixel coordinates in both views, and the doubling is the headset's asymmetric FOV
+    // declaring those identical pixels 30 deg apart. The fix that follows from that lives in
+    // cutscene_mono (mode 5, via the API layer); the two modes below predate it.
     //   1 = UEVR's 2D SCREEN MODE (VR_2DScreenMode). THE DEFAULT -- the community-preferred
     //       behaviour. CAVEAT, field-tested: over SteamVR's OpenXR runtime the screen never
     //       composites in-headset (SteamVR drops UEVR's eye-visibility quad layers; they DO
@@ -3171,6 +3174,125 @@ struct Config {
     // Quad size as a fraction of frame HEIGHT, and its centre within each eye's half, normalised.
     float scope_blit_size = 0.35f;
     float scope_blit_x    = 0.5f;
+    // ---- CUTSCENE BLIT (cutsceneblit, default OFF) --------------------------------------------
+    //
+    // The other half of the cutscene problem. docs\CUTSCENE_FINDINGS.md establishes that the
+    // campaign cutscenes are pre-rendered MP4s drawn by the engine's native MoviePlayer through
+    // its own Slate pass, OUTSIDE the per-eye 3D render -- so there is no MediaTexture to host on
+    // a world quad, and the per-eye composite arrives doubled. It also establishes that a CLEAN
+    // MONO FRAME EXISTS every frame (the desktop mirror is a clean letterboxed image).
+    //
+    // ** THE PREMISE THIS KEY WAS BUILT ON WAS WRONG, MEASURED 2026-09-08. ** It assumed the
+    // on_post_render_vr_framework_dx12 destination is the frame about to be submitted to the eyes.
+    // It is D3D12::RTV::IMGUI -- UEVR's UI overlay render target (Framework.cpp:838), which UEVR
+    // composites as a flat quad OVER the scene. Worse, every plugin render hook fires AFTER UEVR
+    // has already copied and submitted the eyes (mods->on_present runs before any plugin callback,
+    // and VR precedes PluginLoader in the mod list), so NO plugin-side hook can touch the eye
+    // images at all. With cutsceneblit=1 the blit ran every cutscene frame, drew the scene into
+    // the overlay target, and the doubled image was untouched -- exactly as this now predicts.
+    //
+    // KEPT, default OFF, as the honest record of that measurement: it is the only thing that
+    // draws game pixels into UEVR's overlay, which may yet be useful. It is NOT a cutscene fix.
+    // The fix lives one layer down -- see cutscene_mono.
+    bool  cutscene_blit   = false;
+    // Fraction of the eye the overlay draw fills (1.0 = edge to edge), centred below 1.0.
+    float cutscene_blit_fill = 1.0f;
+
+    // ---- CUTSCENE MONO (cutscenemono, default OFF until verified) ------------------------------
+    //
+    // The lane that CAN reach the eyes: our OpenXR API layer, which sits between UEVR and the
+    // runtime and sees the projection layer at xrEndFrame -- downstream of every copy the plugin
+    // is upstream of. While a cutscene plays, the layer gives the RIGHT eye's view the LEFT eye's
+    // sub-image (XrLayerAbi.h: set_projection_mono). Zero GPU work; one struct field on a clone.
+    // The 3D scene goes mono for the duration, which a cutscene does not care about.
+    //
+    // WHY THIS IS ALSO THE DISCRIMINATOR. docs\CUTSCENE_FINDINGS.md never established WHERE the
+    // doubling enters. If it is baked into the submitted eye images, this removes it outright and
+    // the lane is the fix. If the movie still doubles while the world has gone mono, the doubling
+    // arrives via a layer OTHER than the projection (a quad UEVR submits, or the runtime), and we
+    // will finally have located it. Either result moves the problem; only a headset can read it.
+    //
+    // Driven by the SAME cine_signal predicate as the flat-view actuator, on change only. Requires
+    // the API layer build that carries set_projection_mono; an older layer negotiates fine and
+    // simply cannot do this, which the plugin logs once rather than pretending.
+    // 0 = off. 1 = LEFT eye's image to both eyes. 2 = RIGHT eye's image to both eyes. Live.
+    //
+    // MEASURED 2026-09-08 20:27 WITH MODE 1: the layer rewrote every projection frame
+    // (patched= climbed at frame rate, runtime accepted every frame) and the doubled cutscene
+    // did NOT change. So the doubling is not a left/right mismatch inside the projection
+    // layer. Mode 2 exists as the live A/B: flipping 1 <-> 2 mid-cutscene either shifts the
+    // picture (the movie IS in the projection images, and the doubling is something else
+    // about them) or does nothing (the movie rides a layer this rewrite cannot reach). The
+    // layer's own log prints an inventory of every submitted layer on the first patched
+    // frame -- read that first.
+    // 3 = DROP the app's quad layers (UEVR's Slate-UI quad), keep the projection.
+    // 4 = DROP the projection, keep the app's quads -- the movie alone on a flat mono screen.
+    //     If the doubling is "the movie twice, once in each place", 4 is the fix outright.
+    //
+    // MEASURED 2026-09-08 20:37-20:51, and this settles it. Modes 1-3: no change. Mode 4: the
+    // movie GONE, subtitles only -- so the movie is inside the projection eye images. The eye
+    // dump (cutscenedump, below) then showed each eye holding ONE copy of the movie, letterboxed
+    // mid-frame, and the two eyes PIXEL-IDENTICAL (mean abs diff 0.00 over the whole frame).
+    // The game composites the movie in screen space, at the same pixel coordinates in both
+    // views. What doubles it is the headset's ASYMMETRIC FOV: UEVR renders and submits each eye
+    // through its own frustum (this rig: left eye tan -1.376..+0.839, right eye mirrored), so
+    // the pixel centre points ~15 deg LEFT of forward in the left eye and ~15 deg RIGHT in the
+    // right eye. Same pixels, 30 deg apart -- unfusable, two ships. Vertically both eyes agree
+    // (~13 deg below the axis), which is why the doubling is horizontal only. Every earlier
+    // model -- Slate quad, movie-twice, left/right image mismatch -- was wrong, and mode 2 of
+    // cutscene_2d (mono collapse) could never have worked: the difference is angular, not
+    // translational.
+    // 5 = FOV-SHIFT ATTEMPT (kept for the record; NOT the fix). Every eye gets view[0]'s image
+    //     through one symmetric fov re-centred on the forward axis, shifted per-eye toward a
+    //     computed convergence depth. MEASURED 2026-09-08 21:56: the movie fused, but the
+    //     subtitles and pause menu (UEVR's stereo-correct UI quad) still doubled, and the layer
+    //     log proved the shift applied exactly as designed. So SteamVR did not honour a projection
+    //     fov shift as depth -- the movie sat wherever the trick landed it, not at the UI.
+    //     (UEVR's own Horizontal Projection = Symmetrical fuses the movie the same way, session-
+    //     wide, at a ~20% angular-resolution cost, and a plugin cannot flip it live: set_mod_value
+    //     changes the value but only the UEVR menu raises should_recalculate_eye_projections. Still
+    //     the zero-build A/B from the UEVR menu.)
+    // 6 = THE FIX (2026-09-08). Drop the doubled projection and present the movie as ITS OWN quad
+    //     -- the same layer type the subtitles use, at a real pose. A quad is stereo-correct by
+    //     construction (the runtime renders it to both eyes from one pose), so it fuses at its
+    //     distance the way the subtitle quad fuses at UI_Distance. The quad's distance IS
+    //     UI_Distance, so the movie and the subtitles share one depth and one convergence, and
+    //     every other layer passes through untouched -- exactly what the user asked for ("target
+    //     the cutscene image specifically without altering per-eye draw wholesale"). Head-locked,
+    //     recomputed each frame; zero GPU work; cutscene-scoped.
+    // Mode 5 was confirmed in headset to fuse the movie (2026-09-08 21:15) but left the UI
+    // doubled, so 6 supersedes it. CONFIRMED IN HEADSET 2026-09-08 22:36 ("Appears to work
+    // great"): movie, subtitles and pause menu all single, at one depth. 6 ships.
+    int   cutscene_mono   = 6;
+    // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
+    // should hinge convergence on the distance of the cutscene pane").
+    //
+    // CONVERGENCE is not a comfort choice, and there is no way round it: eyes converge on ONE
+    // depth, and anything at another depth is seen double -- hold a finger up and look past it.
+    // UEVR's UI quad (subtitles, pause menu) sits at UI_Distance (2.43 m shipped); the first
+    // mode-5 run put the picture at infinity, the movie fused, and everything at 2.43 m carried
+    // ~1.5 deg of disparity and doubled. So the picture converges exactly where the UI is, read
+    // live from UEVR (a player who moves the UI keeps the match). cutscenedist, cm, is the DEV
+    // override for experiments only: 0 = match UI_Distance (shipped and the only sane value).
+    // The layer turns it into a uniform per-eye fov shift of (ipd/2)/D, IPD from the submitted
+    // eye poses.
+    float cutscene_dist   = 0.0f;
+    // FRAMING is the comfort choice, and for a flat picture it is entirely SIZE: 1.0 = as the
+    // game draws it (edge to edge, ~96 deg wide), 0.75 reads as a comfortable cinema screen a bit
+    // further off, focus unchanged. Scales the declared tangent extents, which is exactly how a
+    // real screen shrinks with distance. Live (~2 s). 0.25..1.5.
+    // Default 0.75, canonized 2026-09-08 after the headset call ("works great" at 0.75) -- edge to
+    // edge at 1.0 is a lot of screen this close; 0.75 is the comfortable frame.
+    float cutscene_size   = 0.75f;
+    // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
+    // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
+    // side-by-side scene render target and writes it as a BMP into the profile's data\ folder,
+    // then logs the path. Set back to 0 to re-arm. This is the picture that decides what "the
+    // movie is doubled" actually looks like inside ONE eye -- modes 1-4 above proved the movie
+    // lives in the projection images and that both eyes already carry the same thing, so the
+    // shape of the doubling (two full copies, a full plus a half, one half) is a fact about a
+    // single eye image, and only the pixels can say which. Compiled out of player builds.
+    int   cutscene_dump   = 0;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------

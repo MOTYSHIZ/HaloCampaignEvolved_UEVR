@@ -112,6 +112,8 @@
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
 #include "Scope.hpp"
+#include "ScopeBlit.hpp"     // cutscene_blit_set_active / scope_blit_register (render-thread blit)
+#include "XrLayerBridge.hpp" // xrbridge_set_projection_mono (cutscene mono via the API layer)
 // For scopelayer_configure_cell_early() only -- the pane's atlas cell must be requested from
 // update() BEFORE xrlayer_tick() builds the atlas. Everything else in the scope lane is reached
 // through Scope.hpp.
@@ -6971,6 +6973,104 @@ void update() {
             const bool cine_signal = s_cin_ok ? s_cin_active
                                               : (g_stick_mode.load() && cine_recent);
 
+            // PUBLISH THE SAME PREDICATE TO THE RENDER THREAD for the cutscene blit, and register
+            // the callback from a NON-DEV path.
+            //
+            // Deliberately the identical expression the flat-view actuator uses rather than a
+            // second reading of the subsystem: two conditions that disagree in any overlapping
+            // state are an oscillator, and this one drives something the eyes see (the 2026-08-05
+            // thrash incident is the worked example, a few lines below).
+            //
+            // scope_blit_tick() is idempotent (it returns immediately once registered, or when
+            // both lanes are off) and is called here because its OTHER call site in Scope.cpp sits
+            // inside #if HALO_VR_DEV -- which would have made cutsceneblit silently inert in
+            // exactly the builds players run. That is the same failure un-gated in XrSource.cpp on
+            // 2026-09-07; see the note above probe() there.
+            halo::cutscene_blit_set_active(cine_signal);
+            // NO REGISTRATION HERE. scope_blit_register() is called from on_initialize; calling it
+            // from this tick took a unique_lock on the shared_mutex whose shared_lock UEVR is
+            // already holding on this thread to dispatch us, and hung the game. Publishing the
+            // flag is a relaxed atomic store and is safe anywhere.
+
+            // CUTSCENE MONO via the API layer -- the lane that can actually reach the eyes (see
+            // Config.hpp, cutscene_mono). Same predicate as everything else in this block, applied
+            // ON CHANGE: the bridge call is cheap, but a VR-visible actuator driven every tick is
+            // the shape of the 2026-08-05 oscillation, so it is not given the chance.
+            {
+                static int s_mono_sent = -1;
+                const int want = cine_signal ? g_cfg.cutscene_mono : 0;   // 0 off, 1 left, 2 right
+                if (want != s_mono_sent) {
+                    const bool applied = halo::xrbridge_set_projection_mono(want);
+                    s_mono_sent = want;
+                    // Say what the LAYER did, not what we asked: "applied" means the layer is live
+                    // and new enough to know the call. false on an old layer is the whole reason
+                    // the bridge size-checks -- it is "cannot", not "did not", and must read so.
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO %s -> %s",
+                                         (want == 0) ? "OFF"
+                                       : (want == 1) ? "ON mode 1 (left eye to both)"
+                                       : (want == 2) ? "ON mode 2 (right eye to both)"
+                                       : (want == 3) ? "ON mode 3 (app quads DROPPED, projection kept)"
+                                       : (want == 4) ? "ON mode 4 (projection DROPPED, app quads kept)"
+                                       : (want == 5) ? "ON mode 5 (one view, one re-centred fov, for every eye)"
+                                                     : "ON mode 6 (movie as its own head-locked quad; projection dropped)",
+                                         applied ? "applied by the API layer"
+                                                 : "NOT applied (layer absent, gated off, or built "
+                                                   "before set_projection_mono -- rebuild/redeploy "
+                                                   "the layer)");
+                }
+#if HALO_VR_DEV
+                // WHILE ON, RELAY THE LAYER'S OWN COUNTERS every ~2 s. The status string carries
+                // mono=/patched=, and patched= must be CLIMBING -- a switch that applied while
+                // that number sits still means no projection layer matched the rewrite. The
+                // 14:38 run on 2026-09-08 had exactly one sample of this string, taken before
+                // the switch, and was unreadable for it.
+                if (want != 0 && (tick % 64) == 17) {
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO layer: %s",
+                                         halo::xrbridge_status());
+                }
+#endif
+            }
+
+            // CUTSCENE SCREEN -> the layer, ON CHANGE: convergence depth and picture size.
+            // CONVERGENCE IS NOT A TUNABLE. UEVR's UI quad (subtitles, pause menu) sits at
+            // UI_Distance, and eyes converged on a picture at any other depth see that quad
+            // doubled -- so the picture converges exactly there, read live from UEVR so a player
+            // who moves the UI keeps the match. cutscenedist (dev) overrides it for experiments.
+            // SIZE is the framing knob (cutscenesize): a smaller picture reads as a screen further
+            // off while the focus stays put. Read on the cfg poll's ~2 s cadence, never per tick;
+            // sent BEFORE any cutscene so the first one has it; the layer uses it only in mode 5.
+            // A send the layer could not take (not up yet, or older than the call) is retried on
+            // the next poll and complained about once, not every 2 s.
+            {
+                static float s_dist_sent = -1.0f;
+                static float s_size_sent = -1.0f;
+                static bool  s_warned    = false;
+                if (tick > 300 && ((tick % 64) == 5 || s_dist_sent < 0.0f)) {
+                    float       want_m = g_cfg.cutscene_dist * 0.01f;
+                    const char* from   = "cutscenedist override";
+                    if (want_m <= 0.0f) {
+                        char cur[32]{};
+                        API::get()->param()->vr->get_mod_value("UI_Distance", cur, sizeof(cur));
+                        want_m = (float)atof(cur);
+                        from   = "UEVR UI_Distance";
+                    }
+                    const float want_size = g_cfg.cutscene_size;
+                    if (fabsf(want_m - s_dist_sent) > 1e-4f || fabsf(want_size - s_size_sent) > 1e-4f) {
+                        if (halo::xrbridge_set_mono_screen(want_m, want_size)) {
+                            s_dist_sent = want_m;
+                            s_size_sent = want_size;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen -> converge at %.2f m (%s), "
+                                                 "size x%.2f -- applied by the API layer", want_m, from, want_size);
+                        } else if (!s_warned) {
+                            s_warned = true;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen NOT applied (layer absent, "
+                                                 "gated off, or older than set_mono_screen) -- retrying quietly; "
+                                                 "the picture sits at infinity, full size, meanwhile");
+                        }
+                    }
+                }
+            }
+
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
             // after any transition (release never is -- being stuck flat is far better than
@@ -10676,6 +10776,13 @@ const ApiLayerEarlyInit g_api_layer_early_init;
 class HaloAimDriverPlugin : public uevr::Plugin {
 public:
     void on_initialize() override {
+        // REGISTER RENDER CALLBACKS HERE AND ONLY HERE. UEVR calls uevr_plugin_initialize from its
+        // plugin-load loop, before any dispatch has taken m_api_cb_mtx (PluginLoader.cpp: init at
+        // ~1876, first lock at 1899). Registering from a TICK instead takes a unique_lock on the
+        // shared_mutex that on_pre_engine_tick's dispatch already holds shared on this thread --
+        // a self-deadlock that hung the game twice on 2026-09-08. See ScopeBlit.hpp.
+        halo::scope_blit_register();
+
         // ALREADY DONE, AT DLL LOAD -- see enable_api_layer_for_this_process. All that is left here
         // is to say what happened, because logging was impossible that early.
         //

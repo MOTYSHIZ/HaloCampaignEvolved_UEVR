@@ -86,26 +86,41 @@ void probe() {
         return;
     }
 
-    // The layer agreed the version. Now check the SIZE, which is the other half of the contract:
-    // a version match with a smaller struct means the layer was built against a header that had
-    // fewer fields, and reading past its end would be reading whatever follows it in the layer's
-    // data segment. Refuse rather than trim -- a same-version disagreement is a build mistake, not
-    // a compatibility case to absorb.
-    if (api->struct_size < sizeof(HaloVrLayerApi)) {
+    // The layer agreed the version. Now check the SIZE, which is the other half of the contract --
+    // but the floor is what ABI 1 SHIPPED WITH, not sizeof() of the header this plugin was built
+    // against. Fields appended since are each size-checked at their own call site, so a layer
+    // that ends before them is "cannot make that call", not "unsafe to touch". This used to
+    // demand the full sizeof and REFUSE: on 2026-09-08 21:41 a plugin expecting 88 bytes met a
+    // same-version 80-byte layer (the layer had not been redeployed with it), refused it whole,
+    // and the cutscene fix silently never engaged while the log said "REFUSING" every two
+    // seconds. Below the v1 floor the struct really is foreign, and that is still a refusal.
+    if (api->struct_size < HALOVR_LAYER_ABI_V1_SIZE) {
         _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
-                    "REFUSING the layer: it reports ABI %u but a struct of %u bytes where this "
-                    "plugin expects %u. Same version, different header -- one of the two was built "
-                    "against a stale XrLayerAbi.h.",
+                    "REFUSING the layer: it reports ABI %u but a struct of %u bytes, smaller than "
+                    "the %u bytes ABI %u shipped with. Same version, different header -- one of the "
+                    "two was built against a stale XrLayerAbi.h.",
                     (unsigned)api->abi_version, (unsigned)api->struct_size,
-                    (unsigned)sizeof(HaloVrLayerApi));
+                    (unsigned)HALOVR_LAYER_ABI_V1_SIZE, (unsigned)HALOVR_LAYER_ABI_VERSION);
         logf("%s", g_status);
         g_state.store(0, std::memory_order_release);
         return;
     }
 
     g_api = api;
-    _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
-                "layer AVAILABLE -- %s", api->build_stamp != nullptr ? api->build_stamp : "(no stamp)");
+    if (api->struct_size < sizeof(HaloVrLayerApi)) {
+        // Older than this plugin: everything v1 works, the appended calls report "cannot" at
+        // their call sites. Say so ONCE here, with the remedy, so a player's log explains why the
+        // cutscene picture still doubles when the reticule is fine.
+        _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+                    "layer AVAILABLE but OLDER than this plugin (%u of %u bytes) -- %s. Reticule OK; "
+                    "the appended calls (cutscene mono / screen) are unavailable until the layer in "
+                    "the profile's apilayer folder is updated alongside halo_vr.dll.",
+                    (unsigned)api->struct_size, (unsigned)sizeof(HaloVrLayerApi),
+                    api->build_stamp != nullptr ? api->build_stamp : "(no stamp)");
+    } else {
+        _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+                    "layer AVAILABLE -- %s", api->build_stamp != nullptr ? api->build_stamp : "(no stamp)");
+    }
     logf("%s", g_status);
     // Say it once, plainly, because the next person to read a log will want the distinction spelled
     // out rather than inferred.
@@ -127,6 +142,30 @@ bool xrbridge_available() {
 
 const HaloVrLayerApi* xrbridge_api() {
     return xrbridge_available() ? g_api : nullptr;
+}
+
+bool xrbridge_set_projection_mono(int mode) {
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr) return false;
+    // THE SIZE CHECK IS THE WHOLE POINT OF THIS WRAPPER. set_projection_mono was appended after ABI
+    // 1 shipped, so an older layer negotiates the same version with a struct that ENDS before this
+    // slot; reading it there is reading past the layer's data. A same-version, smaller struct is
+    // "the call does not exist", not an error.
+    constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_projection_mono)
+                           + sizeof(((HaloVrLayerApi*)nullptr)->set_projection_mono);
+    if (api->struct_size < kNeed || api->set_projection_mono == nullptr) return false;
+    return api->set_projection_mono(mode) == 1;
+}
+
+bool xrbridge_set_mono_screen(float meters, float size) {
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr) return false;
+    // Second append after ABI 1; a layer built between the two appends has set_projection_mono
+    // but ENDS before this slot. Same check, same meaning: absent is "cannot", not an error.
+    constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_mono_screen)
+                           + sizeof(((HaloVrLayerApi*)nullptr)->set_mono_screen);
+    if (api->struct_size < kNeed || api->set_mono_screen == nullptr) return false;
+    return api->set_mono_screen(meters, size) == 1;
 }
 
 const char* xrbridge_status() {

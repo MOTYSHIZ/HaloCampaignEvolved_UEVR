@@ -70,6 +70,7 @@
 #include "thirdparty/openxr/loader_interfaces.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -109,6 +110,14 @@ std::atomic<uint32_t>              g_cb_inflight{0};
 // Watchdog counters. "Installed is not running" -- these are how the plugin proves the difference.
 std::atomic<uint64_t> g_frames_seen{0};
 std::atomic<uint64_t> g_layers_appended{0};
+// MONO PROJECTION (see XrLayerAbi.h, set_projection_mono). Set by the plugin on the game thread,
+// read here on the app's render/submit thread; relaxed is enough because a frame late is invisible
+// and there is nothing to order against. g_mono_patched counts projection layers actually rewritten
+// -- the number a caller must see MOVING before claiming the mono path is live.
+std::atomic<int>      g_projection_mono{0};
+std::atomic<float>    g_mono_distance{0.f};    // mode 5: convergence depth, metres; 0 = infinity
+std::atomic<float>    g_mono_size{1.f};        // mode 5: picture scale; 1 = as rendered
+std::atomic<uint64_t> g_mono_patched{0};
 std::atomic<uint64_t> g_batch_refused{0};   // callback returned more than it was offered
 std::atomic<uint64_t> g_runtime_rejects{0}; // runtime refused the frame WITH our layers in it
 std::atomic<uint64_t> g_passthrough_rejects{0}; // refused for a reason that is NOT ours; returned as-is
@@ -252,16 +261,21 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
     XrResult result = XR_SUCCESS;
     bool     handled = false;
 
-    if (cb != nullptr && info != nullptr) {
+    // MONO is a reason to rebuild the layer list on its own, with or without a plugin callback and
+    // with or without extra quads -- so it is read here, ahead of the callback, and folded into the
+    // same "do we patch this frame" decision the quads use. One rebuild path, not two.
+    const int mono = g_projection_mono.load(std::memory_order_relaxed);
+
+    if (info != nullptr && (cb != nullptr || mono != 0)) {
         const XrCompositionLayerBaseHeader* extra[HALOVR_LAYER_MAX_EXTRA_LAYERS];
-        const uint32_t n = cb(session, info, extra, HALOVR_LAYER_MAX_EXTRA_LAYERS, user);
+        const uint32_t n = (cb != nullptr) ? cb(session, info, extra, HALOVR_LAYER_MAX_EXTRA_LAYERS, user) : 0u;
 
         if (n > HALOVR_LAYER_MAX_EXTRA_LAYERS) {
             // A caller that returned more than it was offered has miscounted, and the array it wrote
             // into is ours. Discard the whole batch rather than trusting any of it: presenting the
             // application's own frame is always a safe answer, and clamping would hide the bug.
             g_batch_refused.fetch_add(1, std::memory_order_relaxed);
-        } else if (n > 0) {
+        } else if (n > 0 || mono != 0) {
             // One combined array. Sized for the runtime's realistic ceiling plus our own; anything
             // beyond it falls through to the untouched frame rather than truncating the
             // APPLICATION's layers, which would be a visible regression for the player.
@@ -271,7 +285,297 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
             if (n <= kMaxTotal && info->layerCount <= kMaxTotal - n && info->layers != nullptr) {
                 const XrCompositionLayerBaseHeader* combined[kMaxTotal];
                 uint32_t w = 0;
-                for (uint32_t i = 0; i < info->layerCount; ++i) combined[w++] = info->layers[i];
+
+                // ---- MONO PROJECTION: clone-and-patch, never edit the app's memory --------------
+                //
+                // The application's layer structs are const and it may reuse them next frame, so
+                // the rewrite happens on a copy that lives on THIS stack frame -- valid for exactly
+                // as long as next() needs it (xrEndFrame is synchronous; the runtime has consumed
+                // the structs by the time it returns). The copy is shallow on purpose: `next`
+                // chains and the subImage swapchain handle are borrowed, not owned.
+                //
+                // The patch itself is one field per extra view: every view after the first is
+                // given view[0]'s subImage (swapchain + array index + imageRect), so the runtime
+                // composites the LEFT eye's pixels for both eyes. Pose and fov are left as the app
+                // set them -- each eye is still reprojected from its own position, which is what
+                // keeps head movement correct; only the CONTENT is shared.
+                //
+                // Bounded scratch: at most kMonoMaxLayers projection layers with kMonoMaxViews
+                // views each. Anything beyond that is passed through UNPATCHED rather than refused
+                // -- a cutscene with a stray extra layer must never lose the frame, only the fix.
+                constexpr uint32_t kMonoMaxLayers = 4;
+                constexpr uint32_t kMonoMaxViews  = 4;
+                XrCompositionLayerProjection     mono_layer[kMonoMaxLayers];
+                XrCompositionLayerProjectionView mono_view[kMonoMaxLayers][kMonoMaxViews];
+                uint32_t mono_used = 0;
+
+                // MODE 6 builds ONE quad here and drops the projection; it must outlive the loop
+                // (next() reads it after), so it lives on this stack frame beside the mono clones.
+                XrCompositionLayerQuad movie_quad{};
+                bool                   have_movie = false;
+
+                for (uint32_t i = 0; i < info->layerCount; ++i) {
+                    const XrCompositionLayerBaseHeader* base = info->layers[i];
+
+                    // MODES 3 AND 4 REMOVE A CLASS OF APP LAYER instead of rewriting one. They
+                    // exist because mode 1 rewrote every projection frame on 2026-09-08 and the
+                    // doubled cutscene did not change, which means the doubling is not a
+                    // left/right mismatch inside the projection. The profile has UEVR presenting
+                    // the game's Slate UI as its own quad (UI_OverlayType=0, UI_Size=2.0,
+                    // UI_Distance=2.43) and the cutscene movie is drawn by Slate -- so the
+                    // likeliest picture is the movie shown TWICE, once in the projection images
+                    // and once on that quad, at different depths. Dropping one class at a time,
+                    // live, says which copy is which. Mode 4 is also the candidate FIX: the
+                    // movie alone, on a flat mono screen, with nothing doubled behind it.
+                    // Our OWN appended quads are added after this loop and are unaffected.
+                    if (base != nullptr && mono == 3 && base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        static bool s_said3 = false;
+                        if (!s_said3) { s_said3 = true; logf("mono mode 3: dropping app layer type=%d (first of them)", (int)base->type); }
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    if (base != nullptr && mono == 4 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        static bool s_said4 = false;
+                        if (!s_said4) { s_said4 = true; logf("mono mode 4: dropping the projection layer (first of them); quads carry the frame"); }
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    // MODE 6 -- THE SHIPPING FIX (2026-09-08 22:xx), and the one the user asked for:
+                    // "target the cutscene image specifically without altering per-eye draw
+                    // wholesale, so all other elements stay correct." Mode 5 re-centred the
+                    // projection's per-eye fov and computed a convergence depth, but SteamVR did not
+                    // honour that shift AS depth: the movie fused, yet the subtitles and pause menu
+                    // -- UEVR's own quad, already stereo-correct at UI_Distance -- still doubled,
+                    // because the eyes rested wherever the fov trick actually landed the movie, not
+                    // at the UI. (Logs 21:56 confirmed the shift applied exactly as designed and the
+                    // doubling stayed, which is what falsifies the fov-shift-as-convergence model.)
+                    //
+                    // So mode 6 stops touching the projection's stereo at all. It DROPS the
+                    // projection (the doubled movie) and submits the movie as ITS OWN quad -- the
+                    // same layer type the subtitles use, placed at a real pose. A quad is
+                    // stereo-correct by construction: the runtime renders it to both eyes from its
+                    // single pose, so it fuses at its distance the way the subtitle quad fuses at
+                    // UI_Distance. Set the quad's distance = UI_Distance and the movie and the
+                    // subtitles share one depth and one convergence. Every other layer -- subtitles,
+                    // menu, our reticule -- is passed through untouched, which is the whole point.
+                    //
+                    // Source = view[0]'s sub-image (the left eye's render: the movie centred on
+                    // black), shown to BOTH eyes. Head-locked: recomputed in front of the head every
+                    // frame (the layer runs every xrEndFrame), which is how UEVR's follow-view UI
+                    // behaves too. Sized to subtend the same angle the movie does now, so it looks
+                    // the same but sits at a real depth; `size` frames it, `distance` moves it.
+                    if (base != nullptr && mono == 6 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                        if (!have_movie && src->views != nullptr && src->viewCount >= 2) {
+                            const XrCompositionLayerProjectionView& v0 = src->views[0];
+                            const XrFovf f = v0.fov;
+                            const float half_h = 0.5f * (tanf(f.angleRight) - tanf(f.angleLeft));
+                            const float half_v = 0.5f * (tanf(f.angleUp)    - tanf(f.angleDown));
+                            const float size = g_mono_size.load(std::memory_order_relaxed);
+                            float D = g_mono_distance.load(std::memory_order_relaxed);
+                            if (!(D > 0.3f)) D = 2.43f;   // 0/infinity is meaningless for a real screen; UI default
+                            // Head = midpoint of the two eye positions; facing = view[0]'s
+                            // orientation. Forward is that orientation applied to local -Z.
+                            const XrVector3f a = src->views[0].pose.position;
+                            const XrVector3f b = src->views[1].pose.position;
+                            const XrQuaternionf q = v0.pose.orientation;
+                            const float fwdx = -2.f * (q.x * q.z + q.w * q.y);
+                            const float fwdy = -2.f * (q.y * q.z - q.w * q.x);
+                            const float fwdz = -(1.f - 2.f * (q.x * q.x + q.y * q.y));
+                            const float hx = 0.5f * (a.x + b.x), hy = 0.5f * (a.y + b.y), hz = 0.5f * (a.z + b.z);
+                            movie_quad.type          = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                            movie_quad.next          = nullptr;
+                            movie_quad.layerFlags    = 0;   // opaque: the movie's black surround is the screen's border
+                            movie_quad.space         = src->space;
+                            movie_quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                            movie_quad.subImage      = v0.subImage;
+                            movie_quad.pose.orientation = q;
+                            movie_quad.pose.position    = XrVector3f{ hx + fwdx * D, hy + fwdy * D, hz + fwdz * D };
+                            movie_quad.size          = XrExtent2Df{ 2.f * D * half_h * size, 2.f * D * half_v * size };
+                            // Placed AT the projection's slot (first), so the subtitle/menu quads
+                            // that come after it in the list draw ON TOP -- never occluded by the
+                            // movie's opaque border.
+                            combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&movie_quad);
+                            have_movie = true;
+                            g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                            static float s_logD6 = -1.f, s_logS6 = -1.f;
+                            if (fabsf(D - s_logD6) > 1e-4f || fabsf(size - s_logS6) > 1e-4f) {
+                                s_logD6 = D; s_logS6 = size;
+                                logf("mono mode 6: movie as a head-locked quad at %.2f m, size x%.2f -> %.2f x %.2f m; "
+                                     "projection dropped, subtitles/menu/reticule untouched",
+                                     D, size, movie_quad.size.width, movie_quad.size.height);
+                            }
+                            continue;
+                        }
+                        // A second projection this frame, or degenerate views: drop it too; the one
+                        // quad already carries the movie.
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    if ((mono == 1 || mono == 2 || mono == 5) && base != nullptr
+                        && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
+                        && mono_used < kMonoMaxLayers) {
+                        const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                        if (src->views != nullptr && src->viewCount >= 2 && src->viewCount <= kMonoMaxViews) {
+                            // mode 1 = view[0] (left) to every eye; mode 2 = view[1] (right) to
+                            // every eye. Two modes so a player can flip LIVE mid-cutscene: if the
+                            // picture shifts, the movie is in the projection images; if it does
+                            // not, it is somewhere the projection rewrite cannot reach.
+                            const uint32_t sv = (mono == 2) ? 1u : 0u;
+                            XrCompositionLayerProjection& dst = mono_layer[mono_used];
+                            dst = *src;                                        // shallow clone
+                            for (uint32_t v = 0; v < src->viewCount; ++v) {
+                                mono_view[mono_used][v] = src->views[v];       // clone each view
+                                if (v != sv) mono_view[mono_used][v].subImage = src->views[sv].subImage;
+                            }
+                            if (mono == 5) {
+                                // MODE 5 -- THE FIX, built on what the eye dump of 2026-09-08
+                                // 20:51 showed. Each eye image holds ONE copy of the movie, and
+                                // the two eyes are PIXEL-IDENTICAL: the game composites the movie
+                                // in screen space, at the same pixel coordinates in both views.
+                                // The doubling is the headset's ASYMMETRIC FOV. UEVR renders and
+                                // submits each eye with its own frustum -- on this rig the left
+                                // eye spans tan -1.376..+0.839 and the right eye +0.839..-1.376
+                                // mirrored -- so the PIXEL centre sits ~15 deg left of forward in
+                                // the left eye and ~15 deg right in the right eye. Identical
+                                // pixels, 30 deg apart: no pair of eyes can fuse that, and the
+                                // player sees two ships. (Vertically both eyes agree, ~13 deg
+                                // below the axis, which is why the doubling is horizontal only.)
+                                //
+                                // So the fix is not the pixels, it is the FRAME they are declared
+                                // in: give every eye the SAME view -- view[0]'s image, pose and
+                                // depth chain -- through the SAME symmetric fov, re-centred on the
+                                // forward axis with the tangent extents the image was rendered at.
+                                // The mapping from pixel to angle then matches in both eyes, the
+                                // movie fuses as one picture dead ahead at infinity, and nothing
+                                // is stretched (same tangent width, only shifted). The 3D world
+                                // is mono for the duration; a cutscene does not care.
+                                const XrFovf f  = src->views[sv].fov;
+                                const float  tl = tanf(f.angleLeft), tr = tanf(f.angleRight);
+                                const float  tu = tanf(f.angleUp),   td = tanf(f.angleDown);
+                                // SIZE (set_mono_screen): scaling the declared tangent extents scales
+                                // the picture uniformly, exactly as a flat screen shrinks with distance
+                                // -- framing, with no effect on convergence, which is set separately
+                                // below and for a different reason.
+                                const float size   = g_mono_size.load(std::memory_order_relaxed);
+                                const float half_h = 0.5f * (tr - tl) * size, half_v = 0.5f * (tu - td) * size;
+                                XrFovf c = f;
+                                c.angleRight = atanf(half_h); c.angleLeft = -c.angleRight;
+                                c.angleUp    = atanf(half_v); c.angleDown = -c.angleUp;
+                                // DISTANCE (set_mono_distance). With one identical frame per eye the
+                                // picture has zero disparity, i.e. it sits at infinity -- and that
+                                // is what doubled the SUBTITLES on 2026-09-08 21:15: UEVR's UI quad
+                                // (subtitles, pause menu) sits 2.43 m away, and eyes converged on
+                                // the movie see everything at 2.43 m ~1.5 deg apart. A finite D is
+                                // one uniform disparity: the picture's centre is declared (ipd/2)/D
+                                // to the RIGHT of forward in the left eye and the same to the LEFT
+                                // in the right eye, so the eyes converge on it at D exactly as on a
+                                // flat screen there. The IPD comes from the app's own two eye poses
+                                // in the layer's metres, so no setting has to know it. Still a shift,
+                                // never a stretch, and still rotation-only under the compositor.
+                                float t = 0.f, ipd = 0.f;
+                                const float D = g_mono_distance.load(std::memory_order_relaxed);
+                                if (D > 0.f) {
+                                    const XrVector3f& a = src->views[0].pose.position;
+                                    const XrVector3f& b = src->views[1].pose.position;
+                                    const float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+                                    ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+                                    if (!(ipd > 0.045f && ipd < 0.085f)) ipd = 0.064f;   // collapsed or absurd poses: a typical IPD
+                                    t = (0.5f * ipd) / D;
+                                    // Which view is the LEFT eye? The one the other sits to the right
+                                    // of, in view[0]'s own frame: rotate +X by view[0]'s orientation
+                                    // and project the eye-to-eye vector onto it.
+                                    const XrQuaternionf& q = src->views[0].pose.orientation;
+                                    const float rx = 1.f - 2.f * (q.y * q.y + q.z * q.z);
+                                    const float ry = 2.f * (q.x * q.y + q.w * q.z);
+                                    const float rz = 2.f * (q.x * q.z - q.w * q.y);
+                                    if (dx * rx + dy * ry + dz * rz < 0.f) t = -t;     // view[1] is on the LEFT: mirror the shift
+                                }
+                                for (uint32_t v = 0; v < src->viewCount; ++v) {
+                                    mono_view[mono_used][v] = src->views[sv];   // image, pose, next (depth) -- one view for every eye
+                                    XrFovf fv = c;
+                                    const float s = (v == 0) ? t : -t;          // left eye's centre to the right, right eye's to the left
+                                    fv.angleLeft  = atanf(-half_h + s);
+                                    fv.angleRight = atanf( half_h + s);
+                                    mono_view[mono_used][v].fov = fv;
+                                }
+                                // On every CHANGE of distance (the plugin sends on change only, so this
+                                // is bounded): the depth actually applied, with the IPD it was derived
+                                // from -- the one number that says whether the poses were believable.
+                                static float s_logged_D = -1.f, s_logged_size = -1.f;
+                                if (fabsf(D - s_logged_D) > 1e-4f || fabsf(size - s_logged_size) > 1e-4f) {
+                                    s_logged_D = D; s_logged_size = size;
+                                    if (D > 0.f) logf("mono mode 5: picture converges at %.2f m (ipd %.4f m from the submitted eye "
+                                                      "poses, per-eye centre shift %.3f deg), size x%.2f", D, ipd, atanf(t) * 57.29578f, size);
+                                    else         logf("mono mode 5: picture at infinity (no per-eye shift), size x%.2f", size);
+                                }
+                                static bool s_said5 = false;
+                                if (!s_said5) {
+                                    s_said5 = true;
+                                    logf("mono mode 5: view[0] to every eye through one re-centred fov -- raw tan L/R/U/D "
+                                         "%.3f/%.3f/%.3f/%.3f -> +-%.3f horizontal, +-%.3f vertical (the pixel centre was "
+                                         "%.1f deg off-axis horizontally, %.1f deg vertically)",
+                                         tl, tr, tu, td, tanf(c.angleRight), tanf(c.angleUp),
+                                         atanf(0.5f * (tl + tr)) * 57.29578f, atanf(0.5f * (tu + td)) * 57.29578f);
+                                }
+                            }
+                            dst.views = mono_view[mono_used];
+                            combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dst);
+                            ++mono_used;
+                            g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                            // ONCE: the positive proof that a projection layer was actually
+                            // rewritten, with the shape we saw. Without this line a run where
+                            // the switch applied but no layer ever matched (wrong type, viewCount
+                            // outside 2..4, null views) is indistinguishable from one that
+                            // worked -- which is exactly the run of 2026-09-08 14:38.
+                            static bool s_said_first = false;
+                            if (!s_said_first) {
+                                s_said_first = true;
+                                logf("mono: first projection layer patched -- views=%u, "
+                                     "imageArrayIndex[0]=%u, rect[0]=%dx%d@%d,%d; every view "
+                                     "now shows view[0]'s sub-image (poses/FOVs untouched)",
+                                     src->viewCount,
+                                     src->views[0].subImage.imageArrayIndex,
+                                     src->views[0].subImage.imageRect.extent.width,
+                                     src->views[0].subImage.imageRect.extent.height,
+                                     src->views[0].subImage.imageRect.offset.x,
+                                     src->views[0].subImage.imageRect.offset.y);
+                                // INVENTORY OF EVERYTHING THE APP SUBMITTED THIS FRAME. The
+                                // 2026-09-08 20:27 run rewrote every projection frame and the
+                                // doubled cutscene did not change -- so the doubling is not a
+                                // left/right mismatch inside the projection. Either it rides a
+                                // DIFFERENT layer (UEVR submits Slate UI as its own quad, and the
+                                // movie is drawn by Slate) or it is two copies inside one eye
+                                // image. This list is what separates those: a second layer here,
+                                // or not.
+                                logf("mono: layer inventory this frame -- %u layer(s):", info->layerCount);
+                                for (uint32_t k = 0; k < info->layerCount && k < 16; ++k) {
+                                    const XrCompositionLayerBaseHeader* h = info->layers[k];
+                                    if (h == nullptr) { logf("  [%u] <null>", k); continue; }
+                                    if (h->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                                        const auto* pl = reinterpret_cast<const XrCompositionLayerProjection*>(h);
+                                        logf("  [%u] PROJECTION views=%u flags=0x%llx", k, pl->viewCount,
+                                             (unsigned long long)pl->layerFlags);
+                                    } else if (h->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                                        const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(h);
+                                        logf("  [%u] QUAD eyeVisibility=%d size=%.3fx%.3f rect=%dx%d@%d,%d "
+                                             "swapchain=%p flags=0x%llx", k, (int)q->eyeVisibility,
+                                             q->size.width, q->size.height,
+                                             q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height,
+                                             q->subImage.imageRect.offset.x, q->subImage.imageRect.offset.y,
+                                             (void*)q->subImage.swapchain, (unsigned long long)q->layerFlags);
+                                    } else {
+                                        logf("  [%u] type=%d (not projection/quad)", k, (int)h->type);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    combined[w++] = base;
+                }
                 // OURS LAST, therefore topmost. The reticule must draw over the scene projection,
                 // never under it.
                 for (uint32_t i = 0; i < n; ++i) combined[w++] = extra[i];
@@ -284,7 +588,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                 handled = true;
 
                 if (XR_SUCCEEDED(result)) {
-                    g_layers_appended.fetch_add(1, std::memory_order_relaxed);
+                    // Only a frame that actually carried our quads counts as "appended"; a
+                    // mono-only rebuild is tallied by g_mono_patched instead.
+                    if (n > 0) g_layers_appended.fetch_add(1, std::memory_order_relaxed);
                 } else if (result == XR_ERROR_LAYER_INVALID
                         || result == XR_ERROR_LAYER_LIMIT_EXCEEDED
                         || result == XR_ERROR_SWAPCHAIN_RECT_INVALID) {
@@ -358,10 +664,11 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrDestroyInstance(XrInstance instance) {
         g_next_destroy_session.store(nullptr, std::memory_order_release);
         g_next_gipa.store(nullptr, std::memory_order_release);
     }
-    logf("instance destroyed (%p) -- frames_seen=%llu layers_appended=%llu",
+    logf("instance destroyed (%p) -- frames_seen=%llu layers_appended=%llu mono_patched=%llu",
          (void*)instance,
          (unsigned long long)g_frames_seen.load(),
-         (unsigned long long)g_layers_appended.load());
+         (unsigned long long)g_layers_appended.load(),
+         (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
     return next(instance);
 }
 
@@ -533,7 +840,7 @@ XRAPI_ATTR uint64_t XRAPI_CALL api_layers_appended(void) {
 XRAPI_ATTR const char* XRAPI_CALL api_status(void) {
     _snprintf_s(g_status_line, sizeof(g_status_line), _TRUNCATE,
                 "%s | gate=%s | instance=%p session=%p next_end_frame=%p | frames=%llu "
-                "appended=%llu refused=%llu rejects=%llu | cb=%s",
+                "appended=%llu refused=%llu rejects=%llu | cb=%s | mono=%d patched=%llu",
                 g_build_stamp, g_gate_reason,
                 (void*)g_instance.load(), (void*)g_session.load(),
                 (void*)g_next_end_frame.load(),
@@ -541,8 +848,58 @@ XRAPI_ATTR const char* XRAPI_CALL api_status(void) {
                 (unsigned long long)g_layers_appended.load(),
                 (unsigned long long)g_batch_refused.load(),
                 (unsigned long long)g_runtime_rejects.load(),
-                g_cb.load() != nullptr ? "set" : "none");
+                g_cb.load() != nullptr ? "set" : "none",
+                g_projection_mono.load(std::memory_order_relaxed),
+                (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
     return g_status_line;
+}
+
+// Names for the log, indexed by mode. Kept in ONE place so the flip line and the plugin's line
+// cannot describe the same number two different ways.
+const char* mono_mode_name(int m) {
+    switch (m) {
+        case 1:  return "ON mode 1: left eye's image to every view";
+        case 2:  return "ON mode 2: right eye's image to every view";
+        case 3:  return "ON mode 3: app QUAD layers dropped, projection kept";
+        case 4:  return "ON mode 4: PROJECTION dropped, app quad layers kept";
+        case 5:  return "ON mode 5: view[0] to every eye through one re-centred symmetric fov (fov-shift attempt)";
+        case 6:  return "ON mode 6: movie as its own head-locked quad, projection dropped (the fix)";
+        default: return "OFF";
+    }
+}
+
+XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
+    // Behind the gate like everything else: an inert layer must not start rewriting a stranger's
+    // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
+    if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
+    // 0 = off, 1/2 = left/right eye to every view, 3 = drop app quads, 4 = drop the projection,
+    // 5 = one view/one re-centred fov (fov-shift attempt), 6 = movie as its own quad (the fix).
+    // Anything outside clamps. See mono_mode_name().
+    const int want = (on <= 0) ? 0 : ((on >= 6) ? 6 : on);
+    const int prev = g_projection_mono.exchange(want, std::memory_order_relaxed);
+    // Say so in the LAYER's log, on change only. The plugin logs what it asked for; this is the
+    // record of what the layer actually accepted, plus how many frames it had rewritten up to the
+    // flip -- so an OFF line reads as "N frames went mono", not just "switched".
+    if (prev != want) {
+        logf("mono projection %s (layers rewritten/dropped so far=%llu)", mono_mode_name(want),
+             (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
+    }
+    return 1;
+}
+
+XRAPI_ATTR int XRAPI_CALL api_set_mono_screen(float meters, float size) {
+    if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
+    // Depth: 0 (or nonsense) = infinity; otherwise a sane screen -- nearer than 0.3 m is a wall
+    // of pixels and past 100 m is infinity to the eye anyway. Size: 0.25..1.5 of as-rendered;
+    // beyond 1.5 the declared frustum nears 60 deg half-angles and the picture's edges leave the
+    // display. Both logged where they are APPLIED (xrEndFrame, on change), with the IPD the
+    // depth was derived from, rather than here.
+    const bool  finite = (meters == meters) && meters > 0.f;
+    const float want_d = !finite ? 0.f : ((meters < 0.3f) ? 0.3f : ((meters > 100.f) ? 100.f : meters));
+    const float want_s = !(size == size) ? 1.f : ((size < 0.25f) ? 0.25f : ((size > 1.5f) ? 1.5f : size));
+    g_mono_distance.store(want_d, std::memory_order_relaxed);
+    g_mono_size.store(want_s, std::memory_order_relaxed);
+    return 1;
 }
 
 const HaloVrLayerApi g_api = {
@@ -556,6 +913,8 @@ const HaloVrLayerApi g_api = {
     api_frames_seen,
     api_layers_appended,
     api_status,
+    api_set_projection_mono,   // appended after ABI 1; callers size-check before use
+    api_set_mono_screen,       // second append; same discipline
 };
 
 }   // namespace
