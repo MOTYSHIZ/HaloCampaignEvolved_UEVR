@@ -308,16 +308,46 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
 
                 for (uint32_t i = 0; i < info->layerCount; ++i) {
                     const XrCompositionLayerBaseHeader* base = info->layers[i];
-                    if (mono != 0 && base != nullptr
+
+                    // MODES 3 AND 4 REMOVE A CLASS OF APP LAYER instead of rewriting one. They
+                    // exist because mode 1 rewrote every projection frame on 2026-09-08 and the
+                    // doubled cutscene did not change, which means the doubling is not a
+                    // left/right mismatch inside the projection. The profile has UEVR presenting
+                    // the game's Slate UI as its own quad (UI_OverlayType=0, UI_Size=2.0,
+                    // UI_Distance=2.43) and the cutscene movie is drawn by Slate -- so the
+                    // likeliest picture is the movie shown TWICE, once in the projection images
+                    // and once on that quad, at different depths. Dropping one class at a time,
+                    // live, says which copy is which. Mode 4 is also the candidate FIX: the
+                    // movie alone, on a flat mono screen, with nothing doubled behind it.
+                    // Our OWN appended quads are added after this loop and are unaffected.
+                    if (base != nullptr && mono == 3 && base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        static bool s_said3 = false;
+                        if (!s_said3) { s_said3 = true; logf("mono mode 3: dropping app layer type=%d (first of them)", (int)base->type); }
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    if (base != nullptr && mono == 4 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        static bool s_said4 = false;
+                        if (!s_said4) { s_said4 = true; logf("mono mode 4: dropping the projection layer (first of them); quads carry the frame"); }
+                        g_mono_patched.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    if ((mono == 1 || mono == 2) && base != nullptr
                         && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
                         && mono_used < kMonoMaxLayers) {
                         const auto* src = reinterpret_cast<const XrCompositionLayerProjection*>(base);
                         if (src->views != nullptr && src->viewCount >= 2 && src->viewCount <= kMonoMaxViews) {
+                            // mode 1 = view[0] (left) to every eye; mode 2 = view[1] (right) to
+                            // every eye. Two modes so a player can flip LIVE mid-cutscene: if the
+                            // picture shifts, the movie is in the projection images; if it does
+                            // not, it is somewhere the projection rewrite cannot reach.
+                            const uint32_t sv = (mono == 2) ? 1u : 0u;
                             XrCompositionLayerProjection& dst = mono_layer[mono_used];
                             dst = *src;                                        // shallow clone
                             for (uint32_t v = 0; v < src->viewCount; ++v) {
                                 mono_view[mono_used][v] = src->views[v];       // clone each view
-                                if (v > 0) mono_view[mono_used][v].subImage = src->views[0].subImage;
+                                if (v != sv) mono_view[mono_used][v].subImage = src->views[sv].subImage;
                             }
                             dst.views = mono_view[mono_used];
                             combined[w++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dst);
@@ -340,6 +370,34 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                                      src->views[0].subImage.imageRect.extent.height,
                                      src->views[0].subImage.imageRect.offset.x,
                                      src->views[0].subImage.imageRect.offset.y);
+                                // INVENTORY OF EVERYTHING THE APP SUBMITTED THIS FRAME. The
+                                // 2026-09-08 20:27 run rewrote every projection frame and the
+                                // doubled cutscene did not change -- so the doubling is not a
+                                // left/right mismatch inside the projection. Either it rides a
+                                // DIFFERENT layer (UEVR submits Slate UI as its own quad, and the
+                                // movie is drawn by Slate) or it is two copies inside one eye
+                                // image. This list is what separates those: a second layer here,
+                                // or not.
+                                logf("mono: layer inventory this frame -- %u layer(s):", info->layerCount);
+                                for (uint32_t k = 0; k < info->layerCount && k < 16; ++k) {
+                                    const XrCompositionLayerBaseHeader* h = info->layers[k];
+                                    if (h == nullptr) { logf("  [%u] <null>", k); continue; }
+                                    if (h->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                                        const auto* pl = reinterpret_cast<const XrCompositionLayerProjection*>(h);
+                                        logf("  [%u] PROJECTION views=%u flags=0x%llx", k, pl->viewCount,
+                                             (unsigned long long)pl->layerFlags);
+                                    } else if (h->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                                        const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(h);
+                                        logf("  [%u] QUAD eyeVisibility=%d size=%.3fx%.3f rect=%dx%d@%d,%d "
+                                             "swapchain=%p flags=0x%llx", k, (int)q->eyeVisibility,
+                                             q->size.width, q->size.height,
+                                             q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height,
+                                             q->subImage.imageRect.offset.x, q->subImage.imageRect.offset.y,
+                                             (void*)q->subImage.swapchain, (unsigned long long)q->layerFlags);
+                                    } else {
+                                        logf("  [%u] type=%d (not projection/quad)", k, (int)h->type);
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -624,17 +682,31 @@ XRAPI_ATTR const char* XRAPI_CALL api_status(void) {
     return g_status_line;
 }
 
+// Names for the log, indexed by mode. Kept in ONE place so the flip line and the plugin's line
+// cannot describe the same number two different ways.
+const char* mono_mode_name(int m) {
+    switch (m) {
+        case 1:  return "ON mode 1: left eye's image to every view";
+        case 2:  return "ON mode 2: right eye's image to every view";
+        case 3:  return "ON mode 3: app QUAD layers dropped, projection kept";
+        case 4:  return "ON mode 4: PROJECTION dropped, app quad layers kept";
+        default: return "OFF";
+    }
+}
+
 XRAPI_ATTR int XRAPI_CALL api_set_projection_mono(int on) {
     // Behind the gate like everything else: an inert layer must not start rewriting a stranger's
     // projection layers because a plugin asked. g_enabled is the same decision xrEndFrame honours.
     if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
-    const int want = (on != 0) ? 1 : 0;
+    // 0 = off, 1/2 = left/right eye to every view, 3 = drop app quads, 4 = drop the projection.
+    // Anything outside clamps. See mono_mode_name().
+    const int want = (on <= 0) ? 0 : ((on >= 4) ? 4 : on);
     const int prev = g_projection_mono.exchange(want, std::memory_order_relaxed);
     // Say so in the LAYER's log, on change only. The plugin logs what it asked for; this is the
     // record of what the layer actually accepted, plus how many frames it had rewritten up to the
     // flip -- so an OFF line reads as "N frames went mono", not just "switched".
     if (prev != want) {
-        logf("mono projection %s (frames patched so far=%llu)", want ? "ON" : "OFF",
+        logf("mono projection %s (layers rewritten/dropped so far=%llu)", mono_mode_name(want),
              (unsigned long long)g_mono_patched.load(std::memory_order_relaxed));
     }
     return 1;

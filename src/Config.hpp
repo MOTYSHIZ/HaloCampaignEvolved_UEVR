@@ -3212,7 +3212,20 @@ struct Config {
     // Driven by the SAME cine_signal predicate as the flat-view actuator, on change only. Requires
     // the API layer build that carries set_projection_mono; an older layer negotiates fine and
     // simply cannot do this, which the plugin logs once rather than pretending.
-    bool  cutscene_mono   = false;
+    // 0 = off. 1 = LEFT eye's image to both eyes. 2 = RIGHT eye's image to both eyes. Live.
+    //
+    // MEASURED 2026-09-08 20:27 WITH MODE 1: the layer rewrote every projection frame
+    // (patched= climbed at frame rate, runtime accepted every frame) and the doubled cutscene
+    // did NOT change. So the doubling is not a left/right mismatch inside the projection
+    // layer. Mode 2 exists as the live A/B: flipping 1 <-> 2 mid-cutscene either shifts the
+    // picture (the movie IS in the projection images, and the doubling is something else
+    // about them) or does nothing (the movie rides a layer this rewrite cannot reach). The
+    // layer's own log prints an inventory of every submitted layer on the first patched
+    // frame -- read that first.
+    // 3 = DROP the app's quad layers (UEVR's Slate-UI quad), keep the projection.
+    // 4 = DROP the projection, keep the app's quads -- the movie alone on a flat mono screen.
+    //     If the doubling is "the movie twice, once in each place", 4 is the fix outright.
+    int   cutscene_mono   = 0;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------

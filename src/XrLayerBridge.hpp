@@ -71,7 +71,8 @@ const HaloVrLayerApi* xrbridge_api();
 // layer's set_projection_mono: it was appended to the ABI after v1 shipped, so this wrapper checks
 // struct_size covers the slot before dereferencing it. false = layer absent, gated off, or too old
 // to know the call -- all of which mean "not applied", and the caller should say so once.
-bool xrbridge_set_projection_mono(bool on);
+// mode: 0 = off, 1 = left eye to every view, 2 = right eye to every view.
+bool xrbridge_set_projection_mono(int mode);
 
 // One line for the log: whether the layer was found, which build, and what its own status says.
 // Never null, always safe to print.

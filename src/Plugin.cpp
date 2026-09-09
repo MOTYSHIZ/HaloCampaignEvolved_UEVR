@@ -6777,15 +6777,19 @@ void update() {
             // the shape of the 2026-08-05 oscillation, so it is not given the chance.
             {
                 static int s_mono_sent = -1;
-                const int want = (g_cfg.cutscene_mono && cine_signal) ? 1 : 0;
+                const int want = cine_signal ? g_cfg.cutscene_mono : 0;   // 0 off, 1 left, 2 right
                 if (want != s_mono_sent) {
-                    const bool applied = halo::xrbridge_set_projection_mono(want != 0);
+                    const bool applied = halo::xrbridge_set_projection_mono(want);
                     s_mono_sent = want;
                     // Say what the LAYER did, not what we asked: "applied" means the layer is live
                     // and new enough to know the call. false on an old layer is the whole reason
                     // the bridge size-checks -- it is "cannot", not "did not", and must read so.
                     API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO %s -> %s",
-                                         want ? "ON" : "OFF",
+                                         (want == 0) ? "OFF"
+                                       : (want == 1) ? "ON mode 1 (left eye to both)"
+                                       : (want == 2) ? "ON mode 2 (right eye to both)"
+                                       : (want == 3) ? "ON mode 3 (app quads DROPPED, projection kept)"
+                                                     : "ON mode 4 (projection DROPPED, app quads kept)",
                                          applied ? "applied by the API layer"
                                                  : "NOT applied (layer absent, gated off, or built "
                                                    "before set_projection_mono -- rebuild/redeploy "

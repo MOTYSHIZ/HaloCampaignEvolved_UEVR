@@ -129,7 +129,7 @@ const HaloVrLayerApi* xrbridge_api() {
     return xrbridge_available() ? g_api : nullptr;
 }
 
-bool xrbridge_set_projection_mono(bool on) {
+bool xrbridge_set_projection_mono(int mode) {
     const HaloVrLayerApi* api = xrbridge_api();
     if (api == nullptr) return false;
     // THE SIZE CHECK IS THE WHOLE POINT OF THIS WRAPPER. set_projection_mono was appended after ABI
@@ -139,7 +139,7 @@ bool xrbridge_set_projection_mono(bool on) {
     constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_projection_mono)
                            + sizeof(((HaloVrLayerApi*)nullptr)->set_projection_mono);
     if (api->struct_size < kNeed || api->set_projection_mono == nullptr) return false;
-    return api->set_projection_mono(on ? 1 : 0) == 1;
+    return api->set_projection_mono(mode) == 1;
 }
 
 const char* xrbridge_status() {
