@@ -2907,6 +2907,10 @@ struct NavwCensus {
     uint32_t deadslot;    // skipped: the map's own allocation bitmap says this slot is FREE. These
                           // are the phantoms -- a freed entry keeps a plausible stale position and
                           // was previously indistinguishable from a live one.
+    uint32_t stale;       // rejected: a pointer read from a raw element offset was READABLE but
+                          // is not a live UObject -- its InternalIndex slot does not hold it.
+                          // This is the pointer class_name_of would otherwise have
+                          // dereferenced; the 2026-09-08 tick faults read exactly that shape.
     uint32_t nullpos;     // rejected: no widget AND a position within 1 m of the world origin,
                           // i.e. zeroed/never-written memory that still resolves a position
     uint32_t slotreuse;   // a slot freed THIS tick had to be re-let the same tick (starvation
@@ -3713,10 +3717,37 @@ constexpr int32_t NAVW_ELEM_WIDGET_OFF = 0x08;
 // of navw_entry_shown so the same validated pointer serves two jobs -- the visibility gate below
 // and the STABLE SLOT IDENTITY -- off ONE read and ONE reflection check per entry, instead of the
 // gate reading it and the slot keying guessing at an index.
+// A pointer read from a raw element offset that IsBadReadPtr accepted and the object array
+// rejected. Counted in the census and said ONCE in full -- the first one is the interesting one,
+// and a storm of them is the census's job -- so the guard is observable in a support log rather
+// than a silent skip. An unobserved fallback is the thing this project keeps being bitten by.
+void navw_note_stale_ptr(const char* where, const void* p) {
+    ++g_navw_census.stale;
+    static bool s_said = false;
+    if (!s_said) {
+        s_said = true;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] NAVWORLD: REJECTED a readable-but-dead object pointer at %s (%p): "
+            "its InternalIndex slot does not hold it. This is the pointer class_name_of would have "
+            "handed to UEVR; the 2026-09-08 tick faults (FName::ToString reading 0x40400018) are "
+            "that dereference.", where, p);
+    }
+}
+
 API::UObject* navw_entry_widget(const uint8_t* elem) {
     if (IsBadReadPtr(elem + NAVW_ELEM_WIDGET_OFF, 8)) return nullptr;
     auto* w = *reinterpret_cast<API::UObject* const*>(elem + NAVW_ELEM_WIDGET_OFF);
     if (w == nullptr || IsBadReadPtr(w, 0x30)) return nullptr;
+    // READABLE IS NOT ALIVE. The guard the ADDR-HYGIENE note above describes stopped at
+    // IsBadReadPtr, and its second step -- class_name_of -- is itself a dereference: it reads
+    // this pointer's ClassPrivate and hands THAT to UEVR's FName::ToString. A freed object's
+    // block is readable and belongs to whatever was allocated next. The census shows most
+    // entries yield no widget here (identfb 79-96%) but never recorded whether those pointers
+    // were null or non-object memory; a non-object one reached class_name_of with nothing but
+    // a readability check and faults the moment [w+0x10] holds a float. `stale` now counts
+    // exactly those. One indexed compare settles it.
+    if (!uobject_slot_valid(w)) { navw_note_stale_ptr("elem+0x08", w); return nullptr; }
+    NAVW_MARK("entry_widget:class_name_of");
     if (class_name_of(w).find(L"Widget") == std::wstring::npos) return nullptr;
     return w;
 }
@@ -4224,9 +4255,17 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             API::UClass* ecls = nullptr;
             if (!IsBadReadPtr(elem + 0x10, 8)) {
                 auto* c2 = *reinterpret_cast<API::UObject* const*>(elem + 0x10);
-                if (c2 != nullptr && !IsBadReadPtr(c2, 0x30)
-                    && class_name_of(c2).find(L"WidgetBlueprintGeneratedClass") != std::wstring::npos) {
-                    ecls = reinterpret_cast<API::UClass*>(c2);
+                if (c2 != nullptr && !IsBadReadPtr(c2, 0x30)) {
+                    // Same rule as navw_entry_widget: prove it is a live UObject before its class
+                    // pointer is read and named. A UClass is a UObject, so the slot test applies.
+                    if (!uobject_slot_valid(c2)) {
+                        navw_note_stale_ptr("elem+0x10", c2);
+                    } else {
+                        NAVW_MARK("elem+0x10:class_name_of");
+                        if (class_name_of(c2).find(L"WidgetBlueprintGeneratedClass") != std::wstring::npos) {
+                            ecls = reinterpret_cast<API::UClass*>(c2);
+                        }
+                    }
                 }
             }
             // THE NAME OF THE CLASS ITSELF -- not the name of the class's class.
@@ -4990,14 +5029,16 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: %d marker(s) at OBJECTIVE world "
                                  "positions (map num=%d max=%d, %d entr(ies) resolved, %d shown) | "
                                  "census visgate=%u/%u vis=0x%X kindmask=%u noclass=%u beyond=%u "
-                                 "staleart=%u rehost=%u identfb=%u slotreuse=%u nullpos=%u deadslot=%u",
+                                 "staleart=%u rehost=%u identfb=%u slotreuse=%u nullpos=%u deadslot=%u "
+                                 "stale=%u",
                                  placed_n, map->num, map->max, seen_entries, n_cand,
                                  g_navw_census.examined, g_navw_census.vis_sup,
                                  g_navw_census.vis_seen, g_navw_census.kind_sup,
                                  g_navw_census.noclass, g_navw_census.beyond,
                                  g_navw_census.staleart, g_navw_census.rehost,
                                  g_navw_census.identfb, g_navw_census.slotreuse,
-                                 g_navw_census.nullpos, g_navw_census.deadslot);
+                                 g_navw_census.nullpos, g_navw_census.deadslot,
+                                 g_navw_census.stale);
         }
         return;
     }

@@ -45,6 +45,21 @@ uevr::API::FName make_fname(const wchar_t* name);
 // against reading a recycled or partially-constructed object's name.
 bool fname_is_sane(const std::string& n);
 
+// IS THIS POINTER A LIVE UObject RIGHT NOW -- in O(1), with no walk of the object array.
+//
+// For a pointer read out of memory we do not own (a raw offset into a game struct), IsBadReadPtr
+// proves only that the bytes are mapped. A freed object's block goes to the next allocation, so a
+// stale pointer stays readable, and whatever now sits at its +0x10 is handed to UEVR as a UClass*
+// whose FName is then read. MEASURED 2026-09-08 (42 aborted ticks): FName::ToString faulting on
+// 0x40400018 = &((UObject*)0x40400000)->NamePrivate, and 0x40400000 is the float 3.0f -- a
+// recycled block, not an object.
+//
+// The object array is the identity: a live object's InternalIndex names the slot that holds it.
+// Garbage at +0xC is out of range or names a slot holding something else. One indexed compare,
+// so it is safe on a per-element, per-tick path where uobject_live()'s array walk is not.
+// Fails CLOSED (false) when the array is unavailable: the caller is about to dereference.
+bool uobject_slot_valid(const uevr::API::UObject* p);
+
 // A pointer PLUS its slot in the global object array, so a recycled slot can be detected instead of
 // silently followed. Prefer this to a raw pointer for anything kept across frames.
 struct TrackedObject {
