@@ -1,11 +1,10 @@
 # Build outputs - our own DLL is assembled into the release zip, never committed.
 build/
 *.dll
-
-# ...except the third-party cutscene plugin, which is SHIPPED CONTENT rather than a build output.
-# Without this exception the blanket *.dll rule above silently drops it from the repo, and the
-# release zip would then be missing a file the README tells users they have.
-!profile/plugins/*.dll
+# (There used to be a `!profile/plugins/*.dll` exception here for the third-party cutscene plugin,
+# which we shipped as content. It was removed 2026-09-08 when our own cutscene fix -- the movie as
+# an OpenXR quad, cutscenemono=6 -- replaced it, so no committed DLL belongs in profile/plugins any
+# more and the blanket rule above should apply there too.)
 *.obj
 *.pdb
 *.exp

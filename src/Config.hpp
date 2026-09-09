@@ -3278,10 +3278,12 @@ struct Config {
     // eye poses.
     float cutscene_dist   = 0.0f;
     // FRAMING is the comfort choice, and for a flat picture it is entirely SIZE: 1.0 = as the
-    // game draws it (edge to edge, ~96 deg wide), 0.7 reads as a screen further off, focus
-    // unchanged. Scales the declared tangent extents, which is exactly how a real screen shrinks
-    // with distance. Live (~2 s). 0.25..1.5.
-    float cutscene_size   = 1.0f;
+    // game draws it (edge to edge, ~96 deg wide), 0.75 reads as a comfortable cinema screen a bit
+    // further off, focus unchanged. Scales the declared tangent extents, which is exactly how a
+    // real screen shrinks with distance. Live (~2 s). 0.25..1.5.
+    // Default 0.75, canonized 2026-09-08 after the headset call ("works great" at 0.75) -- edge to
+    // edge at 1.0 is a lot of screen this close; 0.75 is the comfortable frame.
+    float cutscene_size   = 0.75f;
     // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
     // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
     // side-by-side scene render target and writes it as a BMP into the profile's data\ folder,

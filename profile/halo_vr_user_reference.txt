@@ -138,9 +138,9 @@
 # 6 = on (default). 0 = off: the doubled picture exactly as the game presents it.
 #cutscenemono=6
 # How big that screen is. 1.0 = as the game draws it, edge to edge; smaller values shrink it,
-# like a screen further away (0.7 is a comfortable cinema). Your eyes always focus on it at the
-# same distance as the subtitles and menus, whatever the size, so nothing doubles.
-#cutscenesize=1.0
+# like a screen further away. Default 0.75 is a comfortable cinema frame. Your eyes always focus
+# on it at the same distance as the subtitles and menus, whatever the size, so nothing doubles.
+#cutscenesize=0.75
 
 # ==================================== RETICULE (world-space) ====================================
 # The mod draws the game's own crosshair out in the world, exactly where your shots will land
