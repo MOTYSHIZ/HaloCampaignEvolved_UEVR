@@ -43,6 +43,7 @@
 #ifndef HALOVR_XRLAYERABI_H
 #define HALOVR_XRLAYERABI_H
 
+#include <stddef.h>   // offsetof, for HALOVR_LAYER_ABI_V1_SIZE
 #include <stdint.h>
 
 // The OpenXR types below (XrSession, XrFrameEndInfo, ...) must be THE SAME LAYOUTS on both sides.
@@ -201,6 +202,15 @@ typedef struct HaloVrLayerApi {
     // Returns 1 when accepted, 0 when the layer is gated off.
     int (XRAPI_PTR *set_mono_screen)(float meters, float size);
 } HaloVrLayerApi;
+
+// THE SIZE ABI 1 SHIPPED WITH -- every field above the append line. A layer reporting at least
+// this much carries every v1 field; each APPENDED field is size-checked at its own call site
+// (XrLayerBridge.cpp). A consumer must accept that and NOT demand sizeof(HaloVrLayerApi): an
+// older layer under a newer plugin is the normal deployment skew (the layer moves rarely, the
+// plugin with every update), and refusing it takes the reticule down over the one appended call
+// it lacks -- which is exactly what happened 2026-09-08 21:41, when a plugin expecting 88 bytes
+// refused a same-version 80-byte layer outright and the cutscene fix silently never engaged.
+#define HALOVR_LAYER_ABI_V1_SIZE ((uint32_t)offsetof(HaloVrLayerApi, set_projection_mono))
 
 // The single export. Returns null -- deliberately, loudly, and without touching anything -- when
 // `abi_version` is not the one this layer implements, or when the layer gated itself off because
