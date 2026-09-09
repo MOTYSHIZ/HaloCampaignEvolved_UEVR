@@ -3261,7 +3261,8 @@ struct Config {
     //     the cutscene image specifically without altering per-eye draw wholesale"). Head-locked,
     //     recomputed each frame; zero GPU work; cutscene-scoped.
     // Mode 5 was confirmed in headset to fuse the movie (2026-09-08 21:15) but left the UI
-    // doubled, so 6 supersedes it; default 6 pending a headset confirm of 6 specifically.
+    // doubled, so 6 supersedes it. CONFIRMED IN HEADSET 2026-09-08 22:36 ("Appears to work
+    // great"): movie, subtitles and pause menu all single, at one depth. 6 ships.
     int   cutscene_mono   = 6;
     // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
     // should hinge convergence on the distance of the cutscene pane").
