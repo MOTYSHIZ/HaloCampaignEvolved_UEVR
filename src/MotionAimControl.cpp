@@ -330,36 +330,33 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
 
     Vec3 fwd = quat_forward(cq);
 
-    // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
+    // ---- AIM DIRECTION SOURCE (aimsrc=1) -- NOT the answer to roll; see aimrollfix below --------
     //
     // WHY ROLL MOVES AIM AT ALL. The direction above comes from the OpenXR AIM pose, which is
     // rigidly attached to the controller with its axis tilted well off the handle. You roll about
     // your WRIST, i.e. about the handle, so the aim vector sweeps a CONE about that axis: for a
-    // tilt a and a roll t, forward moves by 2*asin(sin a * sin(t/2)). At a ~35 deg a 90 deg roll
-    // displaces it by ~48 deg. Nothing is broken; the axis is simply the wrong one to roll about.
+    // tilt a and a roll t, forward moves by 2*asin(sin a * sin(t/2)). At a ~35 deg tilt a 90 deg
+    // roll displaces it by ~48 deg. Nothing is broken; the axis is simply the wrong one.
     //
-    // It is then AMPLIFIED ASYMMETRICALLY by the yaw extraction: yaw is atan2(fwd.x, -fwd.z), so
-    // as the cone carries the vector toward steeper pitch the horizontal projection shrinks and the
-    // same displacement becomes a much larger yaw.
+    // Taking the direction from the GRIP pose does remove that -- its forward IS the handle axis,
+    // so rolling about it moves nothing. It is kept for that reason and because TwoHandAim.cpp
+    // reads it. But it is NOT the fix, because it trades the cone for an ill-conditioned yaw:
+    // measured grip forward pitches 41.5 deg on average and past 60 deg in HALF of all samples,
+    // so atan2(fwd.x,-fwd.z) is then dividing by a tiny horizontal projection. aimrollfix below
+    // keeps the aim pose's near-level direction (7.7 deg mean, past 60 in 0.3%) and takes the roll
+    // out of it instead.
     //
-    // THE PROPOSED FIX. Take the direction from the GRIP pose. If the grip's forward IS the handle
-    // axis then rolling about it leaves the vector invariant, and the constant "handle points here,
-    // I feel I am pointing there" difference is exactly what the Page Down calibration absorbs.
-    //
-    // ⚠️ WHAT 27,826 LOGGED SAMPLES ACTUALLY ESTABLISHED (2026-08-09), because the obvious reading
-    // of them is wrong:
-    //   * SOLID -- the sightline term is negligible: |mean| 0.18 deg, past 1 deg in 2.4% of
-    //     samples, no trend against roll. Widening xdist cannot help; that hypothesis is dead.
-    //   * SOLID -- grip forward is STEEPLY PITCHED: mean 41.5 deg, past 60 deg in HALF of samples,
-    //     against the aim pose's 7.7 deg / 0.3%. So grip YAW is an atan2 over a small horizontal
-    //     projection, whatever the vector does.
-    //   * NOT ESTABLISHED -- anything measured against `roll` in that run. It came from a
-    //     Tait-Bryan decomposition whose yaw/roll split degenerates as 1/cos(pitch), and half the
-    //     samples were past 60 deg. The headline "grip yaw swings 1.08 deg/deg of roll" is the
-    //     instrument failing near gimbal lock, not the vector moving. The aim pose's 0.19 deg/deg
-    //     is suspect for the same reason.
-    // The AIMROLL instrument now takes roll as the swing-twist about grip forward, which is
-    // well-conditioned at any pitch. Re-measure before adopting or deleting this option.
+    // TWO CLAIMS THAT USED TO SIT HERE AND ARE NOT TRUE:
+    //   * "The cone is then AMPLIFIED ASYMMETRICALLY by the yaw extraction, which is why rolling
+    //     left and right do not cost the same." DISPROVEN 2026-08-09 by direct computation --
+    //     |dYaw(-90)| - |dYaw(+90)| came out exactly +0.0 at every tilt and every base pitch. The
+    //     cone is symmetric and atan2 does not break that. The leading explanation for the reported
+    //     asymmetry is unequal roll RANGE (supination beats pronation), not unequal response.
+    //   * "Grip yaw swings 1.08 deg per degree of roll, the aim pose 0.19." Both were measured
+    //     against a Tait-Bryan roll that degenerates as 1/cos(pitch), with half the samples past
+    //     60 deg. Those are readings of the instrument. What survives from that run, because it
+    //     does not depend on the roll axis: the sightline term is negligible (mean 0.18 deg, past
+    //     1 deg in 2.4%, no trend), and the two pitch distributions quoted above.
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
