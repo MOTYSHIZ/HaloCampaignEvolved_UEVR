@@ -61,8 +61,24 @@ static Quat pose(float yaw_deg, float pitch_deg, float roll_deg) {
     return halo::quat_mul(axis_angle(norm(halo::quat_forward(qp)), roll_deg * DEG2RAD), qp);
 }
 
-// The corrected aim direction, built exactly as derive_ctrl_angles() builds it.
+// The corrected aim direction, built exactly as derive_ctrl_angles() builds it -- including the
+// direction blend, which is the part with a trap in it. See test 8.
 static Vec3 corrected_aim(const Quat& q_grip, const Quat& tilt, float strength, float vert_deg) {
+    const Vec3 A = halo::quat_forward(halo::quat_mul(q_grip, tilt));
+    const Vec3 axis = norm(halo::quat_forward(q_grip));
+    float tw = 0.0f, fade = 0.0f;
+    if (!halo::wrist_twist_upright(q_grip, axis, vert_deg, &tw, &fade)) return A;
+    const Vec3  flat = halo::rotate_about_axis(A, axis, -tw);
+    const float s    = halo::clampf(strength * fade, 0.0f, 1.0f);
+    Vec3 out{A.x + (flat.x - A.x) * s, A.y + (flat.y - A.y) * s, A.z + (flat.z - A.z) * s};
+    const float ol = std::sqrt(dot(out, out));
+    return (ol > 1e-4f) ? Vec3{out.x / ol, out.y / ol, out.z / ol} : flat;
+}
+
+// The form this code had FIRST, kept only so test 8 can show what it did wrong. Scaling the ANGLE
+// looks equivalent and is not: see the comment on test 8.
+static Vec3 corrected_aim_by_angle(const Quat& q_grip, const Quat& tilt, float strength,
+                                   float vert_deg) {
     const Vec3 A = halo::quat_forward(halo::quat_mul(q_grip, tilt));
     const Vec3 axis = norm(halo::quat_forward(q_grip));
     float tw = 0.0f, fade = 0.0f;
@@ -74,7 +90,7 @@ static Vec3 corrected_aim(const Quat& q_grip, const Quat& tilt, float strength, 
 
 int main() {
     std::srand(20260908);
-    const float VERT = 25.0f;
+    const float VERT = 15.0f;   // the shipped aim_roll_vert_deg default
 
     // The fixed aim-vs-handle tilt. ~35 deg is the figure BLAM_AIM_FINDINGS.md works from.
     const Quat TILT = axis_angle(Vec3{1, 0, 0}, 35.0f * DEG2RAD);
@@ -153,7 +169,40 @@ int main() {
         std::printf("     elevation %5.1f -> ok=%d fade=%.3f twist=%7.2f deg\n",
                     elev, (int)ok, fade, tw * RAD2DEG);
         check(fade >= 0.0f && fade <= 1.0f, "fade stays inside [0,1]", fade, 1.0);
-        if (elev <= 60.0f) check(fade > 0.999f, "full strength below 65 deg elevation", fade, 1.0);
+        if (elev <= 70.0f) check(fade > 0.999f, "full strength below 75 deg elevation", fade, 1.0);
+    }
+
+    // REGRESSION. Found by the live instrument on 2026-09-08, not by this harness, which had been
+    // testing only +-90 deg of roll at full strength -- the one corner where the bug is invisible.
+    //
+    // Rotating by an angle is 2*pi-periodic, so at multiplier 1 the twist crossing +-180 lands on
+    // the same vector and nothing happens. SCALE that angle and it no longer does: the applied
+    // rotation jumps by 2*180*(1-s) at the wrap. And the multiplier is below 1 almost always,
+    // because the pole `fade` is a factor in it. Live data: |twist| passes 150 deg in 1% of
+    // samples, so this is ordinary play, not a corner.
+    std::printf("8. regression: no seam where the twist wraps through +-180\n");
+    {
+        // Handle elevation 80 deg, so fade < 1 with the shipped band and the multiplier is scaled.
+        const float ELEV = 80.0f, STRENGTH = 1.0f, STEP = 0.5f;
+        float worst_blend = 0.0f, worst_angle = 0.0f;
+        Vec3 prev_b = corrected_aim(pose(0.0f, -ELEV, -180.0f), TILT, STRENGTH, VERT);
+        Vec3 prev_a = corrected_aim_by_angle(pose(0.0f, -ELEV, -180.0f), TILT, STRENGTH, VERT);
+        for (float r = -180.0f + STEP; r <= 180.0f; r += STEP) {
+            const Quat q = pose(0.0f, -ELEV, r);
+            const Vec3 b = corrected_aim(q, TILT, STRENGTH, VERT);
+            const Vec3 a = corrected_aim_by_angle(q, TILT, STRENGTH, VERT);
+            const float db = ang_deg(prev_b, b), da = ang_deg(prev_a, a);
+            if (db > worst_blend) worst_blend = db;
+            if (da > worst_angle) worst_angle = da;
+            prev_b = b; prev_a = a;
+        }
+        std::printf("     worst step over a %.1f deg roll increment:  blend %.3f deg  |  "
+                    "angle-scaled %.1f deg\n", STEP, worst_blend, worst_angle);
+        // A half-degree of roll can never move the aim more than a couple of degrees.
+        check(worst_blend < 2.0f, "direction blend is continuous through the wrap",
+              worst_blend, 2.0);
+        // The control: the old form must still show the seam, or this test proves nothing.
+        check(worst_angle > 30.0f, "control -- angle scaling really does jump", worst_angle, 30.0);
     }
 
     std::printf("\n%s  (%d failure%s)\n", g_fail ? "FAILED" : "ALL CHECKS PASSED",

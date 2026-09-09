@@ -293,10 +293,29 @@ struct Config {
     // correction is reaching something it does not own -- run it before trusting a result from 0.
     int   aim_roll_axis = 0;
 
-    // Elevation (degrees from horizontal) at which the correction has faded to nothing, because the
-    // upright reference degenerates as the handle approaches vertical. Full strength up to
-    // (90 - this), then a linear fade. 25 leaves the correction whole through 65 deg of elevation.
-    float aim_roll_vert_deg = 25.0f;
+    // Width of the fade band at the pole, in degrees: the correction is whole up to (90 - this)
+    // degrees of handle elevation and falls linearly to nothing at vertical, because no upright
+    // reference exists there.
+    //
+    // MEASURED DEFAULT, and the first guess was badly wrong. 25 was chosen by reasoning that
+    // "pointing a gun past 65 degrees of elevation is rare" -- true of the AIM direction and
+    // irrelevant, because the axis here is the HANDLE, which points steeply down whenever you hold
+    // a controller like a pistol grip. A live session (2,698 samples, 1,177 of them with the aim
+    // within +-20 deg of level) measured handle elevation at a median of 60 deg and a 99th
+    // percentile of 74.5:
+    //
+    //     band   full strength up to   at full   mean strength   reference sensitivity
+    //       25          65 deg           54%         0.88               2.4x
+    //       20          70 deg           64%         0.95               2.9x
+    //       15          75 deg         99.8%         1.00               3.9x
+    //       10          80 deg          100%         1.00               5.8x
+    //
+    // So 25 would have run the correction at 88% average strength and whole only about half the
+    // time -- quietly, with nothing in the logs calling it a problem. 15 clears the measured
+    // distribution outright, and going narrower buys no coverage while making the reference more
+    // sensitive to hand movement near the pole (it swings as 1/sin(band), which is what the last
+    // column is).
+    float aim_roll_vert_deg = 15.0f;
 
     // ---- HMD TRANSLATION LEASH ---------------------------------------------------------------
     // Bound how far the player's HEAD may get from the standing origin, by sliding the standing

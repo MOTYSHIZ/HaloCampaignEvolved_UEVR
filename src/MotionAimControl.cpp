@@ -397,9 +397,37 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
                 axis.x /= al; axis.y /= al; axis.z /= al;   // Rodrigues needs a unit axis
                 float tw = 0.0f, fade = 0.0f;
                 if (wrist_twist_upright(rq, axis, g_cfg.aim_roll_vert_deg, &tw, &fade)) {
-                    const float applied = -tw * g_cfg.aim_roll_fix * fade;
-                    fwd = rotate_about_axis(fwd, axis, applied);
-                    roll_corr_deg = applied * RAD2DEG;
+                    // BLEND THE DIRECTION, NOT THE ANGLE -- and this is not a stylistic choice.
+                    //
+                    // The obvious form is `rotate(fwd, axis, -tw * strength * fade)`. A FULL
+                    // rotation is safe, because rotating by an angle is 2*pi-periodic and the twist
+                    // crossing +-180 therefore lands on the same vector. A SCALED one is not: at a
+                    // multiplier s the applied angle jumps by 2*180*(1-s) as the twist wraps.
+                    // Measured in a live session, |twist| passes 150 deg in 1% of samples, and the
+                    // multiplier is below 1 essentially always because `fade` is part of it -- so
+                    // that discontinuity is reachable in ordinary play, and it would have arrived
+                    // as an unexplained aim snap that no reading of the maths would suggest.
+                    //
+                    // Interpolating between the raw and fully-corrected DIRECTIONS has no such
+                    // seam: the two are separated by at most twice the aim-vs-handle tilt, about 70
+                    // degrees, so they are never near antipodal and the blend is continuous
+                    // everywhere -- including straight through the wrap.
+                    const Vec3  flat = rotate_about_axis(fwd, axis, -tw);
+                    const float s    = clampf(g_cfg.aim_roll_fix * fade, 0.0f, 1.0f);
+                    Vec3 out{fwd.x + (flat.x - fwd.x) * s,
+                             fwd.y + (flat.y - fwd.y) * s,
+                             fwd.z + (flat.z - fwd.z) * s};
+                    const float ol = std::sqrt(out.x * out.x + out.y * out.y + out.z * out.z);
+                    if (ol > 1e-4f) { out.x /= ol; out.y /= ol; out.z /= ol; }
+                    else            { out = flat; }   // unreachable at any real tilt; not a crash
+                    if (g_cfg.aim_roll_log > 0) {
+                        // What was ACTUALLY applied, not what was asked for -- they differ under
+                        // the blend, and the instrument exists to catch exactly that kind of gap.
+                        const float d = fwd.x * out.x + fwd.y * out.y + fwd.z * out.z;
+                        roll_corr_deg = std::acos(clampf(d, -1.0f, 1.0f)) * RAD2DEG
+                                      * (tw < 0.0f ? 1.0f : -1.0f);
+                    }
+                    fwd = out;
                 }
             }
         } else {
