@@ -3226,6 +3226,15 @@ struct Config {
     // 4 = DROP the projection, keep the app's quads -- the movie alone on a flat mono screen.
     //     If the doubling is "the movie twice, once in each place", 4 is the fix outright.
     int   cutscene_mono   = 0;
+    // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
+    // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
+    // side-by-side scene render target and writes it as a BMP into the profile's data\ folder,
+    // then logs the path. Set back to 0 to re-arm. This is the picture that decides what "the
+    // movie is doubled" actually looks like inside ONE eye -- modes 1-4 above proved the movie
+    // lives in the projection images and that both eyes already carry the same thing, so the
+    // shape of the doubling (two full copies, a full plus a half, one half) is a fact about a
+    // single eye image, and only the pixels can say which. Compiled out of player builds.
+    int   cutscene_dump   = 0;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------
