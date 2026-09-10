@@ -98,9 +98,22 @@ Mat3 TwoHandHold::effective_basis(const Mat3& one_hand_basis,
                                   const TwoHandTuning& tuning) const {
     if (m_state.blend <= 0.0f || !valid_basis(one_hand_basis)) return one_hand_basis;
 
+    // How much authority the SEPARATION earns. See TwoHandTuning::min_baseline_m: the angular
+    // sensitivity of this line is 1/separation, so a short baseline is not a weak signal, it is an
+    // amplifier on tracking noise. Computed before the branch because the remembered-line path
+    // below deserves the same ceiling -- it is the last good line, not a licence to keep steering
+    // from a separation that had already collapsed.
+    float baseline_w = 1.0f;
+
     Vec3 two_hand_forward{};
     if (support_tracked) {
-        two_hand_forward = normalized(support_grip_position - aim_grip_position);
+        const Vec3  sep     = support_grip_position - aim_grip_position;
+        const float sep_m   = length(sep) * tuning.units_to_metres;
+        baseline_w = smoothstep(tuning.min_baseline_m, tuning.min_baseline_m * 2.0f, sep_m);
+        if (!(baseline_w > 0.0f)) return one_hand_basis;
+
+        two_hand_forward = normalized(sep);
+        // Kept: this catches exact coincidence, which the band above cannot express.
         if (length_squared(two_hand_forward) < 0.8f) return one_hand_basis;
     } else {
         if (!m_has_last_forward) return one_hand_basis;
@@ -122,7 +135,8 @@ Mat3 TwoHandHold::effective_basis(const Mat3& one_hand_basis,
     const float agreement = dot(two_hand_forward, one_hand_basis.forward);
     if (!std::isfinite(agreement) || agreement < tuning.minimum_agreement) return one_hand_basis;
     const float weight =
-        m_state.blend * smoothstep(tuning.minimum_agreement, tuning.full_agreement, agreement);
+        m_state.blend * smoothstep(tuning.minimum_agreement, tuning.full_agreement, agreement) *
+        baseline_w;
 
     const Vec3 blended_forward =
         normalized(one_hand_basis.forward + (two_hand_forward - one_hand_basis.forward) * weight);

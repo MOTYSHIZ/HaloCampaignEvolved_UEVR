@@ -6356,7 +6356,15 @@ void update() {
         const bool held = (key_focus && (g_cfg.calib_key != 0) &&
                            ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0)) ||
                           (menu_mode == 1 && !menu_lt) ||
-                          wpn_calib_held();
+                          wpn_calib_held() ||
+                          // THE GRIP CAPTURE'S FREEZE IS A LATCH, not a key. Joining it here means
+                          // it reuses the freeze the rig already implements -- the same snapshot on
+                          // the rising edge, the same held-in-world-space behaviour -- instead of a
+                          // second freeze that would have to be kept in agreement with this one.
+                          //
+                          // It also makes the keyboard inert while frozen: End cannot produce an
+                          // edge, because this term holds `held` true throughout.
+                          halo::grip_offset_freeze_active();
         const bool was  = g_calib_held.exchange(held);
         // Mirror it for other translation units -- see calib_hold_active() in WeaponCalib.hpp.
         calib_hold_publish(held);

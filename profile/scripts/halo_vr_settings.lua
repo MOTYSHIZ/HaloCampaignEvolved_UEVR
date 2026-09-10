@@ -713,30 +713,32 @@ local function draw_calib()
     imgui.push_id("calwpngrip")
     local garmed = (grip_arm == 1)
     if garmed then imgui.push_style_color(21, 0xFF2288DD) end
-    local glabel = garmed and "ARMED -- now hold the weapon calibration key"
-                          or  "Arm weapon grip (off-centre handles)"
+    local glabel = garmed and "SAVE grip -- weapon is frozen"
+                          or  "Calibrate weapon grip (off-centre handles)"
     if imgui.button(glabel) then fire(garmed and "calib:wpngripoff" or "calib:wpngrip") end
     if garmed then imgui.pop_style_color(1) end
     if imgui.is_item_hovered() then
         if garmed then
-            imgui.set_tooltip("Armed. Close this menu, then hold the weapon calibration key --\n" ..
-                              "the weapon FREEZES. Put your SUPPORT hand where that weapon's\n" ..
-                              "handle actually is and release.\n" ..
-                              "Nothing else about the weapon's fit is changed by this press.\n" ..
-                              "Click again to cancel.")
+            imgui.set_tooltip("The weapon is FROZEN. Put your SUPPORT hand where that weapon's\n" ..
+                              "front handle actually is, then press this again to save.\n" ..
+                              "Your other hand is free -- this measures against the frozen\n" ..
+                              "weapon, not against a controller, so reaching over here to\n" ..
+                              "click cannot disturb it.\n" ..
+                              "No keyboard needed, and nothing else about the weapon changes.")
         else
             imgui.set_tooltip("For weapons whose front handle is NOT on the barrel -- the rocket\n" ..
                               "launcher, the sentinel beam.\n" ..
-                              "Records where that weapon is really held, so two-handed aiming\n" ..
-                              "grabs at the handle instead of at an imaginary barrel, and the\n" ..
-                              "weapon points where its barrel points rather than along the line\n" ..
-                              "between your hands.\n" ..
+                              "Click once: the weapon freezes. Put your support hand on its real\n" ..
+                              "handle. Click again: saved. No keyboard, no holding a key.\n" ..
+                              "Two-handed aiming then grabs at the handle instead of at an\n" ..
+                              "imaginary barrel, and the weapon points where its barrel points\n" ..
+                              "rather than along the line between your hands.\n" ..
                               "Weapons you never calibrate are completely unaffected.")
         end
     end
     if garmed then
         imgui.same_line()
-        imgui.text_colored("<-- weapon will freeze", 0xFF2288DD)
+        imgui.text_colored("<-- hand on the handle, then click", 0xFF2288DD)
     end
     -- Shown unconditionally, same reasoning as the scope 'x' above: these rows live in the
     -- machine-owned halo_vr_weapons.cfg keyed by a weapon this menu cannot see, so the plugin

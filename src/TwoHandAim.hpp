@@ -153,11 +153,15 @@ const TwoHandZoneMeas& two_hand_zone_measurement();
 
 // ---- GRIP-OFFSET CALIBRATION ------------------------------------------------------------------
 //
-// Same gesture the per-weapon weapon calibration uses -- hold the key, the WEAPON FREEZES, put
-// your support hand where the weapon's handle actually is, release -- with a different
-// destination. Armed from the Script UI (calib:wpngrip) or by config, exactly as the per-weapon
-// scope trim is, so it needs no hotkey of its own and cannot be confused with a wpnoff/wpnfix
-// capture.
+// TWO CLICKS, NO KEYBOARD. Press the Script UI button and the WEAPON FREEZES; put your support
+// hand where that weapon's handle actually is; press it again to save.
+//
+// WHY THIS ONE DOES NOT NEED A HELD KEY, when the pose-match calibration does. That gesture asks
+// you to line your CONTROLLER up with the frozen weapon, so the act of holding and the act of
+// measuring are the same thing and it must end with your hand in place. This measures the SUPPORT
+// hand against the frozen WEAPON. The weapon is not moving, so nothing the other hand does between
+// the clicks can disturb the measurement -- including reaching out to click the button. Asking for
+// a keyboard key while the player holds two hands in a pose inside a headset bought nothing.
 //
 // WHY THE FROZEN WEAPON IS WHAT MAKES THIS MEASURABLE. The quantity being captured is where the
 // handle sits ON THE WEAPON, which is only a fixed property while the weapon is not moving. The
@@ -167,8 +171,14 @@ const TwoHandZoneMeas& two_hand_zone_measurement();
 // while calibrating"). So the capture is in the frozen weapon's own frame by construction, and
 // does not repeat the scope pane's mistake of differencing a capture against a base in another
 // frame.
+// on = freeze the weapon and begin. off = ask to finish; the capture itself runs on the falling
+// edge of the calibration hold, so there is one rule about which tick is measured rather than two.
 void grip_offset_arm(bool on);
 bool grip_offset_armed();
+
+// Should the weapon be held frozen this tick? Joined into the calibration-hold poll in Plugin.cpp
+// so this reuses the rig's existing freeze rather than inventing a second one to keep in step.
+bool grip_offset_freeze_active();
 
 // Record the frozen weapon's handle offset for the weapon in hand, and persist it.
 //
