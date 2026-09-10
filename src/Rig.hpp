@@ -220,7 +220,10 @@ bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3*
 // position, read off the weapon's own skeletal mesh via UE reflection. Returns false when no weapon
 // is equipped or no mesh component carries the marker -- the caller then falls back (grip+offset
 // with a weapon, the controller aim path with none). See Rig.cpp; docs\BLAM_AIM_FINDINGS.md 2026-09-10.
-bool shotpoint_world(Vec3* out_pos);
+// out_fwd (optional) gets the marker's skeletal-mesh COMPONENT world forward (GetForwardVector) --
+// the practical bore direction, since this build exposes no socket-rotation UFUNCTION (only
+// GetSocketLocation), and the mesh's own forward is a cleaner axis than an FX marker's anyway.
+bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd = nullptr);
 // Dev-only readout of the resolution above, throttled by shotaimlog. No-op in release / when off.
 void shotpoint_dev_readout(unsigned tick);
 

@@ -801,12 +801,20 @@ static API::UObject* weapon_marker_component(API::UObject* wpn, const wchar_t* s
     return nullptr;
 }
 
-bool shotpoint_world(Vec3* out_pos) {
+bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
     auto* wpn = fp_weapon_actor();
     if (wpn == nullptr) return false;
     Vec3 p{};
-    if (weapon_marker_component(wpn, kMuzzleMarker, &p) == nullptr) return false;
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
+    if (comp == nullptr) return false;
     if (out_pos) *out_pos = p;
+    if (out_fwd) {
+        Vec3 f{};
+        // GetForwardVector: the component's world +X. This build has no socket-rotation UFUNCTION,
+        // so the mesh component forward stands in for the muzzle's authored forward. Zeroed on a
+        // failed read so the caller can tell "no direction" from a real one.
+        *out_fwd = call_ret_vec3(comp, L"GetForwardVector", &f) ? f : Vec3{0.0f, 0.0f, 0.0f};
+    }
     return true;
 }
 
@@ -823,9 +831,19 @@ void shotpoint_dev_readout(unsigned tick) {
     Vec3 p{};
     auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
     if (comp != nullptr) {
+        // Mesh component world forward, and the same vector as UE-convention game angles (yaw about
+        // +Z, +X forward, +Y right) -- the space the aim COMMAND lives in. Logging both lets the
+        // frame relationship to the controller aim (a DIFFERENT, VR-space extraction) be READ
+        // rather than guessed, which is the whole prerequisite for wiring the direction safely.
+        Vec3 f{};
+        const bool hf = call_ret_vec3(comp, L"GetForwardVector", &f);
+        const float ue_yaw = hf ? std::atan2(f.y, f.x) * RAD2DEG : 0.0f;
+        const float ue_pit = hf ? std::asin(clampf(f.z, -1.0f, 1.0f)) * RAD2DEG : 0.0f;
         API::get()->log_info(
-            "[Halo-CampE-UEVR] SHOTPOINT: '%ls' marker '%ls' on %ls -> world (%.1f,%.1f,%.1f)",
-            wc.c_str(), kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z);
+            "[Halo-CampE-UEVR] SHOTPOINT: '%ls' marker '%ls' on %ls | pos (%.1f,%.1f,%.1f) | "
+            "meshfwd (%.3f,%.3f,%.3f) UEyaw=%.1f UEpitch=%.1f haveFwd=%d",
+            wc.c_str(), kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z,
+            f.x, f.y, f.z, ue_yaw, ue_pit, (int)hf);
     } else {
         API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: weapon '%ls' has NO '%ls' marker on any mesh comp -> grip+offset fallback",
                              wc.c_str(), kMuzzleMarker);
