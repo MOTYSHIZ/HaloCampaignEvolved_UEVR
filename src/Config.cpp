@@ -54,20 +54,33 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopezoom")   == 0) g_cfg.scope_zoom     = clampf((float)v, 1.05f, 300.0f);
     else if (_stricmp(key, "scoperes")    == 0) g_cfg.scope_rt_size  = (int)clampf((float)v, 128.0f, 2048.0f);
     else if (_stricmp(key, "scopediv")    == 0) g_cfg.scope_div      = (int)clampf((float)v, 1.0f, 8.0f);
-    else if (_stricmp(key, "scopedist")   == 0) g_cfg.scope_dist     = clampf((float)v, 25.0f, 400.0f);
+    // EVERY PLACEMENT KEY RE-VALIDATES THE BLOCK, exactly as aimoffyaw/aimoffpitch do.
+    //
+    // Without this the scope calibration ERASED ITSELF on the next unrelated capture. The block
+    // in write_calib_file() is gated on scope_calib_valid, which only the CAPTURE set; a config
+    // reload does g_cfg = Config{} and then re-parses, restoring the numbers but not the flag, so
+    // the next pose or aim capture rewrote the file without a scope block at all. Observed
+    // 2026-09-10: three scope captures logged "Saved" at 01:01 and the file written at 01:02:57
+    // contained none of them. Nothing warned, because from the writer's point of view there was
+    // simply no scope calibration to write.
+    //
+    // Safe to set on parse only because no SHIPPED file carries these keys -- the canonical fit
+    // is compiled into Config.hpp. If one ever does, this needs the per-file guard that
+    // s_wpnfix_from_capture provides, or it will copy the shipped fit into the player's file.
+    else if (_stricmp(key, "scopedist")   == 0) { g_cfg.scope_dist     = clampf((float)v, 25.0f, 400.0f); g_cfg.scope_calib_valid = true; }
     else if (_stricmp(key, "scopecamdist")== 0) g_cfg.scope_cam_dist = clampf((float)v, 25.0f, 600.0f);
     else if (_stricmp(key, "scopesize")   == 0) g_cfg.scope_size     = clampf((float)v, 5.0f, 100.0f);
-    else if (_stricmp(key, "scoperight")  == 0) g_cfg.scope_right    = clampf((float)v, -100.0f, 100.0f);
-    else if (_stricmp(key, "scopeup")     == 0) g_cfg.scope_up       = clampf((float)v, -100.0f, 100.0f);
+    else if (_stricmp(key, "scoperight")  == 0) { g_cfg.scope_right    = clampf((float)v, -100.0f, 100.0f); g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scopeup")     == 0) { g_cfg.scope_up       = clampf((float)v, -100.0f, 100.0f); g_cfg.scope_calib_valid = true; }
     // CEILING RAISED 8 -> 8192 (2026-08-25). The old ceiling silently capped every brightness
     // test at 8x. The hosted-widget RETICULE needed aim_widget_tint 1024 x aim_widget_gain 5 --
     // roughly 5000x -- to survive the same scene pre-exposure and tonemapper this pane feeds
     // through, so 8 was never in the right order of magnitude for this material family. A knob
     // whose useful range sits outside its own clamp reads as "the setting does nothing".
     else if (_stricmp(key, "scopebright") == 0) g_cfg.scope_bright   = clampf((float)v, 0.0f, 8192.0f);
-    else if (_stricmp(key, "scoperotp")   == 0) g_cfg.scope_rot_p    = (float)v;
-    else if (_stricmp(key, "scoperoty")   == 0) g_cfg.scope_rot_y    = (float)v;
-    else if (_stricmp(key, "scoperotr")   == 0) g_cfg.scope_rot_r    = (float)v;
+    else if (_stricmp(key, "scoperotp")   == 0) { g_cfg.scope_rot_p    = (float)v; g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scoperoty")   == 0) { g_cfg.scope_rot_y    = (float)v; g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scoperotr")   == 0) { g_cfg.scope_rot_r    = (float)v; g_cfg.scope_calib_valid = true; }
     else if (_stricmp(key, "scopecamroll")== 0) g_cfg.scope_cam_roll = (float)v;
     else if (_stricmp(key, "scopecamtrack")==0) g_cfg.scope_cam_track = (int)clampf((float)v, 0.0f, 1.0f);
     else if (_stricmp(key, "scopecamorigin")==0)

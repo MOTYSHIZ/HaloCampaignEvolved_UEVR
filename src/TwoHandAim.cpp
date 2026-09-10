@@ -613,6 +613,32 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
             });
     }
 
+    // ---- THE BASELINE SAMPLER. For "the weapon yaws when my hands cross".
+    //
+    // PERIODIC WHILE LATCHED, and periodic is the point: the fault is a number MOVING, and the
+    // only samples an edge-triggered line can produce are the ones at its own threshold -- which
+    // is how a GRABGUIDE report was misread as pinned endpoints on 2026-09-08. Reporting the
+    // separation, the authority it earned and the geometry it came from makes the difference
+    // between "the band is doing its job" and "the band is the cause" readable rather than argued.
+    //
+    // WHAT TO LOOK FOR. baseline oscillating across min_baseline_m with w swinging 0..1 means the
+    // aim is being handed back and forth between one- and two-handed, and the fade band is the
+    // jitter rather than the cure -- in which case the offset needs to fade with distance from the
+    // HANDLE instead, because a fixed offset is extrapolation once the hand leaves it.
+    // A steady w with the weapon still yawing means the fault is elsewhere and this is exonerated.
+    HALO_VR_DEV_ONLY(
+        if (g_cfg.two_hand_log && st.latched) {
+            static uint32_t s_last = 0;
+            if (tick - s_last >= 16u) {
+                s_last = tick;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] TWOHAND BASE: sep=%.3fm w=%.2f blend=%.2f | along=%.3f "
+                    "lat=%.3f | gripoff=%d fixaim=%d",
+                    st.baseline_m, st.baseline_w, st.blend, st.along_m, st.lateral_m,
+                    s_zone_meas.grip_off_valid ? 1 : 0, g_cfg.grip_fix_aim ? 1 : 0);
+            }
+        });
+
     // THE ONE CALL. Nothing else in the plugin may call effective_basis(); see TwoHandAim.hpp.
     const pa::Mat3 canonical = in.aim_basis;
     const pa::Mat3 blended   = s_hold.effective_basis(canonical, in.aim_grip_position,

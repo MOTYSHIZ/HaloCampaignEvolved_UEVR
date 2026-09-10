@@ -132,6 +132,19 @@ struct TwoHandState {
     float along_m   = 0.0f;     // distance along the aim ray from the aim grip
     float lateral_m = 0.0f;     // perpendicular distance off that ray
     bool  measured  = false;    // false when the poses were unusable, so 0,0 is not read as "here"
+
+    // ---- THE SEPARATION, AND THE AUTHORITY IT EARNED -----------------------------------------
+    //
+    // Computed in update() rather than inside effective_basis() so it can be REPORTED, not just
+    // applied. A weapon that yaws when the hands cross is the symptom of this number moving, and
+    // without it the only evidence is a player saying "it jitters" -- which cannot distinguish the
+    // band doing its job from the band being the cause.
+    //
+    // baseline_m is the separation AFTER any per-weapon grip offset, because that is the line
+    // effective_basis actually normalises; the raw hand distance can look perfectly healthy while
+    // the corrected one passes through zero.
+    float baseline_m = 0.0f;
+    float baseline_w = 1.0f;    // 0..1 from min_baseline_m..2x, via the same smoothstep
 };
 
 // The hold, as an object so its state is visible and testable rather than ambient.
