@@ -1,18 +1,19 @@
 <#
 .SYNOPSIS
-  Compile and run the wrist-roll cancellation geometry checks. No game, no headset, ~5 seconds.
+  Compile and run the wrist-roll geometry checks. No game, no headset, ~5 seconds.
 
 .DESCRIPTION
-  aimrollfix rotates the aim direction back about the handle axis by the twist the wrist is
-  carrying, so that rolling the controller stops sliding the aim sideways. Whether it does that is
-  a question about pure geometry, and a headset is the wrong instrument for it: in there, "the
-  construction is wrong", "the calibration is stale" and "my hand moved" all look the same.
+  tests\AimRollGeometryTest.cpp includes the REAL src\Math.hpp and exercises the shipping helpers
+  - quat_up, rotate_about_axis, wrist_twist_upright - rather than a copy that would pass forever
+  while the plugin rotted. It also carries an executable record of the withdrawn roll-cancellation
+  lane: a roll about the HANDLE sweeps the aim on a 60 deg cone and the construction cancels it
+  exactly (the maths was right), while a roll about the BORE - what a wrist on a pistol grip
+  actually does, measured 2026-09-10 - leaves the raw aim alone and that same construction then
+  amplifies it (the physics was wrong). Both must pass; neither can be read without the other.
 
-  tests\AimRollGeometryTest.cpp includes the REAL src\Math.hpp and exercises the shipping
-  functions - quat_up, rotate_about_axis, wrist_twist_upright - rather than a copy that would pass
-  forever while the plugin rotted. It asserts the invariance directly, and carries a paired control
-  arm (the UNcorrected direction must still swing) so a test that silently stopped measuring
-  anything would fail rather than pass.
+  A headset is the wrong instrument for the geometry half: in there, "the construction is wrong",
+  "the calibration is stale" and "my hand moved" all look the same. It is the ONLY instrument for
+  the physics half, which is the lesson the record exists to keep.
 
   RUN IT AFTER TOUCHING any of those three functions.
 
@@ -90,9 +91,9 @@ if (-not $KeepArtifacts) {
 }
 
 if ($rc -ne 0) {
-    Write-Host "[aimroll] FAILED - the roll construction does not hold. Do not ship aimrollfix on." -ForegroundColor Red
+    Write-Host "[aimroll] FAILED - a Math.hpp roll helper or the recorded geometry no longer holds. Read the FAIL lines." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "[aimroll] OK - roll cancellation verified against the shipping maths." -ForegroundColor Green
+Write-Host "[aimroll] OK - roll helpers verified against the shipping Math.hpp; both halves of the record hold." -ForegroundColor Green
 exit 0

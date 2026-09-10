@@ -236,86 +236,31 @@ struct Config {
     // steeply as pitch steepens and the horizontal projection shrinks -- so rolling left and right
     // do not cost the same amount.
     //
-    // The grip's forward IS the handle axis, so rolling about it moves nothing. But its yaw is a
-    // BAD number to extract: measured grip forward pitches 41.5 deg on average and past 60 deg in
-    // HALF of all samples, so atan2(fwd.x,-fwd.z) is dividing by a tiny horizontal projection. That
-    // is why aimrollfix below exists and this does not ship on -- the fix keeps the aim pose's
-    // near-level direction (7.7 deg mean) and removes the roll from it, rather than trading the
-    // roll for an ill-conditioned extraction.
+    // Its forward is the handle axis, so rolling about the handle would leave it fixed. Two
+    // measured reasons it does not ship on: its yaw is ill-conditioned (grip forward pitches 60 deg
+    // below the aim on this hardware, so atan2(fwd.x,-fwd.z) divides by a small horizontal
+    // projection), and the premise is wrong anyway -- the wrist rolls about the BORE, not the
+    // handle (BLAM_AIM_FINDINGS.md, 2026-09-10), so the aim pose is already roll-invariant to
+    // within the wander of the wrist. There is nothing here for a source swap to fix.
     //
     // NOT REMOVED, despite what an older halo_vr_dev.cfg comment claimed: this is still parsed, and
     // TwoHandAim.cpp reads it to pick the basis its agreement gate is measured against.
     int   aim_src = 0;
 
-    // AIMROLL diagnostic: log the roll->aim coupling every N calls, 0 = off. Dev builds only.
+    // AIMROLL instrument: every N calls log the aim/grip directions, the body's rotation axis
+    // since the last line IN BODY COORDINATES (along the bore, toward the handle, out of plane)
+    // and the weapon roll about the bore against upright -- enough to read the wrist's roll axis
+    // straight off a session log. 0 = off. Dev builds only.
     int   aim_roll_log = 0;
 
-    // ---- WRIST-ROLL CANCELLATION (aimrollfix) ------------------------------------------------
-    //
-    // How much of the wrist roll to remove from the aim direction. 0 = off (ship default and every
-    // calibration to date), 1 = the aim direction becomes a function of WHERE THE HANDLE POINTS
-    // and nothing else. Fractions are a straight partial rotation, for finding what feels right.
-    //
-    // WHY ROLL MOVES AIM. The OpenXR aim pose is bolted to the controller with its axis tilted well
-    // off the handle, and you roll about the HANDLE. So the aim vector sweeps a cone: for a tilt a
-    // and a roll t it moves 2*asin(sin a * sin(t/2)), which at a plausible ~35 deg tilt costs 35-42
-    // deg of yaw for a 90 deg roll. Confirmed by direct computation; not a bug in quat_forward.
-    //
-    // THE CONSTRUCTION. Take the twist of the controller about the handle axis, measured against
-    // the UPRIGHT reference (the controller's own up versus world up, both projected into the plane
-    // normal to the handle), then rotate the aim forward back about that same axis by it. The
-    // result is exactly invariant under wrist roll, because rolling changes the twist and leaves
-    // the handle axis -- the rotation axis -- untouched.
-    //
-    // WHY UPRIGHT AND NOT A STORED REFERENCE POSE. A reference captured at calibration would drift:
-    // twist measured between two orientations picks up the sphere's holonomy, so swinging the arm
-    // around a wide arc and back registers tens of degrees of roll that the wrist never did.
-    // Referencing world up instead makes the correction a pure function of the current pose -- no
-    // history, no accumulation, nothing to persist, and nothing to go stale across a level load.
-    //
-    // THE UNAVOIDABLE COST is at the poles: an upright reference does not exist when the handle
-    // points straight up or down, so the correction fades out there (see aimrollvert). You cannot
-    // comb a sphere; every roll-free frame has this somewhere, and pointing a gun past 65 deg of
-    // elevation is the cheapest place to put it.
-    //
-    // ENABLING THIS MOVES YOUR AIM AND WANTS ONE RECALIBRATION. It removes the roll you happened to
-    // be holding, so the hand-to-aim offset changes by the cone displacement at that roll. Set it,
-    // run Page Down once, judge. Nothing is stored differently -- aimoffyaw/aimoffpitch absorb the
-    // constant, which is why this needs no calibration-schema change and cannot strand a saved fit.
-    float aim_roll_fix = 0.0f;
-
-    // Which axis the wrist is taken to roll about. 0 = the GRIP pose's forward (the handle, and the
-    // reason the grip pose exists), 1 = the AIM pose's forward.
-    //
-    // 0 is the physical answer and the default. 1 is a NULL CONTROL, not a preference: with the
-    // default source it rotates the aim forward about ITSELF, which is the identity, so it must
-    // change nothing while still running every line of the correction. If aim moves under 1, the
-    // correction is reaching something it does not own -- run it before trusting a result from 0.
-    int   aim_roll_axis = 0;
-
-    // Width of the fade band at the pole, in degrees: the correction is whole up to (90 - this)
-    // degrees of handle elevation and falls linearly to nothing at vertical, because no upright
-    // reference exists there.
-    //
-    // MEASURED DEFAULT, and the first guess was badly wrong. 25 was chosen by reasoning that
-    // "pointing a gun past 65 degrees of elevation is rare" -- true of the AIM direction and
-    // irrelevant, because the axis here is the HANDLE, which points steeply down whenever you hold
-    // a controller like a pistol grip. A live session (2,698 samples, 1,177 of them with the aim
-    // within +-20 deg of level) measured handle elevation at a median of 60 deg and a 99th
-    // percentile of 74.5:
-    //
-    //     band   full strength up to   at full   mean strength   reference sensitivity
-    //       25          65 deg           54%         0.88               2.4x
-    //       20          70 deg           64%         0.95               2.9x
-    //       15          75 deg         99.8%         1.00               3.9x
-    //       10          80 deg          100%         1.00               5.8x
-    //
-    // So 25 would have run the correction at 88% average strength and whole only about half the
-    // time -- quietly, with nothing in the logs calling it a problem. 15 clears the measured
-    // distribution outright, and going narrower buys no coverage while making the reference more
-    // sensitive to hand movement near the pole (it swings as 1/sin(band), which is what the last
-    // column is).
-    float aim_roll_vert_deg = 15.0f;
+    // There is NO wrist-roll cancellation here, and that is a measured result, not an omission.
+    // aimrollfix / aimrollaxis / aimrollvert lived here for two days (2026-09-08..10): rotate the
+    // aim direction back about the HANDLE by the twist against upright, proven exact out of tree.
+    // In a headset it doubled the aim's motion. Replay of that session (BLAM_AIM_FINDINGS.md,
+    // 2026-09-10): the wrist rolls about the BORE, within ~5 deg, so the aim pose is already
+    // roll-invariant to the wander of the wrist, and deriving aim from handle direction amplifies
+    // every sideways hand movement by 1/cos(60 deg) = 2x. No fixed roll axis beat the raw pose.
+    // Do not reintroduce it from the 2026-08-09 cone argument; that argument assumed the handle.
 
     // ---- HMD TRANSLATION LEASH ---------------------------------------------------------------
     // Bound how far the player's HEAD may get from the standing origin, by sliding the standing
