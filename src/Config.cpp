@@ -1552,6 +1552,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimreticulesrc") == 0) g_cfg.aim_reticule_src = (int)v;
         else if (_stricmp(key, "aimhidenative") == 0) g_cfg.aim_hide_native = (v != 0.0);
         else if (_stricmp(key, "aimsrc")       == 0) g_cfg.aim_src         = (int)v;
+        else if (_stricmp(key, "shotaim")      == 0) g_cfg.shot_aim         = (int)v;
+        else if (_stricmp(key, "shotaimdir")   == 0) g_cfg.shot_aim_dir     = (int)v;
+        else if (_stricmp(key, "shotaimlog")   == 0) g_cfg.shot_aim_log     = (int)v;
         else if (_stricmp(key, "aimrolllog")   == 0) g_cfg.aim_roll_log    = (int)v;
         else if (_stricmp(key, "aimreticuletrace") == 0) g_cfg.aim_reticule_trace = (v != 0.0);
         else if (_stricmp(key, "aimreticuletracemax") == 0)

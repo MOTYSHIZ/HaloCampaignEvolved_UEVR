@@ -6084,6 +6084,11 @@ void update() {
                              (int)g_in_menu.load(), (int)g_stick_mode.load(),
                              (int)g_cfg.scope_dev_ray, (int)g_cfg.scope_enabled);
     }
+    // SHOTPOINT readout (shotaimlog>0, dev cfg): confirm the fx_muzzleflash socket read live and
+    // report the marker's world position, so the shot-point aim source is designed from a
+    // measurement rather than a guess. Reads only -- it never touches aim.
+    halo::shotpoint_dev_readout(tick);
+
     // SCOPE DEV RAY (scopedevray=1, dev cfg): synthesize the ray from the RENDERED VIEW instead of
     // the controller. Exists because the SimVR null driver never validates the controller aim
     // pose, so the on-foot reticule path -- the scope's real ray source -- stays parked and the

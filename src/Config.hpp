@@ -243,6 +243,30 @@ struct Config {
     // coupling is upstream of this choice and switching sources will not help.
     int   aim_src = 0;
 
+    // ---- SHOT-POINT AIM (shotaim): derive aim from the WEAPON, not the controller pose ----------
+    // 0 = OFF (ship default). The controller-aim-pose + calibration path is UNCHANGED and remains
+    // the ONLY path when no weapon is equipped -- unarmed play, and the future third-person /
+    // vehicle aim-split features that have no weapon to read from. This is an ADDITIVE, weapon-only
+    // source layered on top, never a replacement for that path.
+    //
+    // 1 = when a weapon IS equipped, take the aim from its authored muzzle marker (fx_muzzleflash)
+    // on the weapon's own skeletal mesh: the shot point becomes the real barrel, so the reticle,
+    // the convergence and the scope all describe a ray leaving the muzzle you see. The selection
+    // cascades (logged via shotaimlog): marker resolved -> shot point; weapon but no marker ->
+    // grip+offset; no weapon -> the controller path above.
+    int   shot_aim = 0;
+
+    // Direction source for shot-point aim. 0 = the barrel-lock-derived direction (well-conditioned,
+    // and already proven to align with where shots actually go). 1 = the muzzle marker's OWN
+    // authored orientation -- the game creator's intent, but fx_muzzleflash is an FX marker whose
+    // orientation need not equal the bore, so it is opt-in and A/B-able live.
+    int   shot_aim_dir = 0;
+
+    // SHOTPOINT dev readout: log the marker resolution + world position every N ticks, 0 = off.
+    // Dev builds only. Confirms the in-plugin socket read live and characterises the marker, so the
+    // aim injection and the direction tunable can be designed from measurement rather than guess.
+    int   shot_aim_log = 0;
+
     // AIMROLL diagnostic: log the roll->aim coupling every N calls, 0 = off. Dev builds only.
     int   aim_roll_log = 0;
 

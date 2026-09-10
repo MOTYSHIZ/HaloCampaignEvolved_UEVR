@@ -758,6 +758,83 @@ bool call_socket_location(API::UObject* comp, const wchar_t* socket, Vec3* out) 
     return true;
 }
 
+// ---------------------------------------------------------------- SHOT POINT (muzzle marker)
+// The equipped weapon's authored muzzle marker in WORLD space. Halo weapons carry an
+// "fx_muzzleflash" marker on their own skeletal model (verified per-weapon 2026-07-27; the FX
+// system spawns muzzle flashes at it by name via BPFL_BlamEffectUtilities.RandomMuzzleFlashSocketNames).
+// We read it the fastest, most honest rung of the cascade -- UE reflection GetSocketLocation with a
+// REAL FName -- exactly where the MCP inspector could not (its FName args marshal to None). The
+// weapon is a separate actor attached at PrimaryWeapon; the marker lives on its skeletal mesh
+// COMPONENT, whose class we do NOT hardcode (a wrong class name is the one-build constant that
+// rots) -- every mesh-like component is probed and the first that owns the marker wins.
+constexpr const wchar_t* kMuzzleMarker = L"fx_muzzleflash";
+
+// GetSocketLocation returns the component's OWN origin for a socket it does not have (the None trap
+// call_socket_location documents). So the marker EXISTS on this component iff its lookup differs
+// from a deliberately-bogus name's lookup -- otherwise both merely returned the origin.
+static bool socket_on_component(API::UObject* comp, const wchar_t* socket, Vec3* out) {
+    Vec3 at{}, origin{};
+    if (!call_socket_location(comp, socket, &at)) return false;
+    if (!call_socket_location(comp, L"__halo_vr_nomatch__", &origin)) return false;
+    const float dx = at.x - origin.x, dy = at.y - origin.y, dz = at.z - origin.z;
+    if ((dx * dx + dy * dy + dz * dz) < 1e-6f) return false;   // socket absent: both are the origin
+    *out = at;
+    return true;
+}
+
+// Probe the weapon actor's own component arrays for whichever mesh carries `socket`.
+static API::UObject* weapon_marker_component(API::UObject* wpn, const wchar_t* socket, Vec3* out) {
+    if (wpn == nullptr) return nullptr;
+    for (const wchar_t* arrp : { L"BlueprintCreatedComponents", L"InstanceComponents" }) {
+        auto* arr = wpn->get_property_data<FRawArrayRO>(arrp);
+        if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) continue;
+        if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) continue;
+        auto** elems = reinterpret_cast<API::UObject**>(arr->data);
+        if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) continue;
+        for (int32_t i = 0; i < arr->num; ++i) {
+            auto* c = elems[i];
+            if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
+            if (class_name_of(c).find(L"Mesh") == std::wstring::npos) continue;  // only meshes have sockets
+            if (socket_on_component(c, socket, out)) return c;
+        }
+    }
+    return nullptr;
+}
+
+bool shotpoint_world(Vec3* out_pos) {
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) return false;
+    Vec3 p{};
+    if (weapon_marker_component(wpn, kMuzzleMarker, &p) == nullptr) return false;
+    if (out_pos) *out_pos = p;
+    return true;
+}
+
+void shotpoint_dev_readout(unsigned tick) {
+#if HALO_VR_DEV
+    if (g_cfg.shot_aim_log <= 0) return;
+    if ((tick % (unsigned)g_cfg.shot_aim_log) != 0) return;
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: no weapon equipped -> controller aim path (unchanged)");
+        return;
+    }
+    const std::wstring wc = class_name_of(wpn);
+    Vec3 p{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
+    if (comp != nullptr) {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] SHOTPOINT: '%ls' marker '%ls' on %ls -> world (%.1f,%.1f,%.1f)",
+            wc.c_str(), kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: weapon '%ls' has NO '%ls' marker on any mesh comp -> grip+offset fallback",
+                             wc.c_str(), kMuzzleMarker);
+    }
+#else
+    (void)tick;
+#endif
+}
+
 // ---------------------------------------------------------------- debug sphere
 // Draws a marker at a WORLD position via UKismetSystemLibrary::DrawDebugSphere, so the pivot can be
 // SEEN without borrowing the arms or the weapon -- both of which are the reference the pivot is

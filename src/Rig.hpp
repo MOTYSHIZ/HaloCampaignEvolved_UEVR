@@ -216,6 +216,14 @@ bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
 // wrong answer. The implementation builds the FName correctly; see its comment.
 bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3* out);
 
+// SHOT-POINT: resolve the equipped FP weapon's authored muzzle marker (fx_muzzleflash) to a WORLD
+// position, read off the weapon's own skeletal mesh via UE reflection. Returns false when no weapon
+// is equipped or no mesh component carries the marker -- the caller then falls back (grip+offset
+// with a weapon, the controller aim path with none). See Rig.cpp; docs\BLAM_AIM_FINDINGS.md 2026-09-10.
+bool shotpoint_world(Vec3* out_pos);
+// Dev-only readout of the resolution above, throttled by shotaimlog. No-op in release / when off.
+void shotpoint_dev_readout(unsigned tick);
+
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);
 void attach_release(uevr::API::UObject* rig, const char* why);
