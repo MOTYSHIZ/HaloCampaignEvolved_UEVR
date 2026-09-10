@@ -23,6 +23,11 @@
 --                                                                   -> strip/delete calib file
 --                                      calibreset:wpnscope          -> drop the EQUIPPED weapon's
 --                                                                      scope trim (weapons cfg)
+--                                      calib:wpngrip|wpngripoff     -> arm/disarm the support-hand
+--                                                                      grip capture (off-centre
+--                                                                      handles: rocket launcher)
+--                                      calibreset:wpngrip           -> drop the EQUIPPED weapon's
+--                                                                      recorded handle
 -- If the catalog mirror is missing, the plugin is not loaded/current -- the menu says so.
 
 local REF_FILE    = "halo_vr_user_reference.txt"
@@ -160,6 +165,9 @@ local once_cmds    = {}    -- one-shot commands (calib arm/reset), flushed on ne
 local editbuf     = {}     -- "layer:key" -> in-progress text for text/hex fields
 local calib_mode  = 0      -- plugin-reported armed calibration mode
 local scope_arm   = 0      -- plugin-reported per-weapon scope trim armed (1 = waiting for a capture)
+-- Same, for the per-weapon support-hand grip (off-centre handles). Absent from an older plugin's
+-- status file reads 0, which shows the unarmed label rather than claiming a state it cannot have.
+local grip_arm    = 0
 local scope_base_arm = 0   -- plugin-reported BASE (global-fit) scope calibration armed
                            -- DECLARE IT HERE. Assigned in the status read and consumed by the
                            -- button; without a local it becomes a global assignment, which this
@@ -292,6 +300,8 @@ local function refresh()
     -- The plugin is the authority on this too: the arm is CONSUMED by the capture, so a button
     -- tracking its own click would keep claiming "armed" after the gesture had already spent it.
     scope_arm  = tonumber(status:match("scopearm=(%d+)") or "0") or 0
+    -- Same authority rule as scope_arm: the plugin owns it, because the capture consumes the arm.
+    grip_arm   = tonumber(status:match("griparm=(%d+)") or "0") or 0
     -- Same reasoning as scope_arm: the plugin CONSUMES this on capture, so the panel reads it
     -- back rather than trusting its own click. Absent (older plugin) reads 0, which simply shows
     -- the unarmed label instead of claiming a state the plugin does not have.
@@ -691,6 +701,53 @@ local function draw_calib()
                           "back to the global fit. Other weapons keep theirs.\n" ..
                           "Takes effect immediately, no reload. If that weapon has no trim\n" ..
                           "(or nothing is equipped) this does nothing and says so in the log.")
+    end
+    imgui.pop_id()
+
+    -- ---- PER-WEAPON SUPPORT-HAND GRIP. Where a weapon's FRONT HANDLE sits relative to its barrel.
+    --
+    -- Same shape as the scope trim above and for the same reason: this button only chooses where
+    -- the next calibration's answer is STORED, so it reads "arm" rather than "calibrate". The
+    -- gesture is the ordinary weapon calibration -- hold the key, the weapon freezes -- which is
+    -- exactly the freeze this needs, so nothing new is duplicated here either.
+    imgui.push_id("calwpngrip")
+    local garmed = (grip_arm == 1)
+    if garmed then imgui.push_style_color(21, 0xFF2288DD) end
+    local glabel = garmed and "ARMED -- now hold the weapon calibration key"
+                          or  "Arm weapon grip (off-centre handles)"
+    if imgui.button(glabel) then fire(garmed and "calib:wpngripoff" or "calib:wpngrip") end
+    if garmed then imgui.pop_style_color(1) end
+    if imgui.is_item_hovered() then
+        if garmed then
+            imgui.set_tooltip("Armed. Close this menu, then hold the weapon calibration key --\n" ..
+                              "the weapon FREEZES. Put your SUPPORT hand where that weapon's\n" ..
+                              "handle actually is and release.\n" ..
+                              "Nothing else about the weapon's fit is changed by this press.\n" ..
+                              "Click again to cancel.")
+        else
+            imgui.set_tooltip("For weapons whose front handle is NOT on the barrel -- the rocket\n" ..
+                              "launcher, the sentinel beam.\n" ..
+                              "Records where that weapon is really held, so two-handed aiming\n" ..
+                              "grabs at the handle instead of at an imaginary barrel, and the\n" ..
+                              "weapon points where its barrel points rather than along the line\n" ..
+                              "between your hands.\n" ..
+                              "Weapons you never calibrate are completely unaffected.")
+        end
+    end
+    if garmed then
+        imgui.same_line()
+        imgui.text_colored("<-- weapon will freeze", 0xFF2288DD)
+    end
+    -- Shown unconditionally, same reasoning as the scope 'x' above: these rows live in the
+    -- machine-owned halo_vr_weapons.cfg keyed by a weapon this menu cannot see, so the plugin
+    -- answers rather than the menu guessing.
+    imgui.same_line()
+    if imgui.small_button("x") then fire("calibreset:wpngrip") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Forget the recorded handle for the weapon IN YOUR HANDS RIGHT NOW ->\n" ..
+                          "it goes back to being held like a rifle. Other weapons keep theirs.\n" ..
+                          "Takes effect immediately, no reload. If that weapon has no recorded\n" ..
+                          "handle (or nothing is equipped) this does nothing and says so.")
     end
     imgui.pop_id()
     -- ---- BASE (GLOBAL) SCOPE CALIBRATION ------------------------------------------------------
