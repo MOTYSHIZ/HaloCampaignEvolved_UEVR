@@ -53,6 +53,46 @@ struct ScopeAdjust {
 };
 constexpr int kMaxScopeAdjust = 24;
 
+// One per-weapon SUPPORT-HAND GRIP OFFSET for two-handed aiming.
+//
+// WHAT IT FIXES. The two-hand hold assumes the support hand goes ON the barrel: the grab zone is a
+// cylinder along the aim ray, and the aim direction is the hand-to-hand line. Both are right for a
+// rifle and wrong for anything whose front handle sits off that axis -- a rocket launcher, a
+// sentinel beam. Such a weapon fails to latch where it is actually held, and if it does latch the
+// gun points along the hand-to-hand line rather than down its own barrel.
+//
+// THE SECOND HALF IS THE ONE THAT SURPRISES PEOPLE. `along` does not cancel the skew, it SCALES it:
+// the aim error is atan(lateral / along), so a 10 cm handle gripped 40 cm down the barrel points
+// the weapon 14 degrees off. Nothing damps it either -- the agreement band ships fully open
+// (minimum_agreement = full_agreement = -1, and smoothstep returns 1.0 for any dot product), so a
+// latched hold hands the hand-to-hand line straight to the aim at full authority.
+//
+// SO THE OFFSET IS SUBTRACTED, NOT CLAMPED. Removing the handle's REST offset reconstructs where
+// the hand would sit on an equivalent rifle: at rest the weapon points down its barrel, and moving
+// the support hand still steers it by exactly the angle a rifle would give. Steering is preserved;
+// only the baseline it is measured from moves onto the handle.
+//
+// FRAME AND UNITS: the GUN's frame, game centimetres -- the same measurement TwoHandZoneMeas
+// carries, because that is the only frame in which "the handle is 10 cm to the left" is a fixed
+// property of the weapon rather than of how you are holding it.
+struct WeaponGrip {
+    char  match[64] = "";    // substring of the weapon actor class, e.g. "FP_RocketLauncher"
+    float off_y = 0.0f;      // lateral, gun frame, game cm
+    float off_z = 0.0f;
+    // WHERE ALONG THE BARREL IT WAS CAPTURED. Recorded, deliberately NOT applied.
+    //
+    // `along` is a permitted RANGE (zone_min_along_m..zone_max_along_m), not a point: you may grip
+    // anywhere down the barrel. Constraining it to the captured distance would narrow the grip
+    // window for no benefit and would make a capture taken at an unusual reach permanently harder
+    // to satisfy. It is here so a log line can say what the capture actually saw.
+    float at_x  = 0.0f;
+    // Player capture, or a shipped baseline? Same load-bearing reason as WeaponFix::captured: the
+    // writer rewrites its file IN FULL, so without this the first capture would copy the shipped
+    // baseline into the player's file, where it would outlive the value it was copied from.
+    bool  captured = false;
+};
+constexpr int kMaxWeaponGrip = 24;
+
 // One per-weapon RIGID DELTA for the PALETTE weapon carry (src\palettearm\PaletteArm.cpp).
 //
 // WHY A SECOND TYPE AND NOT MORE WeaponAdjust FIELDS. WeaponAdjust adjusts the RIG path's fitted
@@ -120,6 +160,10 @@ constexpr int kHandFixSchema = 1;
 // can pass weapon_offset_current_class() -- a pointer read -- rather than paying for reflection.
 // Returns nullptr when nothing matches.
 const WeaponFix* weapon_fix_for(const char* class_name);
+
+// The held weapon's support-hand grip offset, or nullptr for "no entry -- behave as before".
+// Returns nullptr when gripoffsets is off, so every consumer gets the switch for free.
+const WeaponGrip* weapon_grip_for(const char* class_name);
 
 struct Config {
     bool  enabled      = true;
@@ -4016,6 +4060,24 @@ struct Config {
     bool  scope_offsets   = true;
     ScopeAdjust wpn_scope[kMaxScopeAdjust];
     int   scope_count     = 0;
+
+    // ---- PER-WEAPON SUPPORT-HAND GRIP OFFSET (wpngrip) ---------------------------------------
+    // See WeaponGrip above for what it fixes and why the aim half matters as much as the zone.
+    // A weapon with no entry behaves EXACTLY as before, which is what makes this safe to ship on.
+    WeaponGrip wpn_grip[kMaxWeaponGrip];
+    int   grip_count      = 0;
+    // Master switch for the whole feature. 0 ignores every entry without deleting it.
+    bool  grip_offsets    = true;
+    // Apply the offset to the AIM DIRECTION as well as to the grab zone.
+    //
+    // Separate from grip_offsets on purpose. The zone half only decides WHERE YOU MAY GRAB and
+    // cannot move a shot; this half changes where the weapon POINTS while held, which is the part
+    // riding on direct drive. Its own key means it can be A/B'd -- and switched off on its own if
+    // an off-axis weapon ever reads better with the raw hand-to-hand line.
+    bool  grip_fix_aim    = true;
+    // Log the matched entry on every weapon CHANGE. The instrument for "is my capture applied at
+    // all", answerable without repeating the calibration.
+    bool  grip_log        = false;
     // Log which weapon matched which trim, on every weapon CHANGE. Off by default; this is the
     // instrument for "is the trim being applied at all", answerable without a capture.
     bool  scope_wpn_log   = false;

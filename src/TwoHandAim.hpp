@@ -125,9 +125,62 @@ struct TwoHandZoneMeas {
     Vec3 hand_gun{};           // support hand from the AIM GRIP, in the gun's frame, game cm
     Vec3 rig_off{};            // aim grip -> rig component, same frame. Drawing adds this; the
                                // zone test must not.
+
+    // ---- THE HELD WEAPON'S SUPPORT-HAND GRIP OFFSET, IN BOTH FRAMES ---------------------------
+    //
+    // Off-axis handles (rocket launcher, sentinel beam) need the same offset applied to two things
+    // that live in DIFFERENT frames, which is why it is published twice rather than converted at
+    // the consumer:
+    //
+    //   grip_off_gun  the grab zone, which is measured in the GUN's frame (game cm) -- subtract
+    //                 from hand_gun's y/z before taking the lateral magnitude.
+    //   grip_off_vr   the aim direction, which effective_basis() builds from RAW VR-SPACE
+    //                 positions (metres) -- subtract from the support position before it is used.
+    //
+    // BOTH ARE FILLED HERE, and that is the whole point. Converting between them needs the blessed
+    // VR-to-game transform AND the gun's world orientation, and Plugin.cpp's rig block is the only
+    // place that holds both (see the note above). A consumer that tried to rotate one into the
+    // other would be re-deriving vr_to_rig by hand, which the comment at its definition explicitly
+    // warns against -- two copies drift, and the drift lands in the player's aim.
+    //
+    // x of grip_off_gun is always 0: `along` is a permitted range, not a point. See WeaponGrip.
+    bool grip_off_valid = false;
+    Vec3 grip_off_gun{};
+    Vec3 grip_off_vr{};
 };
 void two_hand_set_zone_measurement(const TwoHandZoneMeas& m);
 const TwoHandZoneMeas& two_hand_zone_measurement();
+
+// ---- GRIP-OFFSET CALIBRATION ------------------------------------------------------------------
+//
+// Same gesture the per-weapon weapon calibration uses -- hold the key, the WEAPON FREEZES, put
+// your support hand where the weapon's handle actually is, release -- with a different
+// destination. Armed from the Script UI (calib:wpngrip) or by config, exactly as the per-weapon
+// scope trim is, so it needs no hotkey of its own and cannot be confused with a wpnoff/wpnfix
+// capture.
+//
+// WHY THE FROZEN WEAPON IS WHAT MAKES THIS MEASURABLE. The quantity being captured is where the
+// handle sits ON THE WEAPON, which is only a fixed property while the weapon is not moving. The
+// freeze is already correct for this without any new work: during the hold the rig composes the
+// gun from g_calib_gun_world, and g_rigw_* -- the orientation the zone measurement is taken
+// against -- is derived from that same composition ("so it stays correct in every rig mode and
+// while calibrating"). So the capture is in the frozen weapon's own frame by construction, and
+// does not repeat the scope pane's mistake of differencing a capture against a base in another
+// frame.
+void grip_offset_arm(bool on);
+bool grip_offset_armed();
+
+// Record the frozen weapon's handle offset for the weapon in hand, and persist it.
+//
+// Returns TRUE if it CLAIMED the press -- including every refusal (not armed is the one false;
+// no weapon in hand and no measurement both claim it). The caller must treat a claim as "this
+// gesture is spoken for" and raise no calibration-finish edge, or one press would also run the
+// weapon solve and overwrite a calibration the player never asked to change.
+bool grip_offset_capture();
+
+// Drop the equipped weapon's wpngrip entry, back to "on the barrel like a rifle". false = nothing
+// to clear. Rewrites halo_vr_weapons.cfg.
+bool grip_offset_clear_current();
 
 bool two_hand_latched();
 

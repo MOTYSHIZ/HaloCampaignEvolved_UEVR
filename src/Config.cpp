@@ -481,6 +481,10 @@ int menu_bridge_tick() {
             // Scope.cpp, so this only chooses the DESTINATION of a capture that gesture already makes.
             if (line == "calib:wpnscope")  { scope_offset_arm(true);  ++applied; continue; }
             if (line == "calib:wpnscopeoff"){ scope_offset_arm(false); ++applied; continue; }
+            // The support-hand grip offset: same freeze gesture as the weapon calibration,
+            // different destination. See grip_offset_arm() in TwoHandAim.hpp.
+            if (line == "calib:wpngrip")   { grip_offset_arm(true);  ++applied; continue; }
+            if (line == "calib:wpngripoff"){ grip_offset_arm(false); ++applied; continue; }
             if (line == "calib:scopebase")   { scope_base_arm(true);   ++applied; continue; }
             if (line == "calib:scopebaseoff"){ scope_base_arm(false);  ++applied; continue; }
             if (line == "calib:off")       { g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
@@ -498,6 +502,7 @@ int menu_bridge_tick() {
             // strip_calib_keys. Returns false when there was nothing to clear, which is not an
             // error -- it logs why and the menu button simply does nothing.
             if (line == "calibreset:wpnscope") { scope_offset_clear_current(); ++applied; continue; }
+            if (line == "calibreset:wpngrip")  { grip_offset_clear_current();  ++applied; continue; }
 
             // ---- BIND CAPTURE. `bind:capture=<cfgkey>` arms; `bind:capture=off` disarms.
             //
@@ -639,21 +644,28 @@ int menu_bridge_tick() {
     // claiming "armed" after the gesture had already spent it.
     static int  s_last_scopearm = -1;
     static int  s_last_scopebase = -1;
+    static int  s_last_griparm  = -1;
     const int scopearm  = scope_offset_armed() ? 1 : 0;
     const int scopebase = scope_base_armed()   ? 1 : 0;
+    // Same authority argument as scopearm: the capture CONSUMES the arm, so a menu button that
+    // tracked its own click would keep claiming "armed" after the gesture had already spent it.
+    const int griparm   = grip_offset_armed()  ? 1 : 0;
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
+        griparm != s_last_griparm ||
         strncmp(s_last_bindkey, g_bind_capture_key, sizeof(s_last_bindkey)) != 0) {
         s_last_status = mode;
         s_last_bind   = barmed;
         s_last_hand   = hready;
         s_last_scopearm = scopearm;
         s_last_scopebase = scopebase;
+        s_last_griparm  = griparm;
         strncpy_s(s_last_bindkey, g_bind_capture_key, _TRUNCATE);
-        char status[320];   // widened for scopearm= and scopebasearm=
+        char status[352];   // widened for scopearm= and griparm=
         sprintf_s(status, sizeof(status),
-                  "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n",
-                  mode, barmed, g_bind_capture_key, hready, scopearm);
+                  "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n"
+                  "griparm=%d\r\n",
+                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm);
         write_text_file(g_status_path, status);
     }
     return applied;
@@ -938,6 +950,76 @@ static bool parse_weapon_fix(const char* val) {
     return true;
 }
 
+// wpngrip=<match>,<off_y>,<off_z>[,<at_x>] -- the per-weapon SUPPORT-HAND GRIP OFFSET.
+//
+// Gun frame, game centimetres, the same frame and unit TwoHandZoneMeas already publishes. What it
+// is FOR is on WeaponGrip in Config.hpp; this only turns a line into an entry.
+//
+// THE TWO LATERALS ARE REQUIRED; at_x IS OPTIONAL. That is a real difference from wpnfix rather
+// than a looser standard: a short wpnfix line is a half-built rotation, which is not a rotation at
+// all, whereas a three-token line here is a COMPLETE offset missing only a diagnostic. A line
+// naming just a weapon is still dropped, because an all-zero offset cannot be told apart from
+// having no entry, and storing one would cost the next reader the ability to distinguish a
+// deliberate centre-line grip from a typo.
+//
+// NO SCHEMA STAMP, and that is deliberate too. wpnfix carries one because its frame changed once
+// already and a delta from a foreign frame fails silently. This is two lateral distances in the
+// frame the zone measurement has used since it existed; there is no earlier spelling of it sitting
+// in anyone's file waiting to be misread.
+//
+// CLAMPED, unlike wpnfix, because this one IS a bounded physical quantity: how far across its own
+// barrel a weapon's front handle sits. Half a metre is far past any real handle and still leaves
+// every plausible capture untouched -- the bound exists to catch a frame or unit error, which
+// presents as a value orders of magnitude out, not as a slightly generous reach.
+static bool parse_weapon_grip(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.grip_count >= kMaxWeaponGrip) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    char* ctx = nullptr;
+    char* tok = strtok_s(buf, ",", &ctx);
+    if (tok == nullptr || tok[0] == 0) return true;
+
+    WeaponGrip w{};
+    strncpy_s(w.match, sizeof(w.match), tok, _TRUNCATE);
+    w.captured = s_wpnfix_from_capture;
+
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok == nullptr) return true;                       // weapon named and nothing else: drop
+    w.off_y = clampf((float)atof(tok), -50.0f, 50.0f);
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok == nullptr) return true;
+    w.off_z = clampf((float)atof(tok), -50.0f, 50.0f);
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok != nullptr) w.at_x = clampf((float)atof(tok), -200.0f, 200.0f);
+
+    // REPLACE BY MATCH, for the same reason wpnfix does it: the lookup returns the first hit, so a
+    // second entry for one weapon would be dead weight that reads like a working override.
+    for (int i = 0; i < g_cfg.grip_count; ++i) {
+        if (_stricmp(g_cfg.wpn_grip[i].match, w.match) == 0) {
+            g_cfg.wpn_grip[i] = w;
+            return true;
+        }
+    }
+    g_cfg.wpn_grip[g_cfg.grip_count++] = w;
+    return true;
+}
+
+// THE ONE GRIP LOOKUP. Backwards, so the last entry parsed for a weapon wins -- the capture file
+// is parsed after halo_vr.cfg, which is what lets a player's own capture beat a shipped baseline.
+// Cheap enough for the tick: a substring test over at most kMaxWeaponGrip short strings.
+const WeaponGrip* weapon_grip_for(const char* class_name) {
+    if (!g_cfg.grip_offsets || class_name == nullptr || class_name[0] == 0) return nullptr;
+    for (int i = g_cfg.grip_count - 1; i >= 0; --i) {
+        const WeaponGrip& w = g_cfg.wpn_grip[i];
+        if (w.match[0] != 0 && strstr(class_name, w.match) != nullptr) return &w;
+    }
+    return nullptr;
+}
+
 // The handfix schema stamp currently in force, PER FILE, reset with the wpnfix one below.
 static int s_handfix_file_ver = 0;
 
@@ -1217,6 +1299,13 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopeoffsets")  == 0) { g_cfg.scope_offsets = (v != 0.0); return true; }
     if (_stricmp(key, "scopewpnlog")   == 0) { g_cfg.scope_wpn_log = (v != 0.0); return true; }
     if (_stricmp(key, "wpnfix")        == 0) { return parse_weapon_fix(val); }
+    // Per-weapon support-hand grip offset for two-handed aiming, and its two switches.
+    // gripfixaim is separate from gripoffsets on purpose: the zone half cannot move a shot,
+    // the aim half can. See WeaponGrip in Config.hpp.
+    if (_stricmp(key, "wpngrip")       == 0) { return parse_weapon_grip(val); }
+    if (_stricmp(key, "gripoffsets")   == 0) { g_cfg.grip_offsets = (v != 0.0); return true; }
+    if (_stricmp(key, "gripfixaim")    == 0) { g_cfg.grip_fix_aim = (v != 0.0); return true; }
+    if (_stricmp(key, "griplog")       == 0) { g_cfg.grip_log     = (v != 0.0); return true; }
     // Scoped to the file being parsed, NOT stored in g_cfg -- see parse_config_file()'s reset.
     if (_stricmp(key, "wpnfixver")     == 0) { s_wpnfix_file_ver     = (int)v; return true; }
     if (_stricmp(key, "handfix")       == 0) { return parse_hand_fix(val); }

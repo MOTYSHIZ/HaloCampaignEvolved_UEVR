@@ -6361,7 +6361,19 @@ void update() {
         // Mirror it for other translation units -- see calib_hold_active() in WeaponCalib.hpp.
         calib_hold_publish(held);
         if (held && !was) g_calib_start  = true;
-        if (!held && was) g_calib_finish = true;
+        // ---- THE GRIP CAPTURE CLAIMS THE WHOLE RELEASE, UPSTREAM OF EVERYTHING IT WOULD RUN.
+        //
+        // Claiming HERE, by simply not raising the finish edge, rather than adding another rung to
+        // the release block: that block runs a solve, takes ownership of the pivot
+        // (g_pivot_from_calib) and then writes either a per-weapon delta or the GLOBAL
+        // calibration. A grip capture wants none of it -- it only reads a measurement that already
+        // exists -- and a press that quietly rewrote the global fit as a side effect of adjusting
+        // one weapon's handle would be the worst kind of surprise, because the damage shows up on
+        // every OTHER weapon later.
+        //
+        // Same "one gesture, one destination" property wpn_calib_take_pending() exists to enforce,
+        // achieved by construction here instead of by a second latch.
+        if (!held && was && !halo::grip_offset_capture()) g_calib_finish = true;
 
         // ---- THE SUPPORT-HAND GESTURE'S HOLD. Published rather than edge-detected here, because
         // its consumer lives in another translation unit (src\palettearm\PaletteArm.cpp, which owns
@@ -8941,6 +8953,50 @@ void update() {
                                                      r.y * g_cfg.rig_scale});
                 };
 
+                // ...AND ITS EXACT INVERSE, defined HERE and only here.
+                //
+                // The note above warns that two copies of this mapping drift. That argument is
+                // about two INDEPENDENT derivations of the same direction; an inverse written as
+                // the adjacent line, closing over the same q_ro, q_turn and rig_scale, is one
+                // thing to keep in step and is visibly paired with what it undoes. Move one and
+                // the other is right there.
+                //
+                // Needed because the per-weapon grip offset is authored in the GUN's frame (where
+                // "the handle is 10 cm left" is a property of the weapon) but has to be applied to
+                // the aim direction, which effective_basis() builds from RAW VR-SPACE positions.
+                //
+                // The algebra, so a reader can check it rather than trust it: vr_to_rig produces
+                // u = {-r.z*s, r.x*s, r.y*s} before the turn, so r = {u.y/s, u.z/s, -u.x/s}.
+                auto rig_to_vr = [&](const Vec3& w) {
+                    const float s = (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;
+                    const Vec3 u = quat_rotate(quat_conj(q_turn), w);
+                    const Vec3 r{u.y / s, u.z / s, -u.x / s};
+                    return quat_rotate(quat_conj(q_ro), r);
+                };
+                // PROVE THE PAIR, every tick, in dev builds. An inverse that silently stops being
+                // one is exactly the failure this project keeps paying for: it would present as a
+                // grip offset that is slightly wrong in a way no amount of recalibrating fixes.
+                // The #if form, not HALO_VR_DEV_ONLY(...): that macro is function-like, and the
+                // preprocessor splits on commas that braces do not protect, so a Vec3{a, b, c}
+                // inside it arrives as three arguments.
+#if HALO_VR_DEV
+                if (g_cfg.grip_log) {
+                    const Vec3 probe{0.13f, -0.07f, 0.21f};
+                    const Vec3 back = rig_to_vr(vr_to_rig(probe));
+                    const float err = std::sqrt((back.x - probe.x) * (back.x - probe.x) +
+                                                (back.y - probe.y) * (back.y - probe.y) +
+                                                (back.z - probe.z) * (back.z - probe.z));
+                    static uint32_t s_said = 0;
+                    if (err > 1.0e-3f && s_said < 4) {
+                        ++s_said;
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] GRIPOFF: rig_to_vr is NOT the inverse of vr_to_rig "
+                            "-- round-trip error %.5f m. The grip offset will be applied in the "
+                            "wrong direction; fix the pair before trusting a capture.", err);
+                    }
+                }
+#endif
+
                 Vec3 pose_off = vr_to_rig(d_vr);
 
                 // ---- THE CALIBRATION HOLD RIDES YOUR HEAD.
@@ -9441,6 +9497,22 @@ void update() {
                             const Vec3 ro{arm.x - mount.x, arm.y - mount.y, arm.z - mount.z};
                             meas.rig_off  = quat_rotate(quat_conj(qg), ro);
                             meas.valid    = true;
+
+                            // ---- THE HELD WEAPON'S HANDLE OFFSET, RESOLVED ONCE, IN BOTH FRAMES.
+                            //
+                            // Here rather than at either consumer because this is the one scope
+                            // holding both halves of the conversion: qg (the gun's world
+                            // orientation) and the vr_to_rig / rig_to_vr pair. See the note on
+                            // TwoHandZoneMeas::grip_off_vr.
+                            //
+                            // x stays 0 on purpose -- the offset moves the cylinder's AXIS off the
+                            // barrel, it does not move the grip window along it.
+                            if (const WeaponGrip* wg = weapon_grip_for(weapon_offset_current_class())) {
+                                const Vec3 off_gun{0.0f, wg->off_y, wg->off_z};
+                                meas.grip_off_gun   = off_gun;
+                                meas.grip_off_vr    = rig_to_vr(quat_rotate(qg, off_gun));
+                                meas.grip_off_valid = true;
+                            }
                         }
                     }
                     halo::two_hand_set_zone_measurement(meas);

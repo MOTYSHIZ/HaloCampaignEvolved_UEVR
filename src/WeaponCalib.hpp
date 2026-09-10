@@ -93,6 +93,13 @@ std::string weapon_key();
 // future update to the baseline. See the `captured` flag on WeaponFix.
 void wpnfix_set(const std::string& key, const float q[4], const float t[3]);
 
+// Store a captured SUPPORT-HAND GRIP OFFSET (gun frame, game cm) for `key`, and rewrite the file.
+// Same captured-entries-only rule as wpnfix_set -- see its note.
+void wpngrip_set(const std::string& key, float off_y, float off_z, float at_x);
+
+// Drop `key`'s captured grip offset. false = there was none. Rewrites halo_vr_weapons.cfg.
+bool wpngrip_clear(const std::string& key);
+
 // Consume the "the per-weapon key was just released" latch.
 //
 // The palette freeze path takes it, so the rig-path capture cannot ALSO claim the same press.

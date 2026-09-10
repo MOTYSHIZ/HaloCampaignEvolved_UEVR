@@ -212,6 +212,84 @@ const TwoHandReach& two_hand_reach() { return s_reach; }
 void two_hand_set_zone_measurement(const TwoHandZoneMeas& m) { s_zone_meas = m; }
 const TwoHandZoneMeas& two_hand_zone_measurement() { return s_zone_meas; }
 
+// ---- GRIP-OFFSET CALIBRATION ------------------------------------------------------------------
+// Contract, and why the frozen weapon is already the right frame, are on the declarations.
+namespace {
+std::atomic<bool> s_grip_armed{false};
+}
+
+void grip_offset_arm(bool on) {
+    const bool was = s_grip_armed.exchange(on);
+    if (on == was) return;
+    if (on) {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] WPNGRIP: ARMED. Hold the weapon calibration key -- the weapon "
+            "freezes -- put your SUPPORT hand where that weapon's front handle actually is, and "
+            "release. Nothing else about the weapon's fit is touched by this press.");
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] WPNGRIP: disarmed; the next calibration press "
+                             "goes back to its normal destination.");
+    }
+}
+
+bool grip_offset_armed() { return s_grip_armed.load(std::memory_order_relaxed); }
+
+bool grip_offset_capture() {
+    // NOT ARMED IS THE ONE FALSE. Every other exit claims the press -- see the declaration: a
+    // refusal that fell through would run the weapon solve and rewrite a calibration the player
+    // was not editing.
+    if (!s_grip_armed.exchange(false)) return false;
+
+    // THE MEASUREMENT IS LAST TICK'S, AND THAT IS THE CORRECT ONE.
+    //
+    // This runs from the input poll, which is upstream of the rig block that publishes the zone
+    // measurement, so s_zone_meas here is the one taken on the previous tick -- the last tick the
+    // hold was still active and the weapon still frozen. Taking THIS tick's would measure against
+    // a weapon that has already snapped back to following the hand.
+    if (!s_zone_meas.valid) {
+        API::get()->log_info("[Halo-CampE-UEVR] WPNGRIP: nothing captured -- no two-hand zone "
+                             "measurement this tick. Both controllers must be tracking.");
+        return true;
+    }
+
+    const std::string key = weapon_key();
+    if (key.empty()) {
+        API::get()->log_info("[Halo-CampE-UEVR] WPNGRIP: nothing captured -- no weapon in hand. "
+                             "The offset is a property of a weapon, so there is nothing to store "
+                             "it against.");
+        return true;
+    }
+
+    const float off_y = s_zone_meas.hand_gun.y;
+    const float off_z = s_zone_meas.hand_gun.z;
+    const float at_x  = s_zone_meas.hand_gun.x;
+    wpngrip_set(key, off_y, off_z, at_x);
+
+    // SAY WHAT IT WILL DO, not just what it stored. The aim half of this feature is invisible
+    // until you fire, and the number that predicts it -- atan(lateral/along) -- is exactly the
+    // skew the capture just removed. Reporting it turns "did that work?" into a reading.
+    const float lateral = std::sqrt(off_y * off_y + off_z * off_z);
+    const float skew_deg = (std::fabs(at_x) > 1.0e-3f)
+                         ? std::atan2(lateral, std::fabs(at_x)) * 57.2957795f : 0.0f;
+    API::get()->log_info(
+        "[Halo-CampE-UEVR] WPNGRIP: CAPTURED for '%s' -- handle sits %.1f cm off the barrel axis "
+        "(y=%.1f z=%.1f), gripped %.1f cm along it. That reach was skewing the two-handed aim by "
+        "%.1f deg; the grab zone now follows the handle%s. Delete the wpngrip line in "
+        "halo_vr_weapons.cfg to undo.",
+        key.c_str(), lateral, off_y, off_z, at_x, skew_deg,
+        g_cfg.grip_fix_aim ? " and that skew is corrected" : " (gripfixaim=0, so aim is unchanged)");
+    return true;
+}
+
+bool grip_offset_clear_current() {
+    const std::string key = weapon_key();
+    if (key.empty()) return false;
+    if (!wpngrip_clear(key)) return false;
+    API::get()->log_info("[Halo-CampE-UEVR] WPNGRIP: cleared for '%s'; it is held like a rifle "
+                         "again.", key.c_str());
+    return true;
+}
+
 const char* two_hand_status() { return s_status; }
 
 bool two_hand_bend_orientation(Quat* q) {
@@ -404,8 +482,41 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
         const float cm_per_m = (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;
         in.zone_measured  = true;
         in.zone_along_m   = s_zone_meas.hand_gun.x / cm_per_m;
-        in.zone_lateral_m = std::sqrt(s_zone_meas.hand_gun.y * s_zone_meas.hand_gun.y +
-                                      s_zone_meas.hand_gun.z * s_zone_meas.hand_gun.z) / cm_per_m;
+
+        // ---- THE HANDLE OFFSET MOVES THE CYLINDER'S AXIS, NOT ITS ENDS ------------------------
+        //
+        // Subtracting it before the magnitude is what puts the grab cylinder along the HANDLE for
+        // a weapon whose front grip is off the barrel -- a rocket launcher, a sentinel beam --
+        // instead of along a barrel line the player's hand never occupies. Zero for every weapon
+        // without an entry, so this is arithmetic on a 0 rather than a branch in the hot path.
+        //
+        // ONLY y/z. `along` is untouched because it is a permitted RANGE, not a point: you may
+        // grip anywhere down the handle's length, exactly as you may down a barrel.
+        const float gy = s_zone_meas.grip_off_valid ? s_zone_meas.grip_off_gun.y : 0.0f;
+        const float gz = s_zone_meas.grip_off_valid ? s_zone_meas.grip_off_gun.z : 0.0f;
+        const float dy = s_zone_meas.hand_gun.y - gy;
+        const float dz = s_zone_meas.hand_gun.z - gz;
+        in.zone_lateral_m = std::sqrt(dy * dy + dz * dz) / cm_per_m;
+    }
+
+    // ---- ...AND THE AIM DIRECTION, WHICH IS THE HALF THAT CAN MOVE A SHOT ----------------------
+    //
+    // effective_basis() takes the gun's forward to be normalized(support - aim). For an off-axis
+    // handle that line is NOT the barrel, and `along` does not cancel the error -- it scales it:
+    // atan(lateral / along), so a 10 cm handle held 40 cm out points the weapon 14 degrees off.
+    // Nothing downstream damps it either, because the agreement band ships fully open.
+    //
+    // Subtracting the handle's REST offset reconstructs where the hand would sit on an equivalent
+    // rifle. At rest the weapon points down its own barrel; move the support hand and it still
+    // steers by exactly the angle a rifle would give, because only the BASELINE moved onto the
+    // handle. That is why this is a subtraction and not a clamp toward the axis.
+    //
+    // Its own switch (gripfixaim) because this one is on the aim path and the zone half is not.
+    if (s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim) {
+        const pa::Vec3 fix = to_pa(s_zone_meas.grip_off_vr);
+        in.support_grip_position.x -= fix.x;
+        in.support_grip_position.y -= fix.y;
+        in.support_grip_position.z -= fix.z;
     }
 
     // ---- ONE-HANDED WEAPONS GRIP AT THE HAND, NOT ALONG A BARREL ------------------------------

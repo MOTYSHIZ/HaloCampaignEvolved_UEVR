@@ -95,6 +95,55 @@ void wpnfix_set(const std::string& key, const float q[4], const float t[3]) {
     wpn_calib_write_file();
 }
 
+// Store a captured SUPPORT-HAND GRIP OFFSET for `key` and rewrite halo_vr_weapons.cfg.
+//
+// Same two-tier rule as wpnfix_set above, and for the same reason: search only the CAPTURED
+// entries, so a shipped baseline is outranked rather than overwritten-and-copied into the player's
+// file, where the copy would outlive the value it was copied from. weapon_grip_for() takes the LAST
+// match, so appending is what makes a capture win.
+void wpngrip_set(const std::string& key, float off_y, float off_z, float at_x) {
+    if (key.empty()) return;
+
+    int slot = -1;
+    for (int i = 0; i < g_cfg.grip_count; ++i) {
+        if (!g_cfg.wpn_grip[i].captured) continue;
+        if (g_cfg.wpn_grip[i].match[0] != 0 &&
+            key.find(g_cfg.wpn_grip[i].match) != std::string::npos) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (g_cfg.grip_count >= kMaxWeaponGrip) {
+            API::get()->log_info("[Halo-CampE-UEVR] WPNGRIP: table full (%d), cannot add '%s'",
+                                 kMaxWeaponGrip, key.c_str());
+            return;
+        }
+        slot = g_cfg.grip_count++;
+        strncpy_s(g_cfg.wpn_grip[slot].match, sizeof(g_cfg.wpn_grip[slot].match),
+                  key.c_str(), _TRUNCATE);
+    }
+    g_cfg.wpn_grip[slot].captured = true;
+    g_cfg.wpn_grip[slot].off_y    = off_y;
+    g_cfg.wpn_grip[slot].off_z    = off_z;
+    g_cfg.wpn_grip[slot].at_x     = at_x;
+    wpn_calib_write_file();
+}
+
+bool wpngrip_clear(const std::string& key) {
+    if (key.empty()) return false;
+    for (int i = 0; i < g_cfg.grip_count; ++i) {
+        if (!g_cfg.wpn_grip[i].captured) continue;
+        if (g_cfg.wpn_grip[i].match[0] == 0 ||
+            key.find(g_cfg.wpn_grip[i].match) == std::string::npos) continue;
+        for (int j = i; j + 1 < g_cfg.grip_count; ++j) g_cfg.wpn_grip[j] = g_cfg.wpn_grip[j + 1];
+        g_cfg.wpn_grip[--g_cfg.grip_count] = WeaponGrip{};
+        wpn_calib_write_file();
+        return true;
+    }
+    return false;
+}
+
 bool wpn_calib_take_pending() { return s_pending.exchange(false, std::memory_order_relaxed); }
 
 bool wpn_calib_held() { return s_held.load(std::memory_order_relaxed); }
@@ -199,6 +248,23 @@ void wpn_calib_write_file() {
             fprintf(f, "wpnscope=%s,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",
                     s.match, s.d_zoom, s.d_dist, s.d_right, s.d_up,
                     s.d_rot_p, s.d_rot_y, s.d_rot_r);
+        }
+
+        // ---- SUPPORT-HAND GRIP OFFSETS. CAPTURED ENTRIES ONLY.
+        //
+        // Unlike the wpnscope block above this filters on `captured`, because this table is the
+        // two-tier kind: if a shipped baseline is ever added to halo_vr.cfg, writing every entry
+        // here would copy it into the player's file and it would then outrank future updates to
+        // itself. Filtering costs nothing today and removes the trap before it can be set.
+        fprintf(f, "\r\n# wpngrip=<match>,<offy>,<offz>[,<atx>]  -- where this weapon's FRONT HANDLE\r\n"
+                   "# sits relative to its barrel, in the gun's own frame, centimetres. Lets a\r\n"
+                   "# rocket launcher or sentinel beam be gripped where it actually has a handle.\r\n"
+                   "# atx is the reach it was captured at: recorded for diagnosis, never applied.\r\n"
+                   "# Delete a line to hold that weapon like a rifle again.\r\n\r\n");
+        for (int i = 0; i < g_cfg.grip_count; ++i) {
+            const auto& gp = g_cfg.wpn_grip[i];
+            if (gp.match[0] == 0 || !gp.captured) continue;
+            fprintf(f, "wpngrip=%s,%.2f,%.2f,%.2f\r\n", gp.match, gp.off_y, gp.off_z, gp.at_x);
         }
         fclose(f);
     }

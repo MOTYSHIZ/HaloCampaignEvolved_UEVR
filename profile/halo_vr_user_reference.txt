@@ -298,6 +298,42 @@
 # Clear it (twohanddeny=) to allow every weapon, or add your own entries.
 #twohanddeny=Magnum,PlasmaPistol,PlasmaRifle,Needler,Sword
 
+# ---------------------------------------------------------------- HANDLES THAT ARE NOT ON THE BARREL
+# Two-handed aiming assumes your support hand goes ON the barrel, which is right for a
+# rifle and wrong for a rocket launcher or a sentinel beam -- their front handle sits off
+# to one side. Those weapons are awkward to grab where they are actually held, and if you
+# do grab them the weapon points slightly away from where its barrel is aimed.
+#
+# You can record where a weapon's handle really is, once, and it is remembered for that
+# weapon. In the mod's Script UI, press "Calibrate weapon grip", close the menu, then hold
+# the weapon calibration key: the weapon FREEZES in place. Put your support hand where that
+# weapon's handle actually is and release. Nothing else about the weapon's fit changes.
+#
+# Master switch for every recorded handle. 0 ignores them all without deleting anything.
+#gripoffsets=1
+#
+# Also correct where the weapon POINTS, not just where you may grab it.
+#
+# Worth understanding, because it is the half you feel: the mod takes the line between your
+# two hands to be the barrel. With an off-centre handle that line is tilted, and the further
+# forward you grip the less it tilts -- but it never stops. A handle 10 cm off centre held
+# 40 cm out points the weapon about 14 degrees away from its own barrel. With this on, that
+# tilt is removed and the weapon still steers with your support hand exactly as a rifle does.
+# Set it to 0 to keep the grab fix and leave aiming alone.
+#gripfixaim=1
+#
+# The recorded handles themselves. You do not normally type these -- the calibration above
+# writes them into halo_vr_weapons.cfg, and deleting a line there holds that weapon like a
+# rifle again. Documented because a setting nobody can look up is a setting nobody can fix.
+#
+# wpngrip=<match>,<offy>,<offz>[,<atx>]
+#   match  substring of the weapon's internal name, e.g. FP_RocketLauncher
+#   offy   how far the handle sits to the side of the barrel, centimetres
+#   offz   ...and above or below it
+#   atx    how far along the barrel you were gripping when it was recorded. Kept for
+#          diagnosis only, never applied -- you may still grip anywhere along the handle.
+#wpngrip=
+
 # ---------------------------------------------------------------- THE GRAB GUIDE
 #
 # A marker at your support hand telling you the two-handed grip is available: the word "Grip" by
