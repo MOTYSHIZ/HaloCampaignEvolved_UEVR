@@ -831,19 +831,27 @@ void shotpoint_dev_readout(unsigned tick) {
     Vec3 p{};
     auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
     if (comp != nullptr) {
-        // Mesh component world forward, and the same vector as UE-convention game angles (yaw about
-        // +Z, +X forward, +Y right) -- the space the aim COMMAND lives in. Logging both lets the
-        // frame relationship to the controller aim (a DIFFERENT, VR-space extraction) be READ
-        // rather than guessed, which is the whole prerequisite for wiring the direction safely.
-        Vec3 f{};
-        const bool hf = call_ret_vec3(comp, L"GetForwardVector", &f);
-        const float ue_yaw = hf ? std::atan2(f.y, f.x) * RAD2DEG : 0.0f;
-        const float ue_pit = hf ? std::asin(clampf(f.z, -1.0f, 1.0f)) * RAD2DEG : 0.0f;
+        // ALL THREE component axes, each as UE-convention game angles (yaw about +Z, +X forward).
+        // This game uses NON-STANDARD axis conventions -- the scope pane's aim axis turned out to be
+        // GetUpVector, not GetForwardVector (ScopeLayer.hpp) -- so which axis is the BORE cannot be
+        // assumed. Log all three; in-headset, aim at a distant reference and whichever axis's
+        // yaw/pitch matches where you are pointing IS the bore. (SimVR cannot answer this: its idle
+        // pose leaves the gun lowered, so the axes do not point where the player would aim.)
+        auto ue = [](const Vec3& v, float* y, float* pt) {
+            *y  = std::atan2(v.y, v.x) * RAD2DEG;
+            *pt = std::asin(clampf(v.z, -1.0f, 1.0f)) * RAD2DEG;
+        };
+        Vec3 vf{}, vu{}, vr{};
+        const bool hf = call_ret_vec3(comp, L"GetForwardVector", &vf);
+        const bool hu = call_ret_vec3(comp, L"GetUpVector",      &vu);
+        const bool hr = call_ret_vec3(comp, L"GetRightVector",   &vr);
+        float fy=0,fp=0,uy=0,up=0,ry=0,rp=0;
+        if (hf) ue(vf,&fy,&fp);  if (hu) ue(vu,&uy,&up);  if (hr) ue(vr,&ry,&rp);
         API::get()->log_info(
             "[Halo-CampE-UEVR] SHOTPOINT: '%ls' marker '%ls' on %ls | pos (%.1f,%.1f,%.1f) | "
-            "meshfwd (%.3f,%.3f,%.3f) UEyaw=%.1f UEpitch=%.1f haveFwd=%d",
+            "FWD y%.1f p%.1f | UP y%.1f p%.1f | RIGHT y%.1f p%.1f | have f%d u%d r%d",
             wc.c_str(), kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z,
-            f.x, f.y, f.z, ue_yaw, ue_pit, (int)hf);
+            fy, fp, uy, up, ry, rp, (int)hf, (int)hu, (int)hr);
     } else {
         API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: weapon '%ls' has NO '%ls' marker on any mesh comp -> grip+offset fallback",
                              wc.c_str(), kMuzzleMarker);
