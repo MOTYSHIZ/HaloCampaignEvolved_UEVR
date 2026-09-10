@@ -218,60 +218,23 @@ const TwoHandZoneMeas& two_hand_zone_measurement() { return s_zone_meas; }
 
 // ---- GRIP-OFFSET CALIBRATION ------------------------------------------------------------------
 // Contract, and why the frozen weapon is already the right frame, are on the declarations.
-namespace {
-// THE FREEZE IS A LATCH, NOT A HELD KEY -- and that is the whole simplification.
+// NO LATCH OF ITS OWN ANY MORE. The arming, the freeze and the save gestures all belong to
+// g_menu_calib_mode (5 = this capture), so there is one arming authority instead of one per
+// calibration -- which is what lets the LEFT/RIGHT trigger standard and the trigger SWALLOWING
+// apply here without either being reimplemented.
 //
-// The pose-match calibration holds a key because you must line your CONTROLLER up with the frozen
-// weapon: the gesture and the measurement are the same act, so it has to end when your hand is in
-// place. This capture is not that. It measures where your SUPPORT hand is against the frozen
-// WEAPON, and the weapon is not moving -- so nothing your other hand does between the two clicks
-// can invalidate it, including pointing at a menu.
-//
-// Which means the keyboard was pure cost: it asked the player to reach for a key while holding
-// both hands in a specific pose, in a headset. Click to freeze, put your hand on the handle, click
-// to save.
-//
-// s_grip_release exists so the SAVE still happens on the falling edge of the calibration hold
-// rather than inside the command handler. That keeps one rule -- "the capture reads the last tick
-// the weapon was frozen" -- instead of two, and it is what lets grip_offset_capture() suppress the
-// normal calibration release, which is the thing that must never fire behind this feature.
-std::atomic<bool> s_grip_freeze{false};
-std::atomic<bool> s_grip_release{false};
+// The freeze itself still comes from the rig's existing calibration hold: mode 5 holds it true,
+// the rig snapshots on the rising edge, and the weapon is held in world space exactly as it is for
+// a pose calibration. Nothing about the freeze is specific to this capture.
+bool grip_offset_armed() {
+    return g_menu_calib_mode.load(std::memory_order_relaxed) == 5;
 }
-
-void grip_offset_arm(bool on) {
-    if (on) {
-        if (s_grip_freeze.exchange(true)) return;    // already frozen: a second arm is a no-op
-        s_grip_release.store(false, std::memory_order_relaxed);
-        API::get()->log_info(
-            "[Halo-CampE-UEVR] WPNGRIP: the weapon is now FROZEN. Put your SUPPORT hand where that "
-            "weapon's front handle actually is, then press the button again to save. Your other "
-            "hand is free -- this measures against the frozen weapon, not against a controller, so "
-            "pointing at the menu cannot disturb it.");
-    } else {
-        // Not cleared here. The falling edge below owns the capture; clearing the freeze from the
-        // command handler would race it and drop the measurement on the floor.
-        if (!s_grip_freeze.load(std::memory_order_relaxed)) return;
-        s_grip_release.store(true, std::memory_order_relaxed);
-    }
-}
-
-// The weapon should be held frozen this tick. Read by the calibration-hold poll, so the freeze the
-// rig already implements is reused rather than a second one being invented.
-bool grip_offset_freeze_active() {
-    return s_grip_freeze.load(std::memory_order_relaxed) &&
-          !s_grip_release.load(std::memory_order_relaxed);
-}
-
-// For the menu's label and colour: frozen (or finishing) counts as armed.
-bool grip_offset_armed() { return s_grip_freeze.load(std::memory_order_relaxed); }
 
 bool grip_offset_capture() {
-    // NO FREEZE IS THE ONE FALSE. Every other exit claims the press -- see the declaration: a
-    // refusal that fell through would run the weapon solve and rewrite a calibration the player
-    // was not editing.
-    if (!s_grip_freeze.exchange(false)) return false;
-    s_grip_release.store(false, std::memory_order_relaxed);
+    // Called ONLY from the calibration falling edge, and only when the mode that started the
+    // freeze was 5 -- so there is no arm flag of our own left to test. Every exit still returns
+    // true: the caller reads it as "this release is spoken for" and raises no finish edge, which
+    // is what keeps the weapon solve and the global write from running behind this gesture.
 
     // THE MEASUREMENT IS LAST TICK'S, AND THAT IS THE CORRECT ONE.
     //

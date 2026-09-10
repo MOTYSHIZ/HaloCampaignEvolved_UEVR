@@ -481,10 +481,20 @@ int menu_bridge_tick() {
             // Scope.cpp, so this only chooses the DESTINATION of a capture that gesture already makes.
             if (line == "calib:wpnscope")  { scope_offset_arm(true);  ++applied; continue; }
             if (line == "calib:wpnscopeoff"){ scope_offset_arm(false); ++applied; continue; }
-            // The support-hand grip offset: same freeze gesture as the weapon calibration,
-            // different destination. See grip_offset_arm() in TwoHandAim.hpp.
-            if (line == "calib:wpngrip")   { grip_offset_arm(true);  ++applied; continue; }
-            if (line == "calib:wpngripoff"){ grip_offset_arm(false); ++applied; continue; }
+            // ---- MODES THAT FREEZE THE WEAPON, joined to the same arming the pose/aim/hand
+            // calibrations already use rather than each carrying its own latch.
+            //
+            // What that buys, and it is the reason for the change: the trigger standard and the
+            // trigger SWALLOWING are both keyed on `mode != 0`, so they extend to these for free --
+            // RIGHT = save & finish, LEFT = save & re-arm, and neither reaches the weapon. It also
+            // makes the keyboard safe by construction: End contributes to the hold ONLY while a
+            // mode is armed, so a stray press can no longer run a calibration nobody asked for.
+            //
+            //   4 = per-weapon weapon fit (was the Insert key, unarmed and therefore dangerous)
+            //   5 = per-weapon support-hand grip offset
+            if (line == "calib:wpnpose")   { g_menu_calib_mode.store(4, std::memory_order_relaxed); ++applied; continue; }
+            if (line == "calib:wpngrip")   { g_menu_calib_mode.store(5, std::memory_order_relaxed); ++applied; continue; }
+            if (line == "calib:wpngripoff"){ g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
             if (line == "calib:scopebase")   { scope_base_arm(true);   ++applied; continue; }
             if (line == "calib:scopebaseoff"){ scope_base_arm(false);  ++applied; continue; }
             if (line == "calib:off")       { g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
@@ -503,6 +513,7 @@ int menu_bridge_tick() {
             // error -- it logs why and the menu button simply does nothing.
             if (line == "calibreset:wpnscope") { scope_offset_clear_current(); ++applied; continue; }
             if (line == "calibreset:wpngrip")  { grip_offset_clear_current();  ++applied; continue; }
+            if (line == "calibreset:wpnpose")  { wpnoff_clear_current();      ++applied; continue; }
 
             // ---- BIND CAPTURE. `bind:capture=<cfgkey>` arms; `bind:capture=off` disarms.
             //

@@ -171,14 +171,10 @@ const TwoHandZoneMeas& two_hand_zone_measurement();
 // while calibrating"). So the capture is in the frozen weapon's own frame by construction, and
 // does not repeat the scope pane's mistake of differencing a capture against a base in another
 // frame.
-// on = freeze the weapon and begin. off = ask to finish; the capture itself runs on the falling
-// edge of the calibration hold, so there is one rule about which tick is measured rather than two.
-void grip_offset_arm(bool on);
+// Armed = g_menu_calib_mode is 5. There is no separate arm flag: one arming authority for every
+// calibration is what makes the LEFT/RIGHT trigger standard and the trigger swallowing apply here
+// without being reimplemented, and it is why a stray End press can no longer reach a solve.
 bool grip_offset_armed();
-
-// Should the weapon be held frozen this tick? Joined into the calibration-hold poll in Plugin.cpp
-// so this reuses the rig's existing freeze rather than inventing a second one to keep in step.
-bool grip_offset_freeze_active();
 
 // Record the frozen weapon's handle offset for the weapon in hand, and persist it.
 //

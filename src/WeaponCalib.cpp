@@ -146,6 +146,36 @@ bool wpngrip_clear(const std::string& key) {
 
 bool wpn_calib_take_pending() { return s_pending.exchange(false, std::memory_order_relaxed); }
 
+void wpn_calib_set_pending() { s_pending.store(true, std::memory_order_relaxed); }
+
+// Drop the equipped weapon's per-weapon POSE delta, so it falls back to the global fit.
+//
+// Deliberately NOT filtered on a `captured` flag the way wpngrip_clear is: WeaponAdjust has no
+// such flag, because wpnoff entries have always come from one source. Removing a hand-written
+// wpnoff from halo_vr.cfg is therefore not possible here and should not be -- this rewrites the
+// machine-owned file only, and a shipped entry reappears on the next reload, which is the honest
+// outcome rather than a silent half-clear.
+bool wpnoff_clear_current() {
+    const std::string key = weapon_key();
+    if (key.empty()) {
+        API::get()->log_info("[Halo-CampE-UEVR] WPNCAL: nothing cleared -- no weapon in hand.");
+        return false;
+    }
+    for (int i = 0; i < g_cfg.wpn_count; ++i) {
+        if (g_cfg.wpn[i].match[0] == 0 ||
+            key.find(g_cfg.wpn[i].match) == std::string::npos) continue;
+        for (int j = i; j + 1 < g_cfg.wpn_count; ++j) g_cfg.wpn[j] = g_cfg.wpn[j + 1];
+        g_cfg.wpn[--g_cfg.wpn_count] = WeaponAdjust{};
+        wpn_calib_write_file();
+        API::get()->log_info("[Halo-CampE-UEVR] WPNCAL: cleared the per-weapon pose for '%s'; it "
+                             "uses the global fit again.", key.c_str());
+        return true;
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] WPNCAL: '%s' had no per-weapon pose to clear.",
+                         key.c_str());
+    return false;
+}
+
 bool wpn_calib_held() { return s_held.load(std::memory_order_relaxed); }
 
 // THE COMBINED CALIBRATION HOLD, published for other translation units.
@@ -164,10 +194,17 @@ bool calib_hold_active()         { return s_calib_hold_any.load(std::memory_orde
 void wpn_calib_poll() {
     const bool down = (g_cfg.wpn_calib_key != 0) &&
                       ((GetAsyncKeyState(g_cfg.wpn_calib_key) & 0x8000) != 0);
-    const bool was = s_held.exchange(down, std::memory_order_relaxed);
-    // Falling edge: claim the solve that is about to run. Latched here rather than sampled in the
-    // handler, because by then the key is released and a state read reports false.
-    if (was && !down) s_pending.store(true, std::memory_order_relaxed);
+    s_held.store(down, std::memory_order_relaxed);
+    // NO LONGER LATCHES THE CLAIM HERE, and removing it was required rather than tidy.
+    //
+    // The destination is now decided by the ARMED MODE at the moment the freeze began (mode 4 =
+    // this weapon), latched in Plugin.cpp's calibration edge. If this still set the claim on its
+    // own falling edge, then releasing Insert during a mode 1 (GLOBAL) calibration would silently
+    // redirect that capture into the held weapon's delta -- the global fit would appear not to
+    // save, and the reason would be a key the player was only using as a hold.
+    //
+    // The key itself still works: it feeds the hold through wpn_calib_held(), and Plugin.cpp only
+    // consults that while a mode is armed.
 }
 
 // Rewrite halo_vr_weapons.cfg in full.

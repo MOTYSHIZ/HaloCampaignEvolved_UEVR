@@ -6328,9 +6328,17 @@ void update() {
                 if (mode != 0) {
                     API::get()->log_info("[Halo-CampE-UEVR] MENU CALIBRATION ARMED (%s): close the UEVR menu "
                                          "(controllers do not reach the game while it is open), align, then "
-                                         "RIGHT trigger = save & finish, LEFT trigger = save & re-arm.",
+                                         "RIGHT trigger = save & finish, LEFT trigger = save & re-arm.%s",
                                          mode == 1 ? "weapon pose" :
-                                         mode == 2 ? "aim ray" : "support hand");
+                                         mode == 2 ? "aim ray" :
+                                         mode == 3 ? "support hand" :
+                                         mode == 4 ? "weapon pose, THIS WEAPON only" :
+                                         mode == 5 ? "weapon grip -- where its handle is" : "?",
+                                         // Mode 5 does not need the menu closed: it measures the
+                                         // support hand against the FROZEN weapon, so the hand
+                                         // that reaches for the menu is not the one being read.
+                                         mode == 5 ? " (this one you can do with the menu open)"
+                                                   : "");
                 } else {
                     API::get()->log_info("[Halo-CampE-UEVR] MENU CALIBRATION finished/disarmed.");
                 }
@@ -6353,35 +6361,62 @@ void update() {
         // Behind key_focus for the same reason the keyboard gestures below are: GetAsyncKeyState
         // is global, so without it a capture latches from a keypress in another window.
         if (key_focus) wpn_calib_poll();
-        const bool held = (key_focus && (g_cfg.calib_key != 0) &&
-                           ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0)) ||
-                          (menu_mode == 1 && !menu_lt) ||
-                          wpn_calib_held() ||
-                          // THE GRIP CAPTURE'S FREEZE IS A LATCH, not a key. Joining it here means
-                          // it reuses the freeze the rig already implements -- the same snapshot on
-                          // the rising edge, the same held-in-world-space behaviour -- instead of a
-                          // second freeze that would have to be kept in agreement with this one.
-                          //
-                          // It also makes the keyboard inert while frozen: End cannot produce an
-                          // edge, because this term holds `held` true throughout.
-                          halo::grip_offset_freeze_active();
+        // ---- EVERY WEAPON-FREEZING CALIBRATION IS UI-ARMED NOW ------------------------------
+        //
+        // WHICH MODES FREEZE THE WEAPON. 1 = global weapon fit, 4 = per-weapon fit, 5 = grip
+        // offset. (2 = aim ray and 3 = support hand are armed the same way but do not freeze the
+        // weapon; they have their own consumers.)
+        const bool mode_freezes = (menu_mode == 1 || menu_mode == 4 || menu_mode == 5);
+        const bool mode_hold    = mode_freezes && !menu_lt;
+
+        // THE KEYBOARD ONLY ACTS WHILE A MODE IS ARMED, and this is the whole point of the change.
+        //
+        // End and Insert used to hold on their own. That meant a single stray press ran a full
+        // solve and wrote the GLOBAL calibration -- the fit every unlisted weapon depends on --
+        // with no arming step and nothing to undo it. It happened, on 2026-09-09, and cost a
+        // calibration that had to be reset to defaults.
+        //
+        // Gating them on `menu_mode != 0` makes that impossible without removing the keys: while a
+        // mode is armed the hold is already true, so the key is a harmless alternative to the
+        // trigger; while nothing is armed it does nothing at all.
+        const bool key_hold = (menu_mode != 0) && key_focus &&
+                              (((g_cfg.calib_key != 0) &&
+                                ((GetAsyncKeyState(g_cfg.calib_key) & 0x8000) != 0)) ||
+                               wpn_calib_held());
+
+        const bool held = mode_hold || key_hold;
         const bool was  = g_calib_held.exchange(held);
         // Mirror it for other translation units -- see calib_hold_active() in WeaponCalib.hpp.
         calib_hold_publish(held);
-        if (held && !was) g_calib_start  = true;
-        // ---- THE GRIP CAPTURE CLAIMS THE WHOLE RELEASE, UPSTREAM OF EVERYTHING IT WOULD RUN.
+        // ---- LATCH THE MODE AT THE RISING EDGE, because the falling edge cannot read it.
         //
-        // Claiming HERE, by simply not raising the finish edge, rather than adding another rung to
-        // the release block: that block runs a solve, takes ownership of the pivot
-        // (g_pivot_from_calib) and then writes either a per-weapon delta or the GLOBAL
-        // calibration. A grip capture wants none of it -- it only reads a measurement that already
-        // exists -- and a press that quietly rewrote the global fit as a side effect of adjusting
-        // one weapon's handle would be the worst kind of surprise, because the damage shows up on
-        // every OTHER weapon later.
-        //
-        // Same "one gesture, one destination" property wpn_calib_take_pending() exists to enforce,
-        // achieved by construction here instead of by a second latch.
-        if (!held && was && !halo::grip_offset_capture()) g_calib_finish = true;
+        // A RIGHT-trigger save clears g_menu_calib_mode BEFORE the hold drops (that is exactly how
+        // "save & finish" is expressed), so by the time the release runs the mode is already 0 and
+        // routing by it would send every RT capture to the wrong destination. The mode that was in
+        // force when the freeze STARTED is the one that owns the result.
+        static int s_hold_mode = 0;
+        if (held && !was) { s_hold_mode = menu_mode; g_calib_start = true; }
+
+        if (!held && was) {
+            const int finished = s_hold_mode;
+            s_hold_mode = 0;
+            // ---- ROUTE THE RELEASE. One gesture, one destination, decided here rather than by
+            // three latches read further downstream.
+            if (finished == 5) {
+                // THE GRIP CAPTURE CLAIMS THE WHOLE RELEASE and raises no finish edge at all.
+                // The release block runs a solve, takes ownership of the pivot and then writes
+                // either a per-weapon delta or the GLOBAL calibration; a grip capture wants none
+                // of it, because it only reads a measurement that already exists. Suppressing the
+                // edge is what makes that true by construction rather than by a guard downstream.
+                halo::grip_offset_capture();
+            } else {
+                // 4 tells the release block to store the solve as THIS WEAPON's delta instead of
+                // the global fit. Set here, at the edge, for the same reason wpn_calib_poll()
+                // latched it: by the time the block runs there is no held key left to read.
+                if (finished == 4) wpn_calib_set_pending();
+                g_calib_finish = true;
+            }
+        }
 
         // ---- THE SUPPORT-HAND GESTURE'S HOLD. Published rather than edge-detected here, because
         // its consumer lives in another translation unit (src\palettearm\PaletteArm.cpp, which owns
