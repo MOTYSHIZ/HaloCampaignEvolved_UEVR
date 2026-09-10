@@ -43,6 +43,7 @@
 #ifndef HALOVR_XRLAYERABI_H
 #define HALOVR_XRLAYERABI_H
 
+#include <stddef.h>   // offsetof, for HALOVR_LAYER_ABI_V1_SIZE
 #include <stdint.h>
 
 // The OpenXR types below (XrSession, XrFrameEndInfo, ...) must be THE SAME LAYOUTS on both sides.
@@ -170,7 +171,46 @@ typedef struct HaloVrLayerApi {
     const char* (XRAPI_PTR *status)(void);
 
     // APPEND NEW FIELDS BELOW THIS LINE ONLY.
+
+    // ---- appended 2026-09-08 (pure append: ABI version unchanged, struct_size grows) -----------
+    //
+    // MONO PROJECTION. While `on` is non-zero the layer rewrites every submitted
+    // XrCompositionLayerProjection so that view[1..n].subImage == view[0].subImage -- the LEFT
+    // eye's image is shown to every eye, poses and FOVs untouched. Zero GPU work: it is a struct
+    // edit on a clone made inside xrEndFrame.
+    //
+    // Exists for the cutscenes, which the game presents as a stereo pair that does not fuse
+    // (docs\CUTSCENE_FINDINGS.md). Every plugin-side render hook fires AFTER UEVR has copied and
+    // submitted the eyes (Framework::on_frame_d3d12 runs mods->on_present -- the VR copy -- before
+    // any plugin callback, and VR precedes PluginLoader in the mod list), so the eye images cannot
+    // be edited from the plugin. The API layer sees them on the way to the runtime; this is the
+    // one place the plugin owns that is downstream of the copy.
+    //
+    // A CALLER MUST CHECK struct_size BEFORE TOUCHING THIS: a layer built before the append reports
+    // the same abi_version with a smaller struct, and this slot is then past its end. The bridge
+    // (XrLayerBridge.cpp: xrbridge_set_projection_mono) does that check; call through it.
+    // Returns 1 when applied, 0 when the layer is gated off.
+    int (XRAPI_PTR *set_projection_mono)(int on);
+    // THE MODE-5 SCREEN. `meters` is the depth the eyes converge on (0 = infinity); `size` is the
+    // picture's scale (1 = as rendered; 0.7 reads as a screen further off, same convergence).
+    // Two knobs on purpose. Convergence is NOT a comfort choice: UEVR's UI quad -- subtitles,
+    // pause menu -- sits at UI_Distance (2.43 m), and eyes converged on a picture at any OTHER
+    // depth see that quad ~1.5 deg doubled (measured at infinity, 2026-09-08 21:15), so the
+    // plugin sends UI_Distance. Framing IS a comfort choice, and for a flat picture size is the
+    // whole of it. Used only while mode 5 is on. Appended after set_projection_mono under the
+    // same struct_size discipline: call through XrLayerBridge.cpp: xrbridge_set_mono_screen.
+    // Returns 1 when accepted, 0 when the layer is gated off.
+    int (XRAPI_PTR *set_mono_screen)(float meters, float size);
 } HaloVrLayerApi;
+
+// THE SIZE ABI 1 SHIPPED WITH -- every field above the append line. A layer reporting at least
+// this much carries every v1 field; each APPENDED field is size-checked at its own call site
+// (XrLayerBridge.cpp). A consumer must accept that and NOT demand sizeof(HaloVrLayerApi): an
+// older layer under a newer plugin is the normal deployment skew (the layer moves rarely, the
+// plugin with every update), and refusing it takes the reticule down over the one appended call
+// it lacks -- which is exactly what happened 2026-09-08 21:41, when a plugin expecting 88 bytes
+// refused a same-version 80-byte layer outright and the cutscene fix silently never engaged.
+#define HALOVR_LAYER_ABI_V1_SIZE ((uint32_t)offsetof(HaloVrLayerApi, set_projection_mono))
 
 // The single export. Returns null -- deliberately, loudly, and without touching anything -- when
 // `abi_version` is not the one this layer implements, or when the layer gated itself off because

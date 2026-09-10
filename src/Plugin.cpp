@@ -92,6 +92,9 @@
 // Live config + calibration persistence. Defines g_cfg, which nearly everything below reads.
 #include "Config.hpp"
 #include "DevTools.hpp"
+// The address-verification harness (signature scan that refuses ambiguity, PE identity). Used
+// here by the tick-fault reporter, so a fault can name its function and its build.
+#include "addrcascade/AddressCascade.hpp"
 
 // UE object/name helpers: TrackedObject (recycle-safe handles), FName resolution, class names.
 #include "UeObject.hpp"
@@ -109,6 +112,8 @@
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
 #include "Scope.hpp"
+#include "ScopeBlit.hpp"     // cutscene_blit_set_active / scope_blit_register (render-thread blit)
+#include "XrLayerBridge.hpp" // xrbridge_set_projection_mono (cutscene mono via the API layer)
 // For scopelayer_configure_cell_early() only -- the pane's atlas cell must be requested from
 // update() BEFORE xrlayer_tick() builds the atlas. Everything else in the scope lane is reached
 // through Scope.hpp.
@@ -157,7 +162,7 @@
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.4.1"
+#define HALO_VR_VERSION "0.4.2"
 
 using namespace uevr;
 
@@ -718,6 +723,128 @@ std::atomic<bool> g_tick_finished{true};
 // system, a blinded one. An instrument whose signal is erased by the very event it measures will
 // always read "nothing happened", which is the most convincing wrong answer there is.
 std::atomic<bool> g_tick_aborted{false};
+
+// ---- NAME THE FUNCTION A TICK FAULT LANDED IN, WITHOUT RECORDING ITS ADDRESS ------------------
+//
+// Every report from the 2026-09-08 release playthrough landed at the same RVA, +0x36FD8A6. Resolved
+// OFFLINE from the exe's own .pdata (Scripts\Resolve-ExeRva.py, no session needed) that is
+// FName::ToString(FString&)+0x16 -- the `mov ecx,[rcx]` that reads the FName it was handed. UEVR's
+// own resolver, which shares no code with that script, logged the same function at the same RVA
+// ("FName::get_to_string (inlined alternative): result=...d890" against "Game Module Addr:
+// ...240000", log 2026-09-08). Two resolvers agreeing is the standard the Direct Drive lane set.
+//
+// So the fault was never "a field read at +0x18 off a poisoned base" INSIDE the game. The faulting
+// read is of the FName pointer ITSELF, and 0x40400018 is &((UObject*)0x40400000)->NamePrivate:
+// some caller asked for the name of an object whose pointer was 0x40400000 -- the float 3.0f, i.e.
+// a recycled block, not an object. Which caller is what the return chain below now records.
+//
+// THAT RVA IS A MEASUREMENT OF ONE BUILD and is deliberately NOT written into this file. The
+// function is found by SHAPE at startup, the scan refuses an ambiguous match, and a fault is named
+// only when the OS's own unwind metadata says its function begins exactly where the scan landed.
+// On a build where the scan fails the report carries the bare RVA -- the previous behaviour, which
+// eight real faults have already exercised, so the fallback is not untested code.
+//
+// The signature is the prologue through the first FNameEntry header decode (`shr r9d,6` is the
+// 10-bit length field); the one rel32 (the FNamePool resolve call) is wildcarded. Verified unique
+// in the exe on disk at 0x18, 0x30, 0x48 and the full 0x81-byte body (2026-09-08).
+// ADDR-HYGIENE: resolved -- scan_signature at on_initialize; there is no fallback constant at all.
+constexpr unsigned char FNAME_TOSTRING_SIG[] = {
+    0x48,0x89,0x5C,0x24,0x10,  0x48,0x89,0x7C,0x24,0x18,  0x41,0x56,  0x48,0x83,0xEC,0x20,
+    0x4C,0x8B,0xF1,  0x48,0x8B,0xDA,  0x8B,0x09,  0xE8,0x00,0x00,0x00,0x00,  0x45,0x8B,0x46,0x04,
+    0x48,0x8B,0xF8,  0x44,0x8B,0x53,0x0C,  0x44,0x0F,0xB7,0x08,  0x41,0xC1,0xE9,0x06 };
+constexpr char FNAME_TOSTRING_MASK[] =
+    "xxxxx" "xxxxx" "xx" "xxxx" "xxx" "xxx" "xx" "x????" "xxxx" "xxx" "xxxx" "xxxx" "xxxx";
+static_assert(sizeof(FNAME_TOSTRING_SIG) == sizeof(FNAME_TOSTRING_MASK) - 1,
+              "signature and mask must pair up");
+
+std::atomic<uintptr_t> g_fname_tostring{0};   // absolute address in this process, 0 = unresolved
+
+void fault_names_init() {
+    void* exe = (void*)GetModuleHandleW(nullptr);
+    if (exe == nullptr) return;
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    const addrcascade::Signature  sig{FNAME_TOSTRING_SIG, FNAME_TOSTRING_MASK, sizeof(FNAME_TOSTRING_SIG)};
+    const addrcascade::ScanResult hit = addrcascade::scan_signature(exe, sig);
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * perf_tick_ms();
+    if (hit.unique()) {
+        g_fname_tostring.store(hit.address, std::memory_order_relaxed);
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] FAULTNAMES: FName::ToString resolved by signature at +0x%llX "
+            "(unique match, %.1f ms scan). A tick fault landing inside it will say so by name.",
+            (unsigned long long)(hit.address - (uintptr_t)exe), ms);
+    } else {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] FAULTNAMES: FName::ToString NOT resolved -- %s (%zu match(es), "
+            "%.1f ms). Tick faults will carry the bare RVA only, exactly as before.",
+            hit.matches > 1 ? "ambiguous signature, refusing to guess" : "no match on this build",
+            hit.matches, ms);
+    }
+}
+
+// Basename of a module path. Written without a backslash literal on purpose: this file has been
+// mangled twice by tooling that collapses escapes, and 92 is unambiguous. The inline version this
+// replaces advanced one character past the separator, which is why every report so far has read
+// "in aloCampaignEvolved.exe".
+const char* fault_module_leaf(const char* path) {
+    const char* leaf = path;
+    for (const char* q = path; *q != '\0'; ++q) {
+        if (*q == '/' || *q == (char)92) leaf = q + 1;
+    }
+    return leaf;
+}
+
+// THE RETURN-ADDRESS CHAIN ABOVE A FAULT, as module+RVA so each frame resolves against that
+// module's PDB afterwards. Walked with the same unwind metadata the OS uses (RtlLookupFunctionEntry
+// + RtlVirtualUnwind on a COPY of the faulting context) -- no recorded address anywhere.
+//
+// This is what finally names the CALLER of a fault that lands in a shared engine utility.
+// FName::ToString has 2,521 call sites in the exe, and "which one" is not something a step marker
+// in our own lane can answer when the call is made from inside UEVR's SDK on our behalf.
+//
+// Filter-safe by construction: fixed-size stack buffers, no allocation, no dbghelp, and its own
+// __try so a torn stack ends the walk instead of nesting a second exception inside the first.
+// Only PODs live in here, which is what lets it contain __try at all.
+void fault_return_chain(const CONTEXT* in, char* out, size_t cap) {
+    out[0] = '\0';
+    if (in == nullptr || cap < 8) return;
+    CONTEXT ctx = *in;
+    size_t used = 0;
+    __try {
+        for (int frame = 0; frame < 8; ++frame) {
+            DWORD64 img = 0;
+            RUNTIME_FUNCTION* rf = RtlLookupFunctionEntry(ctx.Rip, &img, nullptr);
+            if (rf == nullptr) {
+                // A leaf function: its return address is at the top of the stack.
+                if (IsBadReadPtr((const void*)(uintptr_t)ctx.Rsp, sizeof(DWORD64))) break;
+                ctx.Rip = *(const DWORD64*)(uintptr_t)ctx.Rsp;
+                ctx.Rsp += sizeof(DWORD64);
+            } else {
+                PVOID   handler = nullptr;
+                DWORD64 est     = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, ctx.Rip, rf, &ctx, &handler, &est, nullptr);
+            }
+            if (ctx.Rip == 0) break;
+            HMODULE   hm = nullptr;
+            char      name[MAX_PATH] = "?";
+            uintptr_t rva = (uintptr_t)ctx.Rip;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                 | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)(uintptr_t)ctx.Rip, &hm) && hm != nullptr) {
+                GetModuleFileNameA(hm, name, MAX_PATH);
+                rva = (uintptr_t)ctx.Rip - (uintptr_t)hm;
+            }
+            const int n = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s%s+0x%llX",
+                                      frame ? " < " : "", fault_module_leaf(name),
+                                      (unsigned long long)rva);
+            if (n < 0) break;
+            used += (size_t)n;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _snprintf_s(out + used, cap - used, _TRUNCATE, "%s(walk faulted)", used ? " < " : "");
+    }
+}
 std::atomic<bool> g_tick_ever{false};    // suppress the report for the very first tick
 
 struct PerfScope {
@@ -2782,6 +2909,10 @@ struct NavwCensus {
     uint32_t deadslot;    // skipped: the map's own allocation bitmap says this slot is FREE. These
                           // are the phantoms -- a freed entry keeps a plausible stale position and
                           // was previously indistinguishable from a live one.
+    uint32_t stale;       // rejected: a pointer read from a raw element offset was READABLE but
+                          // is not a live UObject -- its InternalIndex slot does not hold it.
+                          // This is the pointer class_name_of would otherwise have
+                          // dereferenced; the 2026-09-08 tick faults read exactly that shape.
     uint32_t nullpos;     // rejected: no widget AND a position within 1 m of the world origin,
                           // i.e. zeroed/never-written memory that still resolves a position
     uint32_t slotreuse;   // a slot freed THIS tick had to be re-let the same tick (starvation
@@ -3588,10 +3719,37 @@ constexpr int32_t NAVW_ELEM_WIDGET_OFF = 0x08;
 // of navw_entry_shown so the same validated pointer serves two jobs -- the visibility gate below
 // and the STABLE SLOT IDENTITY -- off ONE read and ONE reflection check per entry, instead of the
 // gate reading it and the slot keying guessing at an index.
+// A pointer read from a raw element offset that IsBadReadPtr accepted and the object array
+// rejected. Counted in the census and said ONCE in full -- the first one is the interesting one,
+// and a storm of them is the census's job -- so the guard is observable in a support log rather
+// than a silent skip. An unobserved fallback is the thing this project keeps being bitten by.
+void navw_note_stale_ptr(const char* where, const void* p) {
+    ++g_navw_census.stale;
+    static bool s_said = false;
+    if (!s_said) {
+        s_said = true;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] NAVWORLD: REJECTED a readable-but-dead object pointer at %s (%p): "
+            "its InternalIndex slot does not hold it. This is the pointer class_name_of would have "
+            "handed to UEVR; the 2026-09-08 tick faults (FName::ToString reading 0x40400018) are "
+            "that dereference.", where, p);
+    }
+}
+
 API::UObject* navw_entry_widget(const uint8_t* elem) {
     if (IsBadReadPtr(elem + NAVW_ELEM_WIDGET_OFF, 8)) return nullptr;
     auto* w = *reinterpret_cast<API::UObject* const*>(elem + NAVW_ELEM_WIDGET_OFF);
     if (w == nullptr || IsBadReadPtr(w, 0x30)) return nullptr;
+    // READABLE IS NOT ALIVE. The guard the ADDR-HYGIENE note above describes stopped at
+    // IsBadReadPtr, and its second step -- class_name_of -- is itself a dereference: it reads
+    // this pointer's ClassPrivate and hands THAT to UEVR's FName::ToString. A freed object's
+    // block is readable and belongs to whatever was allocated next. The census shows most
+    // entries yield no widget here (identfb 79-96%) but never recorded whether those pointers
+    // were null or non-object memory; a non-object one reached class_name_of with nothing but
+    // a readability check and faults the moment [w+0x10] holds a float. `stale` now counts
+    // exactly those. One indexed compare settles it.
+    if (!uobject_slot_valid(w)) { navw_note_stale_ptr("elem+0x08", w); return nullptr; }
+    NAVW_MARK("entry_widget:class_name_of");
     if (class_name_of(w).find(L"Widget") == std::wstring::npos) return nullptr;
     return w;
 }
@@ -3892,6 +4050,12 @@ void nav_world_tick(bool engaged, uint32_t tick) {
         // markers on each path with no way to tell from the log which.
         const bool layer_owns = navw_layer_owns();
 
+        // MARKED FROM HERE DOWN. The shipped lane (navworldsrc=2) never enters the projection block
+        // above, so the first mark a shipping build could reach was SetVisibility in the PLACE pass
+        // -- everything between the entry and that point, including this whole sweep, read as
+        // `step '-'`. The 2026-09-08 handoff took '-' to mean "before line ~3794"; on the shipped
+        // path it meant "anywhere in the next ~600 lines".
+        NAVW_MARK("lane2:manager_lookup");
         API::UObject* mgr = nullptr;
         for (int i = 0; i < g_nav_count; ++i) {
             auto* w = g_navpoints[i].get();
@@ -3909,6 +4073,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             return;
         }
         struct FMapRaw { void* data; int32_t num; int32_t max; };
+        NAVW_MARK("lane2:NavpointInstances");
         auto* map = mgr->get_property_data<FMapRaw>(L"NavpointInstances");
         if (map == nullptr || map->data == nullptr || map->num <= 0) {
             if (g_navw_shown) { g_navw_shown = false; navw_hide_all(); g_navw_placed_n = 0; }
@@ -4092,9 +4257,17 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             API::UClass* ecls = nullptr;
             if (!IsBadReadPtr(elem + 0x10, 8)) {
                 auto* c2 = *reinterpret_cast<API::UObject* const*>(elem + 0x10);
-                if (c2 != nullptr && !IsBadReadPtr(c2, 0x30)
-                    && class_name_of(c2).find(L"WidgetBlueprintGeneratedClass") != std::wstring::npos) {
-                    ecls = reinterpret_cast<API::UClass*>(c2);
+                if (c2 != nullptr && !IsBadReadPtr(c2, 0x30)) {
+                    // Same rule as navw_entry_widget: prove it is a live UObject before its class
+                    // pointer is read and named. A UClass is a UObject, so the slot test applies.
+                    if (!uobject_slot_valid(c2)) {
+                        navw_note_stale_ptr("elem+0x10", c2);
+                    } else {
+                        NAVW_MARK("elem+0x10:class_name_of");
+                        if (class_name_of(c2).find(L"WidgetBlueprintGeneratedClass") != std::wstring::npos) {
+                            ecls = reinterpret_cast<API::UClass*>(c2);
+                        }
+                    }
                 }
             }
             // THE NAME OF THE CLASS ITSELF -- not the name of the class's class.
@@ -4113,6 +4286,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             //   * prio below is (kind == NAVW_OBJECTIVE) ? 1 : 2, so the OBJECTIVE never got
             //     priority 1 and could be shed by a short slot budget like any floor item -- one of
             //     the two reasons the objective marker goes missing while item markers do not.
+            NAVW_MARK("ecls:to_string");
             const std::wstring ecn = (ecls != nullptr && ecls->get_fname() != nullptr)
                                    ? ecls->get_fname()->to_string() : std::wstring();
             const NavwKind kind = ecn.empty() ? NAVW_OTHER : navw_classify(ecn);
@@ -4233,6 +4407,7 @@ void nav_world_tick(bool engaged, uint32_t tick) {
 
             // ---- BUG 2: draw only navpoints the game's own HUD is showing. See navw_entry_shown.
             int vis_dbg = -1;
+            NAVW_MARK("entry_shown:reflect");
             const bool shown = navw_entry_shown_w(ewidget, &vis_dbg, kind);
 
             // A FIFTH NAVPOINT CLASS WOULD OTHERWISE VANISH IN SILENCE. The gate above is an
@@ -4856,14 +5031,16 @@ void nav_world_tick(bool engaged, uint32_t tick) {
             API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: %d marker(s) at OBJECTIVE world "
                                  "positions (map num=%d max=%d, %d entr(ies) resolved, %d shown) | "
                                  "census visgate=%u/%u vis=0x%X kindmask=%u noclass=%u beyond=%u "
-                                 "staleart=%u rehost=%u identfb=%u slotreuse=%u nullpos=%u deadslot=%u",
+                                 "staleart=%u rehost=%u identfb=%u slotreuse=%u nullpos=%u deadslot=%u "
+                                 "stale=%u",
                                  placed_n, map->num, map->max, seen_entries, n_cand,
                                  g_navw_census.examined, g_navw_census.vis_sup,
                                  g_navw_census.vis_seen, g_navw_census.kind_sup,
                                  g_navw_census.noclass, g_navw_census.beyond,
                                  g_navw_census.staleart, g_navw_census.rehost,
                                  g_navw_census.identfb, g_navw_census.slotreuse,
-                                 g_navw_census.nullpos, g_navw_census.deadslot);
+                                 g_navw_census.nullpos, g_navw_census.deadslot,
+                                 g_navw_census.stale);
         }
         return;
     }
@@ -6795,6 +6972,104 @@ void update() {
             // consulted only on a build where the subsystem is missing.
             const bool cine_signal = s_cin_ok ? s_cin_active
                                               : (g_stick_mode.load() && cine_recent);
+
+            // PUBLISH THE SAME PREDICATE TO THE RENDER THREAD for the cutscene blit, and register
+            // the callback from a NON-DEV path.
+            //
+            // Deliberately the identical expression the flat-view actuator uses rather than a
+            // second reading of the subsystem: two conditions that disagree in any overlapping
+            // state are an oscillator, and this one drives something the eyes see (the 2026-08-05
+            // thrash incident is the worked example, a few lines below).
+            //
+            // scope_blit_tick() is idempotent (it returns immediately once registered, or when
+            // both lanes are off) and is called here because its OTHER call site in Scope.cpp sits
+            // inside #if HALO_VR_DEV -- which would have made cutsceneblit silently inert in
+            // exactly the builds players run. That is the same failure un-gated in XrSource.cpp on
+            // 2026-09-07; see the note above probe() there.
+            halo::cutscene_blit_set_active(cine_signal);
+            // NO REGISTRATION HERE. scope_blit_register() is called from on_initialize; calling it
+            // from this tick took a unique_lock on the shared_mutex whose shared_lock UEVR is
+            // already holding on this thread to dispatch us, and hung the game. Publishing the
+            // flag is a relaxed atomic store and is safe anywhere.
+
+            // CUTSCENE MONO via the API layer -- the lane that can actually reach the eyes (see
+            // Config.hpp, cutscene_mono). Same predicate as everything else in this block, applied
+            // ON CHANGE: the bridge call is cheap, but a VR-visible actuator driven every tick is
+            // the shape of the 2026-08-05 oscillation, so it is not given the chance.
+            {
+                static int s_mono_sent = -1;
+                const int want = cine_signal ? g_cfg.cutscene_mono : 0;   // 0 off, 1 left, 2 right
+                if (want != s_mono_sent) {
+                    const bool applied = halo::xrbridge_set_projection_mono(want);
+                    s_mono_sent = want;
+                    // Say what the LAYER did, not what we asked: "applied" means the layer is live
+                    // and new enough to know the call. false on an old layer is the whole reason
+                    // the bridge size-checks -- it is "cannot", not "did not", and must read so.
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO %s -> %s",
+                                         (want == 0) ? "OFF"
+                                       : (want == 1) ? "ON mode 1 (left eye to both)"
+                                       : (want == 2) ? "ON mode 2 (right eye to both)"
+                                       : (want == 3) ? "ON mode 3 (app quads DROPPED, projection kept)"
+                                       : (want == 4) ? "ON mode 4 (projection DROPPED, app quads kept)"
+                                       : (want == 5) ? "ON mode 5 (one view, one re-centred fov, for every eye)"
+                                                     : "ON mode 6 (movie as its own head-locked quad; projection dropped)",
+                                         applied ? "applied by the API layer"
+                                                 : "NOT applied (layer absent, gated off, or built "
+                                                   "before set_projection_mono -- rebuild/redeploy "
+                                                   "the layer)");
+                }
+#if HALO_VR_DEV
+                // WHILE ON, RELAY THE LAYER'S OWN COUNTERS every ~2 s. The status string carries
+                // mono=/patched=, and patched= must be CLIMBING -- a switch that applied while
+                // that number sits still means no projection layer matched the rewrite. The
+                // 14:38 run on 2026-09-08 had exactly one sample of this string, taken before
+                // the switch, and was unreadable for it.
+                if (want != 0 && (tick % 64) == 17) {
+                    API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO layer: %s",
+                                         halo::xrbridge_status());
+                }
+#endif
+            }
+
+            // CUTSCENE SCREEN -> the layer, ON CHANGE: convergence depth and picture size.
+            // CONVERGENCE IS NOT A TUNABLE. UEVR's UI quad (subtitles, pause menu) sits at
+            // UI_Distance, and eyes converged on a picture at any other depth see that quad
+            // doubled -- so the picture converges exactly there, read live from UEVR so a player
+            // who moves the UI keeps the match. cutscenedist (dev) overrides it for experiments.
+            // SIZE is the framing knob (cutscenesize): a smaller picture reads as a screen further
+            // off while the focus stays put. Read on the cfg poll's ~2 s cadence, never per tick;
+            // sent BEFORE any cutscene so the first one has it; the layer uses it only in mode 5.
+            // A send the layer could not take (not up yet, or older than the call) is retried on
+            // the next poll and complained about once, not every 2 s.
+            {
+                static float s_dist_sent = -1.0f;
+                static float s_size_sent = -1.0f;
+                static bool  s_warned    = false;
+                if (tick > 300 && ((tick % 64) == 5 || s_dist_sent < 0.0f)) {
+                    float       want_m = g_cfg.cutscene_dist * 0.01f;
+                    const char* from   = "cutscenedist override";
+                    if (want_m <= 0.0f) {
+                        char cur[32]{};
+                        API::get()->param()->vr->get_mod_value("UI_Distance", cur, sizeof(cur));
+                        want_m = (float)atof(cur);
+                        from   = "UEVR UI_Distance";
+                    }
+                    const float want_size = g_cfg.cutscene_size;
+                    if (fabsf(want_m - s_dist_sent) > 1e-4f || fabsf(want_size - s_size_sent) > 1e-4f) {
+                        if (halo::xrbridge_set_mono_screen(want_m, want_size)) {
+                            s_dist_sent = want_m;
+                            s_size_sent = want_size;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen -> converge at %.2f m (%s), "
+                                                 "size x%.2f -- applied by the API layer", want_m, from, want_size);
+                        } else if (!s_warned) {
+                            s_warned = true;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO screen NOT applied (layer absent, "
+                                                 "gated off, or older than set_mono_screen) -- retrying quietly; "
+                                                 "the picture sits at infinity, full size, meanwhile");
+                        }
+                    }
+                }
+            }
 
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
@@ -10501,6 +10776,13 @@ const ApiLayerEarlyInit g_api_layer_early_init;
 class HaloAimDriverPlugin : public uevr::Plugin {
 public:
     void on_initialize() override {
+        // REGISTER RENDER CALLBACKS HERE AND ONLY HERE. UEVR calls uevr_plugin_initialize from its
+        // plugin-load loop, before any dispatch has taken m_api_cb_mtx (PluginLoader.cpp: init at
+        // ~1876, first lock at 1899). Registering from a TICK instead takes a unique_lock on the
+        // shared_mutex that on_pre_engine_tick's dispatch already holds shared on this thread --
+        // a self-deadlock that hung the game twice on 2026-09-08. See ScopeBlit.hpp.
+        halo::scope_blit_register();
+
         // ALREADY DONE, AT DLL LOAD -- see enable_api_layer_for_this_process. All that is left here
         // is to say what happened, because logging was impossible that early.
         //
@@ -10519,6 +10801,10 @@ public:
                 g_apilayer_note[0] ? g_apilayer_note : "api-layer init did not run at all",
                 (unsigned long long)ago);
         }
+
+        // Name-the-fault table: ONE signature scan of the exe, so a TICK FAULT line can say
+        // which engine function it landed in without a recorded RVA. See FNAME_TOSTRING_SIG.
+        fault_names_init();
 
         // Config lives beside the UEVR profile so it is where a user would look for it.
         char appdata[MAX_PATH] = {0};
@@ -10818,13 +11104,7 @@ public:
             GetModuleFileNameA(hm, modname, MAX_PATH);
             modbase = (void*)hm;
         }
-        // Last path separator, without writing a backslash literal: this file has been
-        // mangled twice by tooling that collapses escapes, and 92 is unambiguous.
-        const char* leaf = modname;
-        for (const char* q = modname; *q != '\0'; ++q) {
-            if (*q == '/' || *q == (char)92) leaf = q + 1;
-        }
-        leaf = (leaf != nullptr) ? leaf + 1 : modname;
+        const char* leaf = fault_module_leaf(modname);
 
         char extra[128] = "";
         if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
@@ -10833,16 +11113,51 @@ public:
                         (er->ExceptionInformation[0] == 1) ? "WRITING" : "executing",
                         (void*)er->ExceptionInformation[1]);
         }
+        // WHICH FUNCTION, from the unwind metadata the OS itself dispatches with -- never a recorded
+        // address. Named only when its start coincides with the signature-resolved FName::ToString
+        // (see FNAME_TOSTRING_SIG); "?" otherwise, with the function's own start RVA so an offline
+        // resolve (Scripts\Resolve-ExeRva.py against that build's exe) can finish the job.
+        char fn[96] = "";
+        {
+            DWORD64 img = 0;
+            const RUNTIME_FUNCTION* rf = RtlLookupFunctionEntry((DWORD64)(uintptr_t)addr, &img, nullptr);
+            if (rf != nullptr) {
+                const uintptr_t begin = (uintptr_t)img + rf->BeginAddress;
+                const uintptr_t ts    = g_fname_tostring.load(std::memory_order_relaxed);
+                _snprintf_s(fn, sizeof(fn), _TRUNCATE, " fn=%s+0x%llX (fn starts +0x%llX)",
+                            (ts != 0 && begin == ts) ? "FName::ToString" : "?",
+                            (unsigned long long)((uintptr_t)addr - begin),
+                            (unsigned long long)(begin - (uintptr_t)img));
+            }
+        }
+        // WHICH BUILD. The RVA is a measurement of THIS binary and means nothing against another,
+        // and every field report so far has cost a round trip to establish which one it was. Same
+        // fields, same order as the BLAMDRIVE line for the sim module, so the two compare.
+        char build[128] = "";
+        {
+            addrcascade::ModuleIdentity id{};
+            if (modbase != nullptr && addrcascade::module_identity(modbase, &id)) {
+                _snprintf_s(build, sizeof(build), _TRUNCATE,
+                            " build{SizeOfImage=0x%X stamp=0x%08X pdb=%s age=%u}",
+                            id.size_of_image, id.timestamp, id.pdb_guid, id.pdb_age);
+            }
+        }
+        // WHO CALLED IT. See fault_return_chain.
+        char chain[512] = "";
+        fault_return_chain(xp->ContextRecord, chain, sizeof(chain));
+
         const int   lane = g_tick_lane.load(std::memory_order_relaxed);
         const char* mark = g_navw_mark.load(std::memory_order_relaxed);
         API::get()->log_info(
-            "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s | "
-            "lane '%s' step '%s'. Observed only -- the exception is passed on untouched, so this "
-            "tick's remaining lanes (rig, arms, hands, two-hand, gestures) did NOT run.",
+            "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s%s%s | "
+            "lane '%s' step '%s' | called from %s. Observed only -- the exception is passed on "
+            "untouched, so this tick's remaining lanes (rig, arms, hands, two-hand, gestures) did "
+            "NOT run.",
             (unsigned)nth, (unsigned)er->ExceptionCode, addr, leaf, modbase,
-            (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra,
+            (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra, fn, build,
             (lane >= 0 && lane < PERF_COUNT) ? kPerfName[lane] : "(none)",
-            (mark != nullptr) ? mark : "-");
+            (mark != nullptr) ? mark : "-",
+            chain[0] ? chain : "(no chain)");
     }
 
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {

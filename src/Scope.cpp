@@ -2863,7 +2863,10 @@ void scope_frame_end(uint32_t tick) {
 #if HALO_VR_DEV
     dev_rt_scan(tick);
 #endif
-    scope_blit_tick();
+    // scope_blit_tick() used to be called here. REMOVED 2026-09-08: it registered a UEVR render
+    // callback from inside a tick, which takes a unique_lock on the shared_mutex UEVR is already
+    // holding shared to dispatch this very tick -- a guaranteed self-deadlock the moment scopeblit
+    // was ever switched on. Registration now happens once in on_initialize (scope_blit_register).
 #endif
     // Park-when-stale only; placement lives in scope_notice_ray now. Within a tick the dev ray
     // notices BEFORE this call and the real reticule path notices AFTER it, so an age over one

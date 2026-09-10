@@ -67,6 +67,16 @@ bool xrbridge_available();
 // static in the layer, but the handles behind it are not, so ask each time you need one.
 const HaloVrLayerApi* xrbridge_api();
 
+// Show the LEFT eye's image to both eyes (cutscene mono). The ONLY correct way to reach the
+// layer's set_projection_mono: it was appended to the ABI after v1 shipped, so this wrapper checks
+// struct_size covers the slot before dereferencing it. false = layer absent, gated off, or too old
+// to know the call -- all of which mean "not applied", and the caller should say so once.
+// mode: 0 = off, 1 = left eye to every view, 2 = right eye to every view.
+bool xrbridge_set_projection_mono(int mode);
+// The mode-5 screen: convergence depth in metres (0 = infinity) and picture scale (1 = as
+// rendered). Same append-and-size-check story.
+bool xrbridge_set_mono_screen(float meters, float size);
+
 // One line for the log: whether the layer was found, which build, and what its own status says.
 // Never null, always safe to print.
 const char* xrbridge_status();

@@ -1,6 +1,7 @@
 #include "UeObject.hpp"
 
 #include <cstring>
+#include <Windows.h>   // IsBadReadPtr
 
 using namespace uevr;
 
@@ -20,6 +21,24 @@ std::wstring class_name_of(API::UObject* obj) {
     auto* f = c->get_fname();
     if (f == nullptr) return L"";
     return f->to_string();
+}
+
+// ADDR-HYGIENE: structural -- UObjectBase::InternalIndex sits at +0xC in every UE4/UE5 layout
+// (vtable, ObjectFlags, InternalIndex, ClassPrivate, NamePrivate, OuterPrivate), the same engine
+// header UEVR's own SDK assumes (UESDK UObjectBase.hpp: s_internal_index_offset{0xC}). Read only,
+// never written through, and a wrong value can only REJECT a pointer -- every consumer treats
+// that as "no object", a state each of them already handles.
+constexpr int32_t UOBJ_INTERNAL_INDEX_OFF = 0x0C;
+
+bool uobject_slot_valid(const API::UObject* p) {
+    if (p == nullptr || (uintptr_t)p < 0x10000) return false;
+    if (IsBadReadPtr(p, (UINT_PTR)UOBJ_INTERNAL_INDEX_OFF + sizeof(int32_t))) return false;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return false;
+    const int32_t idx = *reinterpret_cast<const int32_t*>(
+                            reinterpret_cast<const uint8_t*>(p) + UOBJ_INTERNAL_INDEX_OFF);
+    if (idx < 0 || idx >= arr->get_object_count()) return false;
+    return arr->get_object(idx) == p;
 }
 
 bool uobject_live(API::UObject* p, int32_t* cached_index) {
