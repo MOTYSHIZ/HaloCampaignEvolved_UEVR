@@ -7555,6 +7555,26 @@ void update() {
                                + g_cfg.aim_turn * g_turn_offset.load());
     float ctrl_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
 
+    // SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): override the controller-derived angle with
+    // the weapon-mesh bore. THIS MUST MATCH derive_ctrl_angles' branch exactly, because this inline
+    // copy (a deliberate repeat, see the note at the top of this second entry point) is what feeds
+    // the CALIBRATION REFERENCE captured just below AND the stick path, while derive_ctrl_angles
+    // feeds the direct-drive setpoint. If only one used the mesh, the reference and the setpoint
+    // would describe different directions and the gap would read as a fixed aim offset that
+    // recalibration could not remove. Mesh forward is WORLD space -> UE-convention angles, and
+    // takes NO turn offset (it already reflects the turned world). Cascade: unavailable -> keep the
+    // controller angle above (also the unarmed path).
+    if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+        Vec3 mf{};
+        if (halo::shotpoint_dir(&mf)) {
+            const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
+            if (ml > 1e-3f) {
+                ctrl_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
+                ctrl_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+            }
+        }
+    }
+
     // TARGET SMOOTHING -- filter WHERE WE ARE ASKED TO POINT, not how fast we get there.
     //
     // `aim_tau_s` used to do two unrelated jobs: pace the approach AND low-pass hand tremor.
