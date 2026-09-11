@@ -49,6 +49,10 @@ using namespace uevr;
 
 namespace halo {
 
+// Defined in Rig.cpp. Reads the weapon-mesh bore forward (UE world) published at tick rate by
+// shotpoint_tick(); false when no weapon / no marker, so the aim path keeps its own direction.
+bool shotpoint_dir(Vec3* out_fwd);
+
 // ---- aim reference ---------------------------------------------------------------------------
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
 std::atomic<float> g_ref_ctrl_pitch{0.0f}, g_ref_aim_pitch{0.0f};
@@ -367,6 +371,37 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
+    }
+
+    // ---- SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): aim along the weapon MESH bore ---------
+    //
+    // Take the aim direction from the rendered weapon's forward (GetForwardVector on the mesh that
+    // carries fx_muzzleflash) instead of the controller pose -- so aim follows the barrel you SEE.
+    // Measured 2026-09-11: that forward IS the bore (matched the game aim setpoint to ~1 deg yaw /
+    // ~2 deg pitch; the UP/RIGHT axes were 80+ deg off).
+    //
+    // THE FRAME, and why this branch does NOT reuse the controller extraction below:
+    //   * The mesh forward is WORLD (game) space -- yaw about +Z, +X forward -- so its game angles
+    //     come straight from atan2(y,x)/asin(z), NOT the VR-space atan2(x,-z)/asin(y) the controller
+    //     pose needs.
+    //   * It ALREADY reflects any snap-turn (the rendered world is turned), so it takes NO turn
+    //     offset -- the controller path adds one because it is in tracking space. Measured: mesh
+    //     world yaw == the final aim setpoint yaw with a turn already active.
+    // Consequences, both intended for this opt-in source: it skips the sightline reprojection (the
+    // bore already IS the aim ray) and the two-hand blend (the rendered pose already carries the
+    // hold). WEAPON-ONLY + CASCADE: if the published direction is unavailable (no weapon, no marker,
+    // not yet sampled), fall through to the controller path below -- which is also the unarmed path.
+    if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+        Vec3 mf{};
+        if (shotpoint_dir(&mf)) {
+            const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
+            if (ml > 1e-3f) {
+                *out_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
+                *out_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+                return true;
+            }
+        }
+        // else: unavailable -> cascade to the controller path below (grip+offset / unarmed).
     }
 
     // ---- THE TWO-HANDED HOLD.

@@ -818,6 +818,28 @@ bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
     return true;
 }
 
+// Published at TICK rate by shotpoint_tick(), read at aim rate by derive_ctrl_angles -- the
+// two-clocks rule: the mesh-forward read is reflection (GetSocketLocation x2 + GetForwardVector)
+// and belongs on the ~32 Hz tick; the aim law runs far faster and must not do reflection.
+static std::atomic<float> g_sp_fx{0.0f}, g_sp_fy{0.0f}, g_sp_fz{0.0f};
+static std::atomic<bool>  g_sp_fwd_valid{false};
+
+void shotpoint_tick() {
+    Vec3 p{}, f{};
+    if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
+        g_sp_fx.store(f.x); g_sp_fy.store(f.y); g_sp_fz.store(f.z);
+        g_sp_fwd_valid.store(true);
+    } else {
+        g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
+    }
+}
+
+bool shotpoint_dir(Vec3* out_fwd) {
+    if (!g_sp_fwd_valid.load()) return false;
+    if (out_fwd) *out_fwd = Vec3{g_sp_fx.load(), g_sp_fy.load(), g_sp_fz.load()};
+    return true;
+}
+
 void shotpoint_dev_readout(unsigned tick) {
 #if HALO_VR_DEV
     if (g_cfg.shot_aim_log <= 0) return;

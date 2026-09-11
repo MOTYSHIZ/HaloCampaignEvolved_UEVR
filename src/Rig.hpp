@@ -226,6 +226,12 @@ bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3*
 bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd = nullptr);
 // Dev-only readout of the resolution above, throttled by shotaimlog. No-op in release / when off.
 void shotpoint_dev_readout(unsigned tick);
+// Sample the weapon-mesh bore forward and publish it. Call ONCE PER TICK (guard with g_cfg.shot_aim
+// so it costs nothing when the feature is off) -- it does reflection and must not run at aim rate.
+void shotpoint_tick();
+// Read the published bore forward (UE world). False when unavailable, so the caller keeps its own
+// direction (the controller path / unarmed path). Cheap: atomics only, safe from the aim hook.
+bool shotpoint_dir(Vec3* out_fwd);
 
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);

@@ -6072,6 +6072,13 @@ void update() {
     // first placement at the end of the tick would never run on exactly those ticks. It consumes
     // the ray scope_notice_ray() deposited LAST tick, so pane placement trails the reticule by
     // one ~32 Hz tick -- invisible next to the smoothing already on the reticule itself.
+
+    // SHOT-POINT: sample the weapon-mesh bore forward once per tick and publish it, so the aim law
+    // (which runs far faster, in the XInput hook) reads an atomic instead of doing reflection. Only
+    // when the feature is on -- costs nothing on a stock profile. Reflection, so it sits here on the
+    // tick with the rest of the rig reads, never in the aim hot path (the two-clocks rule).
+    if (g_cfg.shot_aim) halo::shotpoint_tick();
+
 #if HALO_VR_DEV
     // SCOPEDEV state line, ~2 s: every input the scope's gates consume, so a dead pane is
     // explainable from the log alone (the aim-servo `blocked(reason)` idea, applied here).
