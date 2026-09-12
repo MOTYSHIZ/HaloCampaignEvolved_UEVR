@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include "ArmDriver.hpp"  // the palette driver owns the weapon too; do not attach under it
 #include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
+#include "MotionAimControl.hpp"  // get_pose(), g_turn_offset -- the frozen bore capture works in the aim frame
 
 #include <cstdio>
 #include <cstring>
@@ -824,6 +825,17 @@ bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
 static std::atomic<float> g_sp_fx{0.0f}, g_sp_fy{0.0f}, g_sp_fz{0.0f};
 static std::atomic<bool>  g_sp_fwd_valid{false};
 
+// FROZEN per-weapon controller-local bore. bore_local is the bore direction in the AIM controller's
+// OWN frame (VR space, snap-turn removed) -- a per-weapon constant captured when the weapon is at
+// rest. The aim path rotates it by the LIVE controller pose and re-adds the snap turn, so the
+// result is FROZEN (immune to reload/recoil, which we then never read) and ROLL-INVARIANT (a
+// constant in the controller frame rotates with the wrist about the bore). Cache is populated only
+// in DEV (auto-capture) for now; consumed in any build (a future persisted / AR-default value works
+// in release). The held weapon's value is published to g_bl_* each tick.
+static std::unordered_map<std::wstring, Vec3> g_bore_cache;
+static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
+static std::atomic<bool>  g_bl_valid{false};
+
 void shotpoint_tick() {
     Vec3 p{}, f{};
     if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
@@ -832,11 +844,28 @@ void shotpoint_tick() {
     } else {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
+
+    // Publish the frozen bore_local for the currently held weapon, if one has been captured.
+    bool have = false;
+    if (auto* wpn = fp_weapon_actor()) {
+        auto it = g_bore_cache.find(class_name_of(wpn));
+        if (it != g_bore_cache.end()) {
+            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z);
+            have = true;
+        }
+    }
+    g_bl_valid.store(have);
 }
 
 bool shotpoint_dir(Vec3* out_fwd) {
     if (!g_sp_fwd_valid.load()) return false;
     if (out_fwd) *out_fwd = Vec3{g_sp_fx.load(), g_sp_fy.load(), g_sp_fz.load()};
+    return true;
+}
+
+bool shotpoint_bore_local(Vec3* out) {
+    if (!g_bl_valid.load()) return false;
+    if (out) *out = Vec3{g_bl_x.load(), g_bl_y.load(), g_bl_z.load()};
     return true;
 }
 
@@ -908,6 +937,65 @@ struct AssetMeasure {
     bool  logged_stable = false;
 };
 static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
+
+// Capture the FROZEN controller-local bore for the held weapon: read the aim controller pose and
+// the world bore, remove the snap turn, convert the bore into the controller's frame, and store it.
+// SELF-CHECKS by reconstructing the aim at the very same pose and comparing to the world bore; if
+// the round trip does not reproduce it (a frame or sign bug), the capture is REJECTED and logged,
+// so a bad transform fails closed onto the live-bore bootstrap instead of throwing aim off.
+//
+// Frame math, derived from the code's own conventions (verified against three reference dirs):
+//   * quat_forward is VR space: game_yaw = atan2(x,-z), game_pitch = asin(y), + aim_turn*g_turn_offset.
+//   * the mesh bore is UE world: game_yaw = atan2(y,x), game_pitch = asin(z), turn already included.
+//   * so UE_forward = (-vr.z, vr.x, vr.y), and UE->VR = (ue.y, ue.z, -ue.x).
+// Uses the CONFIGURED AIM HAND (left or right), never a hardcoded controller.
+static bool capture_bore_local(API::UObject* wpn) {
+    if (wpn == nullptr) return false;
+    Vec3 mpos{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &mpos);
+    if (comp == nullptr) return false;
+    Vec3 bore_ue{};
+    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_ue)) return false;
+    const float blen = std::sqrt(bore_ue.x*bore_ue.x + bore_ue.y*bore_ue.y + bore_ue.z*bore_ue.z);
+    if (blen < 1e-4f) return false;
+    bore_ue.x /= blen; bore_ue.y /= blen; bore_ue.z /= blen;
+
+    const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                             : API::VR::get_right_controller_index();
+    if (ridx < 0) return false;
+    Vec3 cpos{}; Quat cq{};
+    if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
+
+    const float t   = g_cfg.aim_turn * g_turn_offset.load();   // snap turn, degrees
+    const float tr  = t * DEG2RAD;
+    const float ct  = std::cos(tr), st = std::sin(tr);
+    // Remove the snap turn: rotate the bore about UE up (Z) by -t so it lands in the turn-free frame.
+    const Vec3 b_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };
+    // UE forward -> VR forward, then into the controller's own frame (turn-free, animation-free).
+    const Vec3 bore_vr{ b_nt.y, b_nt.z, -b_nt.x };
+    const Vec3 bore_local = quat_rotate(quat_conj(cq), bore_vr);
+
+    // Self-check: reconstruct the aim at THIS pose; must reproduce the world bore's game angles.
+    const Vec3  rec       = quat_rotate(cq, bore_local);
+    const float rec_yaw   = std::atan2(rec.x, -rec.z) * RAD2DEG + t;
+    const float rec_pit   = std::asin(clampf(rec.y, -1.0f, 1.0f)) * RAD2DEG;
+    const float bore_yaw  = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
+    const float bore_pit  = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
+    const float dyaw = std::fabs(wrap180(rec_yaw - bore_yaw));
+    const float dpit = std::fabs(rec_pit - bore_pit);
+    if (dyaw > 2.0f || dpit > 2.0f) {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: REJECT '%ls' -- self-check off by yaw=%.2f "
+                             "pit=%.2f deg (frame/sign bug); staying on live bore",
+                             class_name_of(wpn).c_str(), dyaw, dpit);
+        return false;
+    }
+    g_bore_cache[class_name_of(wpn)] = bore_local;
+    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f); "
+                         "reproduces bore yaw=%.1f pit=%.1f (err yaw=%.2f pit=%.2f) -- frozen aim armed",
+                         class_name_of(wpn).c_str(), bore_local.x, bore_local.y, bore_local.z,
+                         bore_yaw, bore_pit, dyaw, dpit);
+    return true;
+}
 
 void shotpoint_asset_dev(unsigned tick) {
     if (g_cfg.shot_aim_log <= 0) return;
@@ -991,6 +1079,13 @@ void shotpoint_asset_dev(unsigned tick) {
 
     // Every sample in the window is within tolerance by construction, so the count IS the gate.
     const bool stable = (m.n >= kStableSamples);
+
+    // On first reaching a stable rest for this weapon, capture the frozen controller-local bore
+    // (fill-if-empty: never overwrite a value already captured). This is the DEV auto-populate;
+    // the capture self-checks and refuses a bad transform.
+    if (stable && g_bore_cache.find(class_name_of(wpn)) == g_bore_cache.end()) {
+        capture_bore_local(wpn);
+    }
 
     if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
         if (stable) m.logged_stable = true;

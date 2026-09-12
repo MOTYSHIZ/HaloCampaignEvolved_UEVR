@@ -239,6 +239,10 @@ void shotpoint_tick();
 // Read the published bore forward (UE world). False when unavailable, so the caller keeps its own
 // direction (the controller path / unarmed path). Cheap: atomics only, safe from the aim hook.
 bool shotpoint_dir(Vec3* out_fwd);
+// FROZEN per-weapon controller-local bore (animation-immune, roll-invariant), published each tick.
+// True + out set when the held weapon has a captured bore_local; the aim path then rotates it by
+// the live controller pose and re-adds the snap turn. False -> caller uses the live-bore bootstrap.
+bool shotpoint_bore_local(Vec3* out);
 
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);

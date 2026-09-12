@@ -52,6 +52,9 @@ namespace halo {
 // Defined in Rig.cpp. Reads the weapon-mesh bore forward (UE world) published at tick rate by
 // shotpoint_tick(); false when no weapon / no marker, so the aim path keeps its own direction.
 bool shotpoint_dir(Vec3* out_fwd);
+// Defined in Rig.cpp. The FROZEN per-weapon controller-local bore, if one is captured for the held
+// weapon; the aim path rotates it by the live controller pose (animation-immune, roll-invariant).
+bool shotpoint_bore_local(Vec3* out);
 
 // True when absolute weapon-mesh aim is live: feature on, direction mode on, and a bore forward is
 // currently published. When true the setpoint IS the mesh bore -- an absolute game-space direction
@@ -427,8 +430,20 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // hold). WEAPON-ONLY + CASCADE: if the published direction is unavailable (no weapon, no marker,
     // not yet sampled), fall through to the controller path below -- which is also the unarmed path.
     if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+        Vec3 bl{};
+        if (shotpoint_bore_local(&bl)) {
+            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose and
+            // re-add the snap turn. Roll-invariant (a constant in the controller frame) and
+            // animation-immune (reads no mesh). cq is the RAW pose the constant was captured against.
+            const Vec3 bvr = quat_rotate(cq, bl);
+            *out_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
+            *out_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+            return true;
+        }
         Vec3 mf{};
         if (shotpoint_dir(&mf)) {
+            // BOOTSTRAP until this weapon has a frozen capture: the live mesh bore (world). Follows
+            // recoil/reload animation -- the accepted "predictable, slightly wrong" interim.
             const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
             if (ml > 1e-3f) {
                 *out_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);

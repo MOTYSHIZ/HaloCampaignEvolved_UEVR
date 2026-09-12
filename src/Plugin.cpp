@@ -7573,12 +7573,22 @@ void update() {
     // takes NO turn offset (it already reflects the turned world). Cascade: unavailable -> keep the
     // controller angle above (also the unarmed path).
     if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
-        Vec3 mf{};
-        if (halo::shotpoint_dir(&mf)) {
-            const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
-            if (ml > 1e-3f) {
-                ctrl_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
-                ctrl_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+        Vec3 bl{};
+        if (halo::shotpoint_bore_local(&bl)) {
+            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose,
+            // re-add the snap turn. Animation-immune + roll-invariant. cq is the raw captured pose.
+            // Feeds ctrl_yaw/pitch so the calibration reference and stick path see the same frame.
+            const Vec3 bvr = quat_rotate(cq, bl);
+            ctrl_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
+            ctrl_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+        } else {
+            Vec3 mf{};
+            if (halo::shotpoint_dir(&mf)) {   // bootstrap: live mesh bore (follows animation)
+                const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
+                if (ml > 1e-3f) {
+                    ctrl_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
+                    ctrl_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+                }
             }
         }
     }
