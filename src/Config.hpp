@@ -888,6 +888,18 @@ struct Config {
     float aim_off_pitch = 0.0f;
     bool  aim_off_valid = false;
 
+    // Controller-frame AIM correction (quaternion x,y,z,w), applied by apply_aim_fix() as a RIGHT
+    // multiply on the controller pose -- so it lives in the controller's own frame and rolls with
+    // the wrist, exactly as the rendered gun does. Identity (default) = no correction. This is the
+    // LANE-INDEPENDENT seam: the loop, the direct write and the weapon publisher all take
+    // controller x aim_fix, so a future producer (the per-weapon bore measurement, or a quaternion
+    // Page Down) corrects every path at once. Unlike aim_off (a WORLD yaw/pitch delta, which a
+    // wrist roll sweeps off the barrel by up to ~8 deg), a controller-frame quaternion is
+    // roll-invariant. Name/(x,y,z,w) layout match the calib file's `aimfix` line for palette-lane
+    // interop. See docs\BLAM_AIM_FINDINGS.md.
+    float aim_fix[4]   = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool  aim_fix_valid = false;
+
     // ---- THE CALIBRATION FRAME ---------------------------------------------------------------
     // Both persisted yaw calibrations -- `aimoffyaw` and `gripyaw` -- are measured against the yaw
     // the view lock pinned the world to (g_locked_view_yaw), because that is the constant relating

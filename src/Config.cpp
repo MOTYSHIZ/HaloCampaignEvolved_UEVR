@@ -1614,6 +1614,15 @@ bool parse_config_file(const char* path) {
     else if (_stricmp(key, "killkey")    == 0) g_cfg.kill_key    = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "aimoffyaw")   == 0) { g_cfg.aim_off_yaw   = (float)v; g_cfg.aim_off_valid = true; }
         else if (_stricmp(key, "aimoffpitch") == 0) { g_cfg.aim_off_pitch = (float)v; g_cfg.aim_off_valid = true; }
+        else if (_stricmp(key, "aimfix")      == 0) {
+            // Comma list, so it needs the raw val string, not the single-float v. sscanf leaves
+            // aim_fix untouched (and aim_fix_valid false) unless all four components parse.
+            float a, b, c, d;
+            if (sscanf(val, "%f,%f,%f,%f", &a, &b, &c, &d) == 4) {
+                g_cfg.aim_fix[0] = a; g_cfg.aim_fix[1] = b; g_cfg.aim_fix[2] = c; g_cfg.aim_fix[3] = d;
+                g_cfg.aim_fix_valid = true;
+            }
+        }
         else if (_stricmp(key, "calibrelative") == 0) g_cfg.calib_relative = (v != 0.0);
         else if (_stricmp(key, "calibver")      == 0) g_cfg.calib_ver      = (int)v;
         else if (_stricmp(key, "aimcalibver")   == 0) g_cfg.aim_calib_ver  = (int)v;
@@ -1901,6 +1910,15 @@ void write_calib_file() {
             "# aim calibration itself has been re-run, whatever the mesh calibration did.\r\n"
             "aimcalibver=%d\r\naimoffyaw=%.3f\r\naimoffpitch=%.3f\r\n",
             g_cfg.aim_calib_ver, g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
+    }
+
+    if (g_cfg.aim_fix_valid) {
+        fprintf(f,
+            "# RIGID controller-frame hand-to-aim correction (quaternion x,y,z,w), right-multiplied\r\n"
+            "# onto the controller pose so it rolls with the wrist like the gun does. Roll-invariant,\r\n"
+            "# unlike aimoffyaw/aimoffpitch. A measurement -- do not hand-edit.\r\n"
+            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
     }
 
     if (g_pivot_from_calib) {

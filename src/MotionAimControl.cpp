@@ -332,6 +332,29 @@ float shape(float err_deg, float dt) {
 // calibrated aim pose, the sightline through xdist (so hand TRANSLATION moves aim, not just
 // rotation), and the snap-turn offset. Everything it touches is either a UEVR API read (internally
 // locked) or an atomic, so it is callable from the XInput hook as well as the tick.
+// ---- THE CONTROLLER-FRAME AIM CORRECTION SEAM (apply_aim_fix) --------------------------------
+// A rotation RIGHT-multiplied onto the controller pose, so the correction lives in the controller's
+// OWN frame and rolls with the wrist exactly as the rendered gun does. This is the lane-independent
+// seam a per-weapon bore correction (or a quaternion Page Down) plugs into: every aim path takes
+// its direction from controller x aim_fix, so one producer corrects the loop, the direct write, the
+// reticle and the weapon publisher at once -- they cannot disagree by construction.
+//
+// WHY RIGHT-MULTIPLY, not left. q_src maps the controller's canonical forward into the world.
+// q_src * f applies f FIRST, in the controller's local axes ("tilt toward the handle's own up"), so
+// the tilt travels with the controller -- a laser glued to it at a fixed angle. Rolling the wrist
+// about the bore then leaves the corrected forward on the bore (R * (q_src*f) applied to a vector
+// on R's axis is unchanged). A LEFT-multiply f * q_src is a world-fixed bend that the roll sweeps
+// away -- exactly the ~8 deg roll wander a world yaw/pitch offset produces (bc measured 0.908
+// correlation with sin(wrist roll); the fingerprint of a correction fixed in the wrong frame).
+//
+// Identity default => no correction and no behaviour change until a producer writes aim_fix. The
+// name and (x,y,z,w) layout match the calibration file's `aimfix` line for palette-lane interop.
+Quat apply_aim_fix(const Quat& q_src) {
+    if (!g_cfg.aim_fix_valid) return q_src;
+    const Quat f{g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]};
+    return quat_mul(q_src, f);
+}
+
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
                         bool allow_two_hand) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
@@ -340,7 +363,11 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
-    Vec3 fwd = quat_forward(cq);
+    // apply_aim_fix: the controller-frame aim correction (identity by default). Applied to the
+    // pose BEFORE the forward is taken, so it rolls with the wrist like the rendered gun does; the
+    // weapon publisher and the direct-write path route through the same call, so ray and barrel
+    // agree by construction. See apply_aim_fix's definition above for why it is a right-multiply.
+    Vec3 fwd = quat_forward(apply_aim_fix(cq));
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -375,7 +402,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            fwd = quat_forward(gq);
+            fwd = quat_forward(apply_aim_fix(gq));
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }

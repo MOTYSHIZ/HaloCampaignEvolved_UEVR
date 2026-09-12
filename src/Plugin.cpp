@@ -7470,7 +7470,10 @@ void update() {
         }
     }
 
-    Vec3 fwd = quat_forward(cq);
+    // Routed through the same controller-frame correction as derive_ctrl_angles (identity by
+    // default): this inline copy feeds the calibration reference and the stick path, so it must
+    // apply aim_fix or the reference would be captured in a different frame than the setpoint.
+    Vec3 fwd = quat_forward(halo::apply_aim_fix(cq));
 
     // ---- THE TWO-HANDED HOLD, on the tick-side copy of the aim derivation.
     //
