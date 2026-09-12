@@ -53,6 +53,14 @@ namespace halo {
 // shotpoint_tick(); false when no weapon / no marker, so the aim path keeps its own direction.
 bool shotpoint_dir(Vec3* out_fwd);
 
+// True when absolute weapon-mesh aim is live: feature on, direction mode on, and a bore forward is
+// currently published. When true the setpoint IS the mesh bore -- an absolute game-space direction
+// -- so it takes NO controller-relative reference and needs NO aim calibration. When false (no
+// weapon, no marker, or the mode off) the aim uses the calibrated controller reference as always.
+static bool shotpoint_aim_active() {
+    return g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 && shotpoint_dir(nullptr);
+}
+
 // ---- aim reference ---------------------------------------------------------------------------
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
 std::atomic<float> g_ref_ctrl_pitch{0.0f}, g_ref_aim_pitch{0.0f};
@@ -505,8 +513,13 @@ bool desired_aim_now(float* out_yaw, float* out_pitch) {
     // Same hold, same reason -- consumers of the setpoint must see the swing target too, or the
     // strike and the reticule disagree about where the blow is going.
     apply_melee_aim_hold(&cy, &cp);
-    *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
-    *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
+    if (shotpoint_aim_active()) {
+        // Absolute mesh bore: cy/cp already ARE the game-space aim direction. See aim_control_law.
+        *out_yaw = cy; *out_pitch = cp;
+    } else {
+        *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
+        *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
+    }
     return true;
 }
 
@@ -610,12 +623,29 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     }
 
     // The hand's rotation SINCE CALIBRATION, kept as its own term because the direct-write path
-    // needs to be able to mirror it independently of the reference it is added to.
+    // needs to mirror it independently of the reference it is added to. Computed unconditionally --
+    // the direct-write path below still references it in its own (non-shot-point) branch.
     const float dctrl_yaw   = wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
     const float dctrl_pitch = wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
 
-    const float desired_yaw   = g_ref_aim_yaw.load()   + dctrl_yaw;
-    const float desired_pitch = g_ref_aim_pitch.load() + dctrl_pitch;
+    // WHERE THE SETPOINT COMES FROM -- two modes, decided once for this tick so the loop path, the
+    // published intent, and the direct-write path below all agree.
+    const bool sp_active = shotpoint_aim_active();
+    float desired_yaw, desired_pitch;
+    if (sp_active) {
+        // ABSOLUTE (shot-point): ctrl_yaw/pitch already ARE the weapon-mesh bore, a game-space aim
+        // direction, so it is the setpoint DIRECTLY. No controller-relative reference means no aim
+        // calibration is needed -- aim points where the barrel does, by construction. The bore is
+        // world-space and already carries snap-turn, so nothing else is added. (ref_ctrl/ref_aim
+        // are still maintained above for the fallback path, just not consulted here.)
+        desired_yaw   = ctrl_yaw;
+        desired_pitch = ctrl_pitch;
+    } else {
+        // RELATIVE (controller): the hand's rotation SINCE CALIBRATION added to the aim captured at
+        // calibration -- the reference maps the abstract controller aim pose onto game aim.
+        desired_yaw   = g_ref_aim_yaw.load()   + dctrl_yaw;
+        desired_pitch = g_ref_aim_pitch.load() + dctrl_pitch;
+    }
 
     // Published for the reticule (see the header). Set before the deadband and shaping so it is the
     // raw setpoint, not something the actuator has already filtered.
@@ -812,8 +842,12 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     // a build per guess (launches are unreliable), the mapping is a live tunable: +1 reproduces the
     // steered setpoint exactly, -1 mirrors the hand's motion about the calibration reference.
     if (g_cfg.aim_direct && aim_direct_ready()) {
-        float wy = g_ref_aim_yaw.load() + g_cfg.aim_direct_sign_x * dctrl_yaw;
-        float wp = g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch;
+        // ABSOLUTE mesh bore -> write the setpoint directly (== desired), with no reference and no
+        // sign mirroring: those exist to map the controller pose, which shot-point aim replaces.
+        // This is the CANONICAL write (aimdirect=1), so the absolute mode must land HERE too, not
+        // only in the loop's desired above -- otherwise the shot would still ride the calibration.
+        float wy = sp_active ? desired_yaw   : g_ref_aim_yaw.load()   + g_cfg.aim_direct_sign_x * dctrl_yaw;
+        float wp = sp_active ? desired_pitch : g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch;
         // Corrected HERE TOO, and with the same call, because this is the LOCAL VIEW half of the
         // aim pair -- blamangles writes the simulation, this writes what you see. The two halves
         // disagreeing by even a degree is the documented "heavy jitter" failure, so a correction
