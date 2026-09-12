@@ -226,6 +226,13 @@ bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3*
 bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd = nullptr);
 // Dev-only readout of the resolution above, throttled by shotaimlog. No-op in release / when off.
 void shotpoint_dev_readout(unsigned tick);
+#if HALO_VR_DEV
+// Dev/recon: measure fx_muzzleflash as a per-weapon-class constant in the weapon's OWN ROOT frame
+// (muzzle position + bore direction), with a stability gate. Call once per tick while shotaimlog>0;
+// samples every call, logs the accumulating constant on the shotaimlog throttle and once on
+// reaching STABLE. Lane-independent -- feeds the seam's eventual per-weapon producer.
+void shotpoint_asset_dev(unsigned tick);
+#endif
 // Sample the weapon-mesh bore forward and publish it. Call ONCE PER TICK (guard with g_cfg.shot_aim
 // so it costs nothing when the feature is off) -- it does reflection and must not run at aim rate.
 void shotpoint_tick();

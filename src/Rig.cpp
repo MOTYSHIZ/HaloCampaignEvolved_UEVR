@@ -883,6 +883,105 @@ void shotpoint_dev_readout(unsigned tick) {
 #endif
 }
 
+// ---------------------------------------------------------------- SHOT-POINT ASSET MEASUREMENT
+// Measure fx_muzzleflash ONCE PER WEAPON CLASS as a constant in the weapon's OWN ROOT frame:
+// the muzzle POSITION (cm) and the bore DIRECTION, both expressed relative to the weapon actor's
+// root component rather than the world. That makes them lane-independent -- a property of the
+// asset, not of how any lane places the weapon -- so the same numbers drive the rig lane and the
+// palette lane. Combined with the weapon's placement (socket attach in the rig lane, the palette
+// grip in the palette lane) they reconstruct the world muzzle and bore, which is what the seam's
+// eventual producer needs: bore-relative-to-root x root-relative-to-controller = the aim_fix.
+//
+// It is exact only at REST: idle sway and recoil animate the mesh relative to the root, so a
+// sample taken mid-animation is off. The stability gate is the whole point -- accumulate across
+// samples, track the max deviation from the running mean, and only trust the constant once it has
+// held still (low deviation over enough samples). A moving reading is visibly unstable and says so.
+//
+// Dev/recon only (#if HALO_VR_DEV, gated on shotaimlog): reflection every tick while measuring.
+#if HALO_VR_DEV
+struct AssetMeasure {
+    Vec3  muzzle_mean{0, 0, 0};   // root-local, cm
+    Vec3  bore_mean{0, 0, 0};     // root-local, ~unit (mean of unit samples)
+    int   n = 0;
+    float bore_dev_max = 0.0f;    // deg, max angle of a sample off the running mean
+    float muzzle_dev_max = 0.0f;  // cm,  max distance of a sample off the running mean
+    bool  logged_stable = false;
+};
+static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
+
+void shotpoint_asset_dev(unsigned tick) {
+    if (g_cfg.shot_aim_log <= 0) return;
+
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) return;
+    auto* root = fp_weapon_root();
+    if (root == nullptr) return;
+
+    // Marker world position + bore (mesh forward), the same resolve the readout uses.
+    Vec3 mpos{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &mpos);
+    if (comp == nullptr) return;
+    Vec3 bore_w{};
+    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_w)) return;
+
+    // Weapon-root world frame: origin + orthonormal basis (UE: X fwd, Y right, Z up).
+    Vec3 P{}, fwd{}, right{}, up{};
+    if (!call_ret_vec3(root, L"K2_GetComponentLocation", &P))   return;
+    if (!call_ret_vec3(root, L"GetForwardVector",        &fwd)) return;
+    if (!call_ret_vec3(root, L"GetRightVector",          &right)) return;
+    if (!call_ret_vec3(root, L"GetUpVector",             &up))  return;
+
+    // World -> root-local is R^T (rows = the basis vectors), since the basis is orthonormal.
+    auto dot3 = [](const Vec3& a, const Vec3& b) { return a.x*b.x + a.y*b.y + a.z*b.z; };
+    const Vec3 rel{mpos.x - P.x, mpos.y - P.y, mpos.z - P.z};
+    const Vec3 muzzle_local{dot3(fwd, rel),    dot3(right, rel),    dot3(up, rel)};
+    Vec3 bore_local       {dot3(fwd, bore_w),  dot3(right, bore_w), dot3(up, bore_w)};
+    const float bl = std::sqrt(bore_local.x*bore_local.x + bore_local.y*bore_local.y + bore_local.z*bore_local.z);
+    if (bl > 1e-4f) { bore_local.x /= bl; bore_local.y /= bl; bore_local.z /= bl; }
+
+    AssetMeasure& m = g_asset_cache[class_name_of(wpn)];
+    if (m.n > 0) {
+        // Deviation of this sample from the mean SO FAR, before folding it in.
+        const Vec3 dp{muzzle_local.x - m.muzzle_mean.x, muzzle_local.y - m.muzzle_mean.y, muzzle_local.z - m.muzzle_mean.z};
+        const float dcm = std::sqrt(dp.x*dp.x + dp.y*dp.y + dp.z*dp.z);
+        if (dcm > m.muzzle_dev_max) m.muzzle_dev_max = dcm;
+        float bm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
+        if (bm > 1e-4f) {
+            const float d = (bore_local.x*m.bore_mean.x + bore_local.y*m.bore_mean.y + bore_local.z*m.bore_mean.z) / bm;
+            const float dev = std::acos(clampf(d, -1.0f, 1.0f)) * RAD2DEG;
+            if (dev > m.bore_dev_max) m.bore_dev_max = dev;
+        }
+    }
+    // Incremental mean.
+    ++m.n;
+    m.muzzle_mean.x += (muzzle_local.x - m.muzzle_mean.x) / m.n;
+    m.muzzle_mean.y += (muzzle_local.y - m.muzzle_mean.y) / m.n;
+    m.muzzle_mean.z += (muzzle_local.z - m.muzzle_mean.z) / m.n;
+    m.bore_mean.x   += (bore_local.x   - m.bore_mean.x)   / m.n;
+    m.bore_mean.y   += (bore_local.y   - m.bore_mean.y)   / m.n;
+    m.bore_mean.z   += (bore_local.z   - m.bore_mean.z)   / m.n;
+
+    // Stable once it has held still over a window: enough samples, low deviation on both.
+    const bool stable = (m.n >= 30) && (m.bore_dev_max < 1.0f) && (m.muzzle_dev_max < 1.0f);
+
+    if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
+        if (stable) m.logged_stable = true;
+        // Bore reported as root-frame yaw/pitch: how far the authored bore tilts off the weapon
+        // root's own forward (0,0 => bore == root forward).
+        float bnorm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
+        if (bnorm < 1e-4f) bnorm = 1.0f;
+        const float byaw = std::atan2(m.bore_mean.y, m.bore_mean.x) * RAD2DEG;
+        const float bpit = std::asin(clampf(m.bore_mean.z / bnorm, -1.0f, 1.0f)) * RAD2DEG;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | muzzle_root=(%.2f,%.2f,%.2f)cm "
+            "boreRoot yaw=%.2f pit=%.2f | dev bore=%.2fdeg muzzle=%.2fcm",
+            class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
+            m.muzzle_mean.x, m.muzzle_mean.y, m.muzzle_mean.z, byaw, bpit,
+            m.bore_dev_max, m.muzzle_dev_max);
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- debug sphere
 // Draws a marker at a WORLD position via UKismetSystemLibrary::DrawDebugSphere, so the pivot can be
 // SEEN without borrowing the arms or the weapon -- both of which are the reference the pivot is

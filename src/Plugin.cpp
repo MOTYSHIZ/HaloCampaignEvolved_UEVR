@@ -6095,6 +6095,11 @@ void update() {
     // report the marker's world position, so the shot-point aim source is designed from a
     // measurement rather than a guess. Reads only -- it never touches aim.
     halo::shotpoint_dev_readout(tick);
+#if HALO_VR_DEV
+    // Per-weapon-class asset measurement (muzzle + bore in the weapon-root frame), shotaimlog-gated.
+    // Every tick while measuring so the stability window fills; the function throttles its own log.
+    halo::shotpoint_asset_dev(tick);
+#endif
 
     // SCOPE DEV RAY (scopedevray=1, dev cfg): synthesize the ray from the RENDERED VIEW instead of
     // the controller. Exists because the SimVR null driver never validates the controller aim
