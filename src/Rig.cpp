@@ -939,30 +939,58 @@ void shotpoint_asset_dev(unsigned tick) {
     const float bl = std::sqrt(bore_local.x*bore_local.x + bore_local.y*bore_local.y + bore_local.z*bore_local.z);
     if (bl > 1e-4f) { bore_local.x /= bl; bore_local.y /= bl; bore_local.z /= bl; }
 
+    // Tolerances for "still": a sample beyond either restarts the window.
+    constexpr float kBoreTolDeg = 1.0f;
+    constexpr float kMuzzleTolCm = 1.0f;
+    constexpr int   kStableSamples = 30;   // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
+
     AssetMeasure& m = g_asset_cache[class_name_of(wpn)];
+
+    // RESET-ON-MOTION SLIDING WINDOW. Measure the CURRENT continuous still-hold, not all history.
+    // Compute this sample's deviation from the window mean; if it breaks tolerance the hold ended
+    // (equip animation, recoil, a swing, or sway too large to measure cleanly), so discard the
+    // window and restart from this sample. Equip/recoil/sway therefore just keep restarting the
+    // counter, and it is 30 CONSECUTIVE quiet samples -- never a cumulative count with a latched
+    // max -- that reaches STABLE. A hold that never gets there (n keeps bouncing low) is itself the
+    // answer: the rest pose is too unsteady on this weapon to read a clean constant at this tol.
+    bool broke = false;
     if (m.n > 0) {
-        // Deviation of this sample from the mean SO FAR, before folding it in.
         const Vec3 dp{muzzle_local.x - m.muzzle_mean.x, muzzle_local.y - m.muzzle_mean.y, muzzle_local.z - m.muzzle_mean.z};
         const float dcm = std::sqrt(dp.x*dp.x + dp.y*dp.y + dp.z*dp.z);
-        if (dcm > m.muzzle_dev_max) m.muzzle_dev_max = dcm;
-        float bm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
+        float bdev = 0.0f;
+        const float bm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
         if (bm > 1e-4f) {
             const float d = (bore_local.x*m.bore_mean.x + bore_local.y*m.bore_mean.y + bore_local.z*m.bore_mean.z) / bm;
-            const float dev = std::acos(clampf(d, -1.0f, 1.0f)) * RAD2DEG;
-            if (dev > m.bore_dev_max) m.bore_dev_max = dev;
+            bdev = std::acos(clampf(d, -1.0f, 1.0f)) * RAD2DEG;
+        }
+        if (dcm > kMuzzleTolCm || bdev > kBoreTolDeg) {
+            broke = true;
+        } else {
+            if (dcm  > m.muzzle_dev_max) m.muzzle_dev_max = dcm;   // spread WITHIN this window, for the log
+            if (bdev > m.bore_dev_max)   m.bore_dev_max   = bdev;
         }
     }
-    // Incremental mean.
-    ++m.n;
-    m.muzzle_mean.x += (muzzle_local.x - m.muzzle_mean.x) / m.n;
-    m.muzzle_mean.y += (muzzle_local.y - m.muzzle_mean.y) / m.n;
-    m.muzzle_mean.z += (muzzle_local.z - m.muzzle_mean.z) / m.n;
-    m.bore_mean.x   += (bore_local.x   - m.bore_mean.x)   / m.n;
-    m.bore_mean.y   += (bore_local.y   - m.bore_mean.y)   / m.n;
-    m.bore_mean.z   += (bore_local.z   - m.bore_mean.z)   / m.n;
 
-    // Stable once it has held still over a window: enough samples, low deviation on both.
-    const bool stable = (m.n >= 30) && (m.bore_dev_max < 1.0f) && (m.muzzle_dev_max < 1.0f);
+    if (m.n == 0 || broke) {
+        // (Re)start the window at this sample.
+        m.muzzle_mean = muzzle_local;
+        m.bore_mean   = bore_local;
+        m.n = 1;
+        m.muzzle_dev_max = 0.0f;
+        m.bore_dev_max   = 0.0f;
+        m.logged_stable  = false;
+    } else {
+        ++m.n;
+        m.muzzle_mean.x += (muzzle_local.x - m.muzzle_mean.x) / m.n;
+        m.muzzle_mean.y += (muzzle_local.y - m.muzzle_mean.y) / m.n;
+        m.muzzle_mean.z += (muzzle_local.z - m.muzzle_mean.z) / m.n;
+        m.bore_mean.x   += (bore_local.x   - m.bore_mean.x)   / m.n;
+        m.bore_mean.y   += (bore_local.y   - m.bore_mean.y)   / m.n;
+        m.bore_mean.z   += (bore_local.z   - m.bore_mean.z)   / m.n;
+    }
+
+    // Every sample in the window is within tolerance by construction, so the count IS the gate.
+    const bool stable = (m.n >= kStableSamples);
 
     if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
         if (stable) m.logged_stable = true;
