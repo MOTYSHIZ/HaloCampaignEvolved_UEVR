@@ -825,13 +825,12 @@ bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
 static std::atomic<float> g_sp_fx{0.0f}, g_sp_fy{0.0f}, g_sp_fz{0.0f};
 static std::atomic<bool>  g_sp_fwd_valid{false};
 
-// FROZEN per-weapon bore, stored PLACEMENT-INDEPENDENT. The cache holds the bore in the PRE-END-TRIM
-// controller-local frame (UE convention): the End placement trim (mode 3: rig_dir_grip_*) is
-// STRIPPED at capture, so an End recalibration is reabsorbed by reapplying the CURRENT trim at
-// publish time -- no recapture, no aim calibration. shotpoint_tick reapplies the trim, converts to
-// VR-local, and publishes to g_bl_*; the aim hook rotates that by the LIVE controller pose and
-// re-adds the snap turn -> FROZEN (immune to reload/recoil, no mesh read) and ROLL-INVARIANT.
-// Populated in DEV (auto-capture); consumed in any build.
+// FROZEN per-weapon bore, in the AIM CONTROLLER's own VR-local frame (snap-turn removed), captured
+// while the weapon rigidly tracks the hand. shotpoint_tick publishes it AS-IS to g_bl_*; the aim
+// hook rotates it by the LIVE controller pose and re-adds the snap turn -> FROZEN (immune to
+// reload/recoil -- no mesh read at aim time) and ROLL-INVARIANT. An End recalibration is handled by
+// RE-CAPTURE (the auto gate re-stores when the value drifts), not by any placement transform.
+// Populated in DEV (auto-capture at a steady hold); consumed in any build.
 static std::unordered_map<std::wstring, Vec3> g_bore_cache;
 static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
 static std::atomic<bool>  g_bl_valid{false};
@@ -853,22 +852,17 @@ void shotpoint_tick() {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
 
-    // Select the stored PLACEMENT-INDEPENDENT intrinsic (own capture, else AR default), reapply the
-    // CURRENT End trim, convert to a VR-local bore, and publish for the aim hook. Reapply uses only
-    // config (q_grip_dir) -- no live rig read -- so it stays animation-immune while tracking End
-    // recalibration. The consumer is unchanged (it rotates g_bl_* by the live cq and extracts).
+    // Publish the stored controller-frame bore for the held weapon (own capture, else AR default).
+    // The value is used AS-IS: the aim hook rotates it by the live controller pose. End changes are
+    // handled by RE-CAPTURE (the auto gate re-stores when the value drifts), not by any transform.
     bool have = false;
-    Vec3 intrinsic{};
     if (auto* wpn = fp_weapon_actor()) {
         auto it = g_bore_cache.find(class_name_of(wpn));
-        if (it != g_bore_cache.end()) { intrinsic = it->second; have = true; }
-        else if (g_def_valid.load()) { intrinsic = Vec3{g_def_x.load(), g_def_y.load(), g_def_z.load()}; have = true; }
-    }
-    if (have) {
-        const Quat qg  = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
-        const Vec3 ble = quat_rotate(qg, intrinsic);      // reapply current End trim (UE-local)
-        const Vec3 blvr{ ble.y, ble.z, -ble.x };          // UE-local -> VR-local
-        g_bl_x.store(blvr.x); g_bl_y.store(blvr.y); g_bl_z.store(blvr.z);
+        if (it != g_bore_cache.end()) {
+            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z); have = true;
+        } else if (g_def_valid.load()) {
+            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load()); have = true;
+        }
     }
     g_bl_valid.store(have);
 }
@@ -904,9 +898,9 @@ void shotpoint_emit_calib(std::FILE* f) {
     if (f == nullptr) return;
     if (g_bore_cache.empty() && !g_def_valid.load()) return;
     std::fprintf(f,
-        "# Shot-point per-weapon bore, PLACEMENT-INDEPENDENT (End trim stripped). shotfixver stamps\r\n"
-        "# the frame convention and must stay ABOVE the lines it covers. A measurement -- do not\r\n"
-        "# hand-edit. Delete these lines to recapture.\r\n"
+        "# Shot-point per-weapon bore, in the aim controller's frame. shotfixver stamps the frame\r\n"
+        "# convention and must stay ABOVE the lines it covers. A measurement -- do not hand-edit.\r\n"
+        "# Delete these lines (or recalibrate End and hold steady) to recapture.\r\n"
         "shotfixver=%d\r\n", kShotFixSchema);
     for (const auto& kv : g_bore_cache) {
         std::string n;
@@ -1000,6 +994,24 @@ static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
 //   * the mesh bore is UE world: game_yaw = atan2(y,x), game_pitch = asin(z), turn already included.
 //   * so UE_forward = (-vr.z, vr.x, vr.y), and UE->VR = (ue.y, ue.z, -ue.x).
 // Uses the CONFIGURED AIM HAND (left or right), never a hardcoded controller.
+// world bore (UE, unit) + aim controller pose -> bore in the controller's VR-local frame, snap-turn
+// removed. This value is CONSTANT while the weapon rigidly tracks the hand -- it is what we freeze.
+static Vec3 bore_to_controller_local(const Quat& cq, const Vec3& bore_ue) {
+    const float t  = g_cfg.aim_turn * g_turn_offset.load();
+    const float tr = t * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
+    const Vec3 b_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };  // strip snap turn (UE Z)
+    const Vec3 bore_vr{ b_nt.y, b_nt.z, -b_nt.x };                                            // UE fwd -> VR fwd
+    return quat_rotate(quat_conj(cq), bore_vr);
+}
+// controller-local bore + current pose -> game angles, EXACTLY what the aim consumer produces.
+static void controller_local_to_game(const Quat& cq, const Vec3& bl, float* yaw, float* pit) {
+    const Vec3 bvr = quat_rotate(cq, bl);
+    *yaw = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
+    *pit = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+}
+
+// Capture the frozen controller-frame bore for the held weapon (force-overwrite). Self-checks by
+// reconstructing at this pose; rejects a bad transform. Uses the configured aim hand (left or right).
 static bool capture_bore_local(API::UObject* wpn) {
     if (wpn == nullptr) return false;
     Vec3 mpos{};
@@ -1017,54 +1029,31 @@ static bool capture_bore_local(API::UObject* wpn) {
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
-    const float t   = g_cfg.aim_turn * g_turn_offset.load();   // snap turn, degrees
-    const float tr  = t * DEG2RAD;
-    const float ct  = std::cos(tr), st = std::sin(tr);
-    // Remove the snap turn: rotate the bore about UE up (Z) by -t so it lands in the turn-free frame.
-    const Vec3 b_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };
-    // UE forward -> VR forward, then into the controller's own frame (turn-free, animation-free).
-    const Vec3 bore_vr{ b_nt.y, b_nt.z, -b_nt.x };
-    const Vec3 bore_local = quat_rotate(quat_conj(cq), bore_vr);
+    const Vec3 bore_local = bore_to_controller_local(cq, bore_ue);
 
-    // Self-check: reconstruct the aim at THIS pose; must reproduce the world bore's game angles.
-    const Vec3  rec       = quat_rotate(cq, bore_local);
-    const float rec_yaw   = std::atan2(rec.x, -rec.z) * RAD2DEG + t;
-    const float rec_pit   = std::asin(clampf(rec.y, -1.0f, 1.0f)) * RAD2DEG;
-    const float bore_yaw  = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
-    const float bore_pit  = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
+    // Self-check: reconstruct at THIS pose; must reproduce the live world bore's game angles.
+    float rec_yaw, rec_pit; controller_local_to_game(cq, bore_local, &rec_yaw, &rec_pit);
+    const float bore_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
+    const float bore_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
     const float dyaw = std::fabs(wrap180(rec_yaw - bore_yaw));
     const float dpit = std::fabs(rec_pit - bore_pit);
     if (dyaw > 2.0f || dpit > 2.0f) {
-        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: REJECT '%ls' -- self-check off by yaw=%.2f "
-                             "pit=%.2f deg (frame/sign bug); staying on live bore",
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: REJECT '%ls' -- self-check off yaw=%.2f pit=%.2f",
                              class_name_of(wpn).c_str(), dyaw, dpit);
         return false;
     }
-    // PLACEMENT-INDEPENDENT store: strip the End trim (mode 3 rig_dir_grip_*) so the stored value
-    // is the bore in the PRE-TRIM controller-local frame. Runtime reapplies the CURRENT trim, so an
-    // End recalibration is reabsorbed with no recapture. The trim right-multiplies the controller
-    // (q_ctrl * q_grip_dir), i.e. it lives in the UE-convention controller-local frame -- convert
-    // bore_local (VR-local) into that frame, strip, and keep it there.
-    const Vec3 ble{ -bore_local.z, bore_local.x, bore_local.y };          // VR-local -> UE-local
-    const Quat qg  = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
-    const Vec3 intrinsic = quat_rotate(quat_conj(qg), ble);
     const std::wstring cn = class_name_of(wpn);
-    g_bore_cache[cn] = intrinsic;
-    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' intrinsic=(%.3f,%.3f,%.3f) "
-                         "(End-independent); reproduces bore yaw=%.1f pit=%.1f (err yaw=%.2f pit=%.2f) "
-                         "-- frozen aim armed",
-                         cn.c_str(), intrinsic.x, intrinsic.y, intrinsic.z,
-                         bore_yaw, bore_pit, dyaw, dpit);
-    // The AR is the reference weapon: its intrinsic also becomes the DEFAULT for uncaptured weapons.
+    g_bore_cache[cn] = bore_local;
+    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f) at bore "
+                         "yaw=%.1f pit=%.1f -- frozen aim armed",
+                         cn.c_str(), bore_local.x, bore_local.y, bore_local.z, bore_yaw, bore_pit);
+    // The AR is the reference weapon: its bore also becomes the DEFAULT for uncaptured weapons.
     if (cn.find(L"AssaultRifle") != std::wstring::npos) {
-        g_def_x.store(intrinsic.x); g_def_y.store(intrinsic.y); g_def_z.store(intrinsic.z);
+        g_def_x.store(bore_local.x); g_def_y.store(bore_local.y); g_def_z.store(bore_local.z);
         g_def_valid.store(true);
-        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> its intrinsic is now the "
-                             "DEFAULT for uncaptured weapons");
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> DEFAULT for uncaptured weapons");
     }
-    // Persist so the capture survives the session (write_calib_file emits shotfix via
-    // shotpoint_emit_calib). Rare -- once per weapon's first stable hold -- never per tick.
-    write_calib_file();
+    write_calib_file();   // persist (rare -- once per weapon's first stable hold, never per tick)
     return true;
 }
 
@@ -1073,134 +1062,83 @@ void shotpoint_asset_dev(unsigned tick) {
 
     auto* wpn = fp_weapon_actor();
     if (wpn == nullptr) return;
-    auto* root = fp_weapon_root();
-    if (root == nullptr) return;
-
-    // Marker world position + bore (mesh forward), the same resolve the readout uses.
     Vec3 mpos{};
     auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &mpos);
     if (comp == nullptr) return;
-    Vec3 bore_w{};
-    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_w)) return;
+    Vec3 bore_ue{};
+    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_ue)) return;
+    const float bl0 = std::sqrt(bore_ue.x*bore_ue.x + bore_ue.y*bore_ue.y + bore_ue.z*bore_ue.z);
+    if (bl0 < 1e-4f) return;
+    bore_ue.x /= bl0; bore_ue.y /= bl0; bore_ue.z /= bl0;
 
-    // Weapon-root world frame: origin + orthonormal basis (UE: X fwd, Y right, Z up).
-    Vec3 P{}, fwd{}, right{}, up{};
-    if (!call_ret_vec3(root, L"K2_GetComponentLocation", &P))   return;
-    if (!call_ret_vec3(root, L"GetForwardVector",        &fwd)) return;
-    if (!call_ret_vec3(root, L"GetRightVector",          &right)) return;
-    if (!call_ret_vec3(root, L"GetUpVector",             &up))  return;
+    const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                             : API::VR::get_right_controller_index();
+    if (ridx < 0) return;
+    Vec3 cpos{}; Quat cq{};
+    if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return;
 
-    // World -> root-local is R^T (rows = the basis vectors), since the basis is orthonormal.
-    auto dot3 = [](const Vec3& a, const Vec3& b) { return a.x*b.x + a.y*b.y + a.z*b.z; };
-    const Vec3 rel{mpos.x - P.x, mpos.y - P.y, mpos.z - P.z};
-    const Vec3 muzzle_local{dot3(fwd, rel),    dot3(right, rel),    dot3(up, rel)};
-    Vec3 bore_local       {dot3(fwd, bore_w),  dot3(right, bore_w), dot3(up, bore_w)};
-    const float bl = std::sqrt(bore_local.x*bore_local.x + bore_local.y*bore_local.y + bore_local.z*bore_local.z);
-    if (bl > 1e-4f) { bore_local.x /= bl; bore_local.y /= bl; bore_local.z /= bl; }
+    // THE BORE IN THE CONTROLLER'S FRAME. Constant while the weapon rigidly tracks the hand, moving
+    // during draw/recoil/reload -- so ITS variance is the right "is the player holding steady?"
+    // signal. (The first cut measured bore-vs-ROOT, which is rigidly constant -- dev=0.00 forever --
+    // so "stable" was always true and the capture fired mid-draw at whatever pose, e.g. the Magnum
+    // at 80 deg up. That is the pistol-reticle-gone bug.)
+    const Vec3 bl = bore_to_controller_local(cq, bore_ue);
 
-    // Tolerances for "still": a sample beyond either restarts the window.
-    constexpr float kBoreTolDeg = 1.0f;
-    constexpr float kMuzzleTolCm = 1.0f;
-    constexpr int   kStableSamples = 30;   // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
+    constexpr float kBoreTolDeg   = 2.0f;   // window: a sample beyond this restarts the hold
+    constexpr float kRecaptureDeg = 5.0f;   // a steady value this far from the cache -> re-store (End)
+    constexpr int   kStableSamples = 30;    // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
+
+    auto ang = [](const Vec3& a, const Vec3& b) {
+        const float la = std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z), lb = std::sqrt(b.x*b.x+b.y*b.y+b.z*b.z);
+        if (la < 1e-4f || lb < 1e-4f) return 0.0f;
+        return std::acos(clampf((a.x*b.x+a.y*b.y+a.z*b.z)/(la*lb), -1.0f, 1.0f)) * RAD2DEG;
+    };
 
     AssetMeasure& m = g_asset_cache[class_name_of(wpn)];
 
-    // RESET-ON-MOTION SLIDING WINDOW. Measure the CURRENT continuous still-hold, not all history.
-    // Compute this sample's deviation from the window mean; if it breaks tolerance the hold ended
-    // (equip animation, recoil, a swing, or sway too large to measure cleanly), so discard the
-    // window and restart from this sample. Equip/recoil/sway therefore just keep restarting the
-    // counter, and it is 30 CONSECUTIVE quiet samples -- never a cumulative count with a latched
-    // max -- that reaches STABLE. A hold that never gets there (n keeps bouncing low) is itself the
-    // answer: the rest pose is too unsteady on this weapon to read a clean constant at this tol.
+    // Reset-on-motion window on the CONTROLLER-relative bore: a sample beyond tolerance ends the
+    // hold and restarts, so draw/recoil/reload/sway just keep restarting the counter and only a
+    // genuine steady hold (weapon rigidly tracking the hand) reaches STABLE.
     bool broke = false;
     if (m.n > 0) {
-        const Vec3 dp{muzzle_local.x - m.muzzle_mean.x, muzzle_local.y - m.muzzle_mean.y, muzzle_local.z - m.muzzle_mean.z};
-        const float dcm = std::sqrt(dp.x*dp.x + dp.y*dp.y + dp.z*dp.z);
-        float bdev = 0.0f;
-        const float bm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
-        if (bm > 1e-4f) {
-            const float d = (bore_local.x*m.bore_mean.x + bore_local.y*m.bore_mean.y + bore_local.z*m.bore_mean.z) / bm;
-            bdev = std::acos(clampf(d, -1.0f, 1.0f)) * RAD2DEG;
-        }
-        if (dcm > kMuzzleTolCm || bdev > kBoreTolDeg) {
-            broke = true;
-        } else {
-            if (dcm  > m.muzzle_dev_max) m.muzzle_dev_max = dcm;   // spread WITHIN this window, for the log
-            if (bdev > m.bore_dev_max)   m.bore_dev_max   = bdev;
-        }
+        const float bdev = ang(bl, m.bore_mean);
+        if (bdev > kBoreTolDeg) broke = true;
+        else if (bdev > m.bore_dev_max) m.bore_dev_max = bdev;
     }
-
     if (m.n == 0 || broke) {
-        // (Re)start the window at this sample.
-        m.muzzle_mean = muzzle_local;
-        m.bore_mean   = bore_local;
-        m.n = 1;
-        m.muzzle_dev_max = 0.0f;
-        m.bore_dev_max   = 0.0f;
-        m.logged_stable  = false;
+        m.bore_mean = bl; m.n = 1; m.bore_dev_max = 0.0f; m.logged_stable = false;
     } else {
         ++m.n;
-        m.muzzle_mean.x += (muzzle_local.x - m.muzzle_mean.x) / m.n;
-        m.muzzle_mean.y += (muzzle_local.y - m.muzzle_mean.y) / m.n;
-        m.muzzle_mean.z += (muzzle_local.z - m.muzzle_mean.z) / m.n;
-        m.bore_mean.x   += (bore_local.x   - m.bore_mean.x)   / m.n;
-        m.bore_mean.y   += (bore_local.y   - m.bore_mean.y)   / m.n;
-        m.bore_mean.z   += (bore_local.z   - m.bore_mean.z)   / m.n;
+        m.bore_mean.x += (bl.x - m.bore_mean.x) / m.n;
+        m.bore_mean.y += (bl.y - m.bore_mean.y) / m.n;
+        m.bore_mean.z += (bl.z - m.bore_mean.z) / m.n;
     }
-
-    // Every sample in the window is within tolerance by construction, so the count IS the gate.
     const bool stable = (m.n >= kStableSamples);
 
-    // On first reaching a stable rest for this weapon, capture the frozen controller-local bore
-    // (fill-if-empty: never overwrite a value already captured). This is the DEV auto-populate;
-    // the capture self-checks and refuses a bad transform.
-    if (stable && g_bore_cache.find(class_name_of(wpn)) == g_bore_cache.end()) {
-        capture_bore_local(wpn);
-    }
-
-    if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
-        if (stable) m.logged_stable = true;
-        // Bore reported as root-frame yaw/pitch: how far the authored bore tilts off the weapon
-        // root's own forward (0,0 => bore == root forward).
-        float bnorm = std::sqrt(m.bore_mean.x*m.bore_mean.x + m.bore_mean.y*m.bore_mean.y + m.bore_mean.z*m.bore_mean.z);
-        if (bnorm < 1e-4f) bnorm = 1.0f;
-        const float byaw = std::atan2(m.bore_mean.y, m.bore_mean.x) * RAD2DEG;
-        const float bpit = std::asin(clampf(m.bore_mean.z / bnorm, -1.0f, 1.0f)) * RAD2DEG;
-        API::get()->log_info(
-            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | muzzle_root=(%.2f,%.2f,%.2f)cm "
-            "boreRoot yaw=%.2f pit=%.2f | dev bore=%.2fdeg muzzle=%.2fcm",
-            class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
-            m.muzzle_mean.x, m.muzzle_mean.y, m.muzzle_mean.z, byaw, bpit,
-            m.bore_dev_max, m.muzzle_dev_max);
-    }
-
-    // VERIFICATION of the placement-independent recompose. The capture-time self-check is IDENTITY
-    // while End is unchanged and so cannot prove the End-accounting; this can. At rest, recompose
-    // the stored intrinsic with the CURRENT End trim + the live controller pose and compare to the
-    // LIVE world bore. dyaw/dpit stay ~0 while End is unchanged; the MEANINGFUL test is that they
-    // STAY ~0 after an End recalibration -- watch this across a real End change before trusting it.
+    // Capture on the first steady hold, and RE-capture when the steady value has drifted from the
+    // cache beyond kRecaptureDeg -- which is how an End recalibration SELF-HEALS: End changes the
+    // rigid hand->bore relationship, the window settles on a new value, and it is re-stored. No
+    // placement math (that was the wrong, now-withdrawn approach).
     if (stable) {
         auto it = g_bore_cache.find(class_name_of(wpn));
-        if (it != g_bore_cache.end() && (tick % (unsigned)g_cfg.shot_aim_log) == 0) {
-            const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
-                                                     : API::VR::get_right_controller_index();
-            Vec3 cpos{}; Quat cq{};
-            if (ridx >= 0 && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) {
-                const Quat qg2 = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
-                const Vec3 ble2 = quat_rotate(qg2, it->second);
-                const Vec3 blvr{ ble2.y, ble2.z, -ble2.x };
-                const Vec3 rec = quat_rotate(cq, blvr);
-                const float t = g_cfg.aim_turn * g_turn_offset.load();
-                const float rec_yaw  = std::atan2(rec.x, -rec.z) * RAD2DEG + t;
-                const float rec_pit  = std::asin(clampf(rec.y, -1.0f, 1.0f)) * RAD2DEG;
-                const float live_yaw = std::atan2(bore_w.y, bore_w.x) * RAD2DEG;
-                const float live_pit = std::asin(clampf(bore_w.z, -1.0f, 1.0f)) * RAD2DEG;
-                API::get()->log_info("[Halo-CampE-UEVR] SHOTVERIFY: '%ls' recompose-vs-live dyaw=%.2f "
-                                     "dpit=%.2f (Endtrim p%.1f y%.1f r%.1f) -- must stay ~0 across End recalib",
-                                     class_name_of(wpn).c_str(), wrap180(rec_yaw - live_yaw), rec_pit - live_pit,
-                                     g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
-            }
-        }
+        const bool need = (it == g_bore_cache.end()) || (ang(m.bore_mean, it->second) > kRecaptureDeg);
+        if (need) capture_bore_local(wpn);
+    }
+
+    // Log + self-verify at the throttle: recompose the window-mean bore with the CURRENT pose and
+    // compare to the LIVE world bore. ~0 at a steady hold confirms the frozen model tracks the hand;
+    // it also shows the recapture converging back to ~0 after an End change.
+    if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
+        if (stable) m.logged_stable = true;
+        float ry, rp; controller_local_to_game(cq, m.bore_mean, &ry, &rp);
+        const float live_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
+        const float live_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | boreCtrl=(%.3f,%.3f,%.3f) dev=%.2fdeg | "
+            "recompose-vs-live dyaw=%.2f dpit=%.2f",
+            class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
+            m.bore_mean.x, m.bore_mean.y, m.bore_mean.z, m.bore_dev_max,
+            wrap180(ry - live_yaw), rp - live_pit);
     }
 }
 #endif

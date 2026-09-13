@@ -251,7 +251,7 @@ bool shotpoint_bore_local(Vec3* out);
 // (forcing a recapture) rather than mis-applied -- the same file-borne-stamp discipline as wpnfix.
 // Config calls the setters on load and shotpoint_emit_calib() on save; all compile in every build
 // (only the auto-capture that PRODUCES values is dev-only).
-constexpr int kShotFixSchema = 1;
+constexpr int kShotFixSchema = 2;   // 2: plain controller-frame bore_local (1 was the withdrawn End-stripped "intrinsic")
 void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
 void shotpoint_set_default(float x, float y, float z);
 void shotpoint_emit_calib(std::FILE* f);
