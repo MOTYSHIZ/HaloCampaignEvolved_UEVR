@@ -844,34 +844,6 @@ static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
 static std::atomic<bool>  g_def_valid{false};
 
 void shotpoint_tick() {
-    // END RECALIBRATION -> invalidate the frozen bores. Every bore_local was captured relative to
-    // the grip placement, so an End recalibration makes them all stale (aim would keep pointing
-    // where the OLD grip put the barrel -- the user's "aim not at the right place after End"). The
-    // global grip trim rig_dir_grip is written ONLY by the End solve (never per weapon / per
-    // switch), so a change here is unambiguously an End recalibration: clear the captures + default
-    // and persist the cleared state (so the ~2 s config reload cannot repopulate the stale values).
-    // Each weapon then falls to the live-mesh bootstrap -- which already follows the NEW grip -- and
-    // re-freezes at the new placement on the next steady hold (dev) or Page Down (release).
-    {
-        static float s_dg = 0.0f, s_dgy = 0.0f, s_dgr = 0.0f;
-        static bool  s_dg_init = false;
-        if (!s_dg_init) {
-            s_dg = g_cfg.rig_dir_grip_deg; s_dgy = g_cfg.rig_dir_grip_yaw; s_dgr = g_cfg.rig_dir_grip_roll;
-            s_dg_init = true;
-        } else if (std::fabs(g_cfg.rig_dir_grip_deg  - s_dg)  > 0.5f ||
-                   std::fabs(g_cfg.rig_dir_grip_yaw  - s_dgy) > 0.5f ||
-                   std::fabs(g_cfg.rig_dir_grip_roll - s_dgr) > 0.5f) {
-            s_dg = g_cfg.rig_dir_grip_deg; s_dgy = g_cfg.rig_dir_grip_yaw; s_dgr = g_cfg.rig_dir_grip_roll;
-            if (!g_bore_cache.empty() || g_def_valid.load()) {
-                g_bore_cache.clear();
-                g_def_valid.store(false);
-                write_calib_file();
-                API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: End recalibrated -> cleared frozen bores; "
-                                     "re-hold each weapon (dev) or Page Down (release) to recapture at the new grip");
-            }
-        }
-    }
-
     Vec3 p{}, f{};
     if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
         g_sp_fx.store(f.x); g_sp_fy.store(f.y); g_sp_fz.store(f.z);
@@ -881,8 +853,8 @@ void shotpoint_tick() {
     }
 
     // Publish the stored controller-frame bore for the held weapon (own capture, else AR default).
-    // The value is used AS-IS: the aim hook rotates it by the live controller pose. End changes are
-    // handled by RE-CAPTURE (the auto gate re-stores when the value drifts), not by any transform.
+    // The value is used AS-IS: the aim hook rotates it by the live controller pose. Captures are
+    // MANUAL (Page Down); after a grip change, Page Down the affected weapon to re-capture.
     bool have = false;
     if (auto* wpn = fp_weapon_actor()) {
         auto it = g_bore_cache.find(class_name_of(wpn));
@@ -1151,15 +1123,10 @@ void shotpoint_asset_dev(unsigned tick) {
     }
     const bool stable = (m.n >= kStableSamples);
 
-    // FILL-IF-EMPTY: capture once per weapon, then NEVER auto-overwrite. A held animation pose --
-    // e.g. a rocket-launcher reload that points the weapon down for over a second -- stabilises the
-    // window and its value differs from the cache, so auto-recapture-on-drift would replace the good
-    // cached bore with the reload-down pose. It cannot tell "reload held a pose" from "you
-    // recalibrated End", so it does not try: a cached weapon is left alone. Deliberate recapture
-    // (after an End recalibration, or to fix a bad first capture) is the manual Page Down override.
-    if (stable && g_bore_cache.find(class_name_of(wpn)) == g_bore_cache.end()) {
-        capture_bore_local(wpn);
-    }
+    // AUTO-CAPTURE SCRAPPED (user, 2026-09-12): the reset-on-motion heuristic never captured
+    // reliably after a cfg change (mostly aimed too high) and was an overcomplication. Capture is
+    // now MANUAL ONLY (Page Down / shotpoint_capture_held). This window + the SHOTASSET line below
+    // stay purely as a dev diagnostic -- nothing here writes the cache.
 
     // Log + self-verify at the throttle: recompose the window-mean bore with the CURRENT pose and
     // compare to the LIVE world bore. ~0 at a steady hold confirms the frozen model tracks the hand;
