@@ -844,6 +844,34 @@ static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
 static std::atomic<bool>  g_def_valid{false};
 
 void shotpoint_tick() {
+    // END RECALIBRATION -> invalidate the frozen bores. Every bore_local was captured relative to
+    // the grip placement, so an End recalibration makes them all stale (aim would keep pointing
+    // where the OLD grip put the barrel -- the user's "aim not at the right place after End"). The
+    // global grip trim rig_dir_grip is written ONLY by the End solve (never per weapon / per
+    // switch), so a change here is unambiguously an End recalibration: clear the captures + default
+    // and persist the cleared state (so the ~2 s config reload cannot repopulate the stale values).
+    // Each weapon then falls to the live-mesh bootstrap -- which already follows the NEW grip -- and
+    // re-freezes at the new placement on the next steady hold (dev) or Page Down (release).
+    {
+        static float s_dg = 0.0f, s_dgy = 0.0f, s_dgr = 0.0f;
+        static bool  s_dg_init = false;
+        if (!s_dg_init) {
+            s_dg = g_cfg.rig_dir_grip_deg; s_dgy = g_cfg.rig_dir_grip_yaw; s_dgr = g_cfg.rig_dir_grip_roll;
+            s_dg_init = true;
+        } else if (std::fabs(g_cfg.rig_dir_grip_deg  - s_dg)  > 0.5f ||
+                   std::fabs(g_cfg.rig_dir_grip_yaw  - s_dgy) > 0.5f ||
+                   std::fabs(g_cfg.rig_dir_grip_roll - s_dgr) > 0.5f) {
+            s_dg = g_cfg.rig_dir_grip_deg; s_dgy = g_cfg.rig_dir_grip_yaw; s_dgr = g_cfg.rig_dir_grip_roll;
+            if (!g_bore_cache.empty() || g_def_valid.load()) {
+                g_bore_cache.clear();
+                g_def_valid.store(false);
+                write_calib_file();
+                API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: End recalibrated -> cleared frozen bores; "
+                                     "re-hold each weapon (dev) or Page Down (release) to recapture at the new grip");
+            }
+        }
+    }
+
     Vec3 p{}, f{};
     if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
         g_sp_fx.store(f.x); g_sp_fy.store(f.y); g_sp_fz.store(f.z);
