@@ -1,4 +1,5 @@
 #include "Config.hpp"
+#include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
 #include "WeaponCalib.hpp"
@@ -523,6 +524,7 @@ int menu_bridge_tick() {
             if (line == "calib:scopebase")   { scope_base_arm(true);   ++applied; continue; }
             if (line == "calib:scopebaseoff"){ scope_base_arm(false);  ++applied; continue; }
             if (line == "calib:off")       { g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
+            if (line == "calib:height")    { height_request_calibrate(); ++applied; continue; }
             if (line == "calibreset:all")  { DeleteFileA(g_calib_path); ++applied; continue; }
             if (line == "calibreset:pose") { strip_calib_keys(POSE_CALIB_KEYS, _countof(POSE_CALIB_KEYS)); ++applied; continue; }
             if (line == "calibreset:aim")  { strip_calib_keys(AIM_CALIB_KEYS,  _countof(AIM_CALIB_KEYS));  ++applied; continue; }
@@ -686,9 +688,13 @@ int menu_bridge_tick() {
     // Same authority argument as scopearm: the capture CONSUMES the arm, so a menu button that
     // tracked its own click would keep claiming "armed" after the gesture had already spent it.
     const int griparm   = grip_offset_armed()  ? 1 : 0;
+    // Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
+    // heightcal is off, so the author's status file is unchanged by default.
+    static std::string s_last_height;
+    const std::string height_line = height_status_line();
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
-        griparm != s_last_griparm ||
+        griparm != s_last_griparm || height_line != s_last_height ||
         strncmp(s_last_bindkey, g_bind_capture_key, sizeof(s_last_bindkey)) != 0) {
         s_last_status = mode;
         s_last_bind   = barmed;
@@ -702,7 +708,10 @@ int menu_bridge_tick() {
                   "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n"
                   "griparm=%d\r\n",
                   mode, barmed, g_bind_capture_key, hready, scopearm, griparm);
-        write_text_file(g_status_path, status);
+        s_last_height = height_line;
+        std::string status_text = status;
+        if (!height_line.empty()) status_text += height_line + "\r\n";
+        write_text_file(g_status_path, status_text.c_str());
     }
     return applied;
 }
@@ -866,8 +875,31 @@ static void copy_trim(char* dst, size_t cap, const char* val) {
 // note above. See the matching Config.hpp section for what each one means.
 // EXPERIMENTAL, PORTED FROM THE FORK: the palette weapon stack's tuning keys, auto height and head
 // block, and the manual reload's frame keys. Hoisted like the other families (C1061).
+// heightmode takes a word (absolute, seated, eyes) or its number.
+static int parse_height_mode(const char* val, double v) {
+    while (*val == ' ' || *val == '\t') ++val;
+    if (_strnicmp(val, "absolute", 8) == 0) return 0;
+    if (_strnicmp(val, "seated", 6) == 0)   return 1;
+    if (_strnicmp(val, "eyes", 4) == 0)     return 2;
+    return (int)clampf((float)v, 0.0f, 2.0f);
+}
+
 static bool parse_fork_port_key(const char* key, const char* val, double v) {
     (void)val;
+    if (_stricmp(key, "heightmode")       == 0) { g_cfg.height_mode     = parse_height_mode(val, v); return true; }
+    if (_stricmp(key, "heightscale")      == 0) { g_cfg.height_scale    = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heighteye")        == 0) { g_cfg.height_eye      = (int)clampf((float)v, 1.0f, 3.0f); return true; }
+    if (_stricmp(key, "heighttracechannel") == 0) { g_cfg.height_trace_channel = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    if (_stricmp(key, "heighttracemax")   == 0) { g_cfg.height_trace_max = clampf((float)v, 50.0f, 2000.0f); return true; }
+    if (_stricmp(key, "heightholdms")     == 0) { g_cfg.height_hold_ms  = clampf((float)v, 0.0f, 5000.0f); return true; }
+    if (_stricmp(key, "heightestep")      == 0) { g_cfg.height_e_step   = clampf((float)v, 0.1f, 50.0f); return true; }
+    if (_stricmp(key, "heightbipedscale") == 0) { g_cfg.height_biped_scale = clampf((float)v, 1.0f, 1000.0f); return true; }
+    if (_stricmp(key, "heightbipedfeet")  == 0) { g_cfg.height_biped_feet  = clampf((float)v, -500.0f, 500.0f); return true; }
+    if (_stricmp(key, "heightpawnfeet")   == 0) { g_cfg.height_pawn_feet   = clampf((float)v, -500.0f, 500.0f); return true; }
+    if (_stricmp(key, "heightseattarget") == 0) { g_cfg.height_seat_target = clampf((float)v, 0.0f, 400.0f); return true; }
+    if (_stricmp(key, "heightautoseat")   == 0) { g_cfg.height_auto_seat   = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heightseatbelow")  == 0) { g_cfg.height_seat_below  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightseatdwell")  == 0) { g_cfg.height_seat_dwell  = clampf((float)v, 0.5f, 60.0f); return true; }
     if (_stricmp(key, "scopelens") == 0) { g_cfg.scope_lens = (v != 0.0); return true; }
     if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
@@ -889,7 +921,11 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "headblockrelease") == 0) { g_cfg.head_block_release = clampf((float)v, 1.0f, 2000.0f); return true; }
     if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "heightkey")        == 0) { g_cfg.height_key      = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "heightkey")        == 0) {
+        const int k = (int)strtol(val, nullptr, 0);
+        g_cfg.height_key = (k == 0x2D) ? 0 : k;   // Insert opens UEVR's menu: never a height key
+        return true;
+    }
     if (_stricmp(key, "heightlog")        == 0) { g_cfg.height_log      = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
     if (_stricmp(key, "heightmin")        == 0) { g_cfg.height_min_abs  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightsample")     == 0) { g_cfg.height_sample   = (int)clampf((float)v, 0.0f, 2.0f); return true; }

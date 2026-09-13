@@ -1,42 +1,53 @@
-// HeightCal -- measure the player's real standing eye height and put the character's eyes there.
+// HeightCal -- the rendered eye's height above the GAME floor, from the head's height above the
+// REAL floor.
 //
-// THE MECHANISM. UEVR renders the eye at game_camera - world_scale * (hmd - standing_origin)
-// (FFakeStereoRenderingHook.cpp, standing_delta). The game camera IS the character's eye, so the
-// view sits exactly at the character's eyes whenever hmd.y == standing_origin.y. Setting the
-// standing origin's Y to the measured STANDING head height therefore maps any player's standing
-// eyes onto the character's, and a physical crouch (hmd.y below it) shows as the view dropping.
-// This is UEVR's own "Set Standing Height" button (VR.cpp: m_standing_origin.y = hmd.y), done
-// from a robust measurement instead of one press at one instant.
+// THE MECHANISM, fitted not assumed. UEVR renders the eye at the game camera plus world_scale x
+// (hmd - standing_origin) (FFakeStereoRenderingHook.cpp, standing_delta; VR_DecoupledPitch
+// flattens the rotation so the vertical term is not tilted by game pitch). Fitted from the
+// 2026-09-13 16:42-16:48 log, 130 samples over +-0.4 m of head travel: rendered-eye Z minus camera
+// Z = 112.7 x (hmd.y - origin.y) + 0.04 cm, residual 0.53 cm, against 100 x VR_WorldScale = 112.6.
+// So with E = the camera's height above the character's feet (UE cm) and S = UE cm per VR metre:
 //
-// THE HEIGHT SOURCES (heightsrc). All three are sampled in UEVR's pose space, because that is the
-// space the standing origin lives in. What differs is whether the FLOOR is known, which is what
-// lets a seated or kneeling start be refused instead of calibrated:
-//   1 OpenXR  -- our own STAGE reference space, created on UEVR's session through the HALOVR API
-//                layer (the plugin cannot reach OpenXR entry points any other way). Locating
-//                UEVR's pose space in it gives the floor offset of that space.
-//   2 OpenVR  -- IVRSystem::GetDeviceToAbsoluteTrackingPose(TrackingUniverseStanding), the HMD
-//                height above the calibrated floor.
-//   3 UEVR    -- the plugin API's HMD pose alone. The floor is unknown on OpenXR (the UEVR source
-//                creates its pose space as LOCAL), so only the relative measurement is available.
-// 0 = auto: OpenXR, then OpenVR, then UEVR, falling back when one is unavailable.
+//     view height above game floor  V = E + S x (hmd.y - origin.y)
+//     =>  origin.y = hmd.y + (E - V) / S
+//
+// MODES (heightmode):
+//   absolute (0, default) -- V = K x head_abs, head_abs = hmd.y + floor offset (metres above the real
+//                            floor). With K = S (heightscale 0) the head cancels: origin.y = E/S - floor.
+//   seated   (1)          -- V = K x head_abs + O, one constant O set at calibration so the view is
+//                            at the target height at that moment; afterwards every movement is 1:1.
+//   eyes     (2)          -- the standing head is mapped to the character's eyes (calibrated H). Also
+//                            the automatic fallback while the floor is unknown.
+//
+// THE FLOOR comes from heightsrc: 0 auto, 1 OpenXR STAGE (own spaces on UEVR's session through the
+// HALOVR API layer), 2 OpenVR standing universe, 3 UEVR pose only (floor unknown on OpenXR).
 
 #pragma once
 
 #include "Math.hpp"
+#include "uevr/API.hpp"
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace halo {
 
-// The last XrFrameEndInfo::displayTime seen on the submit path (XrLayer.cpp). xrLocateSpace needs
-// a valid XrTime and the plugin has no other source of one. 0 = none seen yet.
+// The last XrFrameEndInfo::displayTime seen on the submit path (XrLayer.cpp). 0 = none yet.
 extern std::atomic<int64_t> g_xr_last_display_time;
 
 // GAME THREAD, once per tick, with the plausibility-gated HMD pose (UEVR pose space, metres).
-// `gameplay` permits sampling (on foot, not in a menu), `key_focus` permits the recalibrate key.
-// Returns true when auto height owns the standing origin's Y this tick; *out_y is the Y to write.
-// Returns false before the first calibration, so whatever owned Y before keeps owning it.
-bool height_tick(const Vec3& hmd, float so_y, bool gameplay, bool key_focus, float dt, float* out_y);
+// `active` = on-foot gameplay (not a menu, vehicle or cutscene); while inactive the last origin Y is
+// held. `ignore` = actors the floor trace must not hit. Returns true when this feature owns the
+// standing origin's Y this tick; *out_y is the Y to write.
+bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float dt,
+                 uevr::API::UObject* const* ignore, int n_ignore, float* out_y);
+
+// The menu's one-shot recalibrate (command calib:height). Seated: a fresh offset. Eyes: the 1 s
+// standing sample. Absolute: nothing to calibrate (logged). Returns true when queued.
+bool height_request_calibrate();
+
+// "height=<mode> <view height above game floor> m" for the menu status file; empty when off.
+std::string height_status_line();
 
 }  // namespace halo

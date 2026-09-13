@@ -8020,16 +8020,25 @@ void update() {
                 nx += rdx * kl; nz += rdz * kl; moved = true;
             }
             const float adz = (dy < 0.0f) ? -dy : dy;
-            // AUTO HEIGHT owns the origin's Y once it holds a calibration (HeightCal.hpp). The
-            // vertical leash would drag Y back onto the head and erase the crouch, so it stands down.
+            // AUTO HEIGHT owns the origin's Y (HeightCal.hpp). While it is on, the vertical leash
+            // never acts: it would drag Y back onto the head and break the floor-to-floor mapping.
             float hc_y = 0.0f;
-            const bool hc_own = (g_cfg.height_cal != 0) &&
-                halo::height_tick(hp, so.y,
-                                  !g_in_menu.load() && !halo::g_unit_mounted.load(std::memory_order_relaxed),
-                                  game_window_focused(), g_last_dt.load(), &hc_y);
+            bool hc_own = false;
+            if (g_cfg.height_cal != 0) {
+                API::UObject* hc_ignore[2] = {};
+                int hc_n = 0;
+                if (auto* pawn = API::get()->get_local_pawn(0)) hc_ignore[hc_n++] = pawn;
+                if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
+                    if (auto* wep = rigc->get_outer()) hc_ignore[hc_n++] = wep;
+                }
+                const bool hc_active = !g_in_menu.load() && !g_cut2d_engaged.load()
+                                    && !halo::g_unit_mounted.load(std::memory_order_relaxed);
+                hc_own = halo::height_tick(hp, so.y, hc_active, game_window_focused(), g_last_dt.load(),
+                                           hc_ignore, hc_n, &hc_y);
+            }
             if (hc_own) {
                 if (std::fabs(hc_y - ny) > 0.0005f) { ny = hc_y; moved = true; }
-            } else if (g_cfg.hmd_leash && adz > g_cfg.hmd_leash_vert) {
+            } else if (g_cfg.height_cal == 0 && g_cfg.hmd_leash && adz > g_cfg.hmd_leash_vert) {
                 ny += dy - ((dy > 0.0f) ? g_cfg.hmd_leash_vert : -g_cfg.hmd_leash_vert);
                 moved = true;
             }

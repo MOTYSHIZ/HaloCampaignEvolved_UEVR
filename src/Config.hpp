@@ -478,20 +478,33 @@ struct Config {
     bool  bob_cancel = false;
     float bob_tau    = 0.4f;
     bool  bob_log    = false;
-    // ---- AUTO HEIGHT (HeightCal.hpp). Measures the standing head height and writes it into the
-    // standing origin's Y, so standing puts the view at the character's eyes for any player height
-    // and a physical crouch lowers it. Owns Y only once calibrated; the vertical leash stands down.
-    // CONFIG KEYS ARE CM (and cm/s); fields are metres.
+    // ---- AUTO HEIGHT (HeightCal.hpp). Writes the standing origin's Y so the rendered eye's height above
+    // the GAME floor follows the head's height above the REAL floor. While it is on, the vertical
+    // leash never acts. Head-side keys are CM (fields metres); game-side keys are UE cm.
     int   height_cal      = 0;       // heightcal: 0 off, 1 on
+    int   height_mode     = 0;       // heightmode: absolute (0), seated (1), eyes (2, also the floor-unknown fallback)
+    int   height_scale    = 0;       // heightscale: 0 = UEVR world scale (real m x 100 x VR_WorldScale), 1 = real cm
     int   height_src      = 0;       // heightsrc: 0 auto, 1 OpenXR STAGE, 2 OpenVR standing, 3 UEVR pose only
-    int   height_sample   = 0;       // heightsample: 0 window once, 1 continuous envelope, 2 key only
-    float height_window_s = 5.0f;    // heightwindow: seconds of still, on-foot samples per window
-    int   height_key      = 0;       // heightkey: VK code of the recalibrate key (0 = none)
-    float height_trim     = 0.0f;    // heighttrim (cm): + raises the view
-    float height_min_abs  = 1.20f;   // heightmin (cm): refuse a window whose head is lower above the floor (floor sources only)
-    float height_band     = 0.10f;   // heightband (cm): continuous mode, drops larger than this are crouches
-    float height_slew     = 0.5f;    // heightslew (cm/s): how fast a new calibration is walked in (0 = snap)
-    int   height_log      = 0;       // heightlog: 0 silent, 1 events, N>1 events + a HEIGHT line every N ticks
+    int   height_eye      = 1;       // heighteye: E_game source, 1 floor trace, 2 Blam biped, 3 UE pawn
+    int   height_trace_channel = 0;  // heighttracechannel: ETraceTypeQuery index for the floor trace (0 Visibility)
+    float height_trace_max = 400.0f; // heighttracemax: UE cm below the camera the floor trace reaches
+    float height_hold_ms  = 400.0f;  // heightholdms: a jump in E_game must persist this long to be taken
+    float height_e_step   = 3.0f;    // heightestep: UE cm per tick of E_game change taken at once
+    float height_biped_scale = 304.8f; // heightbipedscale: UE cm per Blam world unit for the biped Z
+    float height_biped_feet = 0.0f;  // heightbipedfeet: UE cm from the biped origin to the feet, 0 = learn from the trace
+    float height_pawn_feet = 0.0f;   // heightpawnfeet: UE cm from the pawn root to the feet, 0 = capsule half-height, else learned
+    float height_seat_target = 0.0f; // heightseattarget: UE cm seated view target, 0 = the character's eye height (E_game)
+    int   height_auto_seat = 0;      // heightautoseat: one-shot seated detection at startup (absolute mode)
+    float height_seat_below = 1.00f; // heightseatbelow (cm): resting head under this above the real floor = seated
+    float height_seat_dwell = 5.0f;  // heightseatdwell (s): still time the startup detection needs
+    int   height_sample   = 0;       // heightsample (eyes): 0 window once, 1 continuous envelope, 2 key only
+    float height_window_s = 5.0f;    // heightwindow (eyes): seconds of still, on-foot samples per window
+    int   height_key      = 0;       // heightkey: VK code of the recalibrate key (0 = none; 0x2D is refused, UEVR's menu)
+    float height_trim     = 0.0f;    // heighttrim (eyes, cm): + raises the view
+    float height_min_abs  = 1.20f;   // heightmin (cm): retained key, unused by the absolute and seated modes
+    float height_band     = 0.10f;   // heightband (eyes, cm): continuous mode, drops larger than this are crouches
+    float height_slew     = 0.5f;    // heightslew (cm/s): how fast a mode switch or new calibration is walked in (0 = snap)
+    int   height_log      = 0;       // heightlog: 0 silent, 1 events, 2+ events + a HEIGHT line once a second
     // ---- HEAD BLOCK (HeadBlock.hpp). Keeps the rendered head out of geometry. UE cm.
     int   head_block         = 0;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface

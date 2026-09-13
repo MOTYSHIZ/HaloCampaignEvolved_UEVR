@@ -33,4 +33,14 @@ bool headblock_apply_post(int index, double* x, double* y, double* z);
 // GAME THREAD. `active` = on-foot gameplay; `ignore` = actors the trace must not hit.
 void headblock_tick(bool active, uevr::API::UObject* const* ignore, int n_ignore, float dt);
 
+// Published for other features, measured whether or not the block is on (UE world cm):
+// the engine camera (body eye) of the last frame, and the rendered head centre minus it.
+bool headblock_body_eye(Vec3* out);
+bool headblock_head_offset(Vec3* out);
+
+// A reflected LineTraceSingle on the given ETraceTypeQuery index. GAME THREAD. False on a miss or
+// when the reflection did not resolve.
+bool headblock_line_trace(const Vec3& a, const Vec3& b, uevr::API::UObject* const* ignore, int n_ignore,
+                          int channel, Vec3* out_impact);
+
 }  // namespace halo

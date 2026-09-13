@@ -19,6 +19,7 @@ namespace {
 
 // ---- published by the view callbacks, read by the tick (UE world cm)
 std::atomic<float> g_body_x{0.0f}, g_body_y{0.0f}, g_body_z{0.0f};
+std::atomic<bool>  g_have_body{false};
 std::atomic<float> g_head_cx{0.0f}, g_head_cy{0.0f}, g_head_cz{0.0f};
 std::atomic<bool>  g_have_head{false};
 // ---- published by the tick, read by the view callbacks
@@ -34,7 +35,7 @@ bool   g_have_raw[2]{};
 double g_shift[3]{};
 
 void hblog(const char* fmt, ...) {
-    if (g_cfg.head_block_log <= 0) return;
+    if (g_cfg.head_block_log <= 0 && g_cfg.height_log <= 0) return;
     char buf[640];
     va_list ap;
     va_start(ap, fmt);
@@ -133,7 +134,7 @@ bool traces_ready() {
     return g_tstate == 1;
 }
 
-bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius,
+bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int channel,
                API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact) {
     if (!t.ok || g_cdo == nullptr) return false;
     auto* world = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
@@ -151,10 +152,7 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius,
         else                 *reinterpret_cast<float*>(p + t.radius)  = radius;
     }
     if (t.self >= 0) *(p + t.self) = 1;
-    if (t.channel >= 0) {
-        const int ch = g_cfg.head_block_channel;
-        *(p + t.channel) = (uint8_t)((ch < 0) ? 0 : (ch > 255 ? 255 : ch));
-    }
+    if (t.channel >= 0) *(p + t.channel) = (uint8_t)((channel < 0) ? 0 : (channel > 255 ? 255 : channel));
     // TArray {T* Data; int32 Num; int32 Max} pointed at the caller's array: safe for a native
     // static, which never takes ownership of its parameter frame (see HitTrace.cpp).
     struct FRawArray { void* data; int32_t num; int32_t max; };
@@ -198,6 +196,27 @@ const char* mode_name(int m) {
 
 }  // namespace
 
+bool headblock_body_eye(Vec3* out) {
+    if (!g_have_body.load(std::memory_order_relaxed)) return false;
+    *out = Vec3{g_body_x.load(std::memory_order_relaxed), g_body_y.load(std::memory_order_relaxed),
+                g_body_z.load(std::memory_order_relaxed)};
+    return true;
+}
+
+bool headblock_head_offset(Vec3* out) {
+    if (!g_have_head.load(std::memory_order_relaxed)) return false;
+    *out = Vec3{g_head_cx.load(std::memory_order_relaxed), g_head_cy.load(std::memory_order_relaxed),
+                g_head_cz.load(std::memory_order_relaxed)};
+    return true;
+}
+
+bool headblock_line_trace(const Vec3& a, const Vec3& b, API::UObject* const* ignore, int n_ignore,
+                          int channel, Vec3* out_impact) {
+    if (!traces_ready() || !g_line.ok) return false;
+    Vec3 loc{};
+    return run_trace(g_line, a, b, 0.0f, channel, ignore, n_ignore, &loc, out_impact);
+}
+
 void headblock_note_pre(int index, double x, double y, double z) {
     if (index < 0 || index > 1) return;
     g_pre[index][0] = x; g_pre[index][1] = y; g_pre[index][2] = z;
@@ -206,6 +225,7 @@ void headblock_note_pre(int index, double x, double y, double z) {
         g_body_x.store((float)x, std::memory_order_relaxed);
         g_body_y.store((float)y, std::memory_order_relaxed);
         g_body_z.store((float)z, std::memory_order_relaxed);
+        g_have_body.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -215,53 +235,49 @@ bool headblock_apply_post(int index, double* x, double* y, double* z) {
     const int mode = g_eff_mode.load(std::memory_order_relaxed);
     bool moved = false;
 
-    if (mode != 0) {
-        // ONE PULL-BACK PER FRAME, computed on eye 0 and reused on eye 1, so both eyes move by the
-        // same vector and the stereo separation is untouched.
-        if (index == 0 || !g_have_raw[0]) {
-            // The head CENTRE's offset from the body: this eye's offset, corrected by half of last
-            // frame's eye-to-eye vector (eye 0 sits half a separation to one side of the centre).
-            double e[3] = {0.0, 0.0, 0.0};
-            if (g_have_raw[0] && g_have_raw[1]) {
-                for (int k = 0; k < 3; ++k) e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
-            }
-            const double half = (index == 0) ? 0.5 : -0.5;
-            double c[3];
-            for (int k = 0; k < 3; ++k) c[k] = raw[k] - g_pre[index][k] + half * e[k];
-            g_head_cx.store((float)c[0], std::memory_order_relaxed);
-            g_head_cy.store((float)c[1], std::memory_order_relaxed);
-            g_head_cz.store((float)c[2], std::memory_order_relaxed);
-            g_have_head.store(true, std::memory_order_relaxed);
+    // ONE HEAD OFFSET PER FRAME, computed on eye 0 and reused on eye 1, so both eyes move by the same
+    // vector and the stereo separation is untouched. Published always: auto height logs it as the
+    // measured view height.
+    if (index == 0 || !g_have_raw[0]) {
+        // The head CENTRE's offset from the body: this eye's offset, corrected by half of last
+        // frame's eye-to-eye vector (eye 0 sits half a separation to one side of the centre).
+        double e[3] = {0.0, 0.0, 0.0};
+        if (g_have_raw[0] && g_have_raw[1]) {
+            for (int k = 0; k < 3; ++k) e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
+        }
+        const double half = (index == 0) ? 0.5 : -0.5;
+        double c[3];
+        for (int k = 0; k < 3; ++k) c[k] = raw[k] - g_pre[index][k] + half * e[k];
+        g_head_cx.store((float)c[0], std::memory_order_relaxed);
+        g_head_cy.store((float)c[1], std::memory_order_relaxed);
+        g_head_cz.store((float)c[2], std::memory_order_relaxed);
+        g_have_head.store(true, std::memory_order_relaxed);
 
-            double s[3] = {0.0, 0.0, 0.0};
-            if (mode == 3) {
-                // Horizontal only (UE Z is up): a crouch is not a lean.
-                const double lean = g_cfg.head_block_lean;
-                const double lh = std::sqrt(c[0] * c[0] + c[1] * c[1]);
-                if (lh > lean && lh > 1e-6) {
-                    const double k = 1.0 - lean / lh;
-                    s[0] = c[0] * k; s[1] = c[1] * k;
-                }
-            } else {
-                const double L = g_allow.load(std::memory_order_relaxed);
-                const double len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
-                if (L >= 0.0 && len > L && len > 1e-6) {
-                    const double k = 1.0 - L / len;
-                    for (int k2 = 0; k2 < 3; ++k2) s[k2] = c[k2] * k;
-                }
+        double s[3] = {0.0, 0.0, 0.0};
+        if (mode == 3) {
+            // Horizontal only (UE Z is up): a crouch is not a lean.
+            const double lean = g_cfg.head_block_lean;
+            const double lh = std::sqrt(c[0] * c[0] + c[1] * c[1]);
+            if (lh > lean && lh > 1e-6) {
+                const double k = 1.0 - lean / lh;
+                s[0] = c[0] * k; s[1] = c[1] * k;
             }
-            for (int k = 0; k < 3; ++k) g_shift[k] = s[k];
-            g_pushed.store((float)std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]),
-                           std::memory_order_relaxed);
+        } else if (mode == 1 || mode == 2) {
+            const double L = g_allow.load(std::memory_order_relaxed);
+            const double len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+            if (L >= 0.0 && len > L && len > 1e-6) {
+                const double k = 1.0 - L / len;
+                for (int k2 = 0; k2 < 3; ++k2) s[k2] = c[k2] * k;
+            }
         }
-        if (g_shift[0] != 0.0 || g_shift[1] != 0.0 || g_shift[2] != 0.0) {
-            *x = raw[0] - g_shift[0];
-            *y = raw[1] - g_shift[1];
-            *z = raw[2] - g_shift[2];
-            moved = true;
-        }
-    } else {
-        g_shift[0] = g_shift[1] = g_shift[2] = 0.0;
+        for (int k = 0; k < 3; ++k) g_shift[k] = s[k];
+        g_pushed.store((float)std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]), std::memory_order_relaxed);
+    }
+    if (mode != 0 && (g_shift[0] != 0.0 || g_shift[1] != 0.0 || g_shift[2] != 0.0)) {
+        *x = raw[0] - g_shift[0];
+        *y = raw[1] - g_shift[1];
+        *z = raw[2] - g_shift[2];
+        moved = true;
     }
 
     for (int k = 0; k < 3; ++k) g_raw_prev[index][k] = raw[k];
@@ -277,7 +293,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
 
     const int cfg_mode = (g_cfg.head_block >= 1 && g_cfg.head_block <= 3) ? g_cfg.head_block : 0;
     if (cfg_mode != s_cfg_mode) {
-        hblog("HEADBLOCK: headblock %d -> %d (%s)", s_cfg_mode, cfg_mode, mode_name(cfg_mode));
+        if (g_cfg.head_block_log > 0) hblog("HEADBLOCK: headblock %d -> %d (%s)", s_cfg_mode, cfg_mode, mode_name(cfg_mode));
         s_cfg_mode = cfg_mode;
         s_L = -1.0f;
     }
@@ -290,7 +306,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
         else if (eff == 1 && !g_line.ok) eff = g_sphere.ok ? 2 : 3;
     }
     if (eff != s_eff) {
-        if (s_eff != -1 || eff != 0) {
+        if ((s_eff != -1 || eff != 0) && g_cfg.head_block_log > 0) {
             hblog("HEADBLOCK: running %s (requested %s, %s)", mode_name(eff), mode_name(cfg_mode),
                   active ? "on foot" : "standing down: menu, vehicle or cutscene");
         }
@@ -316,6 +332,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     const Vec3 c{g_head_cx.load(), g_head_cy.load(), g_head_cz.load()};
     const float len = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
     const float r = g_cfg.head_block_radius;
+    const int ch = g_cfg.head_block_channel;
 
     float L_raw = -1.0f;
     bool hit = false;
@@ -324,7 +341,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
         if (eff == 2) {
             // The sphere centre where the sweep stopped is the furthest the head centre can go.
             const Vec3 end{B.x + c.x, B.y + c.y, B.z + c.z};
-            if (run_trace(g_sphere, B, end, r, ignore, n_ignore, &loc, &imp)) {
+            if (run_trace(g_sphere, B, end, r, ch, ignore, n_ignore, &loc, &imp)) {
                 hit = true;
                 L_raw = dist(loc, B);
             }
@@ -332,7 +349,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
             // A ray to the head plus the radius; stop the head a radius short of the surface.
             const float k = (len + r) / len;
             const Vec3 end{B.x + c.x * k, B.y + c.y * k, B.z + c.z * k};
-            if (run_trace(g_line, B, end, 0.0f, ignore, n_ignore, &loc, &imp)) {
+            if (run_trace(g_line, B, end, 0.0f, ch, ignore, n_ignore, &loc, &imp)) {
                 hit = true;
                 L_raw = (std::max)(0.0f, dist(imp, B) - r);
             }
@@ -353,8 +370,10 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
 
     if (hit != s_hit_prev) {
         s_hit_prev = hit;
-        if (hit) hblog("HEADBLOCK: contact (%s) head |%.1f| cm from body, allowed %.1f cm", mode_name(eff), len, L_raw);
-        else     hblog("HEADBLOCK: clear (%s), releasing from %.1f cm", mode_name(eff), s_L);
+        if (g_cfg.head_block_log > 0) {
+            if (hit) hblog("HEADBLOCK: contact (%s) head |%.1f| cm from body, allowed %.1f cm", mode_name(eff), len, L_raw);
+            else     hblog("HEADBLOCK: clear (%s), releasing from %.1f cm", mode_name(eff), s_L);
+        }
     }
     if (g_cfg.head_block_log > 1) {
         static uint32_t s_n = 0;
@@ -362,7 +381,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
             hblog("HEADBLOCK %s body=(%.0f %.0f %.0f) head=(%.1f %.1f %.1f)|%.1f| hit=%d loc=(%.0f %.0f %.0f) "
                   "Lraw=%.1f L=%.1f pushed=%.1f cm r=%.1f ch=%d ignore=%d",
                   mode_name(eff), B.x, B.y, B.z, c.x, c.y, c.z, len, (int)hit, loc.x, loc.y, loc.z,
-                  L_raw, s_L, g_pushed.load(), r, g_cfg.head_block_channel, n_ignore);
+                  L_raw, s_L, g_pushed.load(), r, ch, n_ignore);
         }
     }
 }
