@@ -701,6 +701,31 @@ std::atomic<uint32_t> g_m_hold_ms{SOURCE_HOLD_MS_DEFAULT};
 std::atomic<uint32_t> g_ring_falls{0};
 std::atomic<uint32_t> g_hold_worst_ms{0};   // longest gap we rode out WITHOUT falling back
 
+// PER-FRAME RENDER-THREAD TIMING (2026-09-12). produce_layers runs inline in xrEndFrame on the
+// app's submit thread; if the 10-15 fps regression is here it is one of two calls -- xrWaitSwapchain
+// Image (can block up to its 20 ms timeout) or blit_into (the whole-atlas copy + command submit).
+// These time each in microseconds and the state line prints mean/worst so a headset run says which,
+// with no guessing. Two QueryPerformanceCounter reads per frame (~20 ns each) -- cheaper than the
+// log line that reports them, so it stays always-on rather than behind a flag.
+inline uint64_t qpc_us() {
+    static const int64_t freq = []{ LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (uint64_t)(c.QuadPart * 1000000LL / freq);
+}
+std::atomic<uint32_t> g_wait_worst_us{0};
+std::atomic<uint64_t> g_wait_sum_us{0};
+std::atomic<uint32_t> g_wait_cnt{0};
+std::atomic<uint32_t> g_blit_worst_us{0};
+std::atomic<uint64_t> g_blit_sum_us{0};
+std::atomic<uint32_t> g_blit_cnt{0};
+inline void acc_worst(std::atomic<uint32_t>& worst, std::atomic<uint64_t>& sum,
+                      std::atomic<uint32_t>& cnt, uint32_t us) {
+    sum.fetch_add(us, std::memory_order_relaxed);
+    cnt.fetch_add(1, std::memory_order_relaxed);
+    uint32_t w = worst.load(std::memory_order_relaxed);
+    if (us > w) worst.store(us, std::memory_order_relaxed);
+}
+
 // HOW MANY QUADS THE BUDGET HAS ACTUALLY THROWN AWAY, cumulative.
 //
 // Counted rather than logged for the same reason as g_ring_falls, and it exists because of a
@@ -2590,7 +2615,10 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     // well under a frame's worth of damage if it ever does hit.
     XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wi.timeout = 20LL * 1000LL * 1000LL;   // ns
-    if (g_xr.wait_image(g_swapchain, &wi) != XR_SUCCESS) {
+    const uint64_t t_wait0 = qpc_us();
+    const XrResult wait_r  = g_xr.wait_image(g_swapchain, &wi);
+    acc_worst(g_wait_worst_us, g_wait_sum_us, g_wait_cnt, (uint32_t)(qpc_us() - t_wait0));
+    if (wait_r != XR_SUCCESS) {
         // The image was acquired but never became ours to write. Release it so the ring buffer
         // does not leak an entry, draw nothing this frame, and forward the frame untouched.
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -2653,7 +2681,10 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
         need_copy = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
     }
     if (need_copy && idx < g_images.size()) {
-        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell) && idx < g_image_dirty.size()) {
+        const uint64_t t_blit0 = qpc_us();
+        const bool     blit_ok = blit_into(g_images[idx], atlas, ring_cell0, guide_cell);
+        acc_worst(g_blit_worst_us, g_blit_sum_us, g_blit_cnt, (uint32_t)(qpc_us() - t_blit0));
+        if (blit_ok && idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
     } else if (from_atlas) {
@@ -4074,8 +4105,21 @@ void xrlayer_tick() {
         uint32_t mask = 0;
         for (int s = 0; s < XRLAYER_SLOTS; ++s) if (xrlayer_slot_ready(s)) mask |= (1u << s);
 
+        // Per-frame render-thread timing since the last report, read-and-reset. wait = xrWait
+        // SwapchainImage, blit = the whole-atlas copy; n = copies actually done this window (vs
+        // copyskip). If mean/worst wait is multi-ms, the swapchain wait is the fps cost; if blit
+        // dominates, the copy is. Both near zero => the cost is the runtime compositing the quad.
+        const uint32_t wcnt   = g_wait_cnt.exchange(0, std::memory_order_relaxed);
+        const uint64_t wsum   = g_wait_sum_us.exchange(0, std::memory_order_relaxed);
+        const double   wmean  = wcnt ? (double)wsum / wcnt / 1000.0 : 0.0;
+        const double   wworst = g_wait_worst_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+        const uint32_t bcnt   = g_blit_cnt.exchange(0, std::memory_order_relaxed);
+        const uint64_t bsum   = g_blit_sum_us.exchange(0, std::memory_order_relaxed);
+        const double   bmean  = bcnt ? (double)bsum / bcnt / 1000.0 : 0.0;
+        const double   bworst = g_blit_worst_us.exchange(0, std::memory_order_relaxed) / 1000.0;
         logf("state=%d tier=%s live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u "
              "copyskip=%u ringfalls=%u held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s "
+             "wait=%.2f/%.2fms blit=%.2f/%.2fms(n=%u) "
              "cohskip=%u cohdrawn=%u drops[%s]",
              (int)g_state.load(std::memory_order_relaxed), tier_name(g_tier),
              (int)g_live.load(), submitted,
@@ -4091,6 +4135,7 @@ void xrlayer_tick() {
              g_sc_w, g_sc_h, mask,
              g_layer_drops.load(std::memory_order_relaxed),
              (m.budget > 0) ? "FORCED" : "queried",
+             wmean, wworst, bmean, bworst, bcnt,
              g_coh_skips.load(std::memory_order_relaxed),
              g_coh_drawn.load(std::memory_order_relaxed),
              [] {
