@@ -1094,7 +1094,6 @@ void shotpoint_asset_dev(unsigned tick) {
     const Vec3 bl = bore_to_controller_local(cq, bore_ue);
 
     constexpr float kBoreTolDeg   = 2.0f;   // window: a sample beyond this restarts the hold
-    constexpr float kRecaptureDeg = 5.0f;   // a steady value this far from the cache -> re-store (End)
     constexpr int   kStableSamples = 30;    // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
 
     auto ang = [](const Vec3& a, const Vec3& b) {
@@ -1124,14 +1123,14 @@ void shotpoint_asset_dev(unsigned tick) {
     }
     const bool stable = (m.n >= kStableSamples);
 
-    // Capture on the first steady hold, and RE-capture when the steady value has drifted from the
-    // cache beyond kRecaptureDeg -- which is how an End recalibration SELF-HEALS: End changes the
-    // rigid hand->bore relationship, the window settles on a new value, and it is re-stored. No
-    // placement math (that was the wrong, now-withdrawn approach).
-    if (stable) {
-        auto it = g_bore_cache.find(class_name_of(wpn));
-        const bool need = (it == g_bore_cache.end()) || (ang(m.bore_mean, it->second) > kRecaptureDeg);
-        if (need) capture_bore_local(wpn);
+    // FILL-IF-EMPTY: capture once per weapon, then NEVER auto-overwrite. A held animation pose --
+    // e.g. a rocket-launcher reload that points the weapon down for over a second -- stabilises the
+    // window and its value differs from the cache, so auto-recapture-on-drift would replace the good
+    // cached bore with the reload-down pose. It cannot tell "reload held a pose" from "you
+    // recalibrated End", so it does not try: a cached weapon is left alone. Deliberate recapture
+    // (after an End recalibration, or to fix a bad first capture) is the manual Page Down override.
+    if (stable && g_bore_cache.find(class_name_of(wpn)) == g_bore_cache.end()) {
+        capture_bore_local(wpn);
     }
 
     // Log + self-verify at the throttle: recompose the window-mean bore with the CURRENT pose and
