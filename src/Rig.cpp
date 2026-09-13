@@ -836,11 +836,23 @@ static std::unordered_map<std::wstring, Vec3> g_bore_cache;
 static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
 static std::atomic<bool>  g_bl_valid{false};
 
-// THE DEFAULT for uncaptured weapons is the ASSAULT RIFLE's bore_local (the user's chosen
-// reference): a weapon with no capture of its own aims with the AR's forward instead of the
-// animation-following live-mesh bootstrap. Set when the AR is captured. In this dev build it exists
-// once the AR has been held steady once (in-memory); persisting it / baking it as a compiled
-// constant so it works with zero captures and in release is the remaining step.
+// THE DEFAULT for uncaptured weapons is the ASSAULT RIFLE's bore: a weapon with no capture of its
+// own aims with the AR's forward instead of the animation-following live-mesh bootstrap.
+//
+// BAKED FACTORY DEFAULT (kDefBore*): the AR's measured bore in the schema-v3 un-driven-weapon frame,
+// so uncaptured weapons are animation-immune from a ZERO-capture / release install -- no file and no
+// held-AR required. Measured 2026-09-13 (7-weapon sweep; every marker sat within ~5 deg of
+// weapon-forward, so the AR's forward is a good fallback for any weapon). It is compiled rather than
+// shipped in halo_vr.cfg precisely so it works when NO calib data is present at all. Because F now
+// divides out the live grip trim, this value is grip-trim-INDEPENDENT (the capture that produced it
+// read ~straight-forward under a non-default End -- proof the frame cancels the grip), so it is a
+// true factory constant. A SCHEMA BUMP INVALIDATES IT: re-measure and update alongside kShotFixSchema.
+//
+// g_def_* / g_def_valid are the RUNTIME default: set true only when the user captures the AR or a
+// calib shotfixdefault is loaded, so they -- not the baked constant -- are what gets persisted
+// (shotpoint_emit_calib keys off g_def_valid). shotpoint_tick uses the runtime default when valid,
+// else falls back to kDefBore*, so the baked value never pollutes a user's calib file.
+static constexpr float kDefBoreX = 0.99999f, kDefBoreY = 0.00250f, kDefBoreZ = 0.00401f;
 static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
 static std::atomic<bool>  g_def_valid{false};
 
@@ -853,17 +865,21 @@ void shotpoint_tick() {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
 
-    // Publish the stored controller-frame bore for the held weapon (own capture, else AR default).
-    // The value is used AS-IS: the aim hook rotates it by the live controller pose. Captures are
-    // MANUAL (Page Down); after a grip change, Page Down the affected weapon to re-capture.
+    // Publish the stored bore for the held weapon: own capture -> user AR default -> BAKED AR
+    // default. The aim hook reconstructs it against the live rig composition. Captures are MANUAL
+    // (Page Down); an uncaptured weapon always has the baked fallback, so it is never left on the
+    // animation-following live-mesh bootstrap even from a zero-capture install.
     bool have = false;
     if (auto* wpn = fp_weapon_actor()) {
         auto it = g_bore_cache.find(class_name_of(wpn));
         if (it != g_bore_cache.end()) {
-            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z); have = true;
+            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z);
         } else if (g_def_valid.load()) {
-            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load()); have = true;
+            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load());
+        } else {
+            g_bl_x.store(kDefBoreX); g_bl_y.store(kDefBoreY); g_bl_z.store(kDefBoreZ);
         }
+        have = true;
     }
     g_bl_valid.store(have);
 }
