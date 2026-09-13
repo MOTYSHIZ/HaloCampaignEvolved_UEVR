@@ -92,6 +92,7 @@
 
 // Live config + calibration persistence. Defines g_cfg, which nearly everything below reads.
 #include "Config.hpp"
+#include "Features.hpp"   // FEATURE REGISTRY hook: startup resolved-state log
 #include "BlamPalette.hpp"
 #include "PaletteTwoHand.hpp"        // palette_two_hand_update: the palette weapon mode's two-hand hold
 #include "WeaponCalib.hpp"
@@ -6104,6 +6105,17 @@ void nav_world_tick_guarded(bool engaged, uint32_t tick) {
 // RETSTAMP: the latest on-foot trace depth (cm) and when it was taken, for the render publish.
 static std::atomic<float>     g_ret_last_d{0.0f};
 static std::atomic<long long> g_ret_last_d_ms{0};
+// RETSTAMP render placement (aimreticulestamp 1/2) draws the STAMPED hand intent, and that stamp is
+// only taken while the pose latch runs in palette weapon mode: poselatch 0 never stores it, and
+// poselatch 3 stores it from the XInput-rate law (aimrate=1) only. Without it the render publish never
+// fires and the compositor reticle goes dark with no message, so the tick publish takes over instead.
+static bool reticule_stamp_render_active() {
+    if (!palette_weapon_mode() || g_cfg.aim_reticule_stamp == 0) return false;
+    if (g_cfg.pose_latch == 0) return false;
+    if (g_cfg.pose_latch == 3 && !g_cfg.aim_rate_render) return false;
+    return true;
+}
+
 static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, double aim_yaw,
                                  double aim_pitch, uint32_t tick) {
     if (g_cfg.aim_reticule) {
@@ -6475,7 +6487,7 @@ static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, doub
                 }
                 // Stamped reticle placement (aimreticulestamp 1/2) publishes at render instead, and only while
                 // the palette weapon (armdriver mode 3) owns the aim. Otherwise the author's tick publish.
-                if (!(palette_weapon_mode() && g_cfg.aim_reticule_stamp != 0)) {
+                if (!reticule_stamp_render_active()) {
                     xrlayer_note_publish_gate(0);   // reached the publish
                     xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
                                             g_ret_scale_mul.load());
@@ -7077,6 +7089,9 @@ void update() {
     const uint32_t trace_every = (halo::blam_palette_freeze_active() || jl) ? 1u : 45u;
     const bool pwl = g_cfg.palette_weapon_log || jl;
     if (jl) ++s_jl_lines;
+    // The barrel axis is only measured while the palette weapon owns (mode 3). Otherwise it must stop
+    // CLAIMING validity, or aimbore=3 and the barrel lock would use an axis from a pose no longer drawn.
+    if (!palette_weapon_mode()) halo::g_barrel_axis_valid.store(false, std::memory_order_relaxed);
     if (palette_weapon_mode() && (tick % trace_every) == 0u) {
         // Head and hand, room-relative, UE axes.
         Vec3 hpos{}, gpos{}; Quat hq{}, gq{};
@@ -7788,7 +7803,10 @@ void update() {
                 const float dzc = g_cfg.roomscale_dz;
                 return dzc + (1.0f - dzc) * (v / g_cfg.roomscale_speed);
             };
+            // Never while MOUNTED, whatever stick mode says: with stickmode=0 a seat is not stick
+            // mode, and roomscale would drive the rider's unit from the headset.
             const bool rs_ok = g_cfg.roomscale && !g_stick_mode.load() && !g_in_menu.load()
+                            && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && g_rig_parent != nullptr;
             static Vec3 s_rs_prev_eye{}; static bool s_rs_have_prev = false;
             static std::chrono::steady_clock::time_point s_rs_prev_t{}; static bool s_rs_have_t = false;
@@ -12590,6 +12608,9 @@ public:
             break;   // right-handed: nothing to report, this is the normal path
         }
 
+        // FEATURE REGISTRY hook: every feature's running value and where it came from, once.
+        features_log_resolved();
+
         // Version first, on its own line: this is what a bug report needs to be actionable, and it
         // must survive even if the settings line below changes shape.
         API::get()->log_info("[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v%s  (halo_vr.dll)",
@@ -13708,7 +13729,10 @@ public:
             static float s_veh_cur = 0.0f;
             static float s_veh_hemi = 0.0f;
             static std::chrono::steady_clock::time_point s_veh_last{};
-            const bool seated = g_cfg.veh_view != 0 && halo::g_unit_mounted.load(std::memory_order_relaxed);
+            // The seated view is the SEAT CAMERA's orientation; without vehcam the stock chase camera is
+            // showing, and re-basing and flattening that view is not what vehview is for.
+            const bool seated = g_cfg.veh_view != 0 && g_cfg.veh_cam != 0
+                             && halo::g_unit_mounted.load(std::memory_order_relaxed);
             if (!seated) {
                 s_veh_primed = false;   // next mount re-primes from the fresh game camera
             } else {
@@ -14217,7 +14241,7 @@ public:
         // Roll must be passed: the pose maths rotates by the head orientation, which carries roll.
         // RETSTAMP render publish (modes 1/2). Same frame as the eye note that follows: this frame's
         // view position, the stamped intent, the latest trace depth. No smoothing.
-        if (index == 0 && palette_weapon_mode() && g_cfg.aim_reticule_stamp != 0 && g_cfg.aim_reticule && g_cfg.xr_layer
+        if (index == 0 && reticule_stamp_render_active() && g_cfg.aim_reticule && g_cfg.xr_layer
             && !g_stick_mode.load() && g_have_view_pos.load()) {
             const long long rs_now = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -14456,7 +14480,7 @@ public:
         // NOT in stick mode: the panels are hidden in vehicles and cutscenes anyway, so eating the
         // trigger there is pure loss -- and LT is the vehicle handbrake / quick turn, so the
         // glance gate was silently disabling a driving control for no benefit.
-        if (g_cfg.wrist_hud && g_cfg.wrist_hud_trigger &&
+        if (g_cfg.enabled && g_cfg.wrist_hud && g_cfg.wrist_hud_trigger &&
             !halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
             g_wristhud_lt.store(state->Gamepad.bLeftTrigger >= 64, std::memory_order_relaxed);
             state->Gamepad.bLeftTrigger = 0;

@@ -128,13 +128,19 @@ void palette_two_hand_reset() {
 }
 
 void palette_two_hand_update(float dt) {
+    static bool s_was_on = false;
     if (!g_cfg.enabled || !g_cfg.two_hand) {
-        if (g_th_latched.load(std::memory_order_relaxed) ||
+        // Reset on the ON->OFF edge too, not only while latched or blending: the grab-zone dot is
+        // shown while the hand APPROACHES an unlatched zone (blend 0), and switching off at that
+        // moment left the dot hanging in the world.
+        if (s_was_on || g_th_latched.load(std::memory_order_relaxed) ||
             g_th_blend.load(std::memory_order_relaxed) != 0.0f) {
             palette_two_hand_reset();
         }
+        s_was_on = false;
         return;
     }
+    s_was_on = true;
 
     // WHICH HAND FETCHES. The aim hand holds the weapon, so the other one is the one that comes up
     // to the barrel. Asked this way round, left-handed play works with no second code path -- the

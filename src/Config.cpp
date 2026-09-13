@@ -1,4 +1,5 @@
 #include "Config.hpp"
+#include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
 #include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
@@ -475,6 +476,68 @@ static void strip_calib_keys(const char* const* keys, size_t count) {
 // share one definition of "changed".
 uint64_t cfg_file_stamp(const char* path);
 
+// ---- WHAT IS ACTUALLY RUNNING (data\halo_vr_effective.txt). The catalog carries each switch's
+// DEFAULT, but halo_vr.cfg, the dev file and the dependency rules can all change the value the plugin
+// runs with, so a menu that shows the default can show a checkbox that disagrees with the game. This
+// mirror is the running value of every feature switch, rewritten after every real reload and
+// re-created if deleted. Same key=value shape as the cfg files.
+struct EffectiveKey { const char* key; double (*get)(); };
+static const EffectiveKey kEffectiveKeys[] = {
+    { "enabled",          [] { return (double)g_cfg.enabled; } },
+    { "armdriver",        [] { return (double)g_cfg.arm_driver; } },
+    { "aimdirect",        [] { return (double)g_cfg.aim_direct; } },
+    { "blamangles",       [] { return (double)g_cfg.blam_angles; } },
+    { "stickmode",        [] { return (double)g_cfg.stick_mode; } },
+    { "aimbore",          [] { return (double)g_cfg.aim_bore; } },
+    { "aimreticule",      [] { return (double)g_cfg.aim_reticule; } },
+    { "aimreticulestamp", [] { return (double)g_cfg.aim_reticule_stamp; } },
+    { "xrlayer",          [] { return (double)g_cfg.xr_layer; } },
+    { "cutscenemono",     [] { return (double)g_cfg.cutscene_mono; } },
+    { "cullfix",          [] { return (double)g_cfg.cull_fix; } },
+    { "roomscale",        [] { return (double)g_cfg.roomscale; } },
+    { "heightcal",        [] { return (double)g_cfg.height_cal; } },
+    { "headblock",        [] { return (double)g_cfg.head_block; } },
+    { "palettehook",      [] { return (double)g_cfg.palette_hook; } },
+    { "palettewpn",       [] { return (double)g_cfg.palette_weapon; } },
+    { "twohand",          [] { return (double)g_cfg.two_hand; } },
+    { "armhide",          [] { return (double)g_cfg.arm_hide; } },
+    { "reloadvr",         [] { return (double)g_cfg.reload_vr; } },
+    { "slidevr",          [] { return (double)g_cfg.slide_vr; } },
+    { "coophide",         [] { return (double)g_cfg.coop_hide; } },
+    { "hidesolo",         [] { return (double)g_cfg.hide_solo; } },
+    { "meleeswing",       [] { return (double)g_cfg.melee_swing; } },
+    { "meleeleft",        [] { return (double)g_cfg.melee_left; } },
+    { "grenadeswallow",   [] { return (double)g_cfg.grenade_swallow; } },
+    { "holster",          [] { return (double)g_cfg.holster_enabled; } },
+    { "holsterpollthrow", [] { return (double)g_cfg.holster_poll_throw; } },
+    { "scope",            [] { return (double)g_cfg.scope_enabled; } },
+    { "scopelens",        [] { return (double)g_cfg.scope_lens; } },
+    { "wristhud",         [] { return (double)g_cfg.wrist_hud; } },
+    { "forcetube",        [] { return (double)g_cfg.force_tube; } },
+    { "vehcam",           [] { return (double)g_cfg.veh_cam; } },
+    { "vehview",          [] { return (double)g_cfg.veh_view; } },
+    { "vehiclewheel",     [] { return (double)g_cfg.vehicle_wheel; } },
+    { "vehhidebody",      [] { return (double)g_cfg.veh_hide_body; } },
+};
+
+static void effective_mirror_path(char* out, size_t cap) {
+    sprintf_s(out, cap, "%s\\halo_vr_effective.txt", g_data_dir);
+}
+
+static void publish_effective_values() {
+    if (g_data_dir[0] == 0) return;
+    std::string text = "# Running value of every feature switch (all cfg layers + dependency rules). Written by\r\n"
+                       "# halo_vr.dll for the settings menu; editing it changes nothing.\r\n";
+    char line[96];
+    for (const auto& e : kEffectiveKeys) {
+        sprintf_s(line, sizeof(line), "%s=%g\r\n", e.key, e.get());
+        text += line;
+    }
+    char path[MAX_PATH] = {0};
+    effective_mirror_path(path, sizeof(path));
+    write_text_file(path, text);
+}
+
 int menu_bridge_tick() {
     if (g_data_dir[0] == 0) return 0;
 
@@ -658,6 +721,8 @@ int menu_bridge_tick() {
         const bool dst_missing = (GetFileAttributesA(m.dst) == INVALID_FILE_ATTRIBUTES);
         if (st == s_mirror_stamp[i] && !dst_missing) continue;
         read_text_file(m.src, src);   // failure leaves src empty, which is exactly what we mirror
+        // FEATURE REGISTRY hook: the DEV panel also lists every feature switch, generated.
+        if (m.dst == g_dev_mirror_path) features_append_dev_reference(src);
         write_text_file(m.dst, src);
         s_mirror_stamp[i] = st;
     }
@@ -688,6 +753,19 @@ int menu_bridge_tick() {
     // Same authority argument as scopearm: the capture CONSUMES the arm, so a menu button that
     // tracked its own click would keep claiming "armed" after the gesture had already spent it.
     const int griparm   = grip_offset_armed()  ? 1 : 0;
+    // The running-values mirror is written by load_config on every real reload; this only covers
+    // someone deleting data\ mid-session, which must not blank the menu until the next cfg edit.
+    {
+        char eff[MAX_PATH] = {0};
+        effective_mirror_path(eff, sizeof(eff));
+        if (GetFileAttributesA(eff) == INVALID_FILE_ATTRIBUTES) publish_effective_values();
+        features_publish_if_missing(g_data_dir);   // FEATURE REGISTRY hook
+    }
+    // Whether the two shipped catalogs exist: a missing catalog mirrors as EMPTY, which on its own
+    // looks exactly like "plugin not loaded"; the flags let the menu name the missing file instead.
+    static int s_last_ref = -1, s_last_dev = -1;
+    const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+    const int dev_missing = (GetFileAttributesA(g_dev_cfg_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
     // Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
     // heightcal is off, so the author's status file is unchanged by default.
     static std::string s_last_height;
@@ -695,6 +773,7 @@ int menu_bridge_tick() {
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
         griparm != s_last_griparm || height_line != s_last_height ||
+        ref_missing != s_last_ref || dev_missing != s_last_dev ||
         strncmp(s_last_bindkey, g_bind_capture_key, sizeof(s_last_bindkey)) != 0) {
         s_last_status = mode;
         s_last_bind   = barmed;
@@ -706,8 +785,10 @@ int menu_bridge_tick() {
         char status[352];   // widened for scopearm= and griparm=
         sprintf_s(status, sizeof(status),
                   "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n"
-                  "griparm=%d\r\n",
-                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm);
+                  "griparm=%d\r\nrefmissing=%d\r\ndevmissing=%d\r\n",
+                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm, ref_missing, dev_missing);
+        s_last_ref = ref_missing;
+        s_last_dev = dev_missing;
         s_last_height = height_line;
         std::string status_text = status;
         if (!height_line.empty()) status_text += height_line + "\r\n";
@@ -2279,6 +2360,7 @@ bool parse_config_file(const char* path) {
         const char* key = line;
         const char* val = eq + 1;
         const double v = atof(val);
+        features_note_key(key, val);   // FEATURE REGISTRY hook: this file set this key
 
         if      (_stricmp(key, "enabled") == 0) g_cfg.enabled     = (v != 0.0);
         else if (_stricmp(key, "pitch")   == 0) g_cfg.drive_pitch = (v != 0.0);
@@ -2570,7 +2652,9 @@ void load_config() {
 
     // The base file is the only REQUIRED one: with it missing there is nothing to override, so we
     // write a default and come back next poll.
-    if (!parse_config_file(kConfigFiles[0])) { write_default_config(); return; }
+    features_begin_load();   // FEATURE REGISTRY hook
+    features_set_layer(0);
+    if (!parse_config_file(kConfigFiles[0])) { write_default_config(); features_apply(); return; }
 
     // Override layers, weakest to strongest: the user's persistent overrides (never shipped, so
     // they survive updates), then the dev/troubleshooting file (ships all-commented; an
@@ -2580,7 +2664,9 @@ void load_config() {
     //
     // Walked from kConfigFiles rather than listed again, so this can never fall out of step with
     // the change-detection gate at the top -- see the warning there.
-    for (int i = 1; i < kConfigFileCount; ++i) parse_config_file(kConfigFiles[i]);
+    for (int i = 1; i < kConfigFileCount; ++i) { features_set_layer(i); parse_config_file(kConfigFiles[i]); }
+    // FEATURE REGISTRY hook: masters no file set take their tier value (see Features.cpp).
+    features_apply();
 
     // An offset with no version stamp is AMBIGUOUS, and guessing wrong is a constant, invisible yaw
     // error that then gets written back to disk. Raised here, reported by the tick -- this file has
@@ -2611,6 +2697,8 @@ void load_config() {
 
     // Only here, past every early return: g_cfg now holds the values that are actually on disk.
     ++g_cfg_load_gen;
+    publish_effective_values();
+    features_publish(g_data_dir);   // FEATURE REGISTRY hook: the menu's feature list
 }
 
 // Point g_calib_path at the file for the configured hand, and load it.

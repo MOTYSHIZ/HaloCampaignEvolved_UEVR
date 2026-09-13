@@ -463,7 +463,7 @@ struct Config {
     // vectors from the sim-side hook -- THE ONE THAT MOVES THE BIPED (measured: eye speed =
     // 6.65 m/s x throttle, linear from 0.02 up, no floor). Modes 1/2 wrote the control record,
     // which survives but moves nothing (consumed before the write lands); not carried here.
-    int   roomscale_throttle = 0;
+    int   roomscale_throttle = 3;
     float roomscale_thr_speed = 6.65f;  // metres/s of eye travel per unit of unit-throttle (measured)
     // THROTTLE-FRAME PROBE (discovery): non-zero writes a constant forward throttle of this/100
     // into the unit object; the ROOMSCALE-PROBE log gives the world direction the pawn moves vs
@@ -4907,14 +4907,14 @@ struct Config {
     // as read (the old behaviour); 1 = the commanded aim (g_desired_yaw/pitch, what the sim is
     // being given for this tick); 2 = the commanded aim sampled fresh from the controller in the
     // hook; 3 = ControlRotation extrapolated by its own last step.
-    int   palette_cam = 0;
+    int   palette_cam = 14;
     // ONE SHARED AIM DIRECTION. The reticle and the barrel are computed on two paths from the same
     // controller (aim: aim pose + aimfix + sightline; barrel: palette pose + gripfix), so they
     // disagree by ~1 deg at rest and by whatever a frame of motion is worth. With this on, the
     // pullback rotates the palette pose so its measured barrel axis lies exactly on the camera
     // forward every build (roll about that axis kept from the controller). 0.5's
     // effective_controller_basis, shared between palette and fire path, is the same idea.
-    bool  palette_barrel_lock = true;
+    bool  palette_barrel_lock = false;
     // Fixed roll of the gun about its barrel, degrees, every weapon (+ = clockwise seen from
     // behind). The global grip capture keeps pitch only, so this is the deliberate global roll knob.
     float palette_roll_trim = 0.0f;
@@ -5664,7 +5664,7 @@ struct Config {
     // EventCookedData, located at runtime by matching GetWwiseShortId) is zeroed for the window;
     // 2 = UnloadData() at the press, LoadData() at the window's end; 3 = ExecuteAction(Stop) on
     // the weapon's reload events every tick of the window. 0 = off.
-    int   reload_ak_mute = 0;
+    int   reload_ak_mute = 4;
     // The mute window's own length: the sim's reload runs 2-3 s on the rifles and its sounds land
     // late in it (the AR's handle sounds came through after a 1200 ms window, 2026-09-05).
     int   reload_mute_ms = 3500;
@@ -6194,7 +6194,7 @@ struct Config {
     // 1 = fix + numbers; 2 = NUMBERS ONLY (measure the sawtooth, write nothing) -- the baseline
     // in the same units. Either way one PALRENDER line per second: applied/skipped counts and
     // the build-to-render camera delta (mean/p95/max deg), which IS the judder amplitude.
-    int   pal_render = 0;
+    int   pal_render = 1;
     // FPMESH METER (2026-09-11, the decisive observation: rotating the RIGHT wrist judders the
     // LEFT hand too, so the WHOLE FP mesh steps with the camera). Read-only: every rendered
     // frame the FP mesh component's world rotation is read, the camera embedded in it recovered
@@ -6311,7 +6311,7 @@ struct Config {
     // SNAPSHOT camera and miss by one tick of chase -- centimetres at the muzzle, every frame,
     // only while the smoothing chases, which is only the aim wrist. Mode 3 embeds the camera
     // ONE FRAME DELAYED to match the snapshot; everything else identical to palrender=1.
-    int   pose_filter = 1;
+    int   pose_filter = 0;
     float pose_filter_min  = 1.5f;   // Hz, the resting cutoff -- lower = calmer rest, laggier creep
     float pose_filter_beta = 40.0f;  // Hz per (m/s): how fast motion re-opens the cutoff
     float pose_filter_rbeta = 6.0f;  // Hz per (unit/s of quat rate): the rotational reopen
@@ -6421,14 +6421,14 @@ struct Config {
     //       it does NOT reopen when you move, which is the whole point. Costs some lag on fast
     //       sweeps, so it is the comparison arm.
     //   3 = notch then low-pass, for the case where one notch is not enough.
-    int   tremor = 1;
+    int   tremor = 0;
     // Notch centre, or low-pass cutoff for mode 2. The measured peak is 8 Hz. For mode 2 prefer
     // about 6, which keeps 2 Hz intent nearly untouched while cutting 8 Hz meaningfully.
     float tremor_hz = 8.0f;
     // Notch width. Lower Q is wider. 1.2 covers roughly 5 to 13 Hz, which spans the tremor band
     // without reaching down into volitional aiming.
     float tremor_q = 1.2f;
-    int   rev_clamp = 1;
+    int   rev_clamp = 0;
     // Degrees per second of angular REVERSAL allowed before it is treated as impossible. At ~50
     // Hz, 120 means about 2.4 deg of reversal per frame, which clips the measured tail (p99 3.6
     // deg, max 16.7) while leaving the bulk (p95 ~1.1 deg) untouched.

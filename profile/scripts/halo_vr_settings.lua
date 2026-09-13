@@ -15,6 +15,10 @@
 --   data/halo_vr_dev_mirror.cfg      mirrored halo_vr_dev.cfg (catalog + active overrides) READ
 --   data/halo_vr_calib_mirror.cfg    mirrored halo_vr_calib.cfg (empty = shipped fit)     READ
 --   data/halo_vr_status.txt          plugin status (armed calibration mode; handready)     READ
+--   data/halo_vr_status.txt          plugin status (armed calibration mode; refmissing,    READ
+--                                    devmissing = that profile file is absent)
+--   data/halo_vr_effective.txt       the value each feature switch is RUNNING with, after  READ
+--                                    every cfg layer and every dependency rule is applied
 --   data/halo_vr_menu_set.txt        command file this script WRITES; the plugin applies it:
 --                                      key=value / -key             -> halo_vr_user.cfg
 --                                      dev:key=value / dev:-key     -> halo_vr_dev.cfg
@@ -39,6 +43,8 @@ local DEV_FILE    = "halo_vr_dev_mirror.cfg"
 local CALIB_FILE  = "halo_vr_calib_mirror.cfg"
 local STATUS_FILE = "halo_vr_status.txt"
 local CMD_FILE    = "halo_vr_menu_set.txt"
+local EFF_FILE    = "halo_vr_effective.txt"
+local FEAT_FILE   = "halo_vr_features.txt"
 
 -- Which calibration keys belong to which gesture (mirror of the plugin's own lists) -- used
 -- only to show the per-gesture "overridden" state and its 'x'.
@@ -139,6 +145,7 @@ local HINTS = {
     aimmeshcb      = { t = "slider", min = 0, max = 1 },
     aimtexfile     = { t = "text" },
     scope          = { t = "bool" },
+    scoperes       = { t = "drag", min = 128, max = 2048, int = true },
     scopezoom      = { t = "drag", min = 1.05, max = 300, speed = 0.5 },
     scoperes       = { t = "drag", min = 128, max = 2048, int = true },
     scopediv       = { t = "slider", min = 1, max = 8, int = true },
@@ -152,9 +159,73 @@ local HINTS = {
     scopeup        = { t = "drag", min = -100, max = 100 },
     scopebright    = { t = "drag", min = 0, max = 10 },
     scopethresh    = { t = "slider", min = 0.05, max = 1 },
+    -- Sub-settings of the switchable features (drawn nested under their feature, which greys them
+    -- while it is off). `needs` = other settings that must be on for this one to do anything.
+    roomscalethrottle = { t = "enum", items = { "through the left stick", "through the Spartan's own movement" }, values = { 0, 3 } },
+    heightmode     = { t = "choice", items = { "absolute", "seated", "eyes" } },
+    heightsrc      = { t = "enum", items = { "automatic", "OpenXR stage", "OpenVR standing", "headset pose only" }, values = { 0, 1, 2, 3 } },
+    heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 } },
+    heighttrim     = { t = "drag", min = -50, max = 50 },
+    heightmin      = { t = "drag", min = 50, max = 200 },
+    heightkey      = { t = "key" },
+    headblockradius = { t = "drag", min = 1, max = 50 },
+    gripexclusive  = { t = "bool" },
+    reloadakmute   = { t = "slider", min = 0, max = 4, int = true },
+    akmimic        = { t = "slider", min = 0, max = 7, int = true },
+    coophide       = { t = "bool" },
+    hidesolo       = { t = "bool", needs = { "coophide" } },
+    meleeleft      = { t = "bool" },
+    wristradar     = { t = "bool", needs = { "blamangles" } },
+    forcetubekick  = { t = "slider", min = 0, max = 255, int = true },
+    vehview        = { t = "bool" },
+    vehhidebody    = { t = "enum", items = { "off", "hide", "hide and shrink" }, values = { 0, 1, 2 } },
+    vehcamguard    = { t = "bool" },
+    vehcamhullcheck = { t = "bool" },
+    -- The author's released features in his own sections.
+    xrlayer        = { t = "bool", needs = { "aimreticule" } },
+    cullfix        = { t = "bool" },
+    culldist       = { t = "drag", min = 1000, max = 200000, int = true, needs = { "cullfix" } },
     perflog        = { t = "bool" },
     rigfast        = { t = "bool" },
 }
+
+-- Plain-language names for the User Settings panel, which never shows a raw key. The DEV panel keeps
+-- the keys: it is the developers' view.
+local LABELS = {
+    turnmode = "Turning", snapdeg = "Snap turn angle", smoothdps = "Smooth turn speed",
+    turndz = "Turn stick dead zone", mapdpadshift = "Right stick up turns the left stick into a d-pad",
+    mapdpaddz = "D-pad stick threshold", maprstickdz = "Right stick gesture threshold",
+    maprstickdown = "Right stick down presses", mapfrom = "Rebind this button", mapto = "...so it sends this button",
+    mapmenuback = "Back button in menus", mapbtnlog = "Log button presses", menusuppress = "Pause remaps in menus",
+    menudetect = "Detect menus", calibkey = "Weapon pose calibration key", aimcalibkey = "Aim calibration key",
+    hmdleash = "Keep the game camera with you", hmdleashlat = "Free movement sideways",
+    hmdleashvert = "Free movement up and down", cutscenesize = "Cutscene screen size",
+    aimreticule = "Show the reticule", aimreticuletrace = "Place the reticule on the surface you aim at",
+    aimreticulemaxdist = "Farthest reticule distance", aimreticulesurfaceoff = "Lift the reticule off walls",
+    aimreticuleminscale = "Smallest reticule size", aimreticuleminscaledist = "Reticule fade-in distance",
+    aimreticulemaxscale = "Largest reticule size", aimreticuledist = "Reticule distance when nothing is hit",
+    aimreticuledistveh = "Reticule distance in vehicles", aimreticulescaleveh = "Reticule size in vehicles",
+    aimreticulesmoothms = "Reticule smoothing", aimreticulesmoothctrlms = "Reticule steadiness",
+    xrlayer = "Draw the reticule on the headset layer", aimwidget = "Show the crosshair",
+    aimwidgetscale = "Crosshair size", aimwidgetgain = "Crosshair brightness", aimwidgettint = "Crosshair tint",
+    hudhide = "Hide the flat crosshair", aimmesh = "Show a ring", aimmeshscale = "Ring size",
+    aimmeshcr = "Ring red", aimmeshcg = "Ring green", aimmeshcb = "Ring blue", aimtexfile = "Ring image file",
+    cullfix = "Keep distant objects drawn", culldist = "Draw distance", perflog = "Record performance",
+    rigfast = "Fast weapon tracking",
+    scoperes = "Lens sharpness", armhidemode = "Hiding method", armhideall = "Hide on every body part",
+    gripexclusive = "The grip never throws grenades", reloadakmute = "Silence the game's reload sound",
+    akmimic = "Reload step sounds", coophide = "Keep the gun empty until you reload (co-op)",
+    hidesolo = "The same when playing alone", meleeleft = "Punch with your other hand too",
+    meleespeed = "Swing speed needed", holstermarkers = "Holster markers", holsterradius = "Holster reach",
+    wristradar = "Radar dots on the motion tracker", forcetubekick = "Kick strength",
+    vehview = "View turns with the vehicle", vehhidebody = "Hide your body while seated",
+    vehcamguard = "Hold the seat while the vehicle moves", vehcamhullcheck = "Check the vehicle body",
+    roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",
+    heightsample = "When your height is measured", heighttrim = "Height nudge",
+    heightmin = "Lowest accepted height", heightkey = "Height keyboard key", headblockradius = "Head clearance",
+}
+-- Prerequisites that are not player features.
+local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }
 
 -- ---------------------------------------------------------------- state
 local user_catalog = nil   -- sections parsed from the reference
@@ -180,10 +251,41 @@ local scope_base_arm = 0   -- plugin-reported BASE (global-fit) scope calibratio
 local hand_ready  = 0      -- plugin-reported: can the support-hand gesture do anything right now
 local bind_capture = 0     -- plugin-reported armed bind capture (1 = waiting for a press)
 local bind_key     = ""    -- which cfg key that capture will write
+local eff_vals    = {}     -- key -> value the plugin is actually running (data/halo_vr_effective.txt)
+local status_seen = false  -- the plugin has written a status file this session
+local ref_missing = 0      -- plugin-reported: halo_vr_user_reference.txt is absent from the profile
+local dev_missing = 0      -- plugin-reported: halo_vr_dev.cfg is absent from the profile
+local height_status = nil  -- plugin-reported `height=` status line (auto height), shown verbatim
+local features     = nil   -- feature registry rows, from data/halo_vr_features.txt (plugin-generated)
+local tier_state   = {}    -- tier name -> { on, source }
+local feature_by_key = {}  -- master key -> feature row
+local subkey_owner = {}    -- sub-setting key -> row of the feature it belongs to
 local frame       = 0
 
 local function trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- A row's name: its plain label, else the first clause of its description, never the raw key.
+local function label_for(entry)
+    local l = LABELS[entry.key]
+    if l ~= nil then return l end
+    local d = (entry.desc or ""):gsub("\n.*", "")
+    d = d:gsub("^%-%-%-%-%s*", "")
+    local cut = d:find("[%.:%(]")
+    if cut ~= nil then d = d:sub(1, cut - 1) end
+    d = trim(d)
+    if d == "" then return "Setting" end
+    return d
+end
+
+local function need_names(list)
+    local out = {}
+    for _, k in ipairs(list) do
+        local f = feature_by_key[k]
+        out[#out + 1] = (f ~= nil and f.name) or LABELS[k] or NEED_TEXT[k] or "another setting"
+    end
+    return table.concat(out, ", ")
 end
 
 -- Parse a catalog-shaped file: centered or left-aligned `# ==== NAME ====` banners open a
@@ -298,7 +400,9 @@ local function refresh()
         local s = parse_file(fs.read(REF_FILE))
         if #s > 0 then user_catalog = s end
     end
+    _, eff_vals = parse_file(fs.read(EFF_FILE))
     local status = fs.read(STATUS_FILE)
+    status_seen = (status ~= nil and status ~= "")
     calib_mode = tonumber(status:match("calibmode=(%d+)") or "0") or 0
     -- The plugin is the authority on this too: the arm is CONSUMED by the capture, so a button
     -- tracking its own click would keep claiming "armed" after the gesture had already spent it.
@@ -318,6 +422,29 @@ local function refresh()
     -- offering a button that would arm a mode nothing looks at. Failing toward the explanation is
     -- the right way round for a mismatch the player did not cause.
     hand_ready   = tonumber(status:match("handready=(%d+)") or "0") or 0
+    ref_missing = tonumber(status:match("refmissing=(%d+)") or "0") or 0
+    dev_missing = tonumber(status:match("devmissing=(%d+)") or "0") or 0
+    height_status = status:match("height=([^\r\n]*)")
+    -- The feature registry lives in the plugin; the menu only draws what it publishes.
+    local ftext = fs.read(FEAT_FILE)
+    if ftext ~= nil and ftext ~= "" then
+        local list, tl, byk, subs = {}, {}, {}, {}
+        for line in ftext:gmatch("[^\r\n]+") do
+            local p = {}
+            for field in (line .. "|"):gmatch("([^|]*)|") do p[#p + 1] = field end
+            if p[1] == "tier" and #p >= 4 then
+                tl[p[2]] = { on = tonumber(p[3]) or 0, source = p[4] }
+            elseif p[1] == "feature" and #p >= 11 then
+                local f = { key = p[2], on = p[3], tier = p[4], group = p[5], name = p[6], desc = p[7],
+                            subkeys = {}, needs = {}, value = tonumber(p[10]) or 0, source = p[11] }
+                for k in p[8]:gmatch("[^,]+") do f.subkeys[#f.subkeys + 1] = k; subs[k] = f end
+                for k in p[9]:gmatch("[^,]+") do f.needs[#f.needs + 1] = k end
+                list[#list + 1] = f
+                byk[f.key] = f
+            end
+        end
+        features, tier_state, feature_by_key, subkey_owner = list, tl, byk, subs
+    end
 end
 
 -- current value as a STRING: queued, else the file's override, else the catalog default
@@ -329,7 +456,44 @@ local function effective(entry, layer)
     if p == false then return entry.default, false end
     local o = over[entry.key]
     if o ~= nil then return o, true end
+    -- No override of yours: show what the plugin is RUNNING, not the catalog default. They differ
+    -- whenever halo_vr.cfg itself sets the key, and a checkbox that disagrees with the game is
+    -- worse than no checkbox.
+    if layer ~= "dev" and eff_vals[entry.key] ~= nil then return eff_vals[entry.key], false end
     return entry.default, false
+end
+
+-- Running value of any key by name, for dependency checks: queued, else your override, else the
+-- plugin-reported value, else nil (unknown).
+local function running_value(key)
+    local p = pending_user[key]
+    if p ~= nil and p ~= false then return p end
+    if user_over[key] ~= nil then return user_over[key] end
+    return eff_vals[key]
+end
+
+-- A dependency is unmet only when the plugin has told us it is off. Unknown (older plugin, no
+-- effective mirror yet) never greys anything out.
+local function unmet_needs(hint)
+    if hint == nil or hint.needs == nil then return nil end
+    local missing = {}
+    for _, dep in ipairs(hint.needs) do
+        local v = tonumber(running_value(dep))
+        if v ~= nil and v == 0 then missing[#missing + 1] = dep end
+    end
+    if #missing == 0 then return nil end
+    return missing
+end
+
+-- begin_disabled/end_disabled exist in current UEVR builds; guarded so an older build only loses
+-- the greying, never the panel.
+local function begin_disabled(on)
+    if not on then return false end
+    local ok = pcall(function() imgui.begin_disabled(true) end)
+    return ok
+end
+local function end_disabled(active)
+    if active then pcall(function() imgui.end_disabled() end) end
 end
 
 -- ---------------------------------------------------------------- text wrapping
@@ -430,36 +594,45 @@ local function draw_entry(entry, layer)
 
     local cur, overridden = effective(entry, layer)
     local num = tonumber(cur)
+    local lbl = (layer == "dev") and key or label_for(entry)
+
+    -- DEPENDENCIES. A switch whose prerequisite is off is greyed out and says which one, instead
+    -- of accepting a change that would silently do nothing.
+    local missing = (layer ~= "dev") and unmet_needs(hint) or nil
+    if missing ~= nil then
+        imgui.text("  (needs " .. need_names(missing) .. " on)")
+    end
+    local disabled = begin_disabled(missing ~= nil)
 
     if hint ~= nil and hint.t == "bool" then
-        local changed, v = imgui.checkbox(key, (num or 0) ~= 0)
+        local changed, v = imgui.checkbox(lbl, (num or 0) ~= 0)
         if changed then queue(layer, key, v and "1" or "0") end
     elseif hint ~= nil and hint.t == "slider" and hint.int then
-        local changed, v = imgui.slider_int(key, math.floor((num or 0) + 0.5), hint.min, hint.max)
+        local changed, v = imgui.slider_int(lbl, math.floor((num or 0) + 0.5), hint.min, hint.max)
         if changed then queue(layer, key, fmt_num(v, true)) end
     elseif hint ~= nil and hint.t == "slider" then
-        local changed, v = imgui.slider_float(key, num or 0, hint.min, hint.max)
+        local changed, v = imgui.slider_float(lbl, num or 0, hint.min, hint.max)
         if changed then queue(layer, key, fmt_num(v, false)) end
     elseif hint ~= nil and hint.t == "drag" and hint.int then
-        local changed, v = imgui.drag_int(key, math.floor((num or 0) + 0.5), 1, hint.min, hint.max)
+        local changed, v = imgui.drag_int(lbl, math.floor((num or 0) + 0.5), 1, hint.min, hint.max)
         if changed then queue(layer, key, fmt_num(v, true)) end
     elseif hint ~= nil and hint.t == "drag" then
         local speed = hint.speed or ((hint.max - hint.min) / 250)
-        local changed, v = imgui.drag_float(key, num or 0, speed, hint.min, hint.max)
+        local changed, v = imgui.drag_float(lbl, num or 0, speed, hint.min, hint.max)
         if changed then queue(layer, key, fmt_num(v, false)) end
     elseif hint ~= nil and hint.t == "enum" then
         local idx = 1
         for i, val in ipairs(hint.values) do
             if val == math.floor((num or 0) + 0.5) then idx = i end
         end
-        local changed, sel = imgui.combo(key, idx, hint.items)
+        local changed, sel = imgui.combo(lbl, idx, hint.items)
         if changed and hint.values[sel] ~= nil then queue(layer, key, fmt_num(hint.values[sel], true)) end
     elseif hint ~= nil and hint.t == "choice" then
         local idx = 1
         for i, s in ipairs(hint.items) do
             if s == cur then idx = i end
         end
-        local changed, sel = imgui.combo(key, idx, hint.items)
+        local changed, sel = imgui.combo(lbl, idx, hint.items)
         if changed and hint.items[sel] ~= nil then queue(layer, key, hint.items[sel]) end
     elseif hint ~= nil and (hint.t == "key" or hint.t == "btn") then
         -- named dropdown: the file stores a numeric code, the player picks a name
@@ -475,7 +648,7 @@ local function draw_entry(entry, layer)
             items[#items + 1] = "(custom value from the file)"
             idx = #items
         end
-        local changed, sel = imgui.combo(key, idx, items)
+        local changed, sel = imgui.combo(lbl, idx, items)
         if changed and list[sel] ~= nil then
             queue(layer, key, string.format("0x%04X", list[sel][1]))
         end
@@ -484,7 +657,7 @@ local function draw_entry(entry, layer)
         local bkey = layer .. ":" .. key
         local buf = editbuf[bkey]
         if buf == nil then buf = cur end
-        local changed, v = imgui.input_text(key, buf, 0)
+        local changed, v = imgui.input_text(lbl, buf, 0)
         if changed then editbuf[bkey] = v end
         imgui.same_line()
         if imgui.small_button("set") then
@@ -501,17 +674,22 @@ local function draw_entry(entry, layer)
         -- no hint (dev knobs, or a key added by a newer release): generic numeric widget
         local is_int = (cur:match("^-?%d+$") ~= nil)
         if is_int then
-            local changed, v = imgui.drag_int(key, math.floor(num + 0.5), 1, -1000000, 1000000)
+            local changed, v = imgui.drag_int(lbl, math.floor(num + 0.5), 1, -1000000, 1000000)
             if changed then queue(layer, key, fmt_num(v, true)) end
         else
-            local changed, v = imgui.drag_float(key, num, 0.01, -1000000.0, 1000000.0)
+            local changed, v = imgui.drag_float(lbl, num, 0.01, -1000000.0, 1000000.0)
             if changed then queue(layer, key, fmt_num(v, false)) end
         end
     end
 
+    end_disabled(disabled)
+
     if not (hint ~= nil and hint.textdesc) and imgui.is_item_hovered() then
         local tip = entry.desc
-        if tip == nil or tip == "" then tip = key end
+        if tip == nil or tip == "" then tip = lbl end
+        if hint ~= nil and hint.needs ~= nil then
+            tip = tip .. "\n\nneeds: " .. need_names(hint.needs)
+        end
         imgui.set_tooltip(tip .. "\n\ndefault: " .. default_label(entry, hint))
     end
 
@@ -530,12 +708,24 @@ local function draw_entry(entry, layer)
     imgui.pop_id()
 end
 
+-- A catalog entry that belongs to a switchable feature (its master or one of its sub-settings) is
+-- drawn under that feature, in its tier section, instead of here. The author's released features
+-- (tier stable) keep their rows in his own sections.
+local function owned_by_tier_section(key)
+    local f = feature_by_key[key] or subkey_owner[key]
+    return f ~= nil and f.tier ~= "stable"
+end
+
 local function draw_catalog(catalog, layer)
     for _, section in ipairs(catalog) do
-        if imgui.collapsing_header(section.name) then
+        local visible = {}
+        for _, entry in ipairs(section.keys) do
+            if layer ~= "user" or not owned_by_tier_section(entry.key) then visible[#visible + 1] = entry end
+        end
+        if #visible > 0 and imgui.collapsing_header(section.name) then
             imgui.indent(8)
             print_text_block(section.text)
-            for _, entry in ipairs(section.keys) do
+            for _, entry in ipairs(visible) do
                 draw_entry(entry, layer)
             end
             imgui.unindent(8)
@@ -544,17 +734,177 @@ local function draw_catalog(catalog, layer)
     end
 end
 
+-- ---------------------------------------------------------------- feature tiers
+-- Every switchable feature, from the plugin's registry, in a section per tier. The tier decides the
+-- default; the player's own switch always wins, and the 'x' puts a feature back on its default.
+local function find_entry(key)
+    if user_catalog == nil then return nil end
+    for _, section in ipairs(user_catalog) do
+        for _, e in ipairs(section.keys) do
+            if e.key == key then return e end
+        end
+    end
+    return nil
+end
+
+local TIER_ORDER = { "beta", "preview", "experimental" }
+local TIER_WORD  = { beta = "Beta", preview = "Preview", experimental = "Experimental" }
+local TIER_TEXT  = {
+    beta = "Nearly finished features. They are on unless you switch them off.",
+    preview = "Features close to ready. They are off until you switch them on.",
+    experimental = "Features still being tested in the headset. They are off until you switch them on, " ..
+                   "and they may change between releases.",
+}
+-- Settings shown with a feature group though they are not that feature's own sub-settings.
+local GROUP_EXTRAS = { Roomscale = { "hmdleashvert" } }
+
+local function tier_switch_row(tier)
+    local key = "tier" .. tier
+    local ts = tier_state[tier] or { on = 0, source = "tier" }
+    local p = pending_user[key]
+    local cur = (p ~= nil and p ~= false) and p or user_over[key] or tostring(ts.on)
+    if p == false then cur = tostring(ts.on) end
+    local on = (tonumber(cur) or 0) ~= 0
+    imgui.push_id("tierswitch")
+    local changed, v = imgui.checkbox("Turn on every " .. TIER_WORD[tier] .. " feature", on)
+    if changed then queue("user", key, v and "1" or "0") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Switches every " .. TIER_WORD[tier] .. " feature at once.\n" ..
+                          "A feature you switched yourself keeps your choice.")
+    end
+    if user_over[key] ~= nil and p == nil then
+        imgui.same_line()
+        if imgui.small_button("x") then queue("user", key, false) end
+        if imgui.is_item_hovered() then imgui.set_tooltip("Back to this tier's default") end
+    end
+    imgui.pop_id()
+end
+
+local function feature_source_text(f, on)
+    if pending_user[f.key] ~= nil then return "saving..." end
+    if user_over[f.key] ~= nil then return "your choice" end
+    if f.source == "base" then return "set by the mod's configuration" end
+    if f.source == "dev" then return "set by a developer file" end
+    if f.source == "switch" then
+        return (on and "on" or "off") .. " with every " .. TIER_WORD[f.tier] .. " feature"
+    end
+    return on and "on by default" or "off by default"
+end
+
+-- Auto height has a one-shot measurement, and this button is how a player takes one.
+local function draw_height_calibration()
+    imgui.push_id("calheight")
+    if imgui.button("Calibrate height") then fire("calib:height") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Measures your standing height. Press it, close this menu, then stand up\n" ..
+                          "straight and look ahead while it measures.")
+    end
+    if height_status ~= nil and height_status ~= "" then
+        imgui.text("Height: " .. height_status)
+    else
+        imgui.text("Height: no reading yet (this version of the mod may not support the button yet)")
+    end
+    imgui.pop_id()
+end
+
+local function draw_feature(f)
+    imgui.push_id("feature:" .. f.key)
+    local p = pending_user[f.key]
+    local cur = (p ~= nil and p ~= false) and p or user_over[f.key] or tostring(f.value)
+    if p == false then cur = tostring(f.value) end
+    local on = (tonumber(cur) or 0) ~= 0
+    local missing = unmet_needs(f)
+    if missing ~= nil then imgui.text("  (needs " .. need_names(missing) .. " on)") end
+    -- Greyed only while off: a feature whose prerequisite went away can still be switched off.
+    local dis = begin_disabled(missing ~= nil and not on)
+    local changed, v = imgui.checkbox(f.name, on)
+    if changed then queue("user", f.key, v and f.on or "0") end
+    end_disabled(dis)
+    if imgui.is_item_hovered() then imgui.set_tooltip(f.desc) end
+    imgui.same_line()
+    imgui.text("(" .. feature_source_text(f, on) .. ")")
+    if user_over[f.key] ~= nil and p == nil then
+        imgui.same_line()
+        if imgui.small_button("x") then queue("user", f.key, false) end
+        if imgui.is_item_hovered() then imgui.set_tooltip("Back to this feature's default") end
+    end
+    if #f.subkeys > 0 then
+        imgui.indent(20)
+        local sub_dis = begin_disabled(not on)
+        for _, sk in ipairs(f.subkeys) do
+            local e = find_entry(sk)
+            if e ~= nil then draw_entry(e, "user") end
+        end
+        end_disabled(sub_dis)
+        imgui.unindent(20)
+    end
+    imgui.pop_id()
+end
+
+local function draw_tier_sections()
+    if features == nil then
+        if status_seen then print_text_block("The list of features is loading.") end
+        return
+    end
+    for _, tier in ipairs(TIER_ORDER) do
+        local groups, order, count = {}, {}, 0
+        for _, f in ipairs(features) do
+            if f.tier == tier then
+                count = count + 1
+                local g = f.group or ""
+                if groups[g] == nil then groups[g] = {}; order[#order + 1] = g end
+                groups[g][#groups[g] + 1] = f
+            end
+        end
+        if count > 0 then
+            imgui.spacing()
+            if imgui.collapsing_header(TIER_WORD[tier] .. " features") then
+                imgui.indent(8)
+                imgui.push_id("tier:" .. tier)
+                print_text_block(TIER_TEXT[tier])
+                tier_switch_row(tier)
+                imgui.spacing()
+                for _, g in ipairs(order) do
+                    local open = (g == "") or imgui.tree_node(g)
+                    if open then
+                        for _, f in ipairs(groups[g]) do draw_feature(f) end
+                        for _, xk in ipairs(GROUP_EXTRAS[g] or {}) do
+                            local e = find_entry(xk)
+                            if e ~= nil then draw_entry(e, "user") end
+                        end
+                        if g == "Roomscale" then
+                            imgui.spacing()
+                            draw_height_calibration()
+                        end
+                        if g ~= "" then imgui.tree_pop() end
+                    end
+                end
+                imgui.pop_id()
+                imgui.unindent(8)
+            end
+        end
+    end
+end
+
 -- ---------------------------------------------------------------- panels
 local function draw_user()
     if user_catalog == nil then
-        print_text_block("Waiting for halo_vr.dll to publish the settings catalog.\n(data/" ..
-                         REF_FILE .. " missing -- is the halo_vr plugin loaded and current?)")
+        if ref_missing ~= 0 then
+            print_text_block("Part of the mod's installation is missing, so the settings cannot be shown. " ..
+                             "Reinstall the mod from its release package.")
+        elseif status_seen then
+            print_text_block("The mod is running and is loading its settings. This takes a couple of seconds.")
+        else
+            print_text_block("The Halo VR mod is not running, so its settings cannot be shown. Start the " ..
+                             "game with the mod installed, then open this menu again.")
+        end
         return
     end
-    print_text_block("Changes save to halo_vr_user.cfg and apply live within ~2 s. " ..
-                     "Overridden settings show an 'x' button: press it to return to the default.")
+    print_text_block("Changes save automatically and apply within about two seconds. A setting you " ..
+                     "changed shows an 'x' button: press it to go back to the default.")
     imgui.spacing()
     draw_catalog(user_catalog, "user")
+    draw_tier_sections()
 end
 
 local function draw_dev()

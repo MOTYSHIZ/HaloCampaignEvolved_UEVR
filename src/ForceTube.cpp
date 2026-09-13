@@ -149,7 +149,16 @@ void forcetube_note_fire(bool firing) {
 }
 
 void forcetube_tick() {
-    if (!g_cfg.force_tube) return;
+    if (!g_cfg.force_tube) {
+        // Switched off live: take the spawn hook back out, so off leaves no detour on the
+        // projectile path. Turning it on again re-installs through install_hook().
+        if (s_hook_id >= 0) {
+            API::get()->param()->functions->unregister_inline_hook(s_hook_id);
+            s_hook_id = -1;
+            API::get()->log_info("[Halo-CampE-UEVR] FORCETUBE: off -- spawn hook removed");
+        }
+        return;
+    }
     if (!load_dll()) return;
     install_hook();
 

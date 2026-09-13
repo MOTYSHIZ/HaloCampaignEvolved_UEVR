@@ -153,6 +153,7 @@
 #cutsceneup=-15
 #cutscenepitch=0
 
+
 # ==================================== RETICULE (world-space) ====================================
 # The mod draws the game's own crosshair out in the world, exactly where your shots will land
 # -- hit marker included.
@@ -265,6 +266,77 @@
 #scopecamlock=0
 # How far the trigger must be squeezed to toggle the scope.
 #scopethresh=0.55
+
+# ================================= WORLD DETAIL & PERFORMANCE ===================================
+# Distant detail the game culls for a flat screen.
+#
+# 1 = keep distant objects drawn at VR view distances.
+#cullfix=1
+# How far objects stay drawn, cm.
+#culldist=40000
+
+# ===================================== FEATURE SETTINGS =========================================
+# Settings of the switchable features. The menu shows each one under its feature, in the feature's
+# tier section, and they only act while that feature is on.
+#
+# Manual reload: each weapon keeps its own reload state (0 the old memory, 1 per weapon type, 2 per weapon, 3 per weapon across a level load).
+#reloadstate=1
+# Manual reload: when a weapon's state is saved (1 every tick, 2 only when it leaves your hand).
+#reloadstatesave=1
+# Manual reload: how a magazine that is out stays hidden (0 once, 1 visibility, 2 hidden in game, 3 shrunk).
+#reloadstatehide=1
+# Manual reload: how long to wait for a weapon's identity before using its type, in milliseconds.
+#reloadstatewaitms=1500
+# Manual reload: when a swapped-out weapon's state is forgotten (0 at death, 1 when a new type comes in, 2 when it comes back as a different gun).
+#reloadstatedrop=2
+# Manual reload: forget every weapon's state at death (0 never, 1 at the death camera, 2 when the next weapon differs).
+#reloadstatedeath=1
+# Manual reload: keep weapon states across a level load.
+#reloadstatelevel=1
+# Manual reload: log every save and restore of a weapon's state.
+#reloadstatelog=0
+# Manual reload: the grip belongs to your hand gestures, so it never throws a grenade.
+#gripexclusive=1
+# Manual reload: silence the game's own reload sound (4 is the default method, 0 is off).
+#reloadakmute=4
+# Manual reload: how the reload step sounds are played (7 is the default method, 0 is off).
+#akmimic=7
+# Manual reload: in co-op the gun stays empty until you reload it yourself.
+#coophide=1
+# Manual reload: the same when playing alone.
+#hidesolo=1
+# Melee by swinging: your other hand can punch too.
+#meleeleft=1
+# Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
+#wristradar=1
+# ForceTube gunstock: kick strength.
+#forcetubekick=200
+# Vehicle seat camera: the view turns with the vehicle and stays level.
+#vehview=1
+# Vehicle seat camera: hide your own body while seated (0 off, 1 hide, 2 hide and shrink).
+#vehhidebody=0
+# Vehicle seat camera: do not re-learn the seat while the vehicle is moving.
+#vehcamguard=1
+# Vehicle seat camera: fall back to the chase anchor when the vehicle body stops matching.
+#vehcamhullcheck=1
+# Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
+#roomscalethrottle=3
+# Auto height: what the measured height is fitted to.
+#heightmode=absolute
+# Auto height: where the height comes from.
+#heightsrc=0
+# Auto height: when it measures.
+#heightsample=0
+# Auto height: nudge the view up or down, in centimetres.
+#heighttrim=0
+# Auto height: ignore a measurement lower than this above the floor, in centimetres.
+#heightmin=120
+# Auto height: an optional keyboard key that re-measures your height. The Calibrate height button is
+# the intended way.
+#heightkey=0x00
+# Head block: how far your head is kept from a surface, in centimetres.
+#headblockradius=12
+
 
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================

@@ -655,7 +655,9 @@ int resolve_driver_parts() {
 // by something that does not consult UE visibility. A transform is not a visibility flag: the
 // draw demonstrably honours scale, so 0.001 is what actually removes the body (vehhidebody=2).
 void driver_hide_update() {
-    const bool want = g_cfg.enabled && g_cfg.veh_hide_body != 0
+    // The body is hidden because the SEAT CAMERA sits inside it. With vehcam off the view is the
+    // stock chase camera, where hiding it just deletes the Spartan from the shot.
+    const bool want = g_cfg.enabled && g_cfg.veh_hide_body != 0 && g_cfg.veh_cam != 0
                    && g_unit_mounted.load(std::memory_order_relaxed);
 
     if (!want) {
@@ -697,6 +699,15 @@ void driver_hide_update() {
         call_set_hidden(c, true);
         call_set_visibility(c, false);
         if (g_cfg.veh_hide_body == 2) call_set_scale(c, 0.001);
+    }
+    // Mode 2 -> 1 mid-ride: put the scale back once, or the parts stay shrunk under mode 1.
+    {
+        static int s_last_mode = 0;
+        if (s_last_mode == 2 && g_cfg.veh_hide_body != 2) {
+            for (int i = 0; i < s_driver_part_count; ++i)
+                if (auto* c = s_driver_parts[i].get()) call_set_scale(c, 1.0);
+        }
+        s_last_mode = g_cfg.veh_hide_body;
     }
 
     // One readback a second, so the log answers "did it take" without inference.
@@ -796,7 +807,8 @@ void vehicle_body_update() {
     driver_hide_update();
     // The hull resolve feeds the seat camera, the seated view and the wheel only (experimental, all off
     // by default): with none of them on, a mount must not sweep for the hog.
-    if (!(g_cfg.veh_cam != 0 || g_cfg.veh_view != 0 || g_cfg.vehicle_wheel != 0)) {
+    // Exactly two consumers read the hull: the rigid seat camera (vehcam with anchor 2) and the wheel.
+    if (!(g_cfg.enabled && ((g_cfg.veh_cam != 0 && g_cfg.veh_cam_anchor == 2) || g_cfg.vehicle_wheel != 0))) {
         g_hog_body_ptr.store(0, std::memory_order_relaxed);
         g_hog_body_idx.store(-1, std::memory_order_relaxed);
         return;

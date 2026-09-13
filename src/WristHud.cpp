@@ -762,6 +762,20 @@ void tracker_mid_probe(uint32_t tick) {
     tmid::s_due = tick + 30;
 }
 
+// The radar's per-contact visuals (doctrine at their use in wristhud_place). File scope rather than
+// a function-local static so the HUD's off edge can hide every dot it spawned.
+struct BlipViz {
+    TrackedObject mesh;
+    TrackedObject mid;                   // colour MID when is_dot (team/gain re-applies)
+    bool     is_dot = false;
+    uint32_t id = 0;
+    uint32_t team = 0;    // the SPECIES ID (object's leading dword)
+    float    sfwd = 0.0f, srgt = 0.0f;   // smoothed panel coords, room metres
+    uint32_t seen_tick = 0;              // id present in the latest publish
+    uint32_t moving_tick = 0;            // last publish that said "moving"
+};
+BlipViz s_bv[MAX_BLIPS];
+
 } // namespace
 
 // DISCOVERY ONLY, once per game tick: census, hosting, and the per-tick colour chain. Placement
@@ -785,7 +799,25 @@ void wristhud_tick() {
 // when im moving"). Standing still it looked fine, which is why it survived this long. The weapon
 // rig already solved exactly this by re-applying on the render path; this is the same treatment.
 void wristhud_place() {
-    if (!g_cfg.wrist_hud) return;
+    static bool s_was_on = false;
+    if (!g_cfg.wrist_hud) {
+        // OFF EDGE: nothing below runs any more, so anything left showing would freeze in the
+        // world at its last pose. Hide the panels and every radar dot, and give the ammo box its
+        // visibility back. The hosted game widgets themselves stay off the flat HUD until the next
+        // level load (the re-parse note in parse_slots says why that is a bigger job).
+        if (s_was_on) {
+            for (int i = 0; i < s_slot_count; ++i)
+                if (auto* c = s_slots[i].comp.get()) holster_marker_show(c, false);
+            for (auto& v : s_bv) {
+                if (auto* m = v.mesh.get()) holster_marker_show(m, false);
+                v.id = 0;
+            }
+            wh_cradle_restore();
+        }
+        s_was_on = false;
+        return;
+    }
+    s_was_on = true;
     auto* owner = API::get()->get_local_pawn(0);
     if (owner == nullptr) return;
     // The off hand's forearm. Hidden in stick mode (vehicles, cutscenes, death),
@@ -905,17 +937,7 @@ void wristhud_place() {
         // blinks at its threshold, and a dot that holds for ~a second after the last movement
         // reads like the real tracker instead of a strobe. The same hold expires a settling
         // corpse's ragdoll blip quickly.
-        struct BlipViz {
-            TrackedObject mesh;
-            TrackedObject mid;                   // colour MID when is_dot (team/gain re-applies)
-            bool     is_dot = false;
-            uint32_t id = 0;
-            uint32_t team = 0;    // the SPECIES ID (object's leading dword)
-            float    sfwd = 0.0f, srgt = 0.0f;   // smoothed panel coords, room metres
-            uint32_t seen_tick = 0;              // id present in the latest publish
-            uint32_t moving_tick = 0;            // last publish that said "moving"
-        };
-        static BlipViz s_bv[MAX_BLIPS];
+        // (BlipViz and s_bv live at file scope, so switching the HUD off can hide the dots too.)
         constexpr uint32_t HOLD_TICKS = 160;     // ~2 s visible after the last movement -- a
                                                  // PATROLLING NPCS walk stop-and-go, and the video
                                                  // caught its dot blinking through every pause

@@ -4752,7 +4752,12 @@ void scope_ab_tick(float dt) {
 } // namespace
 
 void scope_update(float dt) {
-    if (!g_cfg.enabled || !g_cfg.scope_enabled || !g_cfg.scope_lens || s_phys_failed) return;
+    if (!g_cfg.enabled || !g_cfg.scope_enabled || !g_cfg.scope_lens || s_phys_failed) {
+        // Off must mean off even mid-aim: a lens switched off while showing kept its last image
+        // and its capture running, because this return used to skip the hide below.
+        if (s_active) { set_hidden(s_lens, true); set_hidden(s_ret, true); set_capture_enabled(false); s_active = false; }
+        return;
+    }
     if (g_cfg.scope_cfg_count <= 0) return;   // no scopewpn= entries: this path builds nothing, the pane path above is the scope
     cvar_dump_once();
     apply_sep_trans();
