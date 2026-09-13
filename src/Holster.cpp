@@ -132,7 +132,10 @@ API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
 }
 
 void resolve_grenade_meshes() {
-    const bool want_mag = g_cfg.reload_mag != 0 && !s_mag_search_done;
+    // reload_vr too: with VR reload off the mag marker can never leave Idle, so the mag half of the
+    // survey (lowercasing every StaticMesh name + up to 40 log lines) would run to feed a marker
+    // that never shows. Matches the want_mag_mark gate at the call site.
+    const bool want_mag = g_cfg.reload_mag != 0 && g_cfg.reload_vr && !s_mag_search_done;
     if (s_mesh_frag.get() != nullptr && s_mesh_plasma.get() != nullptr && !want_mag) return;
     auto* arr = API::get()->get_uobject_array();
     if (arr == nullptr) return;
@@ -558,8 +561,17 @@ void holster_update(float dt) {
     // cadence the value can change. Placement: zone offsets are HEAD-frame; head->room is the
     // inverse of the rotation above (rx = hx*c + hz*s, rz = -hx*s + hz*c), then the palette's
     // room->world -- the same transform that puts the rendered gun on the hand on foot.
-    const bool want_gren_marks = g_cfg.holster_markers != 0;
-    const bool want_mag_mark   = g_cfg.reload_mag != 0;
+    // Only survey+spawn markers that can ACTUALLY be shown under the current config. This gate is
+    // load-bearing for perf: resolve_grenade_meshes() walks the whole ~290k UObject array (measured
+    // 65-100 ms) and repeats every 120 ticks until every wanted marker exists -- forever, in a
+    // level with no matching StaticMesh. Under the shipped defaults (holstermarkers=1,
+    // holstergrenades=0, reloadvr=0) NONE of these markers can ever display, so the sweep was pure
+    // cost. Grenade pouches show only in always-on preview (markers==2) or when the grenade grab is
+    // enabled (holstergrenades, which is what makes a pouch "approachable"); the mag marker shows
+    // only once reloadvr lets the reload state leave Idle.
+    const bool want_gren_marks = (g_cfg.holster_markers == 2)
+                              || (g_cfg.holster_markers != 0 && g_cfg.holster_grenades);
+    const bool want_mag_mark   = (g_cfg.reload_mag != 0) && g_cfg.reload_vr;
     if ((want_gren_marks || want_mag_mark)
         && ((want_gren_marks && (s_pouch_l.get() == nullptr || s_pouch_r.get() == nullptr || s_hand_g.get() == nullptr))
             || (want_mag_mark && s_mag_marker.get() == nullptr))
