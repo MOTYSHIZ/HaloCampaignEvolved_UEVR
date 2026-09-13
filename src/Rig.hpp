@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace halo {
@@ -215,6 +216,50 @@ bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
 // returns the COMPONENT'S OWN location, so a mis-built FName makes every lookup succeed with the
 // wrong answer. The implementation builds the FName correctly; see its comment.
 bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3* out);
+
+// SHOT-POINT: resolve the equipped FP weapon's authored muzzle marker (fx_muzzleflash) to a WORLD
+// position, read off the weapon's own skeletal mesh via UE reflection. Returns false when no weapon
+// is equipped or no mesh component carries the marker -- the caller then falls back (grip+offset
+// with a weapon, the controller aim path with none). See Rig.cpp; docs\BLAM_AIM_FINDINGS.md 2026-09-10.
+// out_fwd (optional) gets the marker's skeletal-mesh COMPONENT world forward (GetForwardVector) --
+// the practical bore direction, since this build exposes no socket-rotation UFUNCTION (only
+// GetSocketLocation), and the mesh's own forward is a cleaner axis than an FX marker's anyway.
+bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd = nullptr);
+// Dev-only readout of the resolution above, throttled by shotaimlog. No-op in release / when off.
+void shotpoint_dev_readout(unsigned tick);
+#if HALO_VR_DEV
+// Dev/recon: measure fx_muzzleflash as a per-weapon-class constant in the weapon's OWN ROOT frame
+// (muzzle position + bore direction), with a stability gate. Call once per tick while shotaimlog>0;
+// samples every call, logs the accumulating constant on the shotaimlog throttle and once on
+// reaching STABLE. Lane-independent -- feeds the seam's eventual per-weapon producer.
+void shotpoint_asset_dev(unsigned tick);
+#endif
+// Sample the weapon-mesh bore forward and publish it. Call ONCE PER TICK (guard with g_cfg.shot_aim
+// so it costs nothing when the feature is off) -- it does reflection and must not run at aim rate.
+void shotpoint_tick();
+// Read the published bore forward (UE world). False when unavailable, so the caller keeps its own
+// direction (the controller path / unarmed path). Cheap: atomics only, safe from the aim hook.
+bool shotpoint_dir(Vec3* out_fwd);
+// FROZEN per-weapon controller-local bore (animation-immune, roll-invariant), published each tick.
+// True + out set when the held weapon has a captured bore_local; the aim path then rotates it by
+// the live controller pose and re-adds the snap turn. False -> caller uses the live-bore bootstrap.
+bool shotpoint_bore_local(Vec3* out);
+// Manual override: force-capture the currently held weapon's bore at the current pose (Page Down).
+// Available in ANY build (the AUTO capture is dev-only). Returns false if no weapon/marker or the
+// self-check rejects the transform. Point steady where you want, then trigger.
+bool shotpoint_capture_held();
+
+// PERSISTENCE of the per-weapon placement-independent intrinsic (+ the AR default) in the calib
+// file, so a capture survives across sessions (hold each weapon once, ever). kShotFixSchema stamps
+// the frame convention: bump it if the capture math changes and old stored values are auto-dropped
+// (forcing a recapture) rather than mis-applied -- the same file-borne-stamp discipline as wpnfix.
+// Config calls the setters on load and shotpoint_emit_calib() on save; all compile in every build
+// (only the auto-capture that PRODUCES values is dev-only).
+constexpr int kShotFixSchema = 2;   // 2: plain controller-frame bore_local (1 was the withdrawn End-stripped "intrinsic")
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
+void shotpoint_set_default(float x, float y, float z);
+void shotpoint_emit_calib(std::FILE* f);
+bool shotpoint_schema_ok(int ver);   // so a caller can gate on the schema without the constant
 
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);

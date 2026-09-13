@@ -22,6 +22,14 @@
 namespace halo {
 using uevr::API;
 
+// Defined in Rig.cpp -- shot-point bore persistence (load setters + calib emit + schema gate).
+// Forward-declared rather than including Rig.hpp, which would pull the engine API into this
+// foundational, engine-API-light file.
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
+void shotpoint_set_default(float x, float y, float z);
+void shotpoint_emit_calib(std::FILE* f);
+bool shotpoint_schema_ok(int ver);
+
 Config g_cfg{};
 
 // Every smoothing setting used to be a fraction of the gap closed PER CALL, which is not a filter
@@ -1047,6 +1055,41 @@ const WeaponGrip* weapon_grip_for(const char* class_name) {
 // The handfix schema stamp currently in force, PER FILE, reset with the wpnfix one below.
 static int s_handfix_file_ver = 0;
 
+// Shot-point per-weapon bore persistence stamp, PER FILE (reset with the others below).
+static int s_shotfix_file_ver = 0;
+
+// shotfix=<weaponClass>,ix,iy,iz -- the placement-independent intrinsic (Rig.cpp owns the frame).
+// shotfixdefault=ix,iy,iz -- the AR reference default. Stamp-gated like wpnfix: a file whose
+// shotfixver does not match this build's convention has its lines DROPPED, not applied in the
+// wrong frame. A short line is dropped rather than half-applied.
+static bool parse_shot_fix(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (!shotpoint_schema_ok(s_shotfix_file_ver)) return true;
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    char* ctx = nullptr;
+    const char* cls = strtok_s(buf, ",", &ctx);
+    const char* xs  = strtok_s(nullptr, ",", &ctx);
+    const char* ys  = strtok_s(nullptr, ",", &ctx);
+    const char* zs  = strtok_s(nullptr, ",", &ctx);
+    if (cls == nullptr || cls[0] == 0 || xs == nullptr || ys == nullptr || zs == nullptr) return true;
+    shotpoint_set_intrinsic(cls, (float)atof(xs), (float)atof(ys), (float)atof(zs));
+    return true;
+}
+static bool parse_shot_default(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (!shotpoint_schema_ok(s_shotfix_file_ver)) return true;
+    char buf[128] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    char* ctx = nullptr;
+    const char* xs = strtok_s(buf, ",", &ctx);
+    const char* ys = strtok_s(nullptr, ",", &ctx);
+    const char* zs = strtok_s(nullptr, ",", &ctx);
+    if (xs == nullptr || ys == nullptr || zs == nullptr) return true;
+    shotpoint_set_default((float)atof(xs), (float)atof(ys), (float)atof(zs));
+    return true;
+}
+
 // handfix=qx,qy,qz,qw,tx,ty,tz -- the SUPPORT HAND's rigid trim, in that controller's own frame.
 //
 // Written only by the menu-armed capture (halo_vr_calib.cfg); there is no shipped baseline, because
@@ -1334,6 +1377,9 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "wpnfixver")     == 0) { s_wpnfix_file_ver     = (int)v; return true; }
     if (_stricmp(key, "handfix")       == 0) { return parse_hand_fix(val); }
     if (_stricmp(key, "handfixver")    == 0) { s_handfix_file_ver    = (int)v; return true; }
+    if (_stricmp(key, "shotfixver")    == 0) { s_shotfix_file_ver    = (int)v; return true; }
+    if (_stricmp(key, "shotfix")       == 0) { return parse_shot_fix(val); }
+    if (_stricmp(key, "shotfixdefault")== 0) { return parse_shot_default(val); }
     if (_stricmp(key, "armkeeppose")   == 0) { g_cfg.arm_keep_pose   = (v != 0.0); return true; }
     if (_stricmp(key, "armhidemode")    == 0) { g_cfg.arm_hide_mode  = (int)v; return true; }
     if (_stricmp(key, "armhidebone")    == 0) {
@@ -1586,6 +1632,7 @@ bool parse_config_file(const char* path) {
     // halo_vr_calib.cfg today, but "each file stamps its own lines" has to hold unconditionally or
     // it holds for nothing -- the wpnfix note above is the whole argument.
     s_handfix_file_ver = 0;
+    s_shotfix_file_ver = 0;
     // Is THIS the capture file? Decides whether the entries it contributes are the player's own and
     // therefore belong in the rewrite -- see WeaponFix::captured.
     s_wpnfix_from_capture =
@@ -1665,6 +1712,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimreticulesrc") == 0) g_cfg.aim_reticule_src = (int)v;
         else if (_stricmp(key, "aimhidenative") == 0) g_cfg.aim_hide_native = (v != 0.0);
         else if (_stricmp(key, "aimsrc")       == 0) g_cfg.aim_src         = (int)v;
+        else if (_stricmp(key, "shotaim")      == 0) g_cfg.shot_aim         = (int)v;
+        else if (_stricmp(key, "shotaimdir")   == 0) g_cfg.shot_aim_dir     = (int)v;
+        else if (_stricmp(key, "shotaimlog")   == 0) g_cfg.shot_aim_log     = (int)v;
         else if (_stricmp(key, "aimrolllog")   == 0) g_cfg.aim_roll_log    = (int)v;
         else if (_stricmp(key, "aimreticuletrace") == 0) g_cfg.aim_reticule_trace = (v != 0.0);
         else if (_stricmp(key, "aimreticuletracemax") == 0)
@@ -1724,6 +1774,15 @@ bool parse_config_file(const char* path) {
     else if (_stricmp(key, "killkey")    == 0) g_cfg.kill_key    = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "aimoffyaw")   == 0) { g_cfg.aim_off_yaw   = (float)v; g_cfg.aim_off_valid = true; }
         else if (_stricmp(key, "aimoffpitch") == 0) { g_cfg.aim_off_pitch = (float)v; g_cfg.aim_off_valid = true; }
+        else if (_stricmp(key, "aimfix")      == 0) {
+            // Comma list, so it needs the raw val string, not the single-float v. sscanf leaves
+            // aim_fix untouched (and aim_fix_valid false) unless all four components parse.
+            float a, b, c, d;
+            if (sscanf(val, "%f,%f,%f,%f", &a, &b, &c, &d) == 4) {
+                g_cfg.aim_fix[0] = a; g_cfg.aim_fix[1] = b; g_cfg.aim_fix[2] = c; g_cfg.aim_fix[3] = d;
+                g_cfg.aim_fix_valid = true;
+            }
+        }
         else if (_stricmp(key, "calibrelative") == 0) g_cfg.calib_relative = (v != 0.0);
         else if (_stricmp(key, "calibver")      == 0) g_cfg.calib_ver      = (int)v;
         else if (_stricmp(key, "aimcalibver")   == 0) g_cfg.aim_calib_ver  = (int)v;
@@ -2013,6 +2072,15 @@ void write_calib_file() {
             g_cfg.aim_calib_ver, g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
     }
 
+    if (g_cfg.aim_fix_valid) {
+        fprintf(f,
+            "# RIGID controller-frame hand-to-aim correction (quaternion x,y,z,w), right-multiplied\r\n"
+            "# onto the controller pose so it rolls with the wrist like the gun does. Roll-invariant,\r\n"
+            "# unlike aimoffyaw/aimoffpitch. A measurement -- do not hand-edit.\r\n"
+            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
+    }
+
     if (g_pivot_from_calib) {
         fprintf(f,
             "# Pivot MEASURED from two calibration samples -- pivauto is off so the socket\r\n"
@@ -2063,6 +2131,9 @@ void write_calib_file() {
             g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up,
             g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
     }
+    // Shot-point per-weapon bores (+ AR default), placement-independent. Rig.cpp owns the cache and
+    // emits shotfixver + the lines; this keeps the calib file the one home for captured calibration.
+    shotpoint_emit_calib(f);
     fclose(f);
 }
 

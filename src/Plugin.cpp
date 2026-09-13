@@ -6072,6 +6072,13 @@ void update() {
     // first placement at the end of the tick would never run on exactly those ticks. It consumes
     // the ray scope_notice_ray() deposited LAST tick, so pane placement trails the reticule by
     // one ~32 Hz tick -- invisible next to the smoothing already on the reticule itself.
+
+    // SHOT-POINT: sample the weapon-mesh bore forward once per tick and publish it, so the aim law
+    // (which runs far faster, in the XInput hook) reads an atomic instead of doing reflection. Only
+    // when the feature is on -- costs nothing on a stock profile. Reflection, so it sits here on the
+    // tick with the rest of the rig reads, never in the aim hot path (the two-clocks rule).
+    if (g_cfg.shot_aim) halo::shotpoint_tick();
+
 #if HALO_VR_DEV
     // SCOPEDEV state line, ~2 s: every input the scope's gates consume, so a dead pane is
     // explainable from the log alone (the aim-servo `blocked(reason)` idea, applied here).
@@ -6084,6 +6091,16 @@ void update() {
                              (int)g_in_menu.load(), (int)g_stick_mode.load(),
                              (int)g_cfg.scope_dev_ray, (int)g_cfg.scope_enabled);
     }
+    // SHOTPOINT readout (shotaimlog>0, dev cfg): confirm the fx_muzzleflash socket read live and
+    // report the marker's world position, so the shot-point aim source is designed from a
+    // measurement rather than a guess. Reads only -- it never touches aim.
+    halo::shotpoint_dev_readout(tick);
+#if HALO_VR_DEV
+    // Per-weapon-class asset measurement (muzzle + bore in the weapon-root frame), shotaimlog-gated.
+    // Every tick while measuring so the stability window fills; the function throttles its own log.
+    halo::shotpoint_asset_dev(tick);
+#endif
+
     // SCOPE DEV RAY (scopedevray=1, dev cfg): synthesize the ray from the RENDERED VIEW instead of
     // the controller. Exists because the SimVR null driver never validates the controller aim
     // pose, so the on-foot reticule path -- the scope's real ray source -- stays parked and the
@@ -6431,9 +6448,26 @@ void update() {
         // alone is not the hold; the mode is the half that a right trigger or Cancel can clear.
         halo::g_hand_calib_held.store(menu_mode == 3 && !menu_lt, std::memory_order_relaxed);
 
-        const bool aim_down = (key_focus && (g_cfg.aim_calib_key != 0) &&
-                               ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0)) ||
-                              (menu_mode == 2 && !menu_lt);
+        bool aim_down = (key_focus && (g_cfg.aim_calib_key != 0) &&
+                         ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0)) ||
+                        (menu_mode == 2 && !menu_lt);
+
+        // SHOT-POINT MANUAL CAPTURE. When shot-point aim is on, Page Down force-captures the held
+        // weapon's bore at the current pose (point steady where you want, tap) and the LEGACY aim
+        // calibration is held INERT -- it maps the controller reference, which shot-point aim does
+        // not use. The auto-capture (dev) covers the common case; this is the deliberate override
+        // and the ONLY capture path in release. Edge-triggered so a hold captures once.
+        if (g_cfg.shot_aim) {
+            static bool s_shotcap_was = false;
+            if (aim_down && !s_shotcap_was) {
+                API::get()->log_info(halo::shotpoint_capture_held()
+                    ? "[Halo-CampE-UEVR] SHOTFIX: manual capture via Page Down"
+                    : "[Halo-CampE-UEVR] SHOTFIX: manual Page Down -- no weapon/marker to capture");
+            }
+            s_shotcap_was = aim_down;
+            aim_down = false;   // keep the legacy calibration gesture below inert
+        }
+
         const bool aim_was  = g_aimcal_held.exchange(aim_down);
         // Publish it: blamangles drives the sim's angular control state from a sim-thread hook in
         // BlamAim.cpp, which cannot see this file's anonymous namespace. Without this the actuator
@@ -7513,7 +7547,10 @@ void update() {
         }
     }
 
-    Vec3 fwd = quat_forward(cq);
+    // Routed through the same controller-frame correction as derive_ctrl_angles (identity by
+    // default): this inline copy feeds the calibration reference and the stick path, so it must
+    // apply aim_fix or the reference would be captured in a different frame than the setpoint.
+    Vec3 fwd = quat_forward(halo::apply_aim_fix(cq));
 
     // ---- THE TWO-HANDED HOLD, on the tick-side copy of the aim derivation.
     //
@@ -7597,6 +7634,39 @@ void update() {
     float ctrl_yaw   = wrap180(std::atan2(fwd.x, -fwd.z) * RAD2DEG
                                + g_cfg.aim_turn * g_turn_offset.load());
     float ctrl_pitch = std::asin(clampf(fwd.y, -1.0f, 1.0f)) * RAD2DEG;
+
+    // SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): override the controller-derived angle with
+    // the weapon-mesh bore. THIS MUST MATCH derive_ctrl_angles' branch exactly, because this inline
+    // copy (a deliberate repeat, see the note at the top of this second entry point) is what feeds
+    // the CALIBRATION REFERENCE captured just below AND the stick path, while derive_ctrl_angles
+    // feeds the direct-drive setpoint. If only one used the mesh, the reference and the setpoint
+    // would describe different directions and the gap would read as a fixed aim offset that
+    // recalibration could not remove. Mesh forward is WORLD space -> UE-convention angles, and
+    // takes NO turn offset (it already reflects the turned world). Cascade: unavailable -> keep the
+    // controller angle above (also the unarmed path).
+    if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+        Vec3 bl{};
+        if (halo::shotpoint_bore_local(&bl)) {
+            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose,
+            // re-add the snap turn. Animation-immune + roll-invariant. cq is the raw captured pose.
+            // Feeds ctrl_yaw/pitch so the calibration reference and stick path see the same frame.
+            Vec3 bvr = quat_rotate(cq, bl);
+            // TWO-HAND: apply the same swing the mesh gets, gated exactly like the normal path
+            // above (not while capturing the reference), so gun and aim stay together.
+            if (!capturing_reference) halo::two_hand_bend_forward(&bvr);
+            ctrl_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
+            ctrl_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+        } else {
+            Vec3 mf{};
+            if (halo::shotpoint_dir(&mf)) {   // bootstrap: live mesh bore (follows animation)
+                const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
+                if (ml > 1e-3f) {
+                    ctrl_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
+                    ctrl_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+                }
+            }
+        }
+    }
 
     // TARGET SMOOTHING -- filter WHERE WE ARE ASKED TO POINT, not how fast we get there.
     //

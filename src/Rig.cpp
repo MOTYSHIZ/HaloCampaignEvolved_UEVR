@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include "ArmDriver.hpp"  // the palette driver owns the weapon too; do not attach under it
 #include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
+#include "MotionAimControl.hpp"  // get_pose(), g_turn_offset -- the frozen bore capture works in the aim frame
 
 #include <cstdio>
 #include <cstring>
@@ -757,6 +758,393 @@ bool call_socket_location(API::UObject* comp, const wchar_t* socket, Vec3* out) 
     *out = Vec3{(float)d[0], (float)d[1], (float)d[2]};
     return true;
 }
+
+// ---------------------------------------------------------------- SHOT POINT (muzzle marker)
+// The equipped weapon's authored muzzle marker in WORLD space. Halo weapons carry an
+// "fx_muzzleflash" marker on their own skeletal model (verified per-weapon 2026-07-27; the FX
+// system spawns muzzle flashes at it by name via BPFL_BlamEffectUtilities.RandomMuzzleFlashSocketNames).
+// We read it the fastest, most honest rung of the cascade -- UE reflection GetSocketLocation with a
+// REAL FName -- exactly where the MCP inspector could not (its FName args marshal to None). The
+// weapon is a separate actor attached at PrimaryWeapon; the marker lives on its skeletal mesh
+// COMPONENT, whose class we do NOT hardcode (a wrong class name is the one-build constant that
+// rots) -- every mesh-like component is probed and the first that owns the marker wins.
+constexpr const wchar_t* kMuzzleMarker = L"fx_muzzleflash";
+
+// GetSocketLocation returns the component's OWN origin for a socket it does not have (the None trap
+// call_socket_location documents). So the marker EXISTS on this component iff its lookup differs
+// from a deliberately-bogus name's lookup -- otherwise both merely returned the origin.
+static bool socket_on_component(API::UObject* comp, const wchar_t* socket, Vec3* out) {
+    Vec3 at{}, origin{};
+    if (!call_socket_location(comp, socket, &at)) return false;
+    if (!call_socket_location(comp, L"__halo_vr_nomatch__", &origin)) return false;
+    const float dx = at.x - origin.x, dy = at.y - origin.y, dz = at.z - origin.z;
+    if ((dx * dx + dy * dy + dz * dz) < 1e-6f) return false;   // socket absent: both are the origin
+    *out = at;
+    return true;
+}
+
+// Probe the weapon actor's own component arrays for whichever mesh carries `socket`.
+static API::UObject* weapon_marker_component(API::UObject* wpn, const wchar_t* socket, Vec3* out) {
+    if (wpn == nullptr) return nullptr;
+    for (const wchar_t* arrp : { L"BlueprintCreatedComponents", L"InstanceComponents" }) {
+        auto* arr = wpn->get_property_data<FRawArrayRO>(arrp);
+        if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) continue;
+        if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) continue;
+        auto** elems = reinterpret_cast<API::UObject**>(arr->data);
+        if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) continue;
+        for (int32_t i = 0; i < arr->num; ++i) {
+            auto* c = elems[i];
+            if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
+            if (class_name_of(c).find(L"Mesh") == std::wstring::npos) continue;  // only meshes have sockets
+            if (socket_on_component(c, socket, out)) return c;
+        }
+    }
+    return nullptr;
+}
+
+bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) return false;
+    Vec3 p{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
+    if (comp == nullptr) return false;
+    if (out_pos) *out_pos = p;
+    if (out_fwd) {
+        Vec3 f{};
+        // GetForwardVector: the component's world +X. This build has no socket-rotation UFUNCTION,
+        // so the mesh component forward stands in for the muzzle's authored forward. Zeroed on a
+        // failed read so the caller can tell "no direction" from a real one.
+        *out_fwd = call_ret_vec3(comp, L"GetForwardVector", &f) ? f : Vec3{0.0f, 0.0f, 0.0f};
+    }
+    return true;
+}
+
+// Published at TICK rate by shotpoint_tick(), read at aim rate by derive_ctrl_angles -- the
+// two-clocks rule: the mesh-forward read is reflection (GetSocketLocation x2 + GetForwardVector)
+// and belongs on the ~32 Hz tick; the aim law runs far faster and must not do reflection.
+static std::atomic<float> g_sp_fx{0.0f}, g_sp_fy{0.0f}, g_sp_fz{0.0f};
+static std::atomic<bool>  g_sp_fwd_valid{false};
+
+// FROZEN per-weapon bore, in the AIM CONTROLLER's own VR-local frame (snap-turn removed), captured
+// while the weapon rigidly tracks the hand. shotpoint_tick publishes it AS-IS to g_bl_*; the aim
+// hook rotates it by the LIVE controller pose and re-adds the snap turn -> FROZEN (immune to
+// reload/recoil -- no mesh read at aim time) and ROLL-INVARIANT. An End recalibration is handled by
+// RE-CAPTURE (the auto gate re-stores when the value drifts), not by any placement transform.
+// Populated in DEV (auto-capture at a steady hold); consumed in any build.
+static std::unordered_map<std::wstring, Vec3> g_bore_cache;
+static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
+static std::atomic<bool>  g_bl_valid{false};
+
+// THE DEFAULT for uncaptured weapons is the ASSAULT RIFLE's bore_local (the user's chosen
+// reference): a weapon with no capture of its own aims with the AR's forward instead of the
+// animation-following live-mesh bootstrap. Set when the AR is captured. In this dev build it exists
+// once the AR has been held steady once (in-memory); persisting it / baking it as a compiled
+// constant so it works with zero captures and in release is the remaining step.
+static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
+static std::atomic<bool>  g_def_valid{false};
+
+void shotpoint_tick() {
+    Vec3 p{}, f{};
+    if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
+        g_sp_fx.store(f.x); g_sp_fy.store(f.y); g_sp_fz.store(f.z);
+        g_sp_fwd_valid.store(true);
+    } else {
+        g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
+    }
+
+    // Publish the stored controller-frame bore for the held weapon (own capture, else AR default).
+    // The value is used AS-IS: the aim hook rotates it by the live controller pose. Captures are
+    // MANUAL (Page Down); after a grip change, Page Down the affected weapon to re-capture.
+    bool have = false;
+    if (auto* wpn = fp_weapon_actor()) {
+        auto it = g_bore_cache.find(class_name_of(wpn));
+        if (it != g_bore_cache.end()) {
+            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z); have = true;
+        } else if (g_def_valid.load()) {
+            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load()); have = true;
+        }
+    }
+    g_bl_valid.store(have);
+}
+
+bool shotpoint_dir(Vec3* out_fwd) {
+    if (!g_sp_fwd_valid.load()) return false;
+    if (out_fwd) *out_fwd = Vec3{g_sp_fx.load(), g_sp_fy.load(), g_sp_fz.load()};
+    return true;
+}
+
+bool shotpoint_bore_local(Vec3* out) {
+    if (!g_bl_valid.load()) return false;
+    if (out) *out = Vec3{g_bl_x.load(), g_bl_y.load(), g_bl_z.load()};
+    return true;
+}
+
+// ---- PERSISTENCE (calib file). Class names are ASCII (BP_FP_...), so narrow<->wide is a byte cast.
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z) {
+    if (cls == nullptr || cls[0] == 0) return;
+    std::wstring w;
+    for (const char* p = cls; *p; ++p) w.push_back((wchar_t)(unsigned char)*p);
+    g_bore_cache[w] = Vec3{x, y, z};
+}
+
+void shotpoint_set_default(float x, float y, float z) {
+    g_def_x.store(x); g_def_y.store(y); g_def_z.store(z);
+    g_def_valid.store(true);
+}
+
+bool shotpoint_schema_ok(int ver) { return ver == kShotFixSchema; }
+
+void shotpoint_emit_calib(std::FILE* f) {
+    if (f == nullptr) return;
+    if (g_bore_cache.empty() && !g_def_valid.load()) return;
+    std::fprintf(f,
+        "# Shot-point per-weapon bore, in the aim controller's frame. shotfixver stamps the frame\r\n"
+        "# convention and must stay ABOVE the lines it covers. A measurement -- do not hand-edit.\r\n"
+        "# Delete these lines (or recalibrate End and hold steady) to recapture.\r\n"
+        "shotfixver=%d\r\n", kShotFixSchema);
+    for (const auto& kv : g_bore_cache) {
+        std::string n;
+        for (wchar_t c : kv.first) n.push_back((char)c);
+        std::fprintf(f, "shotfix=%s,%.5f,%.5f,%.5f\r\n", n.c_str(),
+                     kv.second.x, kv.second.y, kv.second.z);
+    }
+    if (g_def_valid.load()) {
+        std::fprintf(f, "shotfixdefault=%.5f,%.5f,%.5f\r\n",
+                     g_def_x.load(), g_def_y.load(), g_def_z.load());
+    }
+}
+
+void shotpoint_dev_readout(unsigned tick) {
+#if HALO_VR_DEV
+    if (g_cfg.shot_aim_log <= 0) return;
+    if ((tick % (unsigned)g_cfg.shot_aim_log) != 0) return;
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: no weapon equipped -> controller aim path (unchanged)");
+        return;
+    }
+    const std::wstring wc = class_name_of(wpn);
+    Vec3 p{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &p);
+    if (comp != nullptr) {
+        // ALL THREE component axes, each as UE-convention game angles (yaw about +Z, +X forward).
+        // This game uses NON-STANDARD axis conventions -- the scope pane's aim axis turned out to be
+        // GetUpVector, not GetForwardVector (ScopeLayer.hpp) -- so which axis is the BORE cannot be
+        // assumed. Log all three; in-headset, aim at a distant reference and whichever axis's
+        // yaw/pitch matches where you are pointing IS the bore. (SimVR cannot answer this: its idle
+        // pose leaves the gun lowered, so the axes do not point where the player would aim.)
+        auto ue = [](const Vec3& v, float* y, float* pt) {
+            *y  = std::atan2(v.y, v.x) * RAD2DEG;
+            *pt = std::asin(clampf(v.z, -1.0f, 1.0f)) * RAD2DEG;
+        };
+        Vec3 vf{}, vu{}, vr{};
+        const bool hf = call_ret_vec3(comp, L"GetForwardVector", &vf);
+        const bool hu = call_ret_vec3(comp, L"GetUpVector",      &vu);
+        const bool hr = call_ret_vec3(comp, L"GetRightVector",   &vr);
+        float fy=0,fp=0,uy=0,up=0,ry=0,rp=0;
+        if (hf) ue(vf,&fy,&fp);  if (hu) ue(vu,&uy,&up);  if (hr) ue(vr,&ry,&rp);
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] SHOTPOINT: '%ls' marker '%ls' on %ls | pos (%.1f,%.1f,%.1f) | "
+            "FWD y%.1f p%.1f | UP y%.1f p%.1f | RIGHT y%.1f p%.1f | have f%d u%d r%d",
+            wc.c_str(), kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z,
+            fy, fp, uy, up, ry, rp, (int)hf, (int)hu, (int)hr);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: weapon '%ls' has NO '%ls' marker on any mesh comp -> grip+offset fallback",
+                             wc.c_str(), kMuzzleMarker);
+    }
+#else
+    (void)tick;
+#endif
+}
+
+// ---------------------------------------------------------------- SHOT-POINT ASSET MEASUREMENT
+// Measure fx_muzzleflash ONCE PER WEAPON CLASS as a constant in the weapon's OWN ROOT frame:
+// the muzzle POSITION (cm) and the bore DIRECTION, both expressed relative to the weapon actor's
+// root component rather than the world. That makes them lane-independent -- a property of the
+// asset, not of how any lane places the weapon -- so the same numbers drive the rig lane and the
+// palette lane. Combined with the weapon's placement (socket attach in the rig lane, the palette
+// grip in the palette lane) they reconstruct the world muzzle and bore, which is what the seam's
+// eventual producer needs: bore-relative-to-root x root-relative-to-controller = the aim_fix.
+//
+// It is exact only at REST: idle sway and recoil animate the mesh relative to the root, so a
+// sample taken mid-animation is off. The stability gate is the whole point -- accumulate across
+// samples, track the max deviation from the running mean, and only trust the constant once it has
+// held still (low deviation over enough samples). A moving reading is visibly unstable and says so.
+//
+// Dev/recon only (#if HALO_VR_DEV, gated on shotaimlog): reflection every tick while measuring.
+#if HALO_VR_DEV
+struct AssetMeasure {
+    Vec3  muzzle_mean{0, 0, 0};   // root-local, cm
+    Vec3  bore_mean{0, 0, 0};     // root-local, ~unit (mean of unit samples)
+    int   n = 0;
+    float bore_dev_max = 0.0f;    // deg, max angle of a sample off the running mean
+    float muzzle_dev_max = 0.0f;  // cm,  max distance of a sample off the running mean
+    bool  logged_stable = false;
+};
+static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
+#endif  // AssetMeasure/g_asset_cache are dev-only; the helpers + capture below are ALWAYS-compiled
+        // because the manual Page Down override (shotpoint_capture_held) needs them in release too.
+
+// Capture the FROZEN controller-local bore for the held weapon: read the aim controller pose and
+// the world bore, remove the snap turn, convert the bore into the controller's frame, and store it.
+// SELF-CHECKS by reconstructing the aim at the very same pose and comparing to the world bore; if
+// the round trip does not reproduce it (a frame or sign bug), the capture is REJECTED and logged,
+// so a bad transform fails closed onto the live-bore bootstrap instead of throwing aim off.
+//
+// Frame math, derived from the code's own conventions (verified against three reference dirs):
+//   * quat_forward is VR space: game_yaw = atan2(x,-z), game_pitch = asin(y), + aim_turn*g_turn_offset.
+//   * the mesh bore is UE world: game_yaw = atan2(y,x), game_pitch = asin(z), turn already included.
+//   * so UE_forward = (-vr.z, vr.x, vr.y), and UE->VR = (ue.y, ue.z, -ue.x).
+// Uses the CONFIGURED AIM HAND (left or right), never a hardcoded controller.
+// world bore (UE, unit) + aim controller pose -> bore in the controller's VR-local frame, snap-turn
+// removed. This value is CONSTANT while the weapon rigidly tracks the hand -- it is what we freeze.
+static Vec3 bore_to_controller_local(const Quat& cq, const Vec3& bore_ue) {
+    const float t  = g_cfg.aim_turn * g_turn_offset.load();
+    const float tr = t * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
+    const Vec3 b_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };  // strip snap turn (UE Z)
+    const Vec3 bore_vr{ b_nt.y, b_nt.z, -b_nt.x };                                            // UE fwd -> VR fwd
+    return quat_rotate(quat_conj(cq), bore_vr);
+}
+// controller-local bore + current pose -> game angles, EXACTLY what the aim consumer produces.
+static void controller_local_to_game(const Quat& cq, const Vec3& bl, float* yaw, float* pit) {
+    const Vec3 bvr = quat_rotate(cq, bl);
+    *yaw = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
+    *pit = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+}
+
+// Capture the frozen controller-frame bore for the held weapon (force-overwrite). Self-checks by
+// reconstructing at this pose; rejects a bad transform. Uses the configured aim hand (left or right).
+static bool capture_bore_local(API::UObject* wpn) {
+    if (wpn == nullptr) return false;
+    Vec3 mpos{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &mpos);
+    if (comp == nullptr) return false;
+    Vec3 bore_ue{};
+    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_ue)) return false;
+    const float blen = std::sqrt(bore_ue.x*bore_ue.x + bore_ue.y*bore_ue.y + bore_ue.z*bore_ue.z);
+    if (blen < 1e-4f) return false;
+    bore_ue.x /= blen; bore_ue.y /= blen; bore_ue.z /= blen;
+
+    const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                             : API::VR::get_right_controller_index();
+    if (ridx < 0) return false;
+    Vec3 cpos{}; Quat cq{};
+    if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
+
+    const Vec3 bore_local = bore_to_controller_local(cq, bore_ue);
+
+    // Self-check: reconstruct at THIS pose; must reproduce the live world bore's game angles.
+    float rec_yaw, rec_pit; controller_local_to_game(cq, bore_local, &rec_yaw, &rec_pit);
+    const float bore_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
+    const float bore_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
+    const float dyaw = std::fabs(wrap180(rec_yaw - bore_yaw));
+    const float dpit = std::fabs(rec_pit - bore_pit);
+    if (dyaw > 2.0f || dpit > 2.0f) {
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: REJECT '%ls' -- self-check off yaw=%.2f pit=%.2f",
+                             class_name_of(wpn).c_str(), dyaw, dpit);
+        return false;
+    }
+    const std::wstring cn = class_name_of(wpn);
+    g_bore_cache[cn] = bore_local;
+    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f) at bore "
+                         "yaw=%.1f pit=%.1f -- frozen aim armed",
+                         cn.c_str(), bore_local.x, bore_local.y, bore_local.z, bore_yaw, bore_pit);
+    // The AR is the reference weapon: its bore also becomes the DEFAULT for uncaptured weapons.
+    if (cn.find(L"AssaultRifle") != std::wstring::npos) {
+        g_def_x.store(bore_local.x); g_def_y.store(bore_local.y); g_def_z.store(bore_local.z);
+        g_def_valid.store(true);
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> DEFAULT for uncaptured weapons");
+    }
+    write_calib_file();   // persist (rare -- once per weapon's first stable hold, never per tick)
+    return true;
+}
+
+// Public manual override (Page Down): force-capture the held weapon now. Any build.
+bool shotpoint_capture_held() {
+    auto* wpn = fp_weapon_actor();
+    return wpn != nullptr && capture_bore_local(wpn);
+}
+
+#if HALO_VR_DEV
+void shotpoint_asset_dev(unsigned tick) {
+    if (g_cfg.shot_aim_log <= 0) return;
+
+    auto* wpn = fp_weapon_actor();
+    if (wpn == nullptr) return;
+    Vec3 mpos{};
+    auto* comp = weapon_marker_component(wpn, kMuzzleMarker, &mpos);
+    if (comp == nullptr) return;
+    Vec3 bore_ue{};
+    if (!call_ret_vec3(comp, L"GetForwardVector", &bore_ue)) return;
+    const float bl0 = std::sqrt(bore_ue.x*bore_ue.x + bore_ue.y*bore_ue.y + bore_ue.z*bore_ue.z);
+    if (bl0 < 1e-4f) return;
+    bore_ue.x /= bl0; bore_ue.y /= bl0; bore_ue.z /= bl0;
+
+    const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                             : API::VR::get_right_controller_index();
+    if (ridx < 0) return;
+    Vec3 cpos{}; Quat cq{};
+    if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return;
+
+    // THE BORE IN THE CONTROLLER'S FRAME. Constant while the weapon rigidly tracks the hand, moving
+    // during draw/recoil/reload -- so ITS variance is the right "is the player holding steady?"
+    // signal. (The first cut measured bore-vs-ROOT, which is rigidly constant -- dev=0.00 forever --
+    // so "stable" was always true and the capture fired mid-draw at whatever pose, e.g. the Magnum
+    // at 80 deg up. That is the pistol-reticle-gone bug.)
+    const Vec3 bl = bore_to_controller_local(cq, bore_ue);
+
+    constexpr float kBoreTolDeg   = 2.0f;   // window: a sample beyond this restarts the hold
+    constexpr int   kStableSamples = 30;    // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
+
+    auto ang = [](const Vec3& a, const Vec3& b) {
+        const float la = std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z), lb = std::sqrt(b.x*b.x+b.y*b.y+b.z*b.z);
+        if (la < 1e-4f || lb < 1e-4f) return 0.0f;
+        return std::acos(clampf((a.x*b.x+a.y*b.y+a.z*b.z)/(la*lb), -1.0f, 1.0f)) * RAD2DEG;
+    };
+
+    AssetMeasure& m = g_asset_cache[class_name_of(wpn)];
+
+    // Reset-on-motion window on the CONTROLLER-relative bore: a sample beyond tolerance ends the
+    // hold and restarts, so draw/recoil/reload/sway just keep restarting the counter and only a
+    // genuine steady hold (weapon rigidly tracking the hand) reaches STABLE.
+    bool broke = false;
+    if (m.n > 0) {
+        const float bdev = ang(bl, m.bore_mean);
+        if (bdev > kBoreTolDeg) broke = true;
+        else if (bdev > m.bore_dev_max) m.bore_dev_max = bdev;
+    }
+    if (m.n == 0 || broke) {
+        m.bore_mean = bl; m.n = 1; m.bore_dev_max = 0.0f; m.logged_stable = false;
+    } else {
+        ++m.n;
+        m.bore_mean.x += (bl.x - m.bore_mean.x) / m.n;
+        m.bore_mean.y += (bl.y - m.bore_mean.y) / m.n;
+        m.bore_mean.z += (bl.z - m.bore_mean.z) / m.n;
+    }
+    const bool stable = (m.n >= kStableSamples);
+
+    // AUTO-CAPTURE SCRAPPED (user, 2026-09-12): the reset-on-motion heuristic never captured
+    // reliably after a cfg change (mostly aimed too high) and was an overcomplication. Capture is
+    // now MANUAL ONLY (Page Down / shotpoint_capture_held). This window + the SHOTASSET line below
+    // stay purely as a dev diagnostic -- nothing here writes the cache.
+
+    // Log + self-verify at the throttle: recompose the window-mean bore with the CURRENT pose and
+    // compare to the LIVE world bore. ~0 at a steady hold confirms the frozen model tracks the hand;
+    // it also shows the recapture converging back to ~0 after an End change.
+    if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
+        if (stable) m.logged_stable = true;
+        float ry, rp; controller_local_to_game(cq, m.bore_mean, &ry, &rp);
+        const float live_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
+        const float live_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | boreCtrl=(%.3f,%.3f,%.3f) dev=%.2fdeg | "
+            "recompose-vs-live dyaw=%.2f dpit=%.2f",
+            class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
+            m.bore_mean.x, m.bore_mean.y, m.bore_mean.z, m.bore_dev_max,
+            wrap180(ry - live_yaw), rp - live_pit);
+    }
+}
+#endif
 
 // ---------------------------------------------------------------- debug sphere
 // Draws a marker at a WORLD position via UKismetSystemLibrary::DrawDebugSphere, so the pivot can be
