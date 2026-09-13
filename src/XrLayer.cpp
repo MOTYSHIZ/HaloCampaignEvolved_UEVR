@@ -791,6 +791,10 @@ struct Mirror {
     float alpha     = 1.0f;
     float cr = 0.35f, cg = 0.95f, cb = 1.0f;
     bool  verbose   = false;
+    // PERF gate (2026-09-12): true = copy the atlas into a swapchain image only when it CHANGED
+    // for that image (or a per-frame overlay is being re-laid); false = the pre-fix unconditional
+    // per-frame copy. Mirrored for the submit thread like everything else here. Default true.
+    bool  copy_gate = true;
     // FORCED LAYER BUDGET. 0 = use what the runtime reported. Anything else overrides it, and its
     // whole reason for existing is that a fallback nobody can force is a fallback nobody has
     // tested: `skips=0` in the state line means the capture's "previous still in flight" rung has
@@ -863,6 +867,11 @@ std::atomic<float> g_m_cmpm{0.0f};
 std::atomic<float> g_m_alpha{1.0f};
 std::atomic<float> g_m_cr{0.35f}, g_m_cg{0.95f}, g_m_cb{1.0f};
 std::atomic<bool>  g_m_verbose{false};
+std::atomic<bool>  g_m_copy_gate{true};
+
+// Render-thread-only state for the per-frame copy gate (produce_layers runs on one thread).
+bool                  g_copy_overlay_prev = false;   // was a ring/guide overlay re-laid last frame?
+std::atomic<uint32_t> g_copy_skips{0};               // whole-atlas copies the gate avoided (lifetime)
 
 Mirror mirror_load() {
     Mirror m;
@@ -876,6 +885,7 @@ Mirror mirror_load() {
     m.cb       = g_m_cb.load(std::memory_order_relaxed);
     m.verbose  = g_m_verbose.load(std::memory_order_relaxed);
     m.budget   = g_m_budget.load(std::memory_order_relaxed);
+    m.copy_gate = g_m_copy_gate.load(std::memory_order_relaxed);
     return m;
 }
 
@@ -890,6 +900,7 @@ void mirror_store(const Mirror& m) {
     g_m_cb.store(m.cb, std::memory_order_relaxed);
     g_m_verbose.store(m.verbose, std::memory_order_relaxed);
     g_m_budget.store(m.budget, std::memory_order_relaxed);
+    g_m_copy_gate.store(m.copy_gate, std::memory_order_relaxed);
     g_m_scope_ret.store(m.scope_ret, std::memory_order_relaxed);
     g_m_scope_ret_size.store(m.scope_ret_size, std::memory_order_relaxed);
     g_m_scope_ret_depth.store(m.scope_ret_depth_cm, std::memory_order_relaxed);
@@ -1172,6 +1183,8 @@ void release_d3d() {
     g_gt_fence_v = 0;
     g_gt_captures = 0;
     g_gt_skips = 0;
+    g_copy_skips.store(0, std::memory_order_relaxed);
+    g_copy_overlay_prev = false;
     g_gt_open_slot = -1;
     g_gt_recorded  = 0;
     g_gt_rec_mask  = 0;
@@ -2616,11 +2629,37 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     const bool guide_cell = from_atlas &&
                             g_tgt_live[XRLAYER_SLOT_GUIDE].load(std::memory_order_relaxed) &&
                             g_cell[XRLAYER_SLOT_GUIDE].dim > 0;
-    const bool need_copy  = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
+    // PERF (2026-09-12): the pre-fix expression was `from_atlas || dirty`, which re-copied the
+    // WHOLE atlas into the acquired swapchain image on EVERY submitted frame once anything had been
+    // captured -- measured ~90 copies/sec while the atlas actually changed only a few times a
+    // second (captures advanced ~64 per 600-tick window, and the copy NEVER skipped). That
+    // whole-image CopyResource + command-list submit + fence signal per frame is the render-thread
+    // cost a player reported as ~10-15 fps from 0.33 to 0.4. An image only NEEDS re-copying when
+    // the atlas changed for it (g_image_dirty, set on every capture) OR while a per-frame dynamic
+    // overlay is being re-laid: CopyResource wipes the whole image, so the stale-reticule ring
+    // (cell 0) and the grab guide have to be redrawn every frame they are shown. When the overlay
+    // turns OFF, the previous frame baked it in, so every image is dirtied once to erase it. This
+    // copies neither less than correctness needs nor more than the old path ever did.
+    // xrlayercopygate=0 restores the unconditional per-frame copy, live, as an escape hatch.
+    bool need_copy;
+    if (m.copy_gate) {
+        const bool overlay = ring_cell0 || guide_cell;
+        if (g_copy_overlay_prev && !overlay) {
+            for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
+        }
+        g_copy_overlay_prev = overlay;
+        need_copy = overlay || (idx < g_image_dirty.size() && g_image_dirty[idx]);
+    } else {
+        need_copy = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
+    }
     if (need_copy && idx < g_images.size()) {
         if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell) && idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
+    } else if (from_atlas) {
+        // A whole-atlas copy the gate avoided. copyskip= in the state line; if it stays 0 with
+        // art on screen, the gate is not saving anything and the diagnosis is wrong.
+        g_copy_skips.fetch_add(1, std::memory_order_relaxed);
     }
 
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -3808,6 +3847,7 @@ void xrlayer_tick() {
     m.cb       = g_cfg.xr_layer_cb;
     m.verbose  = g_cfg.xr_layer_log;
     m.budget   = g_cfg.xr_layer_budget;
+    m.copy_gate = g_cfg.xr_layer_copy_gate;
     m.scope_ret      = g_cfg.xr_layer_scope_reticle;
     m.scope_ret_size = g_cfg.xr_layer_scope_reticle_size;
     m.scope_ret_depth_cm = g_cfg.xr_layer_scope_reticle_depth;
@@ -4035,7 +4075,7 @@ void xrlayer_tick() {
         for (int s = 0; s < XRLAYER_SLOTS; ++s) if (xrlayer_slot_ready(s)) mask |= (1u << s);
 
         logf("state=%d tier=%s live=%d submitted=%u cm/m=%.1f src=%s captures=%u skips=%u "
-             "ringfalls=%u held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s "
+             "copyskip=%u ringfalls=%u held=%ums/%ums atlas=%dx%d slots=0x%03X drops=%u budget=%s "
              "cohskip=%u cohdrawn=%u drops[%s]",
              (int)g_state.load(std::memory_order_relaxed), tier_name(g_tier),
              (int)g_live.load(), submitted,
@@ -4044,6 +4084,7 @@ void xrlayer_tick() {
                  ? "ring"
                  : ((g_source_override.load(std::memory_order_relaxed) != nullptr) ? "owned" : "ring"),
              g_gt_captures, g_gt_skips,
+             g_copy_skips.load(std::memory_order_relaxed),
              g_ring_falls.load(std::memory_order_relaxed),
              g_hold_worst_ms.load(std::memory_order_relaxed),
              g_m_hold_ms.load(std::memory_order_relaxed),
@@ -4389,6 +4430,14 @@ void xrlayer_capture_submit() {
     g_gt_alloc_fence[slot] = g_gt_fence_v;
 
     ++g_gt_captures;
+    // PERF (2026-09-12): a capture just changed the atlas, so every swapchain image is now a frame
+    // behind and needs exactly ONE re-copy. produce_layers' copy gate keys on g_image_dirty; it
+    // MUST be set on every capture, not only the first (the source-override block below did that and
+    // nothing else refreshed it -- which is why the pre-fix path had to copy unconditionally). Miss
+    // this and the gate would present each image's first captured frame forever: a frozen reticule
+    // and a frozen scope pane. Game thread, same std::vector<bool> the submit thread clears; a torn
+    // bool is at worst one late/extra copy that self-corrects next capture.
+    for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
     const uint64_t now = GetTickCount64();
     const uint32_t gtick = g_game_tick.load(std::memory_order_relaxed);
     g_src_beat.store(now, std::memory_order_relaxed);

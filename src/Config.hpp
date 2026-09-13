@@ -1853,6 +1853,14 @@ struct Config {
     // the early-out. Watch drops= move in the state line.
     int   xr_layer_budget = 0;
 
+    // PERF, default ON (2026-09-12): copy the atlas into a swapchain image only when it CHANGED for
+    // that image, or while a per-frame overlay (stale-reticule ring / grab guide) is being re-laid.
+    // The pre-fix path re-copied the whole atlas every submitted frame (~90/s) though it changed a
+    // few times a second -- the render-thread cost a player reported as ~10-15 fps between 0.33 and
+    // 0.4. copyskip= in the XRLAYER state line shows the copies avoided. Set 0 to restore the old
+    // unconditional per-frame copy, live, if the reticule/guide ever ghosts or freezes.
+    bool  xr_layer_copy_gate = true;
+
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
     float rig_clamp    = 0.0f;

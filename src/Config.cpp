@@ -1068,6 +1068,7 @@ static bool parse_xrlayer_key(const char* key, double v) {
     // the runtime accepts would just make xrEndFrame reject the frame, which is a worse way to
     // learn the number than reading the ARMED line.
     if (_stricmp(key, "xrlayerbudget")   == 0) { g_cfg.xr_layer_budget    = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    if (_stricmp(key, "xrlayercopygate") == 0) { g_cfg.xr_layer_copy_gate = (v != 0.0); return true; }
     return false;
 }
 
