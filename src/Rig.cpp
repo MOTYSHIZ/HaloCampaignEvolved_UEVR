@@ -825,13 +825,13 @@ bool shotpoint_world(Vec3* out_pos, Vec3* out_fwd) {
 static std::atomic<float> g_sp_fx{0.0f}, g_sp_fy{0.0f}, g_sp_fz{0.0f};
 static std::atomic<bool>  g_sp_fwd_valid{false};
 
-// FROZEN per-weapon controller-local bore. bore_local is the bore direction in the AIM controller's
-// OWN frame (VR space, snap-turn removed) -- a per-weapon constant captured when the weapon is at
-// rest. The aim path rotates it by the LIVE controller pose and re-adds the snap turn, so the
-// result is FROZEN (immune to reload/recoil, which we then never read) and ROLL-INVARIANT (a
-// constant in the controller frame rotates with the wrist about the bore). Cache is populated only
-// in DEV (auto-capture) for now; consumed in any build (a future persisted / AR-default value works
-// in release). The held weapon's value is published to g_bl_* each tick.
+// FROZEN per-weapon bore, stored PLACEMENT-INDEPENDENT. The cache holds the bore in the PRE-END-TRIM
+// controller-local frame (UE convention): the End placement trim (mode 3: rig_dir_grip_*) is
+// STRIPPED at capture, so an End recalibration is reabsorbed by reapplying the CURRENT trim at
+// publish time -- no recapture, no aim calibration. shotpoint_tick reapplies the trim, converts to
+// VR-local, and publishes to g_bl_*; the aim hook rotates that by the LIVE controller pose and
+// re-adds the snap turn -> FROZEN (immune to reload/recoil, no mesh read) and ROLL-INVARIANT.
+// Populated in DEV (auto-capture); consumed in any build.
 static std::unordered_map<std::wstring, Vec3> g_bore_cache;
 static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
 static std::atomic<bool>  g_bl_valid{false};
@@ -853,18 +853,22 @@ void shotpoint_tick() {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
 
-    // Publish the frozen bore_local for the currently held weapon: its own capture if it has one,
-    // else the AR reference DEFAULT, else nothing (caller then uses the live-mesh bootstrap).
+    // Select the stored PLACEMENT-INDEPENDENT intrinsic (own capture, else AR default), reapply the
+    // CURRENT End trim, convert to a VR-local bore, and publish for the aim hook. Reapply uses only
+    // config (q_grip_dir) -- no live rig read -- so it stays animation-immune while tracking End
+    // recalibration. The consumer is unchanged (it rotates g_bl_* by the live cq and extracts).
     bool have = false;
+    Vec3 intrinsic{};
     if (auto* wpn = fp_weapon_actor()) {
         auto it = g_bore_cache.find(class_name_of(wpn));
-        if (it != g_bore_cache.end()) {
-            g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z);
-            have = true;
-        } else if (g_def_valid.load()) {
-            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load());
-            have = true;
-        }
+        if (it != g_bore_cache.end()) { intrinsic = it->second; have = true; }
+        else if (g_def_valid.load()) { intrinsic = Vec3{g_def_x.load(), g_def_y.load(), g_def_z.load()}; have = true; }
+    }
+    if (have) {
+        const Quat qg  = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
+        const Vec3 ble = quat_rotate(qg, intrinsic);      // reapply current End trim (UE-local)
+        const Vec3 blvr{ ble.y, ble.z, -ble.x };          // UE-local -> VR-local
+        g_bl_x.store(blvr.x); g_bl_y.store(blvr.y); g_bl_z.store(blvr.z);
     }
     g_bl_valid.store(have);
 }
@@ -1001,18 +1005,27 @@ static bool capture_bore_local(API::UObject* wpn) {
                              class_name_of(wpn).c_str(), dyaw, dpit);
         return false;
     }
+    // PLACEMENT-INDEPENDENT store: strip the End trim (mode 3 rig_dir_grip_*) so the stored value
+    // is the bore in the PRE-TRIM controller-local frame. Runtime reapplies the CURRENT trim, so an
+    // End recalibration is reabsorbed with no recapture. The trim right-multiplies the controller
+    // (q_ctrl * q_grip_dir), i.e. it lives in the UE-convention controller-local frame -- convert
+    // bore_local (VR-local) into that frame, strip, and keep it there.
+    const Vec3 ble{ -bore_local.z, bore_local.x, bore_local.y };          // VR-local -> UE-local
+    const Quat qg  = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
+    const Vec3 intrinsic = quat_rotate(quat_conj(qg), ble);
     const std::wstring cn = class_name_of(wpn);
-    g_bore_cache[cn] = bore_local;
-    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f); "
-                         "reproduces bore yaw=%.1f pit=%.1f (err yaw=%.2f pit=%.2f) -- frozen aim armed",
-                         cn.c_str(), bore_local.x, bore_local.y, bore_local.z,
+    g_bore_cache[cn] = intrinsic;
+    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' intrinsic=(%.3f,%.3f,%.3f) "
+                         "(End-independent); reproduces bore yaw=%.1f pit=%.1f (err yaw=%.2f pit=%.2f) "
+                         "-- frozen aim armed",
+                         cn.c_str(), intrinsic.x, intrinsic.y, intrinsic.z,
                          bore_yaw, bore_pit, dyaw, dpit);
-    // The AR is the reference weapon: its capture also becomes the DEFAULT for uncaptured weapons.
+    // The AR is the reference weapon: its intrinsic also becomes the DEFAULT for uncaptured weapons.
     if (cn.find(L"AssaultRifle") != std::wstring::npos) {
-        g_def_x.store(bore_local.x); g_def_y.store(bore_local.y); g_def_z.store(bore_local.z);
+        g_def_x.store(intrinsic.x); g_def_y.store(intrinsic.y); g_def_z.store(intrinsic.z);
         g_def_valid.store(true);
-        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> it is now the DEFAULT for "
-                             "uncaptured weapons");
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> its intrinsic is now the "
+                             "DEFAULT for uncaptured weapons");
     }
     return true;
 }
@@ -1121,6 +1134,35 @@ void shotpoint_asset_dev(unsigned tick) {
             class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
             m.muzzle_mean.x, m.muzzle_mean.y, m.muzzle_mean.z, byaw, bpit,
             m.bore_dev_max, m.muzzle_dev_max);
+    }
+
+    // VERIFICATION of the placement-independent recompose. The capture-time self-check is IDENTITY
+    // while End is unchanged and so cannot prove the End-accounting; this can. At rest, recompose
+    // the stored intrinsic with the CURRENT End trim + the live controller pose and compare to the
+    // LIVE world bore. dyaw/dpit stay ~0 while End is unchanged; the MEANINGFUL test is that they
+    // STAY ~0 after an End recalibration -- watch this across a real End change before trusting it.
+    if (stable) {
+        auto it = g_bore_cache.find(class_name_of(wpn));
+        if (it != g_bore_cache.end() && (tick % (unsigned)g_cfg.shot_aim_log) == 0) {
+            const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                     : API::VR::get_right_controller_index();
+            Vec3 cpos{}; Quat cq{};
+            if (ridx >= 0 && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) {
+                const Quat qg2 = rotator_to_quat(g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
+                const Vec3 ble2 = quat_rotate(qg2, it->second);
+                const Vec3 blvr{ ble2.y, ble2.z, -ble2.x };
+                const Vec3 rec = quat_rotate(cq, blvr);
+                const float t = g_cfg.aim_turn * g_turn_offset.load();
+                const float rec_yaw  = std::atan2(rec.x, -rec.z) * RAD2DEG + t;
+                const float rec_pit  = std::asin(clampf(rec.y, -1.0f, 1.0f)) * RAD2DEG;
+                const float live_yaw = std::atan2(bore_w.y, bore_w.x) * RAD2DEG;
+                const float live_pit = std::asin(clampf(bore_w.z, -1.0f, 1.0f)) * RAD2DEG;
+                API::get()->log_info("[Halo-CampE-UEVR] SHOTVERIFY: '%ls' recompose-vs-live dyaw=%.2f "
+                                     "dpit=%.2f (Endtrim p%.1f y%.1f r%.1f) -- must stay ~0 across End recalib",
+                                     class_name_of(wpn).c_str(), wrap180(rec_yaw - live_yaw), rec_pit - live_pit,
+                                     g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
+            }
+        }
     }
 }
 #endif
