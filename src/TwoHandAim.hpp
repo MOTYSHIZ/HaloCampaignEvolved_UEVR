@@ -70,6 +70,11 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick);
 bool two_hand_bend_orientation(Quat* q);
 bool two_hand_bend_forward(Vec3* fwd);
 
+// The inverse of the RIG's bend, for a direction in raw VR space: removes exactly the swing that
+// two_hand_bend_orientation() applied to the rig this tick, and nothing when twohandrig kept it from
+// applying one. Game thread, between the rig's bend and two_hand_update(). See TwoHandZoneMeas::gun1_*.
+bool two_hand_unbend_rig_forward(Vec3* fwd);
+
 // True while the hold is engaged. For the reticule policy and the reload gesture's magazine
 // suppression -- you cannot pull a magazine with both hands on the gun.
 // ---- THE REACH, for the grab guide -------------------------------------------------------------
@@ -147,6 +152,25 @@ struct TwoHandZoneMeas {
     bool grip_off_valid = false;
     Vec3 grip_off_gun{};
     Vec3 grip_off_vr{};
+
+    // ---- THE ONE-HANDED GUN'S AXES, IN RAW VR SPACE, WITH THIS TICK'S SWING TAKEN BACK OUT ------
+    //
+    // For gun mode (twohandgun), which swings the gun's own grip-to-handle vector onto the hands.
+    // Unit vectors: x down the barrel, y/z the gun's y/z -- the frame hand_gun and grip_off_gun are
+    // in, so wpngrip's y/z apply to them directly. The mapping into VR space includes a handedness
+    // flip, which is harmless: only lengths and angles of vectors built from these are used.
+    //
+    // UNSWUNG IS THE POINT. The rig composed this tick's gun with the swing published last tick, so
+    // measuring from its axes as drawn would feed every swing into the next one -- the loop that
+    // spun the sentinel beam. The rig block removes that swing with two_hand_unbend_rig_forward(),
+    // which is gated exactly like the bend it undoes.
+    //
+    // Independent of the support pose (unlike `valid` above), so a tick where the off hand drops
+    // out does not also drop the frame the remembered hand line is measured against.
+    bool gun1_valid = false;
+    Vec3 gun1_x{};
+    Vec3 gun1_y{};
+    Vec3 gun1_z{};
 };
 void two_hand_set_zone_measurement(const TwoHandZoneMeas& m);
 const TwoHandZoneMeas& two_hand_zone_measurement();
@@ -205,5 +229,9 @@ const char* two_hand_status();
 // that chain is at MSVC's 128-deep block limit and overflowing it is a fatal C1061 that points
 // nowhere near the change that caused it.
 bool two_hand_parse_key(const char* key, double value);
+
+// Put every two-hand key back to its compiled default. load_config() calls it right after resetting
+// g_cfg, so a key deleted from a file reverts on the next reload instead of lingering until restart.
+void two_hand_tuning_reset();
 
 } // namespace halo

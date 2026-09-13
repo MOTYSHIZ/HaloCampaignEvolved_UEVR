@@ -9582,6 +9582,33 @@ void update() {
                 {
                     halo::TwoHandZoneMeas meas{};
                     if (g_rigw_valid.load()) {
+                        const Quat qg{g_rigw_x.load(), g_rigw_y.load(),
+                                      g_rigw_z.load(), g_rigw_w.load()};
+
+                        // ---- THE ONE-HANDED GUN'S AXES, for two-hand gun mode. See
+                        // TwoHandZoneMeas::gun1_*. Through rig_to_vr (the blessed inverse, no hand
+                        // conversion) and then the swing this rig applied is taken back out, so the
+                        // hold measures from the gun as the aim hand alone would hold it. Normalised
+                        // because rig_to_vr also removes rig_scale.
+                        {
+                            Vec3 ax = rig_to_vr(quat_rotate(qg, Vec3{1.0f, 0.0f, 0.0f}));
+                            Vec3 ay = rig_to_vr(quat_rotate(qg, Vec3{0.0f, 1.0f, 0.0f}));
+                            Vec3 az = rig_to_vr(quat_rotate(qg, Vec3{0.0f, 0.0f, 1.0f}));
+                            halo::two_hand_unbend_rig_forward(&ax);
+                            halo::two_hand_unbend_rig_forward(&ay);
+                            halo::two_hand_unbend_rig_forward(&az);
+                            const auto unit = [](Vec3* v) {
+                                const float n = std::sqrt(v->x * v->x + v->y * v->y + v->z * v->z);
+                                if (!std::isfinite(n) || n < 1.0e-9f) return false;
+                                v->x /= n; v->y /= n; v->z /= n;
+                                return true;
+                            };
+                            if (unit(&ax) && unit(&ay) && unit(&az)) {
+                                meas.gun1_x = ax; meas.gun1_y = ay; meas.gun1_z = az;
+                                meas.gun1_valid = true;
+                            }
+                        }
+
                         const int32_t sidx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
                                                                  : API::VR::get_left_controller_index();
                         Vec3 spos{}; Quat sq{};
@@ -9591,8 +9618,6 @@ void update() {
                         // above is head-relative and must not be mixed in here.
                         if (sidx >= 0 && get_pose(sidx, &spos, &sq, /*use_aim=*/false)
                                       && get_pose(ridx, &apos, &aq, /*use_aim=*/false)) {
-                            const Quat qg{g_rigw_x.load(), g_rigw_y.load(),
-                                          g_rigw_z.load(), g_rigw_w.load()};
                             const Vec3 d{spos.x - apos.x, spos.y - apos.y, spos.z - apos.z};
                             const Vec3 v = vr_to_rig(d);              // VR offset -> world axes
                             // ZONE: origin stays on the AIM GRIP, only the AXIS becomes the gun's.
