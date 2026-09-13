@@ -7645,18 +7645,13 @@ void update() {
     // takes NO turn offset (it already reflects the turned world). Cascade: unavailable -> keep the
     // controller angle above (also the unarmed path).
     if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
-        Vec3 bl{};
-        if (halo::shotpoint_bore_local(&bl)) {
-            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose,
-            // re-add the snap turn. Animation-immune + roll-invariant. cq is the raw captured pose.
-            // Feeds ctrl_yaw/pitch so the calibration reference and stick path see the same frame.
-            Vec3 bvr = quat_rotate(cq, bl);
-            // TWO-HAND: apply the same swing the mesh gets, gated exactly like the normal path
-            // above (not while capturing the reference), so gun and aim stay together.
-            if (!capturing_reference) halo::two_hand_bend_forward(&bvr);
-            ctrl_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
-            ctrl_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
-        } else {
+        // FROZEN per-weapon bore, reconstructed on the SAME composition the rig renders the weapon
+        // with (live pose + live grip trim, snap turn re-added). Feeds ctrl_yaw/pitch so the
+        // calibration reference and stick path see the same frame as derive_ctrl_angles' setpoint --
+        // ONE shared definition in Rig.cpp, so they cannot describe different directions. two_hand =
+        // !capturing_reference: swing with the barrel, except on a reference-capture tick (matching
+        // the normal path above). Cascade: no frozen constant -> live mesh bootstrap below.
+        if (!halo::shotpoint_aim_angles(ridx, cq, !capturing_reference, &ctrl_yaw, &ctrl_pitch)) {
             Vec3 mf{};
             if (halo::shotpoint_dir(&mf)) {   // bootstrap: live mesh bore (follows animation)
                 const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);

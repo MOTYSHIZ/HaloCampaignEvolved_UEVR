@@ -55,6 +55,12 @@ bool shotpoint_dir(Vec3* out_fwd);
 // Defined in Rig.cpp. The FROZEN per-weapon controller-local bore, if one is captured for the held
 // weapon; the aim path rotates it by the live controller pose (animation-immune, roll-invariant).
 bool shotpoint_bore_local(Vec3* out);
+// Defined in Rig.cpp. Reconstruct that frozen bore to game-space yaw/pitch on the SAME composition
+// the rig renders the weapon with (grip-independent, animation-immune). ONE definition shared by
+// this path and the Plugin.cpp inline copy, so setpoint and reference cannot describe different
+// directions. False -> no frozen constant for the held weapon; caller cascades to the bootstrap.
+bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
+                          float* out_yaw, float* out_pitch);
 
 // True when absolute weapon-mesh aim is live: feature on, direction mode on, and a bore forward is
 // currently published. When true the setpoint IS the mesh bore -- an absolute game-space direction
@@ -413,37 +419,29 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
 
     // ---- SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): aim along the weapon MESH bore ---------
     //
-    // Take the aim direction from the rendered weapon's forward (GetForwardVector on the mesh that
-    // carries fx_muzzleflash) instead of the controller pose -- so aim follows the barrel you SEE.
-    // Measured 2026-09-11: that forward IS the bore (matched the game aim setpoint to ~1 deg yaw /
-    // ~2 deg pitch; the UP/RIGHT axes were 80+ deg off).
-    //
-    // THE FRAME, and why this branch does NOT reuse the controller extraction below:
-    //   * The mesh forward is WORLD (game) space -- yaw about +Z, +X forward -- so its game angles
-    //     come straight from atan2(y,x)/asin(z), NOT the VR-space atan2(x,-z)/asin(y) the controller
-    //     pose needs.
-    //   * It ALREADY reflects any snap-turn (the rendered world is turned), so it takes NO turn
-    //     offset -- the controller path adds one because it is in tracking space. Measured: mesh
-    //     world yaw == the final aim setpoint yaw with a turn already active.
-    // It skips the sightline reprojection (the bore already IS the aim ray) but STILL applies the
-    // two-hand swing below -- the frozen bore does NOT carry the hold (the mesh gets it on a
-    // separate path), so the aim must swing by the same rotation or the barrel you SEE and where you
-    // aim diverge under a two-handed hold. WEAPON-ONLY + CASCADE: if the published direction is
-    // unavailable (no weapon, no marker, not yet sampled), fall through to the controller path below.
+    // Aim from the rendered weapon's barrel (the fx_muzzleflash marker's forward) instead of the
+    // controller pose -- so aim follows the barrel you SEE. Measured 2026-09-11: that forward IS the
+    // bore (matched the game aim setpoint to ~1 deg yaw / ~2 deg pitch; the UP/RIGHT axes were 80+
+    // off). Two tiers, both in GAME space (yaw = atan2(y,x), pitch = asin(z)), NOT the VR-space
+    // atan2(x,-z)/asin(y) the controller path uses:
+    //   1. FROZEN (shotpoint_aim_angles): a per-weapon constant captured once, reconstructed against
+    //      the LIVE rig composition -- grip-independent (an End grip change is followed with no
+    //      re-capture), animation-immune, roll-invariant, and it carries the two-hand swing itself
+    //      (the swing is inside the reconstruction, matching the rendered weapon -- no separate bend
+    //      here). The reconstruction re-adds the snap turn.
+    //   2. BOOTSTRAP (live mesh): until a weapon is captured, read its live marker forward. It is
+    //      WORLD space and ALREADY reflects any snap-turn (the rendered world is turned), so it takes
+    //      NO turn offset; it follows recoil/reload animation -- the accepted interim.
+    // Both skip the sightline reprojection (the bore already IS the aim ray). CASCADE: if neither is
+    // available (no weapon / no marker / not yet sampled), fall through to the controller path below.
     if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
-        Vec3 bl{};
-        if (shotpoint_bore_local(&bl)) {
-            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose.
-            // Roll-invariant + animation-immune. cq is the RAW pose the constant was captured against.
-            Vec3 bvr = quat_rotate(cq, bl);
-            // TWO-HAND: swing the bore by the same rotation the hold applies to the mesh, so the
-            // gun and the aim stay together. Self-gates on twohandaim / an active swing; suppressed
-            // during calibration capture via allow_two_hand, exactly like the controller path below.
-            if (allow_two_hand) two_hand_bend_forward(&bvr);
-            *out_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
-            *out_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
-            return true;
-        }
+        // FROZEN per-weapon bore, reconstructed on the SAME composition the rig renders the weapon
+        // with: the live controller pose + live grip trim (grip-independent -- an End grip change is
+        // followed with no re-capture), snap turn re-added. Animation-immune + roll-invariant.
+        // two_hand=allow_two_hand: swing with the barrel, except while capturing the calibration
+        // snapshot (the controller path below is gated the same way). One shared definition in
+        // Rig.cpp so this setpoint and the inline copy that feeds the reference cannot diverge.
+        if (shotpoint_aim_angles(ridx, cq, allow_two_hand, out_yaw, out_pitch)) return true;
         Vec3 mf{};
         if (shotpoint_dir(&mf)) {
             // BOOTSTRAP until this weapon has a frozen capture: the live mesh bore (world). Follows

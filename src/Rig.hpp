@@ -240,10 +240,20 @@ void shotpoint_tick();
 // Read the published bore forward (UE world). False when unavailable, so the caller keeps its own
 // direction (the controller path / unarmed path). Cheap: atomics only, safe from the aim hook.
 bool shotpoint_dir(Vec3* out_fwd);
-// FROZEN per-weapon controller-local bore (animation-immune, roll-invariant), published each tick.
-// True + out set when the held weapon has a captured bore_local; the aim path then rotates it by
-// the live controller pose and re-adds the snap turn. False -> caller uses the live-bore bootstrap.
+// FROZEN per-weapon bore, in the weapon's UN-DRIVEN frame (grip-, snap-turn- and animation-free),
+// published each tick. True + out set when the held weapon has a captured constant; the aim path
+// then reconstructs it against the LIVE rig composition (see shotpoint_aim_angles). False -> caller
+// uses the live-bore bootstrap.
 bool shotpoint_bore_local(Vec3* out);
+// Reconstruct the held weapon's frozen bore to GAME-space yaw/pitch, on the SAME composition the rig
+// renders the weapon with -- so aim points where the barrel is DRAWN. Rotates the frozen constant by
+// the live controller pose + live grip trim (grip-independent: an End grip change is followed with
+// no re-capture) and adds the snap turn. `cq` = the aim pose the caller already sampled; `two_hand`
+// = apply the two-hand swing (false on a raw calibration snapshot). False when no frozen constant is
+// available for the held weapon, so the caller cascades to the bootstrap / controller path. Cheap:
+// atomics + one grip-pose read, safe from the aim hook. ONE definition, called by both aim paths.
+bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
+                          float* out_yaw, float* out_pitch);
 // Manual override: force-capture the currently held weapon's bore at the current pose (Page Down).
 // Available in ANY build (the AUTO capture is dev-only). Returns false if no weapon/marker or the
 // self-check rejects the transform. Point steady where you want, then trigger.
@@ -255,7 +265,12 @@ bool shotpoint_capture_held();
 // (forcing a recapture) rather than mis-applied -- the same file-borne-stamp discipline as wpnfix.
 // Config calls the setters on load and shotpoint_emit_calib() on save; all compile in every build
 // (only the auto-capture that PRODUCES values is dev-only).
-constexpr int kShotFixSchema = 2;   // 2: plain controller-frame bore_local (1 was the withdrawn End-stripped "intrinsic")
+constexpr int kShotFixSchema = 3;   // 3: bore in the un-driven weapon frame -- divides out the rig's
+                                    //    full composition (VR->UE -w handedness + LIVE grip trim), so
+                                    //    a grip change is followed without re-capture. 2 was the plain
+                                    //    controller-frame bore_local (VR-space vector permute, no grip,
+                                    //    so an End grip change moved the barrel but not the aim); 1 was
+                                    //    the withdrawn End-stripped "intrinsic".
 void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
 void shotpoint_set_default(float x, float y, float z);
 void shotpoint_emit_calib(std::FILE* f);
