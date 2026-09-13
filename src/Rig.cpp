@@ -885,6 +885,41 @@ bool shotpoint_bore_local(Vec3* out) {
     return true;
 }
 
+// ---- PERSISTENCE (calib file). Class names are ASCII (BP_FP_...), so narrow<->wide is a byte cast.
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z) {
+    if (cls == nullptr || cls[0] == 0) return;
+    std::wstring w;
+    for (const char* p = cls; *p; ++p) w.push_back((wchar_t)(unsigned char)*p);
+    g_bore_cache[w] = Vec3{x, y, z};
+}
+
+void shotpoint_set_default(float x, float y, float z) {
+    g_def_x.store(x); g_def_y.store(y); g_def_z.store(z);
+    g_def_valid.store(true);
+}
+
+bool shotpoint_schema_ok(int ver) { return ver == kShotFixSchema; }
+
+void shotpoint_emit_calib(std::FILE* f) {
+    if (f == nullptr) return;
+    if (g_bore_cache.empty() && !g_def_valid.load()) return;
+    std::fprintf(f,
+        "# Shot-point per-weapon bore, PLACEMENT-INDEPENDENT (End trim stripped). shotfixver stamps\r\n"
+        "# the frame convention and must stay ABOVE the lines it covers. A measurement -- do not\r\n"
+        "# hand-edit. Delete these lines to recapture.\r\n"
+        "shotfixver=%d\r\n", kShotFixSchema);
+    for (const auto& kv : g_bore_cache) {
+        std::string n;
+        for (wchar_t c : kv.first) n.push_back((char)c);
+        std::fprintf(f, "shotfix=%s,%.5f,%.5f,%.5f\r\n", n.c_str(),
+                     kv.second.x, kv.second.y, kv.second.z);
+    }
+    if (g_def_valid.load()) {
+        std::fprintf(f, "shotfixdefault=%.5f,%.5f,%.5f\r\n",
+                     g_def_x.load(), g_def_y.load(), g_def_z.load());
+    }
+}
+
 void shotpoint_dev_readout(unsigned tick) {
 #if HALO_VR_DEV
     if (g_cfg.shot_aim_log <= 0) return;
@@ -1027,6 +1062,9 @@ static bool capture_bore_local(API::UObject* wpn) {
         API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> its intrinsic is now the "
                              "DEFAULT for uncaptured weapons");
     }
+    // Persist so the capture survives the session (write_calib_file emits shotfix via
+    // shotpoint_emit_calib). Rare -- once per weapon's first stable hold -- never per tick.
+    write_calib_file();
     return true;
 }
 

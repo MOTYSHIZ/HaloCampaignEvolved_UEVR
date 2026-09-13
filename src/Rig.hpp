@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace halo {
@@ -243,6 +244,18 @@ bool shotpoint_dir(Vec3* out_fwd);
 // True + out set when the held weapon has a captured bore_local; the aim path then rotates it by
 // the live controller pose and re-adds the snap turn. False -> caller uses the live-bore bootstrap.
 bool shotpoint_bore_local(Vec3* out);
+
+// PERSISTENCE of the per-weapon placement-independent intrinsic (+ the AR default) in the calib
+// file, so a capture survives across sessions (hold each weapon once, ever). kShotFixSchema stamps
+// the frame convention: bump it if the capture math changes and old stored values are auto-dropped
+// (forcing a recapture) rather than mis-applied -- the same file-borne-stamp discipline as wpnfix.
+// Config calls the setters on load and shotpoint_emit_calib() on save; all compile in every build
+// (only the auto-capture that PRODUCES values is dev-only).
+constexpr int kShotFixSchema = 1;
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
+void shotpoint_set_default(float x, float y, float z);
+void shotpoint_emit_calib(std::FILE* f);
+bool shotpoint_schema_ok(int ver);   // so a caller can gate on the schema without the constant
 
 // ---- UObjectHook attachment ------------------------------------------------------------------
 void attach_apply(uevr::API::UObject* rig, const Quat& rot_off, const Vec3& loc_off_cm);
