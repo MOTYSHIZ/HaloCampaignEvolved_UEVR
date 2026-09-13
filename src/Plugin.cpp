@@ -6393,9 +6393,26 @@ void update() {
         // alone is not the hold; the mode is the half that a right trigger or Cancel can clear.
         halo::g_hand_calib_held.store(menu_mode == 3 && !menu_lt, std::memory_order_relaxed);
 
-        const bool aim_down = (key_focus && (g_cfg.aim_calib_key != 0) &&
-                               ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0)) ||
-                              (menu_mode == 2 && !menu_lt);
+        bool aim_down = (key_focus && (g_cfg.aim_calib_key != 0) &&
+                         ((GetAsyncKeyState(g_cfg.aim_calib_key) & 0x8000) != 0)) ||
+                        (menu_mode == 2 && !menu_lt);
+
+        // SHOT-POINT MANUAL CAPTURE. When shot-point aim is on, Page Down force-captures the held
+        // weapon's bore at the current pose (point steady where you want, tap) and the LEGACY aim
+        // calibration is held INERT -- it maps the controller reference, which shot-point aim does
+        // not use. The auto-capture (dev) covers the common case; this is the deliberate override
+        // and the ONLY capture path in release. Edge-triggered so a hold captures once.
+        if (g_cfg.shot_aim) {
+            static bool s_shotcap_was = false;
+            if (aim_down && !s_shotcap_was) {
+                API::get()->log_info(halo::shotpoint_capture_held()
+                    ? "[Halo-CampE-UEVR] SHOTFIX: manual capture via Page Down"
+                    : "[Halo-CampE-UEVR] SHOTFIX: manual Page Down -- no weapon/marker to capture");
+            }
+            s_shotcap_was = aim_down;
+            aim_down = false;   // keep the legacy calibration gesture below inert
+        }
+
         const bool aim_was  = g_aimcal_held.exchange(aim_down);
         // Publish it: blamangles drives the sim's angular control state from a sim-thread hook in
         // BlamAim.cpp, which cannot see this file's anonymous namespace. Without this the actuator

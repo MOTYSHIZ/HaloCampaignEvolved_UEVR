@@ -244,6 +244,10 @@ bool shotpoint_dir(Vec3* out_fwd);
 // True + out set when the held weapon has a captured bore_local; the aim path then rotates it by
 // the live controller pose and re-adds the snap turn. False -> caller uses the live-bore bootstrap.
 bool shotpoint_bore_local(Vec3* out);
+// Manual override: force-capture the currently held weapon's bore at the current pose (Page Down).
+// Available in ANY build (the AUTO capture is dev-only). Returns false if no weapon/marker or the
+// self-check rejects the transform. Point steady where you want, then trigger.
+bool shotpoint_capture_held();
 
 // PERSISTENCE of the per-weapon placement-independent intrinsic (+ the AR default) in the calib
 // file, so a capture survives across sessions (hold each weapon once, ever). kShotFixSchema stamps

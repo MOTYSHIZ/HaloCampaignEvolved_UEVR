@@ -982,6 +982,8 @@ struct AssetMeasure {
     bool  logged_stable = false;
 };
 static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
+#endif  // AssetMeasure/g_asset_cache are dev-only; the helpers + capture below are ALWAYS-compiled
+        // because the manual Page Down override (shotpoint_capture_held) needs them in release too.
 
 // Capture the FROZEN controller-local bore for the held weapon: read the aim controller pose and
 // the world bore, remove the snap turn, convert the bore into the controller's frame, and store it.
@@ -1057,6 +1059,13 @@ static bool capture_bore_local(API::UObject* wpn) {
     return true;
 }
 
+// Public manual override (Page Down): force-capture the held weapon now. Any build.
+bool shotpoint_capture_held() {
+    auto* wpn = fp_weapon_actor();
+    return wpn != nullptr && capture_bore_local(wpn);
+}
+
+#if HALO_VR_DEV
 void shotpoint_asset_dev(unsigned tick) {
     if (g_cfg.shot_aim_log <= 0) return;
 
