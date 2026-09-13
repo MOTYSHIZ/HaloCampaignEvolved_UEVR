@@ -9896,7 +9896,11 @@ void update() {
     // the pivot latch. A session booted with rig=0 and only the gate below proved what happens
     // otherwise: the route never resolves, the constants never measure, and the palette weapon
     // silently never applies while the stock rig keeps rendering.
-    if (g_cfg.rig_enabled || palette_weapon_mode()) {
+    // Also for the fork's manual reload (reloadvr / slidevr): its per-weapon state saves on a weapon
+    // swap, and the swap is seen through this resolve, so it must run under every arm driver mode --
+    // including rig=0 with the author's palettearm route. The resolve only reads; the rig WRITES stay
+    // in the rig_enabled block below.
+    if (g_cfg.rig_enabled || palette_weapon_mode() || g_cfg.reload_vr || g_cfg.slide_vr) {
         // Re-resolve on a timer ALWAYS, not only when we hold nothing. A pointer to a recycled
         // component never becomes null -- it keeps accepting writes -- so "resolve once, cache
         // until null" can pin the driver to residue with no symptom other than nothing moving.

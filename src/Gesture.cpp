@@ -2258,6 +2258,13 @@ void slide_update(const Vec3& head) {
             }
         }
     }
+    // Only the rack ends this lock, and with slidevr off nothing can rack (the gate below releases
+    // the hand): release it as racked, so the pose goes forward and a seated magazine's reload goes
+    // out instead of s_sl_reload_due waiting forever behind a frozen slide.
+    if (!g_cfg.slide_vr && s_sl_lock_pending) {
+        s_sl_rack_done = true;
+        if (reload_weapon_anim_instance() == nullptr) { s_sl_lock_pending = false; s_sl_rack_done = false; s_sl_locked_back = false; }
+    }
     if (s_sl_lock_pending) {
         if (auto* animbp = reload_weapon_anim_instance()) {
             if (auto* p = animbp->get_property_data<int32_t>(L"PrimaryAmmunition_ExplicitFrame")) {
@@ -2727,12 +2734,25 @@ void slide_fire_tick() {
 // the fire-state slide has snapped home (so the game's reload animation, which the state hold
 // then suppresses, never overlaps the rack's own motion).
 uint16_t* rounds_field() {
+    // The object pointer is resolved on the sim thread from the published datum, so right after a
+    // swap it can still be the previous weapon's: no read or write lands on that gun.
+    const int32_t held = g_wpn_obj_index.load(std::memory_order_relaxed);
+    if (held != -1 && g_wpn_obj_ptr_datum.load(std::memory_order_relaxed) != held) return nullptr;
     const uintptr_t obj = g_wpn_obj_ptr.load(std::memory_order_relaxed);
     const int off = g_cfg.rounds_off;
     if (obj == 0 || off <= 0 || off > 0x7FE) return nullptr;
     auto* r = reinterpret_cast<uint16_t*>(obj + (uintptr_t)off);
     if (IsBadWritePtr(r, sizeof(uint16_t))) return nullptr;
     return r;
+}
+// Is the gun in hand empty right now? The rounds counter when it reads (the phantom's one round
+// counts as empty), else the AnimBP's two-state ammunition frame. The frame alone reads 0 on a
+// freshly spawned weapon until its first reload (logged: 14 rounds, frame 0), which dropped a loaded
+// rifle as empty: trigger dead with the mag out, a rack forced, the game's reload pressed at the drop.
+bool weapon_empty_now() {
+    if (s_true_empty) return true;
+    if (auto* r = rounds_field()) return *r == 0;
+    return slide_ammo_frame() == 0;
 }
 // ---- SLIDEPHANTOM: see Config.hpp. Runs every tick on the game thread against the resolved
 // weapon object (ordinary heap memory once resolved).
@@ -2776,7 +2796,12 @@ void slide_phantom_tick() {
     static int s_prev = -1;
     static uint16_t s_snap[0x400]; static bool s_have_snap = false;   // last tick's first 0x800 bytes, for the reserve search
     static int s_reserve = -1;
-    if (g_cfg.slide_phantom == 0 && !g_cfg.slide_undo_reload) { s_true_empty = false; s_prev = -1; s_have_snap = false; return; }
+    if (g_cfg.slide_phantom == 0 && !g_cfg.slide_undo_reload) {
+        // The hidden reload's display hide is released below this return; switched off mid-lock it
+        // stayed set and the ammo displays read 0 on a loaded gun.
+        s_true_empty = false; s_hide_display = false; g_wristhud_hide_cradle.store(false, std::memory_order_relaxed);
+        s_prev = -1; s_have_snap = false; return;
+    }
     const bool coop = g_cfg.coop_auto && net_is_coop();
     const bool hidden = reload_hidden_mode();
     if (!hidden || (s_reload == ReloadState::Idle && !s_true_empty && !s_sl_pressed_early)) s_hide_display = false;
@@ -2785,7 +2810,9 @@ void slide_phantom_tick() {
     if (coop && !g_cfg.coop_hide && g_cfg.coop_stop_at <= 0) { s_true_empty = false; s_prev = -1; s_have_snap = false; return; }
     const std::string key = weapon_key();
     static long long s_key_at = 0, s_shot_at = 0;
-    const bool tracked = g_cfg.reload_state_id != 0;
+    // Tracked only while the tracker runs (it lives in reload_update, behind reloadvr): with it
+    // stopped nothing saves or loads the flags on a swap, and its datum goes stale.
+    const bool tracked = g_cfg.reload_state_id != 0 && g_cfg.reload_vr;
     if (key != s_key || (tracked && s_ph_rebase)) {
         // Tracked: the flags already belong to the weapon now in hand (the tracker saved the old
         // weapon's and loaded this one's earlier in this tick); only the counter caches re-seed.
@@ -2850,7 +2877,7 @@ void slide_phantom_tick() {
     // weapon's counter reads 0 while it initialises and on a swap to a plasma weapon (60 -> 0 in
     // the log), and the first build fired the dry trigger in the mission's first second and froze
     // the pose under a live gun (the climbing pitch, 2026-09-07).
-    if (hidden && !s_true_empty && s_prev == 1 && cur == 0 && nowt_c - s_key_at > ms_to_ticks(2000)
+    if (g_cfg.reload_vr && hidden && !s_true_empty && s_prev == 1 && cur == 0 && nowt_c - s_key_at > ms_to_ticks(2000)
         && s_reload == ReloadState::Idle && !s_sl_reload_due && !s_sl_pressed_early && !weapon_in_list(g_cfg.reload_skip_weapons)) {
         // The last round went out and the game is reloading: freeze the pose, mute it, show empty,
         // dead trigger. Nothing clears this but our own reload (reload_press_now) or a swap.
@@ -2864,7 +2891,7 @@ void slide_phantom_tick() {
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
     }
-    if (coop && !g_cfg.coop_hide && !s_true_empty && cur >= 1 && cur <= stop_at && !reserve_empty && nowt_c - s_key_at > ms_to_ticks(500)
+    if (g_cfg.reload_vr && coop && !g_cfg.coop_hide && !s_true_empty && cur >= 1 && cur <= stop_at && !reserve_empty && nowt_c - s_key_at > ms_to_ticks(500)
         && s_reload == ReloadState::Idle && !s_sl_reload_due && !s_sl_pressed_early
         && !weapon_in_list(g_cfg.reload_skip_weapons)) {   // every weapon with a magazine, rack or not (the SMG has no rack part)
         // The dry stop: no write, the last round stays in the counter and the trigger is dead.
@@ -2874,7 +2901,7 @@ void slide_phantom_tick() {
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
     }
-    if (!coop && !hidden && !s_true_empty && s_prev == 1 && cur == 0 && slide_weapon_ok() && slide_chamber_ok() && slide_rack_available() && g_cfg.slide_phantom > 0) {
+    if (g_cfg.reload_vr && !coop && !hidden && !s_true_empty && s_prev == 1 && cur == 0 && slide_weapon_ok() && slide_chamber_ok() && slide_rack_available() && g_cfg.slide_phantom > 0) {
         *r = 1;
         s_true_empty = true;
         if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: magazine empty; one phantom round held so the game does not auto-reload (trigger dead, slide back)");
@@ -4434,8 +4461,12 @@ void slide_part_tick() {
         if (g_cfg.slide_part_hide == 7) {
             if (!s_np_have) {
                 static std::string s_np_fail_key; static int s_np_fails = 0;
-                if (key != s_np_fail_key) { s_np_fail_key = key; s_np_fails = 0; }
-                if (now_ticks() - s_np_retry < ms_to_ticks(s_np_fails < 3 ? 1500 : 15000)) return;
+                // A fresh weapon actor attaches its parts some frames after the swap (logged: only a
+                // light cone at the swap tick, the rack found on the 1.5 s retry). The seat's lock-back
+                // and the phantom both require the part to be found, so a seat inside that window
+                // skipped the rack of a gun that came back empty. Retry fast first.
+                if (key != s_np_fail_key) { s_np_fail_key = key; s_np_fails = 0; s_np_retry = 0; }
+                if (now_ticks() - s_np_retry < ms_to_ticks(s_np_fails < 8 ? 150 : (s_np_fails < 11 ? 1500 : 15000))) return;
                 s_np_retry = now_ticks();
                 s_np_quiet = s_np_fails >= 2;
                 if (!np_spawn(src)) { ++s_np_fails; return; }
@@ -4691,7 +4722,7 @@ void set_state(ReloadState next, const char* why) {
     // ...and on the way out it FALLS: the drop is spawned from the component just hidden.
     if (prev == ReloadState::Idle && next == ReloadState::MagOut && !s_restoring_mag_out) { if (!slide_parts_mag_drop()) mag_drop_spawn(); ak_dump("drop"); ak_step_sound("drop"); ak_step_sound("open");
         if (g_cfg.reload_press_at == 1 && slide_weapon_ok()) {
-            const bool empty_now = (slide_ammo_frame() == 0) || s_true_empty;
+            const bool empty_now = weapon_empty_now();
             if (empty_now) { s_sl_pressed_early = true; reload_press_now("mag drop"); }
             else { s_sl_press_pending = true; if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD press waits for the chambered shot or the seat"); }
         }
@@ -5151,8 +5182,11 @@ bool reload_fire_suppressed() {
     }
     // THE SLIDE: no shot with the chamber open. Dead while the slide is pulled more than a
     // third of its travel, and dead from a reload's seat until the rack completes.
+    // Truly empty never fires, whatever slidevr says: the phantom re-asserts one round every tick,
+    // so a trigger left live with slidevr off fired it forever; the dry stop and the hidden reload
+    // promise a dead trigger too.
+    if (s_true_empty) return true;
     if (g_cfg.slide_vr) {
-        if (s_true_empty) return true;   // the phantom round must never fire
         if (s_sl_lock_pending) return true;
         if (s_sl_held && g_slide_pull.load(std::memory_order_relaxed) > g_cfg.slide_travel * 0.33f) return true;
     }
@@ -5472,6 +5506,35 @@ void reload_state_mirror() {
     if (g_cfg.reload_state_id == 0 || g_cfg.reload_state_save != 1) return;
     rs_save("mirror", true);
 }
+// MANUAL RELOAD SWITCHED OFF. Every lock the reload keeps (the phantom round, the dry stop, the hidden
+// reload, the lock-back waiting for the rack) is ended only by the gesture, and with reloadvr off the
+// gesture never runs: the gun stayed dead, and with the per-weapon records the flag no longer even
+// dropped on a swap. The game's own reload runs unmanaged while it is off, so no record or legacy
+// memory may survive to hand a gun back "mag out" when the switch comes on again.
+void reload_release_all(const char* why) {
+    const bool coop = g_cfg.coop_auto && net_is_coop();
+    if (s_true_empty && !coop && !reload_hidden_mode()) {
+        if (auto* r = rounds_field()) { if (*r == 1) *r = 0; }   // the phantom round back to the honest count
+    }
+    if (s_sl_lock_pending) {
+        if (auto* animbp = reload_weapon_anim_instance())
+            if (auto* p = animbp->get_property_data<int32_t>(L"PrimaryAmmunition_ExplicitFrame"))
+                if (!IsBadWritePtr(p, sizeof(int32_t))) *p = slide_forward_frame();
+    }
+    if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, why);
+    s_sl_chamber_left = 0; s_sl_empty_at_drop = false; s_sl_locked_back = false; s_sl_lock_pending = false;
+    s_sl_reload_due = false; s_sl_pressed_early = false; s_sl_press_pending = false; s_sl_press_due_at = 0;
+    s_sl_lock_frame = 0; s_sl_rack_done = false;
+    s_true_empty = false; s_hide_display = false; s_coop_lock_rounds = 1;
+    g_wristhud_hide_cradle.store(false, std::memory_order_relaxed);
+    for (auto& m : s_wpn_mem) m = WpnMem{};
+    rs_forget_all(why);
+    s_rs_live_id.clear(); s_rs_live_type.clear(); s_rs_live_datum = -1; s_rs_cur_datum = -1;
+    s_rs_seen_actor = nullptr; s_rs_seen_type.clear(); s_rs_after_reset = false;
+    s_reload_weapon.clear();
+    s_ph_rebase = true;
+    if (g_cfg.reload_log || g_cfg.reload_state_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD released every lock and record (%s)", why);
+}
 
 // The reload half of the tick. Separate from the melee detector because it is a state machine over
 // BUTTONS and ZONES, not a derivative over velocity -- sharing a function would only tangle them.
@@ -5480,10 +5543,13 @@ void reload_state_mirror() {
 // when they are missing -- losing tracking mid-gesture is one of the ways a player gets stuck, so
 // that is the last moment to stop servicing the state machine.
 static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
+    static bool s_reload_on = true;   // one release on the off edge (at a boot with reloadvr 0 there is nothing to release)
     if (!g_cfg.enabled || !g_cfg.reload_vr) {
+        if (s_reload_on) { s_reload_on = false; reload_release_all("manual reload switched off"); }
         if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, "disabled");
         return;
     }
+    s_reload_on = true;
     // The well marker and the slide exist only while the magazine is in hand; every other state
     // hides the one and resets the other.
     if (s_reload != ReloadState::MagHeld) {
@@ -5604,7 +5670,7 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
             // Deliberately does NOT forward the press. The game is told to reload only when the
             // magazine goes in -- that deferral IS the feature.
             s_reload_weapon = weapon_key();   // whose magazine this is (see the swap-cancel above)
-            s_sl_empty_at_drop = (slide_ammo_frame() == 0);   // decides whether the seat wants a rack
+            s_sl_empty_at_drop = weapon_empty_now();   // decides whether the seat wants a rack
             s_sl_locked_back = s_sl_empty_at_drop;
             s_sl_chamber_left  = s_sl_empty_at_drop ? 0 : 1;   // the one round already chambered
             set_state(ReloadState::MagOut, "reload pressed, mag dropped");
@@ -5800,6 +5866,8 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
                                             && (s_sl_empty_at_drop || weapon_in_list(g_cfg.slide_always_weapons));
                     if (rack_first) {
                         s_sl_lock_pending = true; s_sl_lock_frame = 0; s_sl_rack_done = false;
+                    } else {
+                        s_sl_locked_back = false;   // no rack will clear it: a stale flag kept the record alive and the rack zone live
                     }
                     if (rack_first && g_cfg.slide_chamber) {
                         // SLIDECHAMBER: the mag is in, the chamber is not. The rack ends the reload.
@@ -5849,6 +5917,10 @@ void gesture_reset() {
     s_true_empty = false;
     sc_teardown("reset");
     sp_teardown("reset");
+    // sp_teardown clears the rack flag for the rebuild mode, but the NATIVE part is not torn down
+    // here and slide_part_tick only re-finds it on a weapon or component change: after a ride or a
+    // cutscene the held gun read "no rack" (no lock-back at the seat, no phantom) until a swap.
+    if (s_np_have && s_np_slide.get() != nullptr) g_slide_rack_found = true;
     // The two-handed hold rides along. It is latched on a button and blended into aim, so a
     // transition the player did not choose (kill switch, stick mode, a tracking stall) must drop it
     // too -- otherwise the aim stays blended toward a support hand nothing is tracking any more.
@@ -6123,6 +6195,13 @@ void gesture_update(float dt) {
         slide_copy_tick();
         slide_part_tick();
         slide_node_write_tick();
+    }
+    // Per-weapon reload state: re-hide a magazine that is out on whichever actor renders the weapon
+    // now, and mirror the live state into its record. Before the melee-off return, so switching melee
+    // off never stops the reload state from saving.
+    if (fork_reload) {
+        mag_hide_enforce();
+        reload_state_mirror();
     }
 
     // ---- MELEE ONLY from here down.

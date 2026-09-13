@@ -3491,10 +3491,11 @@ void weapon_object_nodes_probe() {
     // The palette-node slide (superseded by the native parts, slideparthide 7) is the only thing
     // this per-frame memory walk served; with native parts it only froze the game every second
     // with its readback (2026-09-06). It runs for its own debug keys, or for a non-native slide.
-    if (!g_cfg.wpn_node_dump && g_cfg.wpn_node_poke < 0 && !g_cfg.slide_vr) {
-        g_slide_node_valid.store(false, std::memory_order_relaxed);
-        return;
-    }
+    // The weapon OBJECT is resolved whatever the slide does: rounds_field reads it for the phantom,
+    // the dry stop and the hidden reload, and returning here left the last weapon's pointer
+    // published for as long as slidevr stayed off.
+    const bool slide_work = g_cfg.wpn_node_dump || g_cfg.wpn_node_poke >= 0 || g_cfg.slide_vr;
+    if (!slide_work) g_slide_node_valid.store(false, std::memory_order_relaxed);
     // Native slide mode still needs the weapon OBJECT (rounds_field reads it) and the legacy
     // valid flag the slide tick gates on; only the node scan and the per-second readback are
     // skipped (the gate that skipped everything killed the racks, 2026-09-06).
@@ -3502,14 +3503,14 @@ void weapon_object_nodes_probe() {
     // A Blam datum is salt:index in one dword and reads NEGATIVE as int32 (measured 0xE27C000D
     // for the held pistol); only the all-ones NONE value means "no object".
     const int32_t idx = g_wpn_obj_index.load(std::memory_order_relaxed);
-    if (idx == -1) return;
+    if (idx == -1) { g_wpn_obj_ptr.store(0, std::memory_order_relaxed); g_wpn_obj_ptr_datum.store(-1, std::memory_order_relaxed); return; }
     const uintptr_t obj = resolve_object_by_datum((uint32_t)idx);
     static uintptr_t s_obj = 0;
     static int       s_off = -1, s_count = 0;
     if (obj == 0 || IsBadReadPtr((const void*)obj, 0x100)) { g_wpn_obj_ptr.store(0, std::memory_order_relaxed); g_wpn_obj_ptr_datum.store(-1, std::memory_order_relaxed); return; }
     g_wpn_obj_ptr.store(obj, std::memory_order_relaxed);
     g_wpn_obj_ptr_datum.store(idx, std::memory_order_relaxed);
-    if (!node_work) { g_slide_node_valid.store(true, std::memory_order_relaxed); return; }
+    if (!node_work) { if (slide_work) g_slide_node_valid.store(true, std::memory_order_relaxed); return; }
     if (obj != s_obj) {
         s_obj = obj; s_off = -1; s_count = 0;
         constexpr int SPAN = 0x3000;
