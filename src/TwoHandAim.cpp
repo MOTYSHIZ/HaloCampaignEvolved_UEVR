@@ -26,39 +26,49 @@ namespace pa = ::halo::palettearm;
 pa::TwoHandHold   s_hold;
 pa::TwoHandTuning s_tuning;   // units_to_metres defaults to 1: OpenXR hands you metres
 
-// ---- THE GUN HELD AT TWO POINTS (twohandgun) ---------------------------------------------------
+// ---- GUN MODE (twohandgun) ---------------------------------------------------------------------
 //
-// 1 = measure the hold from the WEAPON (default), 0 = from the controller's aim RAY, with the
-// handle offset subtracted from the support hand (every build before 2026-09-13).
+// 1 = measure the hold in the WEAPON's frame (default), 0 = the RAY mode: the controller's aim ray
+// turns onto the hands, with the handle offset taken off the support hand in the SWUNG gun (every
+// build before 2026-09-13).
 //
-// The swing turns ONE vector onto the line between the hands. In gun mode that vector is the
-// ONE-HANDED gun's own grip-to-handle line: from the aim grip, down the barrel to where the support
-// hand is, then out to the handle (wpngrip y/z). So a rigid gun held at two points is solved as a
-// rigid gun held at two points, and three things fall out of that together:
+// Gun mode swings the ONE-HANDED BARREL onto the line from the aim grip to the support hand with the
+// handle's offset removed in the ONE-HANDED, UNSWUNG gun. An off-axis handle therefore steers exactly
+// like a rifle held at the same reach, and three things come with it:
 //
-//   1. A HOLD AT REST MOVES NOTHING. With both hands where the gun already has them, the two
-//      vectors coincide and the swing is identity. The ray mode turned the controller's pointing
-//      ray onto the hands instead, so grabbing rotated the gun by however far its barrel sits from
-//      that ray -- the grip trim plus any per-weapon rotation -- even at the calibrated hold.
+//   1. A HOLD AT REST MOVES NOTHING. With the hand on the handle the corrected line IS the barrel, so
+//      the swing is identity. The ray mode turned the controller's pointing ray onto the hands, so
+//      grabbing rotated the gun by however far its barrel sits from that ray -- the grip trim plus
+//      any per-weapon rotation -- even at the calibrated hold.
 //
-//   2. NO FEEDBACK. Both vectors come from THIS tick's raw poses and the UNSWUNG gun (the rig block
-//      publishes its axes with the swing it applied taken back out). The ray mode rotated the
-//      handle offset with the already-swung gun, so every swing moved the next tick's hand line.
-//      With the sentinel beam's 27 cm handle and the hands close together that loop gains above 1:
-//      it presented as the weapon SPINNING, and with an agreement band closed it flipped between the
-//      one- and two-handed pose on alternate ticks -- "two ghost images of the weapon" (2026-09-13).
+//   2. NO FEEDBACK. The barrel and the handle offset come from the gun's axes as the rig block
+//      publishes them, with the swing it applied taken back out, and the hands come raw -- nothing
+//      here depends on the swing it is about to produce. The ray mode rotated the offset with the
+//      ALREADY-SWUNG gun, so every swing moved the next tick's hand line: with the sentinel beam's
+//      27 cm handle that loop gained above 1 as the hands closed, which presented as the weapon
+//      SPINNING, and with an agreement band closed as the weapon flipping between its one- and
+//      two-handed pose on alternate ticks ("two ghost images").
 //
-//   3. THE GATES MEAN SOMETHING. Agreement is now "how far is the support hand from where this gun's
-//      handle would be, seen from the aim grip": ~1 on the gun, falling as a hand crosses over, at
-//      any separation. So the gate can close to a band, and the minimum baseline shrinks to a guard
-//      against the hands actually coinciding. Fading by DISTANCE starved grips that are close by
-//      design -- the rocket launcher's sit 13 cm apart, which the 10-20 cm band held to about a
-//      fifth of its authority.
+//   3. THE GATES MEAN SOMETHING. Agreement is measured against the barrel: ~1 with the hand on the
+//      handle, falling as a hand crosses over, at any separation. So the gate closes to a band and
+//      the minimum baseline shrinks to a guard against the hands coinciding. Fading by DISTANCE
+//      starved grips that are close by design -- the rocket launcher's sit 13 cm apart, which the
+//      10-20 cm band held to about a fifth of its authority.
+//
+// WHY NOT A TRUE RIGID TWO-POINT SOLVE. It shipped first (4d004aa) as the shortest arc from the
+// grip-to-handle VECTOR onto the hand line, and it was wrong for exactly the weapons this is for.
+// That vector sits ~53 degrees off the sentinel beam's barrel, so its shortest arc mixes in ROLL:
+// reported "will not yaw left much when I move my left hand left" (8 deg for 10 cm, a rifle gives 26)
+// and a barrel that pitched down along a cone as the swing grew ("causing a curve"). Solving it
+// exactly -- hand on the handle line, roll kept -- is no better: once the hand comes within the
+// handle's offset distance of the aim grip no orientation puts it on the handle line, so it
+// saturates about 7 cm to the right. Keeping the offset fixed in the one-handed gun is what makes
+// it steer like the rifle the player's hands expect, with no singularity but the hands coinciding.
 //
 // ITS OWN GATE KEYS (twohandgunagree*/twohandgunminbase), deliberately not the ray mode's: the two
-// agreements measure different things, so a value tuned for one silently applied to the other --
-// e.g. a player file that opened the ray gate with twohandagreemin=-1 -- would switch the gun gate
-// off without saying so.
+// agreements are measured against different directions, so a value tuned for one silently applied
+// to the other -- e.g. a player file that opened the ray gate with twohandagreemin=-1 -- would
+// switch the gun gate off without saying so.
 int   s_gun_mode       = 1;
 float s_gun_agree_min  = 0.35f;   // cos 69.5 deg: no authority past this
 float s_gun_agree_full = 0.70f;   // cos 45.6 deg: full authority within this
@@ -66,12 +76,6 @@ float s_gun_agree_full = 0.70f;   // cos 45.6 deg: full authority within this
 // mode the same 5 cm spun the weapon whenever the hands closed (reported: anything under 0.14 spun);
 // that was the feedback loop above, which this mode does not have.
 float s_gun_min_base   = 0.05f;
-
-// The support hand's distance down the barrel is used AS MEASURED (you may grip anywhere along a
-// handle, exactly as along a barrel) but never below this, so a hand sliding back past the aim grip
-// cannot turn the grip-to-handle vector backwards. Past it the two vectors disagree and the gate
-// fades the hold out instead. Metres.
-constexpr float kGunMinAlong = 0.02f;
 
 // ---- THE PUBLISHED SWING -----------------------------------------------------------------------
 //
@@ -590,47 +594,33 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
         in.zone_lateral_m = std::sqrt(dy * dy + dz * dz) / cm_per_m;
     }
 
-    // ---- WHAT THE SWING TURNS, AND ONTO WHAT ---------------------------------------------------
+    // ---- GUN MODE: SWING THE BARREL, HANDLE TAKEN OFF IN THE UNSWUNG GUN ------------------------
     //
-    // GUN MODE (twohandgun=1, the default; see s_gun_mode): FROM is the one-handed gun's own
-    // grip-to-handle vector, TO is the raw line between the hands, and nothing is subtracted from
-    // the support hand. effective_basis() measures agreement against, and swings from, the aim
-    // basis's forward -- so handing it FROM as that forward is the entire change on the hold's side.
-    // The hold itself (TwoHand.cpp, unit-tested) is untouched.
+    // See s_gun_mode. effective_basis() measures agreement against, and swings from, the aim basis's
+    // forward, and takes the line to swing onto as normalized(support - aim). So gun mode is two
+    // substitutions on the inputs and nothing inside the hold (TwoHand.cpp, unit-tested) changes:
+    //   forward = the one-handed BARREL, and
+    //   support = the support hand minus the handle offset, rotated by the one-handed gun.
     //
-    // Both vectors are metres in RAW VR space. The gun's axes arrive UNSWUNG from the rig block, so
-    // FROM cannot depend on the swing it is about to produce.
+    // Everything is metres in RAW VR space, and the gun's axes arrive UNSWUNG from the rig block --
+    // which is the whole difference from the ray mode's subtraction below, and why this one cannot
+    // feed back: nothing on this path reads the swing it is about to produce.
     bool gun_mode = false;
-    {
-        // The support hand's distance down the barrel, kept for a tick where it is not tracked: the
-        // hold then steers from its remembered line, and FROM has to stay the vector it was measured
-        // against or the agreement jumps. Rebuilt against the LIVE gun axes, never stored in world
-        // space, so it still turns with the aim hand.
-        static float s_last_along = 0.30f;
-        if (s_gun_mode != 0 && s_zone_meas.gun1_valid) {
-            const Vec3& gx = s_zone_meas.gun1_x;
+    if (s_gun_mode != 0 && s_zone_meas.gun1_valid) {
+        const pa::Mat3 ray_basis = in.aim_basis;
+        gun_mode = forward_basis(s_zone_meas.gun1_x, ray_basis, &in.aim_basis);
+        // Out to the handle: the wpngrip y/z, game centimetres -> metres through rig_scale (the same
+        // divisor the zone uses, and for the same reason). No entry = nothing to take off, which is
+        // a rifle; gripfixaim=0 leaves the handle out of aim, as it always has.
+        if (gun_mode && support_tracked && s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim) {
+            const float cm_per_m = (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;
+            const float oy = s_zone_meas.grip_off_gun.y / cm_per_m;
+            const float oz = s_zone_meas.grip_off_gun.z / cm_per_m;
             const Vec3& gy = s_zone_meas.gun1_y;
             const Vec3& gz = s_zone_meas.gun1_z;
-            float along = s_last_along;
-            if (support_tracked) {
-                const Vec3 d{support_pos.x - aim_grip_pos.x, support_pos.y - aim_grip_pos.y,
-                             support_pos.z - aim_grip_pos.z};
-                along = d.x * gx.x + d.y * gx.y + d.z * gx.z;
-                if (!std::isfinite(along) || along < kGunMinAlong) along = kGunMinAlong;
-                s_last_along = along;
-            }
-            // Out to the handle: the wpngrip y/z, game centimetres -> metres through rig_scale (the
-            // same divisor the zone uses, and for the same reason). Zero with no entry, which makes
-            // FROM the barrel itself; gripfixaim=0 leaves the handle out of aim, as it always has.
-            const float cm_per_m = (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;
-            const bool  handle   = s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim;
-            const float oy = handle ? s_zone_meas.grip_off_gun.y / cm_per_m : 0.0f;
-            const float oz = handle ? s_zone_meas.grip_off_gun.z / cm_per_m : 0.0f;
-            const Vec3 from{gx.x * along + gy.x * oy + gz.x * oz,
-                            gx.y * along + gy.y * oy + gz.y * oz,
-                            gx.z * along + gy.z * oy + gz.z * oz};
-            const pa::Mat3 ray_basis = in.aim_basis;
-            gun_mode = forward_basis(from, ray_basis, &in.aim_basis);
+            in.support_grip_position.x -= gy.x * oy + gz.x * oz;
+            in.support_grip_position.y -= gy.y * oy + gz.y * oz;
+            in.support_grip_position.z -= gy.z * oy + gz.z * oz;
         }
     }
 
@@ -646,10 +636,10 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     // steers by exactly the angle a rifle would give, because only the BASELINE moved onto the
     // handle. That is why this is a subtraction and not a clamp toward the axis.
     //
-    // SUPERSEDED BY GUN MODE, and kept whole for the A/B. It has two faults the gun mode was built to
-    // remove: it rotates the offset with the ALREADY-SWUNG gun (grip_off_vr), which feeds each swing
-    // back into the next tick's hand line; and it steers an off-axis handle by atan(d/along), as if
-    // the handle sat on the barrel, where a rigid gun turns by d over the full grip-to-handle reach.
+    // SUPERSEDED BY GUN MODE, which keeps this idea and removes its two faults, and kept whole for the
+    // A/B. It rotates the offset with the ALREADY-SWUNG gun (grip_off_vr), which feeds each swing
+    // back into the next tick's hand line; and it swings the controller's aim ray rather than the
+    // barrel, so the swing's axis is not perpendicular to the barrel and that feedback is first-order.
     //
     // Its own switch (gripfixaim) because this one is on the aim path and the zone half is not.
     if (!gun_mode && s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim) {
@@ -697,8 +687,9 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
             API::get()->log_info(
                 "[Halo-CampE-UEVR] TWOHAND: %s. Authority: full within %.0f deg, none past %.0f deg; "
                 "fades out as the hands close from %.0f cm to %.0f cm.",
-                s_gun_mode ? "holding the GUN at two points (twohandgun=1) -- a hold where the gun "
-                             "already sits moves nothing"
+                s_gun_mode ? "GUN mode (twohandgun=1) -- the barrel swings onto your hands with the "
+                             "handle offset taken off in the one-handed gun; a hold at rest moves "
+                             "nothing"
                            : "RAY mode (twohandgun=0) -- the controller's aim ray turns onto the "
                              "hands, as before 2026-09-13",
                 deg(f), deg(m), b * 200.0f, b * 100.0f);

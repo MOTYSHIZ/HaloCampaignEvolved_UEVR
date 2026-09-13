@@ -155,10 +155,11 @@ struct TwoHandZoneMeas {
 
     // ---- THE ONE-HANDED GUN'S AXES, IN RAW VR SPACE, WITH THIS TICK'S SWING TAKEN BACK OUT ------
     //
-    // For gun mode (twohandgun), which swings the gun's own grip-to-handle vector onto the hands.
-    // Unit vectors: x down the barrel, y/z the gun's y/z -- the frame hand_gun and grip_off_gun are
-    // in, so wpngrip's y/z apply to them directly. The mapping into VR space includes a handedness
-    // flip, which is harmless: only lengths and angles of vectors built from these are used.
+    // For gun mode (twohandgun), which swings the one-handed barrel (x) onto the hands with the
+    // handle offset taken off along y/z. Unit vectors: x down the barrel, y/z the gun's y/z -- the
+    // frame hand_gun and grip_off_gun are in, so wpngrip's y/z apply to them directly. The mapping
+    // into VR space includes a handedness flip, which is harmless: only lengths and angles of vectors
+    // built from these are used.
     //
     // UNSWUNG IS THE POINT. The rig composed this tick's gun with the swing published last tick, so
     // measuring from its axes as drawn would feed every swing into the next one -- the loop that
