@@ -3,6 +3,7 @@
 #include "ArmDriver.hpp"  // the palette driver owns the weapon too; do not attach under it
 #include "Reticule.hpp"   // reticle_arm_stray_check: a weapon change rebuilds the HUD crosshair
 #include "MotionAimControl.hpp"  // get_pose(), g_turn_offset -- the frozen bore capture works in the aim frame
+#include "TwoHandAim.hpp"        // two_hand_bend_orientation -- the aim frame must swing with the rig
 
 #include <cstdio>
 #include <cstring>
@@ -985,31 +986,66 @@ static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
 #endif  // AssetMeasure/g_asset_cache are dev-only; the helpers + capture below are ALWAYS-compiled
         // because the manual Page Down override (shotpoint_capture_held) needs them in release too.
 
-// Capture the FROZEN controller-local bore for the held weapon: read the aim controller pose and
-// the world bore, remove the snap turn, convert the bore into the controller's frame, and store it.
-// SELF-CHECKS by reconstructing the aim at the very same pose and comparing to the world bore; if
-// the round trip does not reproduce it (a frame or sign bug), the capture is REJECTED and logged,
-// so a bad transform fails closed onto the live-bore bootstrap instead of throwing aim off.
+// ---- THE RIG COMPOSITION, factored so the aim frame is the SAME one the barrel is drawn in.
 //
-// Frame math, derived from the code's own conventions (verified against three reference dirs):
-//   * quat_forward is VR space: game_yaw = atan2(x,-z), game_pitch = asin(y), + aim_turn*g_turn_offset.
-//   * the mesh bore is UE world: game_yaw = atan2(y,x), game_pitch = asin(z), turn already included.
-//   * so UE_forward = (-vr.z, vr.x, vr.y), and UE->VR = (ue.y, ue.z, -ue.x).
+// The rendered weapon's game-space orientation (mode 3, before the parent divides out and re-applies)
+// is  q_ctrl * q_grip_dir , where q_ctrl comes from the CONTROLLER pose converted VR->UE with the -w
+// HANDEDNESS term and q_grip_dir is the live End grip trim. shotpoint_gun_quat() reproduces exactly
+// that rotation, MINUS the snap turn (callers add turn as a scalar yaw -- equivalent to the rig's
+// q_turn pre-rotation, since a yaw about UE +Z just adds to atan2(y,x) and leaves asin(z) alone).
+//
+// Because the grip trim is applied LIVE here (never frozen), a bore captured against this frame
+// follows an End grip change with no re-capture -- that is the grip-independence. And because the
+// pose conversion matches the rig, aim points where the barrel VISUALLY points.
+//
+// ⚠️ THIS MIRRORS the rig's mode-3 pose->orientation block in Plugin.cpp (the one that builds
+// g_pitch/g_yaw/g_roll from cq_2h/gqo, then q_ctrl*q_grip_dir). It is a deliberate second copy, the
+// same discipline as the derive_ctrl_angles / inline-aim pair: if you change that rig block, change
+// this. (rotator_to_quat is the exact inverse of quat_to_rotator per Math.hpp, so building the
+// quaternion straight from the -w-swizzled components equals the rig's rotator round-trip, without
+// the Euler gimbal degeneracy near vertical.)
+//
 // Uses the CONFIGURED AIM HAND (left or right), never a hardcoded controller.
-// world bore (UE, unit) + aim controller pose -> bore in the controller's VR-local frame, snap-turn
-// removed. This value is CONSTANT while the weapon rigidly tracks the hand -- it is what we freeze.
-static Vec3 bore_to_controller_local(const Quat& cq, const Vec3& bore_ue) {
-    const float t  = g_cfg.aim_turn * g_turn_offset.load();
-    const float tr = t * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
-    const Vec3 b_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };  // strip snap turn (UE Z)
-    const Vec3 bore_vr{ b_nt.y, b_nt.z, -b_nt.x };                                            // UE fwd -> VR fwd
-    return quat_rotate(quat_conj(cq), bore_vr);
+static Quat shotpoint_gun_quat(const Quat& cq, const Quat& gq, bool have_grip,
+                               const Quat& q_ro, bool two_hand) {
+    Quat bcq = cq, bgq = gq;
+    if (two_hand) {                       // the SAME swing the rig applies to the rendered weapon
+        two_hand_bend_orientation(&bcq);
+        two_hand_bend_orientation(&bgq);
+    }
+    // Grip pose * rotation_offset when the grip pose is available (as the rig does), else the aim
+    // pose. rotation_offset is composed in VR space, before the conversion -- matching the rig.
+    const Quat pose = have_grip ? quat_mul(q_ro, bgq) : bcq;
+    const Quat ue{ -pose.z, pose.x, pose.y, -pose.w };   // VR -> UE, WITH handedness (the -w term)
+    const Quat q_grip_dir = rotator_to_quat(g_cfg.rig_dir_grip_deg,
+                                            g_cfg.rig_dir_grip_yaw,
+                                            g_cfg.rig_dir_grip_roll);
+    return quat_mul(ue, q_grip_dir);
 }
-// controller-local bore + current pose -> game angles, EXACTLY what the aim consumer produces.
-static void controller_local_to_game(const Quat& cq, const Vec3& bl, float* yaw, float* pit) {
-    const Vec3 bvr = quat_rotate(cq, bl);
-    *yaw = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
-    *pit = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
+// Samples the grip pose + rotation offset for `ridx` and composes the gun quat. `cq` is the aim pose
+// the caller already sampled. The one place the rig_view_yaw sign convention on the offset lives.
+static Quat shotpoint_gun_quat_live(int32_t ridx, const Quat& cq, bool two_hand) {
+    Vec3 gpos{}; Quat gq{};
+    const bool have_grip = get_pose(ridx, &gpos, &gq, /*use_aim=*/false);
+    const auto ro = API::VR::get_rotation_offset();
+    Quat q_ro{ro.x, ro.y, ro.z, ro.w};
+    if (g_cfg.rig_view_yaw < 0.0f) q_ro = quat_conj(q_ro);   // mirror the rig block (Plugin.cpp)
+    return shotpoint_gun_quat(cq, gq, have_grip, q_ro, two_hand);
+}
+
+// Reconstruct the frozen constant F to game angles: F is the bore in the un-driven weapon frame, so
+// rotating it by the live gun quat gives the world bore, and atan2(y,x)/asin(z) (+turn) are its
+// game angles. This IS the aim consumers' shared setpoint -- see the header.
+bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
+                          float* out_yaw, float* out_pitch) {
+    Vec3 F{};
+    if (!shotpoint_bore_local(&F)) return false;   // no frozen constant -> caller cascades
+    const Quat q_gun = shotpoint_gun_quat_live(ridx, cq, two_hand);   // game space, no turn
+    const Vec3 bore  = quat_rotate(q_gun, F);
+    const float turn = g_cfg.aim_turn * g_turn_offset.load();
+    if (out_yaw)   *out_yaw   = wrap180(std::atan2(bore.y, bore.x) * RAD2DEG + turn);
+    if (out_pitch) *out_pitch = std::asin(clampf(bore.z, -1.0f, 1.0f)) * RAD2DEG;
+    return true;
 }
 
 // Capture the frozen controller-frame bore for the held weapon (force-overwrite). Self-checks by
@@ -1031,27 +1067,41 @@ static bool capture_bore_local(API::UObject* wpn) {
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
-    const Vec3 bore_local = bore_to_controller_local(cq, bore_ue);
+    // Freeze the bore in the weapon's UN-DRIVEN frame: divide out the rig's live composition (grip
+    // pose + grip trim), and strip the snap turn, so what remains is grip-, turn- and
+    // animation-free. two_hand=false -- Page Down is a deliberate single-handed calibration gesture
+    // (a live swing would cancel between q_gun and the swung mesh bore anyway, but keeping it off
+    // makes the stored constant unambiguous).
+    const Quat q_gun = shotpoint_gun_quat_live(ridx, cq, /*two_hand=*/false);   // game space, no turn
+    const float turn = g_cfg.aim_turn * g_turn_offset.load();
+    const float tr = turn * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
+    const Vec3 bore_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };  // strip snap turn (UE +Z)
+    const Vec3 F = quat_rotate(quat_conj(q_gun), bore_nt);
 
-    // Self-check: reconstruct at THIS pose; must reproduce the live world bore's game angles.
-    float rec_yaw, rec_pit; controller_local_to_game(cq, bore_local, &rec_yaw, &rec_pit);
+    // Self-check: reconstruct THIS freshly-computed F at THIS pose; must reproduce the live world
+    // bore's game angles. A near-tautology by construction (rec == bore_nt), so its real job is to
+    // reject a degenerate/NaN pose (e.g. an empty tracking pose) before it is frozen. NB: cannot use
+    // shotpoint_aim_angles here -- that reads the PUBLISHED atomic (last tick's F), not this one.
+    const Vec3 rec = quat_rotate(q_gun, F);
+    const float rec_yaw = wrap180(std::atan2(rec.y, rec.x) * RAD2DEG + turn);
+    const float rec_pit = std::asin(clampf(rec.z, -1.0f, 1.0f)) * RAD2DEG;
     const float bore_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
     const float bore_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
     const float dyaw = std::fabs(wrap180(rec_yaw - bore_yaw));
     const float dpit = std::fabs(rec_pit - bore_pit);
-    if (dyaw > 2.0f || dpit > 2.0f) {
+    if (!std::isfinite(dyaw) || !std::isfinite(dpit) || dyaw > 2.0f || dpit > 2.0f) {
         API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: REJECT '%ls' -- self-check off yaw=%.2f pit=%.2f",
                              class_name_of(wpn).c_str(), dyaw, dpit);
         return false;
     }
     const std::wstring cn = class_name_of(wpn);
-    g_bore_cache[cn] = bore_local;
-    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f) at bore "
-                         "yaw=%.1f pit=%.1f -- frozen aim armed",
-                         cn.c_str(), bore_local.x, bore_local.y, bore_local.z, bore_yaw, bore_pit);
+    g_bore_cache[cn] = F;
+    API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' F=(%.3f,%.3f,%.3f) at bore "
+                         "yaw=%.1f pit=%.1f -- grip-independent frozen aim armed",
+                         cn.c_str(), F.x, F.y, F.z, bore_yaw, bore_pit);
     // The AR is the reference weapon: its bore also becomes the DEFAULT for uncaptured weapons.
     if (cn.find(L"AssaultRifle") != std::wstring::npos) {
-        g_def_x.store(bore_local.x); g_def_y.store(bore_local.y); g_def_z.store(bore_local.z);
+        g_def_x.store(F.x); g_def_y.store(F.y); g_def_z.store(F.z);
         g_def_valid.store(true);
         API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> DEFAULT for uncaptured weapons");
     }
@@ -1086,12 +1136,17 @@ void shotpoint_asset_dev(unsigned tick) {
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return;
 
-    // THE BORE IN THE CONTROLLER'S FRAME. Constant while the weapon rigidly tracks the hand, moving
-    // during draw/recoil/reload -- so ITS variance is the right "is the player holding steady?"
-    // signal. (The first cut measured bore-vs-ROOT, which is rigidly constant -- dev=0.00 forever --
-    // so "stable" was always true and the capture fired mid-draw at whatever pose, e.g. the Magnum
-    // at 80 deg up. That is the pistol-reticle-gone bug.)
-    const Vec3 bl = bore_to_controller_local(cq, bore_ue);
+    // THE BORE IN THE WEAPON'S UN-DRIVEN FRAME (the frozen constant, sampled live). Constant while
+    // the weapon rigidly tracks the hand, moving during draw/recoil/reload -- so ITS variance is the
+    // right "is the player holding steady?" signal. Same math as capture_bore_local, so this window
+    // measures exactly what a Page Down would freeze. (The first cut measured bore-vs-ROOT, which is
+    // rigidly constant -- dev=0.00 forever -- so "stable" was always true and the capture fired
+    // mid-draw at whatever pose, e.g. the Magnum at 80 deg up. That is the pistol-reticle-gone bug.)
+    const Quat  q_gun = shotpoint_gun_quat_live(ridx, cq, /*two_hand=*/true);   // game space, no turn
+    const float turn  = g_cfg.aim_turn * g_turn_offset.load();
+    const float tr = turn * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
+    const Vec3  bore_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };
+    const Vec3  bl = quat_rotate(quat_conj(q_gun), bore_nt);
 
     constexpr float kBoreTolDeg   = 2.0f;   // window: a sample beyond this restarts the hold
     constexpr int   kStableSamples = 30;    // ~0.9 s of CONSECUTIVE quiet at ~32 Hz
@@ -1104,9 +1159,9 @@ void shotpoint_asset_dev(unsigned tick) {
 
     AssetMeasure& m = g_asset_cache[class_name_of(wpn)];
 
-    // Reset-on-motion window on the CONTROLLER-relative bore: a sample beyond tolerance ends the
-    // hold and restarts, so draw/recoil/reload/sway just keep restarting the counter and only a
-    // genuine steady hold (weapon rigidly tracking the hand) reaches STABLE.
+    // Reset-on-motion window on the un-driven-frame bore: a sample beyond tolerance ends the hold
+    // and restarts, so draw/recoil/reload/sway just keep restarting the counter and only a genuine
+    // steady hold (weapon rigidly tracking the hand) reaches STABLE.
     bool broke = false;
     if (m.n > 0) {
         const float bdev = ang(bl, m.bore_mean);
@@ -1133,11 +1188,13 @@ void shotpoint_asset_dev(unsigned tick) {
     // it also shows the recapture converging back to ~0 after an End change.
     if ((tick % (unsigned)g_cfg.shot_aim_log) == 0 || (stable && !m.logged_stable)) {
         if (stable) m.logged_stable = true;
-        float ry, rp; controller_local_to_game(cq, m.bore_mean, &ry, &rp);
+        const Vec3  rec = quat_rotate(q_gun, m.bore_mean);   // window-mean F, current pose
+        const float ry  = wrap180(std::atan2(rec.y, rec.x) * RAD2DEG + turn);
+        const float rp  = std::asin(clampf(rec.z, -1.0f, 1.0f)) * RAD2DEG;
         const float live_yaw = std::atan2(bore_ue.y, bore_ue.x) * RAD2DEG;
         const float live_pit = std::asin(clampf(bore_ue.z, -1.0f, 1.0f)) * RAD2DEG;
         API::get()->log_info(
-            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | boreCtrl=(%.3f,%.3f,%.3f) dev=%.2fdeg | "
+            "[Halo-CampE-UEVR] SHOTASSET: '%ls' n=%d %s | F=(%.3f,%.3f,%.3f) dev=%.2fdeg | "
             "recompose-vs-live dyaw=%.2f dpit=%.2f",
             class_name_of(wpn).c_str(), m.n, stable ? "STABLE" : "settling",
             m.bore_mean.x, m.bore_mean.y, m.bore_mean.z, m.bore_dev_max,
