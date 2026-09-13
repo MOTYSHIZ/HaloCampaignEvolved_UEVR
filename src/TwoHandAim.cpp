@@ -26,6 +26,53 @@ namespace pa = ::halo::palettearm;
 pa::TwoHandHold   s_hold;
 pa::TwoHandTuning s_tuning;   // units_to_metres defaults to 1: OpenXR hands you metres
 
+// ---- THE GUN HELD AT TWO POINTS (twohandgun) ---------------------------------------------------
+//
+// 1 = measure the hold from the WEAPON (default), 0 = from the controller's aim RAY, with the
+// handle offset subtracted from the support hand (every build before 2026-09-13).
+//
+// The swing turns ONE vector onto the line between the hands. In gun mode that vector is the
+// ONE-HANDED gun's own grip-to-handle line: from the aim grip, down the barrel to where the support
+// hand is, then out to the handle (wpngrip y/z). So a rigid gun held at two points is solved as a
+// rigid gun held at two points, and three things fall out of that together:
+//
+//   1. A HOLD AT REST MOVES NOTHING. With both hands where the gun already has them, the two
+//      vectors coincide and the swing is identity. The ray mode turned the controller's pointing
+//      ray onto the hands instead, so grabbing rotated the gun by however far its barrel sits from
+//      that ray -- the grip trim plus any per-weapon rotation -- even at the calibrated hold.
+//
+//   2. NO FEEDBACK. Both vectors come from THIS tick's raw poses and the UNSWUNG gun (the rig block
+//      publishes its axes with the swing it applied taken back out). The ray mode rotated the
+//      handle offset with the already-swung gun, so every swing moved the next tick's hand line.
+//      With the sentinel beam's 27 cm handle and the hands close together that loop gains above 1:
+//      it presented as the weapon SPINNING, and with an agreement band closed it flipped between the
+//      one- and two-handed pose on alternate ticks -- "two ghost images of the weapon" (2026-09-13).
+//
+//   3. THE GATES MEAN SOMETHING. Agreement is now "how far is the support hand from where this gun's
+//      handle would be, seen from the aim grip": ~1 on the gun, falling as a hand crosses over, at
+//      any separation. So the gate can close to a band, and the minimum baseline shrinks to a guard
+//      against the hands actually coinciding. Fading by DISTANCE starved grips that are close by
+//      design -- the rocket launcher's sit 13 cm apart, which the 10-20 cm band held to about a
+//      fifth of its authority.
+//
+// ITS OWN GATE KEYS (twohandgunagree*/twohandgunminbase), deliberately not the ray mode's: the two
+// agreements measure different things, so a value tuned for one silently applied to the other --
+// e.g. a player file that opened the ray gate with twohandagreemin=-1 -- would switch the gun gate
+// off without saying so.
+int   s_gun_mode       = 1;
+float s_gun_agree_min  = 0.35f;   // cos 69.5 deg: no authority past this
+float s_gun_agree_full = 0.70f;   // cos 45.6 deg: full authority within this
+// m: full from 10 cm apart, none at 5 -- the hands coinciding, not the grips being close. In the ray
+// mode the same 5 cm spun the weapon whenever the hands closed (reported: anything under 0.14 spun);
+// that was the feedback loop above, which this mode does not have.
+float s_gun_min_base   = 0.05f;
+
+// The support hand's distance down the barrel is used AS MEASURED (you may grip anywhere along a
+// handle, exactly as along a barrel) but never below this, so a hand sliding back past the aim grip
+// cannot turn the grip-to-handle vector backwards. Past it the two vectors disagree and the gate
+// fades the hold out instead. Metres.
+constexpr float kGunMinAlong = 0.02f;
+
 // ---- THE PUBLISHED SWING -----------------------------------------------------------------------
 //
 // Written on the game thread, read from the game thread, the XInput hook and the sim hook. A
@@ -147,6 +194,22 @@ pa::Mat3 vr_basis(const Quat& q) {
     return pa::Mat3{to_pa(f), to_pa(l), to_pa(u)};
 }
 
+// An orthonormal basis whose FORWARD is `fwd` and whose UP is the aim controller's up with the
+// forward component removed. effective_basis() derives the blended LEFT from this up, so roll still
+// comes from the aim hand exactly as it does with the ray basis -- the support hand sets where the
+// gun points, never how it is twisted. False, with `out` untouched, when `fwd` lies along the
+// controller's up and no up can be defined; the caller keeps the ray for that tick.
+bool forward_basis(const Vec3& fwd, const pa::Mat3& ray, pa::Mat3* out) {
+    const pa::Vec3 f = pa::normalized(to_pa(fwd));
+    if (!(pa::length_squared(f) > 0.8f)) return false;
+    pa::Vec3 u = ray.up - f * pa::dot(ray.up, f);
+    if (!(pa::length_squared(u) > 1.0e-4f)) return false;
+    u = pa::normalized(u);
+    const pa::Vec3 l = pa::cross(u, f);
+    *out = pa::Mat3{f, l, pa::cross(f, l)};
+    return true;
+}
+
 // Shortest-arc rotation taking `from` onto `to`. Identity (and false) for every degenerate case:
 // failing to one-handed aim is a working game.
 bool swing_between(const pa::Vec3& from, const pa::Vec3& to, Quat* out) {
@@ -186,6 +249,16 @@ bool two_hand_parse_key(const char* key, double v) {
         s_tuning.minimum_agreement = (float)v;
     else if (_stricmp(key, "twohandagreefull") == 0 || _stricmp(key, "pa2hagreefull") == 0)
         s_tuning.full_agreement = (float)v;
+    // 1 = hold the gun at two points, measured from the weapon; 0 = the ray mode. See s_gun_mode.
+    // The three below tune gun mode only, and the three ray keys tune the ray mode only.
+    else if (_stricmp(key, "twohandgun") == 0)
+        s_gun_mode = (v != 0.0) ? 1 : 0;
+    else if (_stricmp(key, "twohandgunagreemin") == 0)
+        s_gun_agree_min = (float)v;
+    else if (_stricmp(key, "twohandgunagreefull") == 0)
+        s_gun_agree_full = (float)v;
+    else if (_stricmp(key, "twohandgunminbase") == 0)
+        s_gun_min_base = (float)v;
     else if (_stricmp(key, "twohandblend")  == 0 || _stricmp(key, "pa2hblend")     == 0)
         s_tuning.blend_seconds = (float)v;
     else if (_stricmp(key, "twohandonemin") == 0)
@@ -196,6 +269,18 @@ bool two_hand_parse_key(const char* key, double v) {
         s_tuning.min_baseline_m = (float)v;
     else return false;
     return true;
+}
+
+// Back to the compiled defaults, ahead of every re-parse. Without this a DELETED key kept its last
+// value until restart -- nothing else writes these, and load_config() only resets g_cfg -- so
+// "remove the line to undo the experiment" silently did nothing, which is the one instruction every
+// dev-cfg experiment ends with.
+void two_hand_tuning_reset() {
+    s_tuning         = pa::TwoHandTuning{};
+    s_gun_mode       = 1;
+    s_gun_agree_min  = 0.35f;
+    s_gun_agree_full = 0.70f;
+    s_gun_min_base   = 0.05f;
 }
 
 // ---- READERS -----------------------------------------------------------------------------------
@@ -304,6 +389,16 @@ bool two_hand_bend_forward(Vec3* fwd) {
     Swing s{};
     if (!read_swing(&s) || !s.valid) return false;
     *fwd = quat_rotate(s.r, *fwd);
+    return true;
+}
+
+bool two_hand_unbend_rig_forward(Vec3* fwd) {
+    // Gated EXACTLY as two_hand_bend_orientation() is, so it removes precisely what the rig applied
+    // this tick: with twohandrig off the rig bent nothing, and this must take nothing out.
+    if (fwd == nullptr || !g_cfg.two_hand_rig) return false;
+    Swing s{};
+    if (!read_swing(&s) || !s.valid) return false;
+    *fwd = quat_rotate(quat_conj(s.r), *fwd);
     return true;
 }
 
@@ -495,7 +590,51 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
         in.zone_lateral_m = std::sqrt(dy * dy + dz * dz) / cm_per_m;
     }
 
-    // ---- ...AND THE AIM DIRECTION, WHICH IS THE HALF THAT CAN MOVE A SHOT ----------------------
+    // ---- WHAT THE SWING TURNS, AND ONTO WHAT ---------------------------------------------------
+    //
+    // GUN MODE (twohandgun=1, the default; see s_gun_mode): FROM is the one-handed gun's own
+    // grip-to-handle vector, TO is the raw line between the hands, and nothing is subtracted from
+    // the support hand. effective_basis() measures agreement against, and swings from, the aim
+    // basis's forward -- so handing it FROM as that forward is the entire change on the hold's side.
+    // The hold itself (TwoHand.cpp, unit-tested) is untouched.
+    //
+    // Both vectors are metres in RAW VR space. The gun's axes arrive UNSWUNG from the rig block, so
+    // FROM cannot depend on the swing it is about to produce.
+    bool gun_mode = false;
+    {
+        // The support hand's distance down the barrel, kept for a tick where it is not tracked: the
+        // hold then steers from its remembered line, and FROM has to stay the vector it was measured
+        // against or the agreement jumps. Rebuilt against the LIVE gun axes, never stored in world
+        // space, so it still turns with the aim hand.
+        static float s_last_along = 0.30f;
+        if (s_gun_mode != 0 && s_zone_meas.gun1_valid) {
+            const Vec3& gx = s_zone_meas.gun1_x;
+            const Vec3& gy = s_zone_meas.gun1_y;
+            const Vec3& gz = s_zone_meas.gun1_z;
+            float along = s_last_along;
+            if (support_tracked) {
+                const Vec3 d{support_pos.x - aim_grip_pos.x, support_pos.y - aim_grip_pos.y,
+                             support_pos.z - aim_grip_pos.z};
+                along = d.x * gx.x + d.y * gx.y + d.z * gx.z;
+                if (!std::isfinite(along) || along < kGunMinAlong) along = kGunMinAlong;
+                s_last_along = along;
+            }
+            // Out to the handle: the wpngrip y/z, game centimetres -> metres through rig_scale (the
+            // same divisor the zone uses, and for the same reason). Zero with no entry, which makes
+            // FROM the barrel itself; gripfixaim=0 leaves the handle out of aim, as it always has.
+            const float cm_per_m = (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;
+            const bool  handle   = s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim;
+            const float oy = handle ? s_zone_meas.grip_off_gun.y / cm_per_m : 0.0f;
+            const float oz = handle ? s_zone_meas.grip_off_gun.z / cm_per_m : 0.0f;
+            const Vec3 from{gx.x * along + gy.x * oy + gz.x * oz,
+                            gx.y * along + gy.y * oy + gz.y * oz,
+                            gx.z * along + gy.z * oy + gz.z * oz};
+            const pa::Mat3 ray_basis = in.aim_basis;
+            gun_mode = forward_basis(from, ray_basis, &in.aim_basis);
+        }
+    }
+
+    // ---- RAY MODE ONLY: THE HANDLE OFFSET, SUBTRACTED FROM THE SUPPORT HAND --------------------
     //
     // effective_basis() takes the gun's forward to be normalized(support - aim). For an off-axis
     // handle that line is NOT the barrel, and `along` does not cancel the error -- it scales it:
@@ -507,8 +646,13 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     // steers by exactly the angle a rifle would give, because only the BASELINE moved onto the
     // handle. That is why this is a subtraction and not a clamp toward the axis.
     //
+    // SUPERSEDED BY GUN MODE, and kept whole for the A/B. It has two faults the gun mode was built to
+    // remove: it rotates the offset with the ALREADY-SWUNG gun (grip_off_vr), which feeds each swing
+    // back into the next tick's hand line; and it steers an off-axis handle by atan(d/along), as if
+    // the handle sat on the barrel, where a rigid gun turns by d over the full grip-to-handle reach.
+    //
     // Its own switch (gripfixaim) because this one is on the aim path and the zone half is not.
-    if (s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim) {
+    if (!gun_mode && s_zone_meas.grip_off_valid && g_cfg.grip_fix_aim) {
         const pa::Vec3 fix = to_pa(s_zone_meas.grip_off_vr);
         in.support_grip_position.x -= fix.x;
         in.support_grip_position.y -= fix.y;
@@ -530,6 +674,36 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     // because nothing re-reads the config on a weapon swap.
     pa::TwoHandTuning tuning = s_tuning;
     if (deny_aim) tuning.zone_min_along_m = g_cfg.two_hand_onehand_min_m;
+    // Gun mode's gates are its own; see the note on s_gun_mode for why they are not shared.
+    if (gun_mode) {
+        tuning.minimum_agreement = s_gun_agree_min;
+        tuning.full_agreement    = s_gun_agree_full;
+        tuning.min_baseline_m    = s_gun_min_base;
+    }
+
+    // SAY WHICH HOLD IS RUNNING, ON CHANGE -- of the CONFIGURATION, not of this tick's fallback, so a
+    // tick with no rig to measure cannot make it chatter.
+    {
+        static int   s_said_mode = -1;
+        static float s_said_min = 0.0f, s_said_full = 0.0f, s_said_base = 0.0f;
+        const float m = s_gun_mode ? s_gun_agree_min  : s_tuning.minimum_agreement;
+        const float f = s_gun_mode ? s_gun_agree_full : s_tuning.full_agreement;
+        const float b = s_gun_mode ? s_gun_min_base   : s_tuning.min_baseline_m;
+        if (s_said_mode != s_gun_mode || s_said_min != m || s_said_full != f || s_said_base != b) {
+            s_said_mode = s_gun_mode; s_said_min = m; s_said_full = f; s_said_base = b;
+            const auto deg = [](float c) {
+                return std::acos(c < -1.0f ? -1.0f : (c > 1.0f ? 1.0f : c)) * 57.2957795f;
+            };
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] TWOHAND: %s. Authority: full within %.0f deg, none past %.0f deg; "
+                "fades out as the hands close from %.0f cm to %.0f cm.",
+                s_gun_mode ? "holding the GUN at two points (twohandgun=1) -- a hold where the gun "
+                             "already sits moves nothing"
+                           : "RAY mode (twohandgun=0) -- the controller's aim ray turns onto the "
+                             "hands, as before 2026-09-13",
+                deg(f), deg(m), b * 200.0f, b * 100.0f);
+        }
+    }
 
     const pa::TwoHandState st = s_hold.update(in, tuning);
 
@@ -626,18 +800,10 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     // jitter rather than the cure -- in which case the offset needs to fade with distance from the
     // HANDLE instead, because a fixed offset is extrapolation once the hand leaves it.
     // A steady w with the weapon still yawing means the fault is elsewhere and this is exonerated.
-    HALO_VR_DEV_ONLY(
-        if (g_cfg.two_hand_log && st.latched) {
-            static uint32_t s_last = 0;
-            if (tick - s_last >= 16u) {
-                s_last = tick;
-                API::get()->log_info(
-                    "[Halo-CampE-UEVR] TWOHAND BASE: sep=%.3fm w=%.2f blend=%.2f | along=%.3f "
-                    "lat=%.3f | gripoff=%d fixaim=%d",
-                    st.baseline_m, st.baseline_w, st.blend, st.along_m, st.lateral_m,
-                    s_zone_meas.grip_off_valid ? 1 : 0, g_cfg.grip_fix_aim ? 1 : 0);
-            }
-        });
+    //
+    // Sampled AFTER the swing is published (below), so it can report the swing and the agreement
+    // that produced it: the "two ghost images" report was the swing alternating between two values
+    // on successive ticks, which only a line carrying the swing itself can show.
 
     // THE ONE CALL. Nothing else in the plugin may call effective_basis(); see TwoHandAim.hpp.
     const pa::Mat3 canonical = in.aim_basis;
@@ -655,6 +821,26 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     out.valid   = !deny_aim && swing_between(canonical.forward, blended.forward, &out.r);
     if (!out.valid) out.r = Quat{0.0f, 0.0f, 0.0f, 1.0f};
     publish(out);
+
+#if HALO_VR_DEV
+    // THE BASELINE SAMPLER itself -- see the note above the one call.
+    if (g_cfg.two_hand_log && st.latched) {
+        static uint32_t s_last = 0;
+        if (tick - s_last >= 16u) {
+            s_last = tick;
+            const float agree = pa::dot(pa::normalized(in.support_grip_position - in.aim_grip_position),
+                                        pa::normalized(canonical.forward));
+            const float w_abs = std::fabs(out.r.w) > 1.0f ? 1.0f : std::fabs(out.r.w);
+            const float swing_deg = out.valid ? 2.0f * std::acos(w_abs) * 57.2957795f : 0.0f;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] TWOHAND BASE: %s sep=%.3fm w=%.2f blend=%.2f agree=%.2f "
+                "swing=%.1fdeg | along=%.3f lat=%.3f | gripoff=%d fixaim=%d",
+                gun_mode ? "gun" : "ray", st.baseline_m, st.baseline_w, st.blend, agree, swing_deg,
+                st.along_m, st.lateral_m,
+                s_zone_meas.grip_off_valid ? 1 : 0, g_cfg.grip_fix_aim ? 1 : 0);
+        }
+    }
+#endif
 
     if (st.in_zone) s_zone_ever = true;
 

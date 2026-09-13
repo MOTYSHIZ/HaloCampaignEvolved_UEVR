@@ -1932,6 +1932,9 @@ void load_config() {
 
     g_cfg = Config{};
     g_cfg.blam_aim = keep_blam_aim;
+    // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset
+    // here -- without it a deleted twohand* key kept its last value until the game restarted.
+    two_hand_tuning_reset();
 
     // The base file is the only REQUIRED one: with it missing there is nothing to override, so we
     // write a default and come back next poll.
