@@ -2038,6 +2038,21 @@ void write_calib_file() {
     const float w_ox    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_x     : g_cfg.off_x;
     const float w_oy    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_y     : g_cfg.off_y;
     const float w_oz    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_z     : g_cfg.off_z;
+    // THE DIRECT PAIR GETS THE SAME GUARD, and it did not until 2026-09-12.
+    //
+    // It was written raw from g_cfg, which was correct only while nothing added a per-weapon delta
+    // to it. Once WeaponOffset began doing exactly that (rig_mode 3 composes from the direct trim
+    // and nothing else, so the delta has to land there), a raw write persisted "calibration +
+    // whatever gun is in hand". Any calibration write while holding a weapon with a pose delta
+    // baked the delta into the global dirgrip, and the next reload stacked it again. The fitted
+    // pair never had this because it was guarded from the start; the guard simply was not extended
+    // when a second consumer of the same pattern appeared.
+    const float w_dg    = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip      : g_cfg.rig_dir_grip_deg;
+    const float w_dgy   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip_yaw  : g_cfg.rig_dir_grip_yaw;
+    const float w_dgr   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip_roll : g_cfg.rig_dir_grip_roll;
+    const float w_dox   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_x     : g_cfg.rig_dir_off_x;
+    const float w_doy   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_y     : g_cfg.rig_dir_off_y;
+    const float w_doz   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_z     : g_cfg.rig_dir_off_z;
     fprintf(f,
         "# halo_vr - CALIBRATION RESULT. Written by the pose-match calibration; applied\r\n"
         "# AFTER halo_vr.cfg, so these override the values in that file.\r\n"
@@ -2058,8 +2073,8 @@ void write_calib_file() {
         // absolute aimoffyaw got stamped v2 by a mesh calibration.
         g_cfg.calib_ver,
         w_grip, w_gyaw, w_groll,
-        g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll,
-        g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z,
+        w_dg, w_dgy, w_dgr,
+        w_dox, w_doy, w_doz,
         w_ox, w_oy, w_oz);
 
     if (g_cfg.aim_off_valid) {

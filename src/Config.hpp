@@ -4081,6 +4081,18 @@ struct Config {
     // recalibration.
     float wpn_base_grip = 0.0f, wpn_base_grip_yaw = 0.0f, wpn_base_grip_roll = 0.0f;
     float wpn_base_off_x = 0.0f, wpn_base_off_y = 0.0f, wpn_base_off_z = 0.0f;
+    // The DIRECT trim's base, published for exactly the reason the fitted one above is: so
+    // write_calib_file() persists the calibration and NOT the calibration plus whatever weapon
+    // happens to be in hand.
+    //
+    // Needed since WeaponOffset began adding each weapon's pose delta into rig_dir_grip_* /
+    // rig_dir_off_* (rig_mode 3 composes from nothing else, so that is where the delta has to go).
+    // The writer guarded the fitted pair with wpn_base_* all along, but wrote the direct pair RAW --
+    // harmless while nothing touched it, and a compounding fault the moment something did: any
+    // calibration write while holding a weapon with a delta (a scope capture, an aim capture)
+    // baked that delta into the global dirgrip, and the next ~2 s reload added it again on top.
+    float wpn_base_dir_grip = 0.0f, wpn_base_dir_grip_yaw = 0.0f, wpn_base_dir_grip_roll = 0.0f;
+    float wpn_base_dir_off_x = 0.0f, wpn_base_dir_off_y = 0.0f, wpn_base_dir_off_z = 0.0f;
     bool  wpn_log         = false;
     WeaponAdjust wpn[kMaxWeaponAdjust];
     int   wpn_count       = 0;

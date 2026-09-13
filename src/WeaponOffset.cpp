@@ -62,6 +62,14 @@ void publish_base() {
     g_cfg.wpn_base_off_x     = s_base.off_x;
     g_cfg.wpn_base_off_y     = s_base.off_y;
     g_cfg.wpn_base_off_z     = s_base.off_z;
+    // The direct trim's base, so write_calib_file() round-trips the calibration rather than the
+    // calibration plus the held weapon's delta. See Config::wpn_base_dir_grip.
+    g_cfg.wpn_base_dir_grip      = s_base.dir_grip;
+    g_cfg.wpn_base_dir_grip_yaw  = s_base.dir_grip_yaw;
+    g_cfg.wpn_base_dir_grip_roll = s_base.dir_grip_roll;
+    g_cfg.wpn_base_dir_off_x     = s_base.dir_off_x;
+    g_cfg.wpn_base_dir_off_y     = s_base.dir_off_y;
+    g_cfg.wpn_base_dir_off_z     = s_base.dir_off_z;
 }
 
 } // namespace
