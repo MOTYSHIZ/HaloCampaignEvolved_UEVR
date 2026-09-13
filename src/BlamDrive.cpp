@@ -1,6 +1,8 @@
 ﻿#include "BlamDrive.hpp"
 
 #include "Config.hpp"
+#include "BlamPalette.hpp"   // blam_weapon_object_probe_offhook: the reload's weapon object under his arm drivers
+#include "Holster.hpp"        // holster_throw_press_active(): arms the throw windup dump
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "AimConverge.hpp"
@@ -11,14 +13,42 @@
 #include <Windows.h>
 #include <tlhelp32.h>   // thread enumeration for the off-thread TLS resolution below
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <intrin.h>
 
 using namespace uevr;
 
 namespace halo {
+
+void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring
+extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
+
+// Roomscale's throttle command and gates, published by the game tick in Plugin.cpp. Consumed
+// here on the sim thread (mode 3: the unit object's own throttle vectors).
+extern std::atomic<float>    g_rs_thr_fwd, g_rs_thr_right;
+extern std::atomic<bool>     g_rs_thr_active;
+extern std::atomic<uint32_t> g_rs_thr_written;
+extern std::atomic<float>    g_pad_user_mag;
+extern std::atomic<float>    g_dbg_face[6];
+
+std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
+std::atomic<bool> g_unit_gvalid{false};
+std::atomic<float> g_unit_px{0.0f}, g_unit_py{0.0f}, g_unit_pz{0.0f};
+std::atomic<bool>  g_unit_pvalid{false};
+std::atomic<float> g_unit_fx{1.0f}, g_unit_fy{0.0f};
+std::atomic<float> g_veh_fx{1.0f}, g_veh_fy{0.0f};
+std::atomic<bool>  g_veh_fvalid{false};
+std::atomic<float> g_vehpx{0.0f}, g_vehpy{0.0f}, g_vehpz{0.0f};
+std::atomic<bool> g_unit_mounted{false};
+std::atomic<uint32_t> g_seat_pub_seq{0}, g_seat_pub_calls{0}, g_seat_norec{0}, g_seat_reresolve{0},
+                      g_seat_direct_reads{0};
+std::atomic<uintptr_t> g_seat_obj{0}, g_seat_vobj{0};
+std::atomic<uint32_t>  g_seat_vdat{0xFFFFFFFFu};
+
 namespace {
 
 // The orientation getter, dll+0x5A6AD0. Hooked purely to get onto the sim thread -- its return
@@ -156,6 +186,7 @@ GetOrientFn g_original = nullptr;
 int         g_hook_id  = -1;
 uintptr_t   g_sim_base = 0;
 uint32_t    g_tls_index = 0;
+
 
 // The resolved control record. Re-resolved when it goes bad AND on a slow timer -- see the
 // re-resolve note in blam_drive_tick(). Steady state is a null check on a hot path.
@@ -577,6 +608,13 @@ uintptr_t hooked_get_orientation(uintptr_t handle, Vec3f* outA, Vec3f* outB) {
     }
 
     const uintptr_t ret = g_original ? g_original(handle, outA, outB) : 0;
+    // Manual reload under the author's arm drivers: the held weapon's Blam object is resolved here, on
+    // the sim thread, because the builder hook that normally does it exists only in armdriver mode 3.
+    // Rate-limited: this hook runs thousands of times a second.
+    if (g_cfg.reload_vr || g_cfg.slide_vr) {
+        static uint32_t s_wo = 0;
+        if ((++s_wo & 0x3Fu) == 0u) blam_weapon_object_probe_offhook();
+    }
     drive_control_angles();
     return ret;
 }
@@ -925,6 +963,803 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     }
 }
 
+// UNIT OBJECT DUMP (Config::blam_unit_dump). The record's +0x80 is our unit datum; the game's own
+// walk (seen at dll+0x279BEA: tls+0x20 -> [..] -> +0x50 -> entry idx*24 -> +0x10) yields the object.
+// Every N calls, log the delivered left stick beside every non-zero float in [-1.5,1.5] of the
+// object's first blam_unit_dump_len bytes -- the biped's throttle is whatever tracks the stick.
+uintptr_t resolve_unit_object(uintptr_t rec_base, uint32_t* out_idx) {
+    const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+    uintptr_t block = 0, ctx = 0, ctx2 = 0, table = 0, obj = 0;
+    if (tls_array == 0) return 0;
+    if (!read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) || block == 0) return 0;
+    if (IsBadReadPtr((const void*)(rec_base + 0x80), 4)) return 0;
+    const uint32_t datum = *(const uint32_t*)(rec_base + 0x80);
+    if (datum == 0xFFFFFFFFu) return 0;
+    const uint32_t idx = datum & 0xFFFFu;
+    if (out_idx) *out_idx = datum;
+    if (!read_ptr(block + 0x20, &ctx) || ctx == 0) return 0;
+    (void)ctx2;
+    if (!read_ptr(ctx + 0x50, &table) || table == 0) return 0;
+    if (!read_ptr(table + (uintptr_t)idx * 24 + 0x10, &obj) || obj == 0) return 0;
+    return obj;
+}
+
+// Resolve ANY object datum through the same table walk. SIM THREAD ONLY (gs:[0x58]).
+// Found 2026-08-20: the biped's +0x0C holds its parent object's datum while mounted (the
+// Warthog's unit) and 0xFFFFFFFF on foot -- this is the door into vehicle state.
+uintptr_t resolve_object_by_datum(uint32_t datum) {
+    const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+    uintptr_t block = 0, ctx = 0, table = 0, obj = 0;
+    if (tls_array == 0 || datum == 0xFFFFFFFFu) return 0;
+    if (!read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) || block == 0) return 0;
+    if (!read_ptr(block + 0x20, &ctx) || ctx == 0) return 0;
+    if (!read_ptr(ctx + 0x50, &table) || table == 0) return 0;
+    if (!read_ptr(table + (uintptr_t)(datum & 0xFFFFu) * 24 + 0x10, &obj) || obj == 0) return 0;
+    return obj;
+}
+
+
+// ---- UNIT STATE FOR THE HOLSTERS, published per sim call. SIM THREAD ONLY (the resolve walks
+// gs:[0x58]). Mounted: the biped's +0x0C parent datum != 0xFFFFFFFF (a vehicle seat or turret) --
+// gates the holster button steal, which must never eat the buttons a seat needs. Grenades: type
+// at +0x380, frag count +0x382, plasma count +0x383 -- the game auto-switches type when one runs
+// out, which is exactly what a plugin-side belief would lose; reading the object is the truth.
+// ---- THROW WINDUP DUMP (throwdump, doctrine in Config.hpp). SIM THREAD. Statics only, no
+// allocation; the cost while idle is one memcmp-sized pass over 0x600 bytes per sim call, and the
+// log lines are capped per window. The mask is learned, not assumed: anything that churns while
+// nothing is being thrown is by definition not the throw.
+inline long long now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// GRENTRACK handoff (see BlamDrive.hpp): written by the dev spawn hook, sampled below.
+std::atomic<uintptr_t> g_grentrack_obj{0};
+std::atomic<long long> g_grentrack_at_ms{0};
+std::atomic<uintptr_t> g_greninst_obj{0};
+std::atomic<long long> g_greninst_at_ms{0};
+std::atomic<float>     g_greninst_vx{0.0f}, g_greninst_vy{0.0f}, g_greninst_vz{0.0f};
+
+std::atomic<int>   g_blip_count{0};
+std::atomic<float> g_blip_dx[MAX_BLIPS], g_blip_dy[MAX_BLIPS];
+std::atomic<int>   g_blip_team[MAX_BLIPS];
+std::atomic<bool>  g_blip_moving[MAX_BLIPS];
+std::atomic<uint32_t> g_blip_id[MAX_BLIPS];
+std::atomic<uint32_t> g_blip_raw[MAX_BLIPS];
+std::atomic<uint32_t> g_blip_type[MAX_BLIPS];
+std::atomic<float> g_blip_wx[MAX_BLIPS], g_blip_wy[MAX_BLIPS], g_blip_wz[MAX_BLIPS];
+std::atomic<float> g_blip_speed[MAX_BLIPS];
+std::atomic<int>   g_blip_dtm[MAX_BLIPS];
+std::atomic<int>   g_blip_run[MAX_BLIPS];
+
+void throw_dump_probe(uintptr_t obj) {
+    constexpr uintptr_t SPAN = 0x600;
+    constexpr int       NDW  = (int)(SPAN / 4);
+    static uint32_t  s_prev[NDW];
+    static uint8_t   s_noisy[NDW];
+    static uintptr_t s_obj = 0;
+    static int  s_armed_as = 0;
+    static bool s_have_prev = false;
+    static int  s_learn = 0;
+    static int  s_window = 0;
+    static int  s_t = 0;
+    static int  s_lines = 0;
+    static bool s_press_prev = false;
+    static int  s_frag0 = -1, s_plas0 = -1;
+
+    // A new object or a bumped throwdump value restarts the learn from scratch.
+    if (obj != s_obj || g_cfg.throw_dump != s_armed_as) {
+        s_obj = obj; s_armed_as = g_cfg.throw_dump;
+        s_have_prev = false; s_learn = 0; s_window = 0; s_press_prev = false;
+        memset(s_noisy, 0, sizeof(s_noisy));
+    }
+    if (IsBadReadPtr((const void*)obj, SPAN)) return;
+    const uint32_t* cur = (const uint32_t*)obj;
+    const uint8_t*  u8  = (const uint8_t*)obj;
+
+    // ---- GRENTRACK: the projectile the spawn hook just created, sampled ~every 30 ms for 1.2 s.
+    // Whether the position MOVES from the first sample is the whole question: flies-immediately
+    // means the delay is presentation, sits-then-launches means an animation event holds it.
+    // +0x20 as the position is the UNIT layout's offset, unverified for projectiles -- if the
+    // samples read as garbage, that is the finding, not a malfunction.
+    {
+        const uintptr_t gobj = g_grentrack_obj.load(std::memory_order_relaxed);
+        if (gobj != 0) {
+            const long long since = now_ms() - g_grentrack_at_ms.load(std::memory_order_relaxed);
+            static long long s_last = 0;
+            if (since > 1200) {
+                g_grentrack_obj.store(0, std::memory_order_relaxed);
+                API::get()->log_info("[Halo-CampE-UEVR] GRENTRACK end (+%lld ms)", since);
+            } else if (now_ms() - s_last >= 30) {
+                s_last = now_ms();
+                if (!IsBadReadPtr((const void*)(gobj + 0x20), 12)) {
+                    const float* q = (const float*)(gobj + 0x20);
+                    API::get()->log_info("[Halo-CampE-UEVR] GRENTRACK +%lld ms pos=(%.4f,%.4f,%.4f)",
+                                         since, q[0], q[1], q[2]);
+                    // GRENSNAP: the object's head at three moments -- created (held), mid-hold,
+                    // and in flight. The dwords dead in the first two that match the measured
+                    // ~8 blam-units/s in the third are the VELOCITY; whatever flips between the
+                    // second and third is the RELEASE mechanism. One throw answers both.
+                    static uintptr_t s_snap_obj = 0;
+                    static uint8_t   s_snapped = 0;
+                    if (gobj != s_snap_obj) { s_snap_obj = gobj; s_snapped = 0; }
+                    int want_snap = -1;
+                    if      (since < 60   && !(s_snapped & 1)) { want_snap = 0; s_snapped |= 1; }
+                    else if (since >= 100 && since < 220 && !(s_snapped & 2)) { want_snap = 1; s_snapped |= 2; }
+                    else if (since >= 300 && !(s_snapped & 4)) { want_snap = 2; s_snapped |= 4; }
+                    if (want_snap >= 0 && !IsBadReadPtr((const void*)gobj, 0x100)) {
+                        const uint32_t* d = (const uint32_t*)gobj;
+                        char buf[352];
+                        for (int half = 0; half < 2; ++half) {
+                            int n = 0;
+                            for (int i = half * 32; i < half * 32 + 32 && n < (int)sizeof(buf) - 12; ++i)
+                                n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
+                            API::get()->log_info("[Halo-CampE-UEVR] GRENSNAP phase=%d +%lld ms +0x%02X | %s",
+                                                 want_snap, since, half * 0x80, buf);
+                        }
+                    }
+                } else {
+                    g_grentrack_obj.store(0, std::memory_order_relaxed);
+                    API::get()->log_info("[Halo-CampE-UEVR] GRENTRACK object unreadable (+%lld ms) -- dropped", since);
+                }
+            }
+        }
+    }
+
+    const bool press = holster_throw_press_active();
+    const bool edge  = press && !s_press_prev;
+    s_press_prev = press;
+
+    if (!s_have_prev) { memcpy(s_prev, cur, SPAN); s_have_prev = true; return; }
+
+    // THE RELEASE WATCH runs EVERY call, window or not. The first cut only watched inside the
+    // window, and the window turned out to cover 50 ms: the learn counters measured this hook at
+    // ~8000 calls/sec, 25x the assumed rate -- state the probe's own rate before trusting any rate
+    // it reports. The count decrement is the game letting go; ms-since-press is the windup.
+    static long long s_press_at = 0;
+    static int s_frag_w = -1, s_plas_w = -1;
+    if (edge) s_press_at = now_ms();
+    if (s_frag_w >= 0 && ((int)u8[0x382] != s_frag_w || (int)u8[0x383] != s_plas_w)) {
+        const long long since = s_press_at != 0 ? now_ms() - s_press_at : -1;
+        API::get()->log_info("[Halo-CampE-UEVR] THROWDUMP RELEASE %+lld ms after press "
+                             "(frag %d->%d plasma %d->%d)%s",
+                             since, s_frag_w, (int)u8[0x382], s_plas_w, (int)u8[0x383],
+                             s_window > 0 ? "" : " [outside window]");
+    }
+    s_frag_w = (int)u8[0x382]; s_plas_w = (int)u8[0x383];
+
+    if (s_window <= 0) {
+        for (int i = 0; i < NDW; ++i)
+            if (cur[i] != s_prev[i]) s_noisy[i] = 1;
+        ++s_learn;
+        if (edge) {
+            int masked = 0;
+            for (int i = 0; i < NDW; ++i) masked += s_noisy[i];
+            // 12000 calls at the MEASURED ~8 kHz is ~1.5 s -- long enough for any windup.
+            s_window = 12000; s_t = 0; s_lines = 0;
+            s_frag0 = (int)u8[0x382]; s_plas0 = (int)u8[0x383];
+            API::get()->log_info("[Halo-CampE-UEVR] THROWDUMP armed: %d idle calls learned, "
+                                 "%d/%d dwords masked, frag=%d plasma=%d",
+                                 s_learn, masked, NDW, s_frag0, s_plas0);
+        }
+        memcpy(s_prev, cur, SPAN);
+        return;
+    }
+
+    ++s_t; --s_window;
+    // ---- UNITSNAP: the whole unit head at four moments DURING the windup. The animation clock
+    // ticks in idle too, so the noise mask hides it by design; a clock cannot hide from a linear
+    // fit across timed snapshots -- any field advancing by equal steps between these four is a
+    // clock candidate, and writing one forward is the clean instant-throw (the game's own release
+    // fires early, with its physics registration and fuse intact -- the field-poked release
+    // produced a grenade frozen outside the simulation, which closed that route).
+    {
+        static uint8_t s_usnapped = 0;
+        if (s_t == 1) s_usnapped = 0;
+        const long long pms = now_ms() - s_press_at;
+        int phase = -1;
+        if      (pms >= 40  && !(s_usnapped & 1)) { phase = 0; s_usnapped |= 1; }
+        else if (pms >= 90  && !(s_usnapped & 2)) { phase = 1; s_usnapped |= 2; }
+        else if (pms >= 140 && !(s_usnapped & 4)) { phase = 2; s_usnapped |= 4; }
+        else if (pms >= 190 && !(s_usnapped & 8)) { phase = 3; s_usnapped |= 8; }
+        if (phase >= 0) {
+            // 0x2000 when readable: the 0x1000 sweep found only mirrors of the global tick
+            // counter, so the animation block (index + frame, the actual windup clock) lives
+            // deeper in the unit if it lives in the unit at all.
+            const uintptr_t uspan = !IsBadReadPtr((const void*)obj, 0x2000) ? 0x2000
+                                  : !IsBadReadPtr((const void*)obj, 0x1000) ? 0x1000 : SPAN;
+            const uint32_t* d = (const uint32_t*)obj;
+            char buf[352];
+            for (uintptr_t off = 0; off < uspan; off += 0x80) {
+                int n = 0;
+                for (int i = (int)(off / 4); i < (int)(off / 4) + 32 && n < (int)sizeof(buf) - 12; ++i)
+                    n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
+                API::get()->log_info("[Halo-CampE-UEVR] UNITSNAP phase=%d +%lld ms +0x%03X | %s",
+                                     phase, pms, (unsigned)off, buf);
+            }
+        }
+    }
+    if (s_lines < 120) {
+        char buf[352]; int n = 0; int shown = 0, more = 0;
+        for (int i = 0; i < NDW; ++i) {
+            if (cur[i] == s_prev[i] || s_noisy[i] != 0) continue;
+            if (shown < 8 && n < (int)sizeof(buf) - 40) {
+                n += snprintf(buf + n, sizeof(buf) - n, "+0x%03X %08X->%08X  ", i * 4, s_prev[i], cur[i]);
+                ++shown;
+            } else ++more;
+        }
+        if (shown > 0) {
+            ++s_lines;
+            API::get()->log_info("[Halo-CampE-UEVR] THROWDUMP t=%d (%+lld ms) | %s(+%d more)",
+                                 s_t, now_ms() - s_press_at, buf, more);
+        }
+    }
+    if (s_window == 0)
+        API::get()->log_info("[Halo-CampE-UEVR] THROWDUMP window end (t=%d, %d lines logged)",
+                             s_t, s_lines);
+    memcpy(s_prev, cur, SPAN);
+}
+
+// ---- BLIPDUMP (wrist-radar survey, doctrine in Config.hpp). SIM THREAD, one shot per value
+// change. Walks the object table the same way resolve_object_by_datum does, collects everything
+// with a plausible position within ~36 m of the player, and dumps each header -- the diff between
+// a marines-only capture and a covenant-only capture names the team byte.
+void blip_dump_probe(uintptr_t player_obj) {
+    static int s_armed_as = 0;
+    if (g_cfg.blip_dump == s_armed_as) return;
+    if (IsBadReadPtr((const void*)(player_obj + 0x20), 12)) return;
+    s_armed_as = g_cfg.blip_dump;
+    const float* pp = (const float*)(player_obj + 0x20);
+
+    const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+    uintptr_t block = 0, ctx = 0, table = 0;
+    if (tls_array == 0 ||
+        !read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) || block == 0 ||
+        !read_ptr(block + 0x20, &ctx) || ctx == 0 ||
+        !read_ptr(ctx + 0x50, &table) || table == 0) {
+        API::get()->log_info("[Halo-CampE-UEVR] BLIPDUMP: table chain unresolved");
+        return;
+    }
+
+    // 0x400 per object: the 0x100 sweep produced only spawn-order artifacts (the E1-vs-E2 salt
+    // at +0xCC ages the object, it does not side it), so the team field lives deeper. The player
+    // dumps too, labeled SELF -- its team must equal the marines', which prunes candidates hard.
+    auto dump_obj = [&](uintptr_t o, int idx, float dist_m) {
+        const uintptr_t span = !IsBadReadPtr((const void*)o, 0x400) ? 0x400 : 0x100;
+        const uint32_t* d = (const uint32_t*)o;
+        char buf[352];
+        for (uintptr_t off = 0; off < span; off += 0x80) {
+            int n = 0;
+            for (int i = (int)(off / 4); i < (int)(off / 4) + 32 && n < (int)sizeof(buf) - 12; ++i)
+                n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
+            API::get()->log_info("[Halo-CampE-UEVR] BLIPDUMP cap=%d idx=%d dist=%.1fm +0x%03X | %s",
+                                 g_cfg.blip_dump, idx, dist_m, (unsigned)off, buf);
+        }
+    };
+    if (!IsBadReadPtr((const void*)player_obj, 0x100)) dump_obj(player_obj, -1, 0.0f);   // SELF
+    // 24 hits, not 12: the table's low indices are load-time scenery, and a 12-object budget
+    // filled with it before ever reaching the late-spawned actors the survey exists to catch.
+    int hits = 0;
+    for (int idx = 0; idx < 4096 && hits < 24; ++idx) {
+        uintptr_t o = 0;
+        if (!read_ptr(table + (uintptr_t)idx * 24 + 0x10, &o) || o == 0) continue;
+        if (o == player_obj || IsBadReadPtr((const void*)(o + 0x20), 12)) continue;
+        const float* q = (const float*)(o + 0x20);
+        const float dx = q[0] - pp[0], dy = q[1] - pp[1], dz = q[2] - pp[2];
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        if (!(d2 == d2) || d2 > 12.0f * 12.0f) continue;   // NaN or beyond ~36 m
+        if (IsBadReadPtr((const void*)o, 0x100)) continue;
+        ++hits;
+        dump_obj(o, idx, std::sqrt(d2) * 3.048f);
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] BLIPDUMP cap=%d done: %d neighbours within 36 m",
+                         g_cfg.blip_dump, hits);
+}
+
+// ---- WRIST RADAR SCAN (doctrine at the exports in BlamDrive.hpp). Two cadences, per the
+// vehfacing lesson (a table walk per publish shook the whole picture): the TABLE walk that finds
+// unit-like objects runs every ~2500 calls (~0.3 Hz), caching pointers; the cheap position reads
+// off the cache run every 32nd call. Everything sim-thread-local except the published atomics.
+void blip_scan(uintptr_t player_obj) {
+    constexpr int MAX_TRACK = 24;
+    static uintptr_t s_track[MAX_TRACK];
+    static int       s_team[MAX_TRACK];
+    static uint8_t   s_raw[MAX_TRACK];
+    static uint32_t  s_type[MAX_TRACK];
+    static float     s_px[MAX_TRACK], s_py[MAX_TRACK];   // last-sampled position (moving flag)
+    static bool      s_moving[MAX_TRACK];
+    // SPEED over WALL-CLOCK time, not displacement per N calls: the call cadence was never
+    // measured, and the log caught the consequence red-handed -- contacts sprinting between
+    // samples, every one flagged mv=0, no dots at all (and the old strobing dots were the same
+    // broken window occasionally crossing threshold by luck). Two consecutive >=0.10 blam-unit/s
+    // (~0.3 m/s) samples at >=130 ms spacing = a mover; single spikes stay filtered.
+    static uint8_t   s_mvrun[MAX_TRACK];
+    static long long s_mvat[MAX_TRACK];
+    static int       s_ntrack = 0;
+    static uint32_t  s_call = 0;
+    ++s_call;
+
+    if (IsBadReadPtr((const void*)(player_obj + 0x20), 12)) return;
+    const float* pp = (const float*)(player_obj + 0x20);
+
+    // REBUILD ON A WALL CLOCK, never on a call count. This was every 2500 calls, assumed to be
+    // ~1 s from a sim rate that was never re-measured; it is actually ~125 ms, so the rebuild
+    // wiped the movement window (130 ms) before it could ever close -- speeds measured fine at
+    // 0.7-1.2 u/s while the run counter was reset to 0 forever and nothing ever counted as
+    // moving. Probe-sampling aliasing, and the second time in this project.
+    static long long s_scan_at = 0;
+    const long long scan_now = now_ms();
+    if (scan_now - s_scan_at >= 1000) {
+        s_scan_at = scan_now;
+        const uintptr_t tls_array = (uintptr_t)__readgsqword(0x58);
+        uintptr_t block = 0, ctx = 0, table = 0;
+        if (tls_array != 0 &&
+            read_ptr(tls_array + (uintptr_t)g_tls_index * 8, &block) && block != 0 &&
+            read_ptr(block + 0x20, &ctx) && ctx != 0 &&
+            read_ptr(ctx + 0x50, &table) && table != 0) {
+            // Snapshot the old set so a contact that survives the rebuild keeps its movement
+            // history. Rebuilding into fresh state is what made the window unclosable.
+            uintptr_t old_track[MAX_TRACK];
+            float     old_px[MAX_TRACK], old_py[MAX_TRACK];
+            bool      old_moving[MAX_TRACK];
+            uint8_t   old_run[MAX_TRACK];
+            long long old_at[MAX_TRACK];
+            const int old_n = s_ntrack;
+            for (int k = 0; k < old_n; ++k) {
+                old_track[k] = s_track[k]; old_px[k] = s_px[k]; old_py[k] = s_py[k];
+                old_moving[k] = s_moving[k]; old_run[k] = s_mvrun[k]; old_at[k] = s_mvat[k];
+            }
+            s_ntrack = 0;
+            for (int idx = 0; idx < 4096 && s_ntrack < MAX_TRACK; ++idx) {
+                uintptr_t o = 0;
+                if (!read_ptr(table + (uintptr_t)idx * 24 + 0x10, &o) || o == 0) continue;
+                if (o == player_obj || IsBadReadPtr((const void*)o, 0x180)) continue;
+                // Unit-like: unattached, and the TEAM byte reads human or covenant.
+                if (*(const uint32_t*)(o + 0x0C) != 0xFFFFFFFFu) continue;
+                const uint8_t team = *(const uint8_t*)(o + 0x177);
+                if (team != 0x0E && team != 0x0D) continue;
+                const float* q = (const float*)(o + 0x20);
+                const float ddx = q[0] - pp[0], ddy = q[1] - pp[1];
+                if (!(ddx == ddx) || ddx * ddx + ddy * ddy > 20.0f * 20.0f) continue;
+                s_track[s_ntrack] = o;
+                s_team[s_ntrack] = (team == 0x0D) ? 1 : 0;
+                s_raw[s_ntrack] = team;
+                s_type[s_ntrack] = *(const uint32_t*)o;
+                int prev = -1;
+                for (int k = 0; k < old_n; ++k) if (old_track[k] == o) { prev = k; break; }
+                if (prev >= 0) {
+                    s_px[s_ntrack] = old_px[prev]; s_py[s_ntrack] = old_py[prev];
+                    s_moving[s_ntrack] = old_moving[prev];
+                    s_mvrun[s_ntrack] = old_run[prev];
+                    s_mvat[s_ntrack] = old_at[prev];
+                } else {
+                    s_px[s_ntrack] = q[0]; s_py[s_ntrack] = q[1];
+                    s_moving[s_ntrack] = false;
+                    s_mvrun[s_ntrack] = 0;
+                    s_mvat[s_ntrack] = scan_now;
+                }
+                ++s_ntrack;
+            }
+        }
+    }
+
+    // Positions publish every 8th call (the render-side jitter fix: ~4x the old rate); the
+    // MOVING test stays on the original 32-call baseline, because its 2 cm threshold was sized
+    // for the ~0.13 s window and a faster window can no longer see a slow walker over the noise.
+    // FACTION-FIELD SURVEY (doctrine at Config::blip_bytes). Fires once per value change, on the
+    // cached contact set, so both captures cover the same object shape.
+    {
+        static int s_bytes_armed = 0;
+        if (g_cfg.blip_bytes != s_bytes_armed) {
+            s_bytes_armed = g_cfg.blip_bytes;
+            if (s_bytes_armed != 0) {
+                for (int i = 0; i < s_ntrack; ++i) {
+                    const uintptr_t o = s_track[i];
+                    if (o == 0 || IsBadReadPtr((const void*)o, 0x200)) continue;
+                    // TWO windows. The HEADER first: a Blam object's leading dwords carry its
+                    // tag / definition index, which is a real SPECIES identity rather than the
+                    // coarse body class at +0x177 (a marine and an Elite share that). If a
+                    // header dword tracks species one-for-one, per-species colour keys on it.
+                    char hdr[3 * 32 + 1];
+                    int hw = 0;
+                    for (int b = 0; b < 32; ++b)
+                        hw += sprintf_s(hdr + hw, sizeof(hdr) - (size_t)hw, "%02X ",
+                                        *(const uint8_t*)(o + b));
+                    char buf[3 * 96 + 1];
+                    int w = 0;
+                    for (int b = 0; b < 96; ++b)
+                        w += sprintf_s(buf + w, sizeof(buf) - (size_t)w, "%02X ",
+                                       *(const uint8_t*)(o + 0x140 + b));
+                    const float* q = (const float*)(o + 0x20);
+                    const float ddx = q[0] - pp[0], ddy = q[1] - pp[1];
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] BLIPBYTES %d id=%08X cls=%02X d=%.1f +0x00: %s| +0x140: %s",
+                        s_bytes_armed, (uint32_t)(o & 0xFFFFFFFFu), s_raw[i],
+                        std::sqrt(ddx * ddx + ddy * ddy), hdr, buf);
+                }
+                API::get()->log_info("[Halo-CampE-UEVR] BLIPBYTES %d done: %d contacts",
+                                     s_bytes_armed, s_ntrack);
+            }
+        }
+    }
+
+    if ((s_call % 8u) != 0u) return;
+    int n = 0;
+    for (int i = 0; i < s_ntrack && n < MAX_BLIPS; ++i) {
+        const uintptr_t o = s_track[i];
+        if (o == 0 || IsBadReadPtr((const void*)o, 0x180)) continue;
+        if (*(const uint8_t*)(o + 0x177) != (s_team[i] == 1 ? 0x0D : 0x0E)) continue;  // slot recycled
+        const float* q = (const float*)(o + 0x20);
+        const float dx = q[0] - pp[0], dy = q[1] - pp[1];
+        if (!(dx == dx) || dx * dx + dy * dy > 8.2f * 8.2f) continue;   // 25 m radar range
+        // MOVING, the real tracker's rule: position changed since the last publish sample
+        // (~0.13 s at this cadence; 2 cm noise floor).
+        bool moving = s_moving[i];
+        float dbg_speed = -1.0f;
+        long long dbg_dtm = 0;
+        {
+            const long long nowm = now_ms();
+            const long long dtm = nowm - s_mvat[i];
+            dbg_dtm = dtm;
+            if (dtm >= 130) {
+                const float mx = q[0] - s_px[i], my = q[1] - s_py[i];
+                const float speed = std::sqrt(mx * mx + my * my) * 1000.0f / (float)dtm;
+                s_px[i] = q[0]; s_py[i] = q[1];
+                s_mvat[i] = nowm;
+                s_mvrun[i] = (speed > 0.10f) ? (uint8_t)((s_mvrun[i] < 250) ? s_mvrun[i] + 1 : 250) : 0;
+                moving = s_mvrun[i] >= 2;   // sustained -- one twitch is a settle, not a contact
+                s_moving[i] = moving;
+                dbg_speed = speed;
+            }
+        }
+        g_blip_dx[n].store(dx, std::memory_order_relaxed);
+        g_blip_dy[n].store(dy, std::memory_order_relaxed);
+        g_blip_team[n].store(s_team[i], std::memory_order_relaxed);
+        g_blip_moving[n].store(moving, std::memory_order_relaxed);
+        g_blip_id[n].store((uint32_t)(o & 0xFFFFFFFFu), std::memory_order_relaxed);
+        g_blip_raw[n].store((uint32_t)s_raw[i], std::memory_order_relaxed);
+        g_blip_type[n].store(s_type[i], std::memory_order_relaxed);
+        g_blip_wx[n].store(q[0], std::memory_order_relaxed);
+        g_blip_wy[n].store(q[1], std::memory_order_relaxed);
+        g_blip_wz[n].store(q[2], std::memory_order_relaxed);
+        if (dbg_speed >= 0.0f) g_blip_speed[n].store(dbg_speed, std::memory_order_relaxed);
+        g_blip_dtm[n].store((int)dbg_dtm, std::memory_order_relaxed);
+        g_blip_run[n].store((int)s_mvrun[i], std::memory_order_relaxed);
+        ++n;
+    }
+    g_blip_count.store(n, std::memory_order_relaxed);
+}
+
+// THE SEAT HALF of the unit publish: the rider's world position (+0x20) and, through the parent
+// datum (+0x0C), the vehicle's facing (+0x1D4) and position. Split out of publish_unit_state so it
+// also runs while stick mode holds the aim write off -- a seat IS stick mode, and the seat camera,
+// the parked-only seat learn (speed), the heading and the seated view all read these. SIM THREAD.
+static void publish_seat_state(uintptr_t obj) {
+    // WORLD POSITION at +0x20 (3 floats, Blam world units). Measured by logging the rendered
+    // camera beside every unit float and fitting: over 972 samples the large-motion delta ratios
+    // are +308/-306/+332 against cam x/y/z, i.e. the 304.8 cm world unit with Blam's Y negation,
+    // and the constant residual is the eye height (~78 cm). This is what puts the VR camera in a
+    // vehicle seat.
+    g_seat_pub_calls.fetch_add(1, std::memory_order_relaxed);
+    if (!IsBadReadPtr((const void*)(obj + 0x20), 12)) {
+        const float* q = (const float*)(obj + 0x20);
+        g_unit_px.store(q[0], std::memory_order_relaxed);
+        g_unit_py.store(q[1], std::memory_order_relaxed);
+        g_unit_pz.store(q[2], std::memory_order_relaxed);
+        g_unit_pvalid.store(true, std::memory_order_relaxed);
+        g_seat_obj.store(obj, std::memory_order_relaxed);
+        g_seat_pub_seq.fetch_add(1, std::memory_order_relaxed);
+    } else g_unit_pvalid.store(false, std::memory_order_relaxed);
+
+    // THE VEHICLE'S FACING (vehfacing). Measured by spinning the hog: the pairs at
+    // +0x1D4/+0x1E0/+0x1EC are unit vectors that swept 3226 deg with it, so they carry the real
+    // orientation -- unlike +0x50, which is parent-local and reads a constant (1,0) from a seat.
+    //
+    // The pointer is resolved ONCE PER MOUNT and cached. The first version walked the object
+    // table on every publish (~325/sec on the sim thread) and shook the whole picture, on foot
+    // included -- that is the bug this cache exists to avoid.
+    if (g_cfg.veh_facing != 0 && !IsBadReadPtr((const void*)(obj + 0x0C), 4)) {
+        static uintptr_t s_vobj = 0;
+        static uint32_t  s_vdat = 0xFFFFFFFFu;
+        static uint32_t  s_vretry = 0;
+        const uint32_t pdat = *(const uint32_t*)(obj + 0x0C);
+        if (pdat != s_vdat) {          // mount, dismount or vehicle swap
+            s_vdat = pdat;
+            s_vretry = 0;
+            s_vobj = (pdat != 0xFFFFFFFFu) ? resolve_object_by_datum(pdat) : 0;
+            if (s_vobj != 0 && IsBadReadPtr((const void*)(s_vobj + 0x1F4), 4)) s_vobj = 0;
+        } else if (s_vobj == 0 && pdat != 0xFFFFFFFFu && (++s_vretry % 325u) == 0u) {
+            // RETRY WHILE MOUNTED-AND-UNRESOLVED (~1 s cadence at this hook's rate). The resolve
+            // used to run once, at the mount edge -- mid entry animation, a transient window --
+            // and a failure there latched for the WHOLE ride: facing stayed invalid, the camera
+            // fell back to the travel-heading hemisphere guess, and the rare "camera starts
+            // backwards, dismount and remount fixes it" is exactly that fallback seeded wrong
+            // and self-latched. A resolve that can fail transiently must retry. Logged both ways
+            // so a backwards ride names its own cause.
+            s_vobj = resolve_object_by_datum(pdat);
+            if (s_vobj != 0 && IsBadReadPtr((const void*)(s_vobj + 0x1F4), 4)) s_vobj = 0;
+            if (s_vretry == 325u || s_vobj != 0)
+                API::get()->log_info("[Halo-CampE-UEVR] VEHFACING: %s (retry %u)",
+                                     s_vobj != 0 ? "resolved on retry -- facing live"
+                                                 : "vehicle object unresolved -- camera is on the travel-heading fallback",
+                                     s_vretry / 325u);
+        }
+        g_seat_vobj.store(s_vobj, std::memory_order_relaxed);
+        g_seat_vdat.store(pdat, std::memory_order_relaxed);
+        if (s_vobj != 0) {
+            const float* fv = (const float*)(s_vobj + (uintptr_t)g_cfg.veh_facing_off);
+            g_veh_fx.store(fv[0], std::memory_order_relaxed);
+            g_veh_fy.store(fv[1], std::memory_order_relaxed);
+            g_veh_fvalid.store(true, std::memory_order_relaxed);
+            // The VEHICLE'S OWN POSITION, same +0x20 layout as the biped's. The seat camera
+            // wants THIS when vehcamsrc=1: measured, driving with the camera on the biped
+            // position left the world smooth and the hog juddering -- the camera was moving on a
+            // different curve from the thing it is supposed to be bolted to.
+            const float* vp = (const float*)(s_vobj + 0x20);
+            g_vehpx.store(vp[0], std::memory_order_relaxed);
+            g_vehpy.store(vp[1], std::memory_order_relaxed);
+            g_vehpz.store(vp[2], std::memory_order_relaxed);
+        } else g_veh_fvalid.store(false, std::memory_order_relaxed);
+    } else g_veh_fvalid.store(false, std::memory_order_relaxed);
+}
+
+// Stick-mode publish (vehicle seats, cutscenes, death): the mounted flag and the seat half only.
+// Everything else publish_unit_state does (grenade state and writes, throw probes, radar scan,
+// roomscale throttle) stays behind the stick-mode hold exactly as before.
+static void publish_seated_unit_state(uintptr_t rec_base) {
+    uint32_t datum = 0;
+    const uintptr_t obj = resolve_unit_object(rec_base, &datum);
+    if (obj == 0 || datum == 0 || (datum & 0xFFFFu) == 0) {
+        g_unit_mounted.store(false, std::memory_order_relaxed);
+        g_unit_pvalid.store(false, std::memory_order_relaxed);
+        g_veh_fvalid.store(false, std::memory_order_relaxed);
+        return;
+    }
+    g_unit_mounted.store(!IsBadReadPtr((const void*)(obj + 0x0C), 4)
+                         && *(const uint32_t*)(obj + 0x0C) != 0xFFFFFFFFu,
+                         std::memory_order_relaxed);
+    publish_seat_state(obj);
+}
+
+// vehseatdirect (approach B): the seat without the sim hook. The rider and vehicle objects are
+// pool entries that stay put for the life of the ride, so once the sim publish has named them the
+// fields are plain memory reads from any thread -- no gs:[0x58] walk, no control record, no hook
+// cadence. Only while stick mode holds the normal publish off; on foot the sim publish owns these.
+// The vehicle half is trusted only while the rider's parent datum still names the cached vehicle.
+void seat_direct_refresh() {
+    if (g_cfg.veh_seat_direct == 0) return;
+    if (!g_stick_mode_active.load(std::memory_order_relaxed)) return;
+    const uintptr_t obj = g_seat_obj.load(std::memory_order_relaxed);
+    if (obj == 0 || IsBadReadPtr((const void*)obj, 0x2C)) return;
+    const uint32_t pdat = *(const uint32_t*)(obj + 0x0C);
+    const float* q = (const float*)(obj + 0x20);
+    if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2])) return;
+    g_unit_mounted.store(pdat != 0xFFFFFFFFu, std::memory_order_relaxed);
+    g_unit_px.store(q[0], std::memory_order_relaxed);
+    g_unit_py.store(q[1], std::memory_order_relaxed);
+    g_unit_pz.store(q[2], std::memory_order_relaxed);
+    g_unit_pvalid.store(true, std::memory_order_relaxed);
+    g_seat_pub_seq.fetch_add(1, std::memory_order_relaxed);
+    g_seat_direct_reads.fetch_add(1, std::memory_order_relaxed);
+    const uintptr_t vobj = g_seat_vobj.load(std::memory_order_relaxed);
+    if (g_cfg.veh_facing != 0 && vobj != 0 && pdat != 0xFFFFFFFFu
+        && pdat == g_seat_vdat.load(std::memory_order_relaxed)
+        && !IsBadReadPtr((const void*)vobj, 0x1F4)) {
+        const float* fv = (const float*)(vobj + (uintptr_t)g_cfg.veh_facing_off);
+        const float* vp = (const float*)(vobj + 0x20);
+        if (std::isfinite(fv[0]) && std::isfinite(fv[1])) {
+            g_veh_fx.store(fv[0], std::memory_order_relaxed);
+            g_veh_fy.store(fv[1], std::memory_order_relaxed);
+            g_veh_fvalid.store(true, std::memory_order_relaxed);
+        }
+        if (std::isfinite(vp[0]) && std::isfinite(vp[1]) && std::isfinite(vp[2])) {
+            g_vehpx.store(vp[0], std::memory_order_relaxed);
+            g_vehpy.store(vp[1], std::memory_order_relaxed);
+            g_vehpz.store(vp[2], std::memory_order_relaxed);
+        }
+    }
+}
+
+void publish_unit_state(uintptr_t rec_base) {
+    uint32_t datum = 0;
+    const uintptr_t obj = resolve_unit_object(rec_base, &datum);
+    {
+        static uint32_t s_last_datum = 0xDEADBEEFu;
+        if ((g_cfg.veh_log || g_cfg.holster_log) && datum != s_last_datum && !IsBadReadPtr((const void*)(rec_base + 0x70), 0x20)) {
+            s_last_datum = datum;
+            const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);
+            // The datum slot read zero all session while play was live, so either the offset or
+            // the RECORD is wrong for this resolve path. Probe the same slot in the neighbouring
+            // records: the one holding a plausible datum identifies the live slot directly.
+            uint32_t nb[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                const uintptr_t r2 = rec_base + (uintptr_t)k * 0x198;
+                if (!IsBadReadPtr((const void*)(r2 + 0x80), 4)) nb[k] = *(const uint32_t*)(r2 + 0x80);
+            }
+            API::get()->log_info("[Halo-CampE-UEVR] UNITREC: rec 0x%llX rec+0x70..0x8C=[%08X %08X %08X %08X %08X %08X %08X %08X] -> datum 0x%08X | +0x80 of records 0..3 = [%08X %08X %08X %08X]",
+                                 (unsigned long long)rec_base,
+                                 rw[0], rw[1], rw[2], rw[3], rw[4], rw[5], rw[6], rw[7], datum,
+                                 nb[0], nb[1], nb[2], nb[3]);
+        }
+    }
+    // Datum 0x00000000 is NOT a unit (measured: it resolves table slot 0, a garbage object whose
+    // +0x0C read as "mounted" -- which disabled the button steal -- and whose counts read zero,
+    // refusing every pouch). Only a plausible datum publishes; anything else stands the state
+    // down so the consumers run on their safe defaults (not mounted, counts unknown).
+    if (obj == 0 || datum == 0 || (datum & 0xFFFFu) == 0) {
+        g_unit_gvalid.store(false, std::memory_order_relaxed);
+        g_unit_mounted.store(false, std::memory_order_relaxed);
+        g_unit_pvalid.store(false, std::memory_order_relaxed);
+        g_veh_fvalid.store(false, std::memory_order_relaxed);
+        return;
+    }
+    g_unit_mounted.store(!IsBadReadPtr((const void*)(obj + 0x0C), 4)
+                         && *(const uint32_t*)(obj + 0x0C) != 0xFFFFFFFFu,
+                         std::memory_order_relaxed);
+    // EVIDENCE, once per resolved object: the pouches read "frag 0 plasma 0" on a unit that
+    // demonstrably had grenades, so either this is the wrong object or the offsets do not hold
+    // on this path. Print the datum, the object, and the raw bytes -- the next session decides.
+    {
+        static uintptr_t s_said_obj = 0;
+        if ((g_cfg.veh_log || g_cfg.holster_log) && obj != s_said_obj && !IsBadReadPtr((const void*)(obj + 0x380), 8)) {
+            s_said_obj = obj;
+            const uint8_t* u8 = (const uint8_t*)obj;
+            const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);
+            API::get()->log_info("[Halo-CampE-UEVR] UNITSTATE: rec 0x%llX rec+0x70..0x8C=[%08X %08X %08X %08X %08X %08X %08X %08X] datum 0x%08X obj 0x%llX bytes@0x380=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+                                 (unsigned long long)rec_base,
+                                 rw[0], rw[1], rw[2], rw[3], rw[4], rw[5], rw[6], rw[7],
+                                 datum, (unsigned long long)obj,
+                                 u8[0x380], u8[0x381], u8[0x382], u8[0x383],
+                                 u8[0x384], u8[0x385], u8[0x386], u8[0x387]);
+        }
+    }
+    // Grenade type and counts from raw unit offsets: only for the fork's grenade-gesture variant
+    // (holsterpollthrow, experimental). Off, g_unit_gvalid stays false and the author's pouches keep
+    // their fail-closed "counts unknown" behaviour exactly as he shipped it.
+    if (g_cfg.holster_poll_throw && !IsBadReadPtr((const void*)(obj + 0x380), 4)) {
+        const uint8_t* u8 = (const uint8_t*)obj;
+        g_unit_gtype.store((int)u8[0x380], std::memory_order_relaxed);
+        g_unit_gfrag.store((int)u8[0x382], std::memory_order_relaxed);
+        g_unit_gplasma.store((int)u8[0x383], std::memory_order_relaxed);
+        g_unit_gvalid.store(true, std::memory_order_relaxed);
+    } else {
+        g_unit_gvalid.store(false, std::memory_order_relaxed);
+    }
+
+    if (g_cfg.throw_dump != 0) throw_dump_probe(obj);
+    blip_dump_probe(obj);
+    if (g_cfg.wrist_hud && g_cfg.wrist_radar) blip_scan(obj);   // the radar exists only with the wrist HUD
+
+    // ---- GRENINSTANT mode 2: backdate the throw-start stamp (doctrine in Config.hpp). The
+    // stamp at unit+0x38C is written by the game within ~1 ms of the press; the first probe call
+    // that sees it change during the press window rewrites it N ticks into the past, once per
+    // throw. If the release is timed against it, the game's own release fires immediately -- and
+    // if nothing changes, the stamp was bookkeeping, which is an answer too.
+    if (g_cfg.gren_instant == 2 && !IsBadReadPtr((const void*)(obj + 0x38C), 4)) {
+        static uint32_t s_stamp_prev = 0;
+        static bool s_backdated = false;
+        const uint32_t st = *(const uint32_t*)(obj + 0x38C);
+        if (!holster_throw_press_active()) {
+            s_backdated = false;
+            s_stamp_prev = st;
+        } else if (!s_backdated && st != s_stamp_prev) {
+            s_backdated = true;
+            const uint32_t bd = st - (uint32_t)g_cfg.gren_backdate;
+            *(uint32_t*)(obj + 0x38C) = bd;
+            s_stamp_prev = bd;
+            API::get()->log_info("[Halo-CampE-UEVR] GRENBACKDATE: stamp 0x%08X -> 0x%08X (-%d ticks)",
+                                 st, bd, g_cfg.gren_backdate);
+        }
+    }
+
+    // ---- GRENINSTANT v3. Version 2 (fight the re-attacher on the grenade alone, continuously)
+    // WEDGED THE UNIT: the keyframe handler found its grenade already released, bailed before
+    // clearing the unit's own throw bookkeeping, and the unit refused every later throw -- state
+    // that survives checkpoints. The missing piece is the UNIT's side: unit+0x10 is the "object
+    // in hand" slot (weapon datum at rest, the grenade's datum during a throw -- watched all
+    // day). v3 empties that slot the moment the grenade is freed, so the re-attacher and the
+    // keyframe handler both lose their reference, and restores the remembered weapon datum once
+    // the animation window is over. The gun may flicker during the window; that is the cost of
+    // the experiment, not the final shape.
+    {
+        static uint32_t  s_idle_hand = 0xFFFFFFFFu;   // unit+0x10 as it reads between throws
+        static uintptr_t s_prev_io = 0;
+        static bool      s_released = false;
+        const uintptr_t io = g_greninst_obj.load(std::memory_order_relaxed);
+        if (io != s_prev_io) { s_prev_io = io; s_released = false; }
+        if (io == 0) {
+            if (!IsBadReadPtr((const void*)(obj + 0x10), 4))
+                s_idle_hand = *(const uint32_t*)(obj + 0x10);
+        } else {
+            const long long since = now_ms() - g_greninst_at_ms.load(std::memory_order_relaxed);
+            if (since > 400) {
+                if (s_idle_hand != 0xFFFFFFFFu && !IsBadReadPtr((void*)(obj + 0x10), 4))
+                    *(uint32_t*)(obj + 0x10) = s_idle_hand;
+                g_greninst_obj.store(0, std::memory_order_relaxed);
+            } else if (!IsBadReadPtr((void*)io, 0x80)) {
+                if (!s_released) {
+                    s_released = true;
+                    *(uint32_t*)(io + 0x0C) = 0xFFFFFFFFu;
+                    *(uint32_t*)(io + 0x14) = 0xFFFFFFFFu;
+                    *(uint32_t*)(io + 0x18) = 0xFFFF00FFu;
+                    *(uint32_t*)(io + 0x08) = 0x00000004u;
+                    *(uint32_t*)(io + 0x04) |= 0x80u;
+                }
+                if (since <= 330) {
+                    // Both hands of the fight, every call: the unit's slot stays empty, the
+                    // grenade stays detached, the velocity stays ours. ~25x the tick rate.
+                    if (!IsBadReadPtr((void*)(obj + 0x10), 4))
+                        *(uint32_t*)(obj + 0x10) = 0xFFFFFFFFu;
+                    *(uint32_t*)(io + 0x0C) = 0xFFFFFFFFu;
+                    float* vel = (float*)(io + 0x68);
+                    vel[0] = g_greninst_vx.load(std::memory_order_relaxed);
+                    vel[1] = g_greninst_vy.load(std::memory_order_relaxed);
+                    vel[2] = g_greninst_vz.load(std::memory_order_relaxed);
+                }
+            } else {
+                g_greninst_obj.store(0, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    publish_seat_state(obj);
+
+    // FACING at +0x50 (unit vector, Blam frame -- seen as (0.028, 1.000, ~0) in the seated
+    // dump). UE direction is (fx, -fy, fz), so UE yaw = atan2(-fy, fx): the same Y negation the
+    // aim reconstruction uses.
+    if (!IsBadReadPtr((const void*)(obj + 0x50), 8)) {
+        const float* fv = (const float*)(obj + 0x50);
+        g_unit_fx.store(fv[0], std::memory_order_relaxed);
+        g_unit_fy.store(fv[1], std::memory_order_relaxed);
+    }
+
+    // ROOMSCALE THROTTLE, MODE 3: write the UNIT's own throttle vectors (found by BLAMUNIT-DUMP:
+    // +0x250 fwd/+0x254 left, second copy at +0x25C/+0x260) from this sim-side path, so the
+    // value sits there whenever the biped reads it. THE ONE THAT MOVES THE BIPED: eye speed =
+    // 6.65 m/s x throttle, linear from 0.02 up, no floor -- modes that wrote the control record
+    // survived but moved nothing (consumed before the write landed). Yields to the player's own
+    // stick and to stick mode, same gates as the pad path.
+    const bool thr_probe = (g_cfg.roomscale_thr_probe != 0)
+                        && !g_stick_mode_active.load(std::memory_order_relaxed)
+                        && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick;
+    if ((g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)
+         && !g_stick_mode_active.load(std::memory_order_relaxed)
+         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick) || thr_probe) {
+        const uintptr_t o1 = (uintptr_t)g_cfg.blam_unit_throttle_off;
+        const uintptr_t o2 = (uintptr_t)g_cfg.blam_unit_throttle_off2;
+        if (o1 != 0 && !IsBadWritePtr((void*)(obj + o1), 8)) {
+            // Candidate BODY-FACING vectors, published for the probe log (game thread): the flat
+            // direction pairs the unit dump showed. Whichever angle tracks move_world exactly is
+            // the frame the throttle is consumed in.
+            if (!IsBadReadPtr((const void*)(obj + 0x1D4), 8)) {
+                g_dbg_face[0].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
+                g_dbg_face[1].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
+                g_dbg_face[4].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
+                g_dbg_face[5].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
+            }
+            if (!IsBadReadPtr((const void*)(obj + 0x1E0), 8)) {
+                g_dbg_face[2].store(*(const float*)(obj + 0x1E0), std::memory_order_relaxed);
+                g_dbg_face[3].store(*(const float*)(obj + 0x1E4), std::memory_order_relaxed);
+            }
+            // AIM-FRAME command, kept as FINAL after two measured attempts to do better both
+            // lost: a body-forward (+0x50) basis was off by the torso twist and flipped 180 in
+            // the biped's turn state; the game's own +0x1D4 basis fed back -- the biped rotates
+            // that vector while moving, the re-projection chased it, and the probe walked in
+            // curves. g_rs_thr_fwd/right are (fwd, right) in the AIM frame.
+            float f, l;
+            if (thr_probe) { f = (float)g_cfg.roomscale_thr_probe / 100.0f; l = 0.0f; }
+            else {
+                f = g_rs_thr_fwd.load(std::memory_order_relaxed);
+                const float r = g_rs_thr_right.load(std::memory_order_relaxed);
+                l = (g_cfg.blam_throttle_ysign < 0) ? -r : r;
+            }
+            *(float*)(obj + o1) = f; *(float*)(obj + o1 + 4) = l;
+            if (o2 != 0 && !IsBadWritePtr((void*)(obj + o2), 8)) { *(float*)(obj + o2) = f; *(float*)(obj + o2 + 4) = l; }
+            g_rs_thr_written.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 static void drive_angles_impl(bool off_thread) {
     if (g_cfg.blam_angles == 0) return;
 
@@ -939,7 +1774,44 @@ static void drive_angles_impl(bool off_thread) {
     // stick mode exists. The control law is disarmed at the stick-mode gate in Plugin.cpp, but this
     // write is driven from the sim's orientation getter and is NOT on that code path, so without
     // this it kept steering the seat camera from the hand while the player's stick did nothing.
-    if (g_stick_mode_active.load(std::memory_order_relaxed)) return;
+    if (g_stick_mode_active.load(std::memory_order_relaxed)) {
+        // The aim write holds off; the seat publish must not. The 0.2.0 tree published unit state
+        // from the hook independently of this gate. With it behind the gate, mounting froze the
+        // rider position (speed 0, heading never armed, the parked-only seat learn never stopping)
+        // and the vehicle facing never resolved. Sim thread only (the resolve walks gs:[0x58]).
+        //
+        // THE RECORD MUST BE RE-FOUND HERE TOO (vehseatpub=1). blam_drive_tick() drops g_ctl_rec
+        // every RERESOLVE_TICKS calls (~14 s at 46 ticks/s), and the only re-resolve lives below
+        // this hold. Publishing only "if the cache is set" therefore worked until the first drop in
+        // a ride and then froze the rider, the mounted flag and the speed for the rest of it -- the
+        // camera learned onto the frozen point and the hog drove away from the view. The 0.2.0
+        // extras publish re-resolved on its own; this does the same. Failures are rate-limited so
+        // a stick-mode state with no record (a cutscene) does not scan 2600 times a second.
+        if (!off_thread) {
+            uintptr_t srec = g_ctl_rec.load(std::memory_order_relaxed);
+            bool have = (srec != 0 && !IsBadReadPtr((const void*)(srec - OFF_CTL_YAW), 8));
+            if (!have && g_cfg.veh_seat_pub != 0) {
+                static uint32_t s_fail_wait = 0;
+                if (s_fail_wait == 0) {
+                    const char* why = "?";
+                    int index = -1;
+                    srec = resolve_control_record(&why, &index);
+                    if (srec != 0 && !IsBadWritePtr((void*)srec, 8)) {
+                        g_ctl_rec.store(srec, std::memory_order_relaxed);
+                        g_seat_reresolve.fetch_add(1, std::memory_order_relaxed);
+                        have = true;
+                    } else {
+                        s_fail_wait = 256;
+                    }
+                } else {
+                    --s_fail_wait;
+                }
+            }
+            if (have) publish_seated_unit_state(srec - OFF_CTL_YAW);
+            else g_seat_norec.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
 
     uintptr_t rec = g_ctl_rec.load(std::memory_order_relaxed);
     if (rec == 0 || IsBadWritePtr((void*)rec, 8)) {
@@ -992,6 +1864,17 @@ static void drive_angles_impl(bool off_thread) {
     }
     if (IsBadWritePtr((void*)rec, 8)) return;
 
+    // Holster inputs (mounted, grenade type/counts), published beside the write. Sim thread only:
+    // the unit resolve walks gs:[0x58], which reads zero from any other thread -- the off-thread
+    // TEB path skips it and the atomics simply hold.
+    //
+    // REBASED: rec points AT the yaw field (resolve returns record + OFF_CTL_YAW; fp[0]/fp[1]
+    // below write through it directly), but the unit resolve walks offsets from the RECORD START.
+    // Passing rec unrebased shifted every read by 0x94 -- the datum slot read from the middle of
+    // the record and came back zero for a whole session, which is what stranded the grenade
+    // pouches on the belief fallback and let the type belief invert against the game.
+    if (!off_thread) publish_unit_state(rec - OFF_CTL_YAW);
+
     float* fp = (float*)rec;
 #if HALO_VR_DEV
     // Sampled BEFORE our write: this is what the record holds after whatever last touched it, which
@@ -1022,6 +1905,15 @@ static void drive_angles_impl(bool off_thread) {
     // traced range is what makes the two agree. Declines to act while the head is leashed, so this
     // is a no-op in the shipped configuration. See AimConverge.hpp.
     aim_converge_apply(&yaw, &pitch);
+    aim_writer_note_blam(yaw, pitch);
+    if (g_cfg.stomp_log != 0) {   // Point 23: the Blam record write, once per snapshot generation (this runs ~2600/s).
+        static uint32_t s_last_gen = 0xFFFFFFFFu;
+        const uint32_t g = pose_latch_last_gen();
+        if (g != s_last_gen) {
+            s_last_gen = g;
+            stomp_mark(23, yaw, pitch, (float)g, (float)g_tick_id.load(std::memory_order_relaxed));
+        }
+    }
 
     // YAW SIGN. desired_aim_now() returns UE-convention degrees, but this record stores BLAM yaw,
     // which is its negation: writing (yaw 1.50, pitch 0.30) produced the aim vector
@@ -1053,6 +1945,7 @@ static void drive_angles_impl(bool off_thread) {
 #endif
 }
 
+
 // TIER 1 entry: called from the hook, on the sim thread, ~2600 times a second.
 void drive_control_angles() { drive_angles_impl(/*off_thread=*/false); }
 
@@ -1060,6 +1953,22 @@ void drive_control_angles() { drive_angles_impl(/*off_thread=*/false); }
 // hook is never going to fire on this build. Costs a toolhelp snapshot on the frames where the
 // record is not yet resolved, which is why it must never be reachable from the hook.
 void blam_drive_offthread_write() { drive_angles_impl(/*off_thread=*/true); }
+
+// FRAMEAUDIT: the Blam control record's current angles, converted back to the UE-convention
+// degrees desired_aim_now() uses, so they can be matched against the generation table.
+bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg) {
+    const uintptr_t rec = g_ctl_rec.load(std::memory_order_relaxed);
+    if (rec == 0 || IsBadReadPtr((void*)rec, 8)) return false;
+    const float* fp = (const float*)rec;
+    if (!std::isfinite(fp[0]) || !std::isfinite(fp[1])) return false;
+    const float asign = (g_cfg.blam_angles_ysign >= 0) ? 1.0f : -1.0f;
+    float y = asign * fp[0] * RAD2DEG - g_cfg.blam_yaw_off;
+    while (y > 180.0f) y -= 360.0f;
+    while (y < -180.0f) y += 360.0f;
+    *yaw_deg = y;
+    *pitch_deg = fp[1] * RAD2DEG - g_cfg.blam_pitch_off;
+    return true;
+}
 
 void blam_drive_tick() {
     const bool want = (g_cfg.blam_angles != 0);
@@ -1419,6 +2328,4 @@ void blam_drive_tick() {
 //
 // At namespace-halo scope on purpose -- inside the anonymous namespace above they would be
 // file-local and Holster.obj would not link.
-std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
-std::atomic<bool> g_unit_gvalid{false};
 }  // namespace halo

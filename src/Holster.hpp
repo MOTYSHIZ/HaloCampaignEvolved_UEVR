@@ -60,6 +60,19 @@ bool holster_offhand_busy();
 // holster tick because the mag lives in ITS body frame (torso leash, neck pivot); consumed by the
 // reload state machine's MAG_OUT grab in Gesture.cpp.
 bool holster_mag_hand_in();
+// Called from the XInput hook with the RAW pad buttons, before remapping and before the throw
+// press mask is composed. Fires the synthetic throw on the carrier grip's falling edge at poll
+// rate -- the tick publishes the verdict, the hook only pulls the trigger. Clocks and atomics
+// only; safe on the hook's thread.
+void holster_note_buttons(unsigned short buttons);
+// The carrier hand's last published position in Blam units (grenhand experiment). Returns false
+// until a grenade has been armed once. Safe on any thread.
+bool holster_hand_blam(float* x, float* y, float* z);
+// The swing's peak direction in Blam units, normalized (greninstant). Safe on any thread.
+bool holster_throw_blam_dir(float* x, float* y, float* z);
+// The resolved grenade meshes (wrist-radar blip art). Game thread; null until resolved.
+uevr::API::UObject* holster_mesh_frag();
+uevr::API::UObject* holster_mesh_plasma();
 // True while the melee detector must stand down: the hand is in or near a holster zone, or a
 // holster action happened in the last few hundred ms. The reach over a shoulder IS a strike to
 // the swing detector; this is what separates "swapping" from "hitting".
@@ -71,6 +84,9 @@ bool holster_mag_hand_in();
 bool holster_grip_held(bool right);
 
 bool holster_melee_veto();
+// Same idea for the OFF-hand detector: the off hand's own pouch proximity + the recent-action
+// window. The aim-hand version reads the AIM hand's proximity and must not gate left punches.
+bool holster_offhand_melee_veto();
 // Deadline for the synthesised grenade-type switch press.
 extern std::atomic<long long> g_holster_gswitch_until;
 bool holster_gswitch_press_active();

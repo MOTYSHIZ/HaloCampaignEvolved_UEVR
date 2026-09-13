@@ -18,6 +18,24 @@
 
 namespace halo {
 
+// The controller-frame aim correction (Config::aim_fix, from the calibration file), applied to
+// every pose-derived direction that must agree with the calibrated trims. It exists as ONE
+// function so the rendered weapon pose (BlamPalette) and the two-hand support pose route through
+// the same rotation: gripfix was SOLVED on a chain carrying this correction, and consuming it
+// without the correction was measured at 8.4 degrees of barrel error, correlated 0.908 with
+// sin(wrist roll) -- the gun sitting differently at every wrist angle. Identity while no aimfix
+// line has been loaded.
+Quat apply_aim_fix(const Quat& q_src);
+
+// ---- GESTURE AIM HOLD. A physical gesture (today: the grenade throw; melee joins in a later
+// feature) can pin the aim to a direction of its own for a bounded window -- the game acts along
+// the AIM, and during a throw the aim is the flailing hand itself. The gesture stores the target
+// as CONTROLLER-equivalent angles plus a deadline; the aim derivation substitutes them while the
+// deadline holds, then blends back over the ramp so the reticle returns instead of teleporting.
+extern std::atomic<long long> g_melee_aim_hold_until;   // 0 = no hold in effect
+extern std::atomic<float>     g_melee_aim_ctrl_yaw;
+extern std::atomic<float>     g_melee_aim_ctrl_pitch;
+
 // Where ControlRotation sits on the PlayerController. RESOLVED AT RUNTIME, with the measured value
 // below as both the fallback and the expectation.
 //
@@ -285,6 +303,22 @@ bool read_control_rotation_hook(double* out_pitch, double* out_yaw);
 
 // A tracked device pose, rejecting the identity placeholder UEVR returns before tracking is live.
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
+
+// POSELATCH: snapshot every device once so all readers share one sample. site 1 = engine tick
+// start, site 3 = the aim law's XInput sample. See the definition for the modes.
+void pose_latch_refresh(int site);
+// DRAWAIM: hand intent (UE degrees) of the outgoing snapshot (prev) and the new one (cur), stored
+// at each latch refresh. palettecam 14 divides by prev, 15 by cur.
+extern std::atomic<float> g_intent_prev_y, g_intent_prev_p, g_intent_cur_y, g_intent_cur_p;
+extern std::atomic<bool>  g_intent_prev_ok, g_intent_cur_ok;
+extern std::atomic<float> g_intent_prev2_y, g_intent_prev2_p;   // RETSTAMP: intent two snapshots back
+extern std::atomic<bool>  g_intent_prev2_ok;
+// FRAMEAUDIT: snapshot generation counter, the generation of the stored prev intent, and the
+// generation the CALLING THREAD was last served by get_pose.
+extern std::atomic<uint32_t> g_latch_gen, g_intent_prev_gen, g_intent_cur_gen;
+uint32_t pose_latch_last_gen();
+// The Blam aim writer notes the UE-convention angle it wrote, for the AIMWRITERS agreement line.
+void aim_writer_note_blam(float yaw_deg, float pitch_deg);
 
 // The aim sightline's body reference, honouring aimorigin AND the leash state. Both sightline
 // sites call this; see the definition for why an unleashed head cannot use the standing origin.

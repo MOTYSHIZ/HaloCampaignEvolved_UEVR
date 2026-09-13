@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cwctype>
 #include <string>
 #include <vector>
@@ -67,6 +68,7 @@ bool  s_have_raw = false;
 long long s_last_swap = 0;                           // debounce: one swap per grip press, min gap
 long long s_last_action = 0;                         // any holster action (melee veto window)
 bool  s_near_zone = false;                           // hand within radius+margin of any zone
+bool  s_gnear_zone = false;                          // OFF hand within gradius+margin of a pouch
 float s_nearest_dist = 1e9f;                         // ...and how far the nearest one actually is
 // Grenade type: READ from the unit object (BlamDrive publishes unit+0x380/+0x382/+0x383), with a
 // belief fallback only while that read is not live. The game auto-switches when a type runs out,
@@ -78,6 +80,7 @@ int   s_gswitch_pending = 0;   // ticks left waiting for the game to flip after 
 // level load recycles the components; a failed spawn retries every ~2 s rather than latching dead.
 TrackedObject s_pouch_l, s_pouch_r, s_hand_g;
 uint32_t s_mk_tick = 0;
+uint32_t s_mk_fails = 0;   // empty surveys in a row: the sweep backs off (120 ticks -> 1200)
 // THE MARKER MESHES ARE THE GAME'S OWN GRENADE MODELS, resolved from the loaded-object list.
 // The engine sphere proved unreliable on foot -- find_uobject cannot load, and this level had no
 // BasicShapes in memory, so three meshless "spheres" rendered as nothing (2026-08-24, in-headset
@@ -99,6 +102,7 @@ bool s_mag_search_done = false;      // the survey ran to completion once; do no
 bool s_mag_zone_prev = false;        // fetch hand inside the mag zone (haptic edge)
 std::atomic<bool> s_mag_hand_in{false};   // ...published for Gesture's grab test (prior tick)
 
+
 // ---- PER-WEAPON MAGS. The 2026-08-27 survey settled the old blocking unknown: this game SHIPS a
 // standalone magazine StaticMesh per weapon (SM_Magnum_Magazine_Default, SM_BattleRifle_Magazine_
 // M_Default, ...) plus SM_ammo_pickup_* for the ones that load shells instead. So the survey now
@@ -110,7 +114,52 @@ struct MagCand { std::wstring lname; TrackedObject obj; int rank = 0; };
 std::vector<MagCand> s_mag_cands;
 std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; sentinel = never set
 
+// The belt point for the weapon in hand: a reloadmagoffw entry if one matches, the global
+// reloadmagoff otherwise. Both the rendered mag and the grab zone read this, so what you see and
+// what you reach for stay the same point.
+Vec3 mag_belt_point() {
+    Vec3 mo{g_cfg.reload_mag_off[0], g_cfg.reload_mag_off[1], g_cfg.reload_mag_off[2]};
+    const std::string key = weapon_key();
+    if (key.empty() || g_cfg.reload_mag_off_w[0] == 0) return mo;
+    std::string lk = key; for (auto& ch : lk) ch = (char)tolower((unsigned char)ch);
+    const std::string tbl = g_cfg.reload_mag_off_w;
+    size_t pos = 0;
+    while (pos <= tbl.size()) {
+        size_t comma = tbl.find(',', pos); if (comma == std::string::npos) comma = tbl.size();
+        std::string ent = tbl.substr(pos, comma - pos);
+        while (!ent.empty() && (unsigned char)ent.back()  <= ' ') ent.pop_back();
+        while (!ent.empty() && (unsigned char)ent.front() <= ' ') ent.erase(ent.begin());
+        const size_t colon = ent.find(':');
+        if (colon != std::string::npos && colon > 0) {
+            std::string name = ent.substr(0, colon);
+            for (auto& ch : name) ch = (char)tolower((unsigned char)ch);
+            if (lk.find(name) != std::string::npos) {
+                float x = mo.x, y = mo.y, z = mo.z;
+                if (sscanf_s(ent.c_str() + colon + 1, "%f/%f/%f", &x, &y, &z) == 3) mo = Vec3{x, y, z};
+                return mo;
+            }
+        }
+        if (comma >= tbl.size()) break;
+        pos = comma + 1;
+    }
+    return mo;
+}
+
+// The survey HAS candidates and every one is a dead handle -- a level transition recycled them.
+// The caller must re-survey on that, or the fallback chain bottoms out at the frag mesh and the
+// belt mag renders as a grenade (field report, 2026-08-31). An empty list is "never surveyed".
+bool mag_cands_stale() {
+    if (s_mag_cands.empty()) return false;
+    for (auto& cnd : s_mag_cands) if (cnd.obj.get() != nullptr) return false;
+    return true;
+}
+
 API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
+    // The weapon's own magazine component first (exact, rank 4); the survey below is the fallback.
+    if (auto* nm = native_mag_mesh()) {
+        if (out_rank != nullptr) *out_rank = 4;
+        return nm;
+    }
     std::wstring tok;
     {
         std::string k = wkey;
@@ -234,7 +283,29 @@ bool  s_carry_off = false;                           // which hand holds the arm
 float s_body_yaw = 0.0f;
 bool  s_body_init = false;
 
+// ---- POLL-RATE THROW RELEASE (doctrine in Config.hpp). The tick's standing verdict, consumed by
+// the XInput hook. Mask 0 = disarmed (no grenade, hand in a pouch = put-back territory, feature
+// off). The hold angles are the tick's peak-direction math, republished every tick so the hook
+// only ever copies numbers.
+std::atomic<unsigned short> g_pollthrow_mask{0};
+std::atomic<float> g_pollthrow_hy{0.0f}, g_pollthrow_hp{0.0f};
+std::atomic<bool>  g_pollthrow_hold{false};
+std::atomic<bool>  g_pollthrow_fired{false};
+
+// The carrier hand's position in BLAM units, for the grenade-at-hand spawn-origin experiment
+// (grenhand, doctrine in Config.hpp). Published per tick while a grenade is armed; the last value
+// deliberately survives the release, because the spawn lands ~42 ms after it.
+std::atomic<float> g_hand_blam_x{0.0f}, g_hand_blam_y{0.0f}, g_hand_blam_z{0.0f};
+std::atomic<bool>  g_hand_blam_valid{false};
+// The swing's peak direction in BLAM units (normalized), for the instant-release velocity.
+std::atomic<float> g_throw_blam_x{0.0f}, g_throw_blam_y{1.0f}, g_throw_blam_z{0.0f};
+std::atomic<bool>  g_throw_blam_valid{false};
+
 void markers_hide_all() {
+    marker_render_drop(s_pouch_l.get());
+    marker_render_drop(s_pouch_r.get());
+    marker_render_drop(s_hand_g.get());
+    marker_render_drop(s_mag_marker.get());
     holster_marker_show(s_pouch_l.get(), false);
     holster_marker_show(s_pouch_r.get(), false);
     holster_marker_show(s_hand_g.get(), false);
@@ -339,6 +410,52 @@ bool holster_offhand_busy() {
 bool holster_mag_hand_in() {
     return s_mag_hand_in.load(std::memory_order_relaxed);
 }
+
+// XINPUT HOOK CADENCE -- clocks and atomics only, per the rule on that callback (no poses, no
+// reflection, no logging, no haptics; all of that is the tick's, before or after). Fires the
+// synthetic throw press on the carrier grip's falling edge. Called with the RAW buttons before
+// any remapping, and BEFORE the press mask is composed into the same poll -- so the throw the
+// player just released goes out in the very report that shows the grip open.
+void holster_note_buttons(unsigned short buttons) {
+    static unsigned short s_prev = 0;
+    const unsigned short prev = s_prev;
+    s_prev = buttons;
+    const unsigned short mask = g_pollthrow_mask.load(std::memory_order_relaxed);
+    if (mask == 0) return;
+    if ((prev & mask) == 0 || (buttons & mask) != 0) return;   // fire on held -> released only
+    g_pollthrow_mask.store(0, std::memory_order_relaxed);      // one shot; the tick re-arms
+    g_holster_throw_until.store(now_ticks() + ms_to_ticks(g_cfg.holster_press_ms),
+                                std::memory_order_relaxed);
+    if (g_pollthrow_hold.load(std::memory_order_relaxed) && g_cfg.holster_aim_hold_ms > 0) {
+        g_melee_aim_ctrl_yaw.store(g_pollthrow_hy.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_melee_aim_ctrl_pitch.store(g_pollthrow_hp.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_melee_aim_hold_until.store(now_ticks() + ms_to_ticks(g_cfg.holster_aim_hold_ms),
+                                     std::memory_order_relaxed);
+    }
+    g_pollthrow_fired.store(true, std::memory_order_relaxed);
+}
+
+// The carrier hand's last published Blam-unit position (grenhand). Safe on any thread.
+bool holster_hand_blam(float* x, float* y, float* z) {
+    if (!g_hand_blam_valid.load(std::memory_order_relaxed)) return false;
+    *x = g_hand_blam_x.load(std::memory_order_relaxed);
+    *y = g_hand_blam_y.load(std::memory_order_relaxed);
+    *z = g_hand_blam_z.load(std::memory_order_relaxed);
+    return true;
+}
+// The resolved grenade meshes, for the wrist radar's blips (frag = human, plasma = covenant --
+// the factions' own ordnance as their marker art). Game thread; may be null until resolved.
+uevr::API::UObject* holster_mesh_frag()   { return s_mesh_frag.get(); }
+uevr::API::UObject* holster_mesh_plasma() { return s_mesh_plasma.get(); }
+
+// The swing's peak direction in Blam units, normalized (greninstant). Safe on any thread.
+bool holster_throw_blam_dir(float* x, float* y, float* z) {
+    if (!g_throw_blam_valid.load(std::memory_order_relaxed)) return false;
+    *x = g_throw_blam_x.load(std::memory_order_relaxed);
+    *y = g_throw_blam_y.load(std::memory_order_relaxed);
+    *z = g_throw_blam_z.load(std::memory_order_relaxed);
+    return true;
+}
 bool holster_gswitch_press_active() { const auto u = g_holster_gswitch_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
 bool holster_melee_veto() {
     if (!g_cfg.holster_enabled) return false;
@@ -347,6 +464,18 @@ bool holster_melee_veto() {
     // left-hand throw cannot false-trigger a right-hand punch -- you can still pistol-whip
     // while palming one.
     if (s_near_zone || (s_grenade_armed && !s_carry_off)) return true;
+    return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
+}
+
+// The OFF hand's own veto. holster_melee_veto() above tests the AIM hand's zone proximity --
+// correct for the aim-hand detector it was built for, and exactly wrong for a left punch: the
+// right hand holding a rifle at chest height parks inside the pouch space and stood every left
+// punch down (measured 2026-08-31, five punches at speed 4.4-9.4 all killed by it). This one
+// tests the OFF hand's pouch proximity plus the same recent-action window; the armed-grenade
+// case is holster_offhand_busy(), which the caller already checks.
+bool holster_offhand_melee_veto() {
+    if (!g_cfg.holster_enabled) return false;
+    if (s_gnear_zone) return true;
     return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
 }
 
@@ -379,6 +508,10 @@ void holster_reset() {
     // The torso re-seeds from the head on the next tick: after a vehicle, a cutscene or a death
     // the old body yaw is a fact about a different situation.
     s_body_init = false;
+    // Disarm the poll-rate throw: a stale mask would let a menu or a seat's grip release lob a
+    // grenade the instant play resumes.
+    g_pollthrow_mask.store(0, std::memory_order_relaxed);
+    g_pollthrow_fired.store(false, std::memory_order_relaxed);
     markers_hide_all();
 }
 
@@ -540,6 +673,7 @@ void holster_update(float dt) {
     // not stand the right hand's punches down.
     HolsterSlot zone_p = HolsterSlot::None; float pbest = 1e9f;   // AIM hand in a pouch
     HolsterSlot zone_g = HolsterSlot::None; float gbest = 1e9f;   // OFF hand in a pouch
+    float gnearest = 1e9f;   // OFF hand's nearest pouch, for ITS OWN melee veto (see below)
     const HolsterSlot pouches[2] = {HolsterSlot::LeftChest, HolsterSlot::RightChest};
     for (HolsterSlot sl : pouches) {
         const Vec3 o = zone_offset(sl);
@@ -552,9 +686,15 @@ void holster_update(float dt) {
             const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
             if (d < g_cfg.holster_gradius && d < gbest) { gbest = d; zone_g = sl; }
         }
+        // The OFF hand's own melee veto reads its pouch proximity whether or not it may grab.
+        if (ghand_ok) {
+            const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
+            if (d < gnearest) gnearest = d;
+        }
     }
     s_nearest_dist = nearest;
     s_near_zone = (nearest < g_cfg.holster_radius + g_cfg.holster_melee_margin);
+    s_gnear_zone = (gnearest < g_cfg.holster_gradius + g_cfg.holster_melee_margin);
 
     // ---- GRENADE VISUALS. Spawned lazily (paced), placed every tick, scale re-applied every
     // tick -- the wheel-disc lesson: anything a live cfg value controls must be re-applied on the
@@ -575,17 +715,18 @@ void holster_update(float dt) {
     if ((want_gren_marks || want_mag_mark)
         && ((want_gren_marks && (s_pouch_l.get() == nullptr || s_pouch_r.get() == nullptr || s_hand_g.get() == nullptr))
             || (want_mag_mark && s_mag_marker.get() == nullptr))
-        && (++s_mk_tick % 120u) == 1u) {
+        && (++s_mk_tick % ((s_mk_fails < 5 || !g_cfg.holster_poll_throw) ? 120u : 1200u)) == 1u) {
         resolve_grenade_meshes();
         auto* mf = s_mesh_frag.get(); auto* mp = s_mesh_plasma.get();
         if (mf == nullptr) mf = mp;          // stand-ins, never a meshless component
         if (mp == nullptr) mp = mf;
+        if (mf == nullptr) ++s_mk_fails; else s_mk_fails = 0;   // a level with no grenade mesh: one sweep per ~40 s, not per 4 s
         if (auto* owner = API::get()->get_local_pawn(0)) {
             if (want_gren_marks && mf != nullptr) {
                 const double ms = (double)g_cfg.holster_marker_scale * 12.5;
-                if (s_pouch_l.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) s_pouch_l.set(m); }
-                if (s_pouch_r.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mp, ms)) s_pouch_r.set(m); }
-                if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) s_hand_g.set(m); }
+                if (s_pouch_l.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_pouch_l.set(m); } }
+                if (s_pouch_r.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mp, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_pouch_r.set(m); } }
+                if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_hand_g.set(m); } }
             }
             if (want_mag_mark && s_mag_marker.get() == nullptr) {
                 auto* mm = s_mesh_mag.get();
@@ -618,9 +759,10 @@ void holster_update(float dt) {
             }
             const bool show = (g_cfg.holster_markers == 2) || dist < capprch;
             holster_marker_show(m, show);
-            if (!show) return;
+            if (!show) { marker_render_drop(m); return; }
             const Vec3 room{anchor.x + o.x * c + o.z * s, anchor.y + o.y, anchor.z + (-o.x * s + o.z * c)};
             holster_marker_place(m, holster_room_to_world(room, hpos));
+            marker_render_anchor(m, room);
             // 12.5x: holstermarkerscale keeps its meaning (0.08 = "natural size") across the move
             // from the 100 cm engine sphere to real assets authored at grenade size.
             holster_marker_scale(m, (double)g_cfg.holster_marker_scale * 12.5);
@@ -632,8 +774,10 @@ void holster_update(float dt) {
         // change reads at a glance.
         if (auto* m = s_hand_g.get()) {
             holster_marker_show(m, s_grenade_armed);
+            if (!s_grenade_armed) marker_render_drop(m);
             if (s_grenade_armed) {
                 holster_marker_place(m, holster_room_to_world(s_carry_off ? gpos : pos, hpos));
+                marker_render_anchor(m, s_carry_off ? gpos : pos);
                 holster_marker_scale(m, (double)g_cfg.holster_marker_scale * 12.5);
                 // The hand shows the TYPE being held: frag mesh for frag, plasma for plasma.
                 auto* want = (s_gtype != 0) ? s_mesh_plasma.get() : s_mesh_frag.get();
@@ -648,7 +792,7 @@ void holster_update(float dt) {
     // as the grenades do.
     if (g_cfg.reload_mag != 0) {
         const ReloadState rs = reload_state();
-        const Vec3 mo{g_cfg.reload_mag_off[0], g_cfg.reload_mag_off[1], g_cfg.reload_mag_off[2]};
+        const Vec3 mo = mag_belt_point();
         // The fetch hand's distance to the belt point, published for Gesture's grab test. Gated on
         // MAG_OUT so a hand idling at the hip between reloads publishes nothing.
         bool in = false;
@@ -679,6 +823,7 @@ void holster_update(float dt) {
                 if (!wk.empty() && wk != s_mag_mesh_key) {
                     int rank = 0;
                     auto* mesh = mag_mesh_for_weapon(wk, &rank);
+                    const bool stale = rank < 4 && mag_cands_stale();   // rank 4 = the weapon's own component, no survey involved
                     // A pick that is not a real MAGAZINE gets ONE re-survey before it is accepted.
                     // The survey runs once per session, so its candidate handles die at every
                     // level transition -- the weapon's own SM_*_Magazine drops out while some
@@ -686,7 +831,12 @@ void holster_update(float dt) {
                     // (field report). Once per weapon key, so shell loaders with no magazine
                     // asset settle on their pickup after a single rebuild instead of thrashing
                     // a ~290k-object walk every tick.
+                    //
+                    // EXCEPT when the whole candidate list is dead handles: that is a level
+                    // transition, not a shell loader, and the once-per-key guard must not hold --
+                    // it is exactly how the belt mag ended up rendering as a frag grenade.
                     static std::string s_resurveyed_for;
+                    if (stale) s_resurveyed_for.clear();   // a dead list re-arms the once-per-key guard
                     if (rank < 3 && s_resurveyed_for != wk) {
                         s_resurveyed_for = wk;
                         s_mag_cands.clear();
@@ -726,6 +876,7 @@ void holster_update(float dt) {
                 holster_marker_show(m, true);
                 holster_marker_place_rot(m, holster_room_to_world(room, hpos),
                                          0.0f, std::atan2(bf.y, bf.x) * RAD2DEG, 0.0f);
+                marker_render_anchor_rot(m, room, 0.0f, std::atan2(bf.y, bf.x) * RAD2DEG, 0.0f);
                 holster_marker_scale(m, (double)g_cfg.reload_mag_scale);
             } else if (rs == ReloadState::MagHeld && ghand_ok) {
                 // IN THE HAND the mag wears the controller's full orientation: yaw and pitch from
@@ -742,12 +893,51 @@ void holster_update(float dt) {
                 const Vec3 up0{-sp * cy, -sp * sy, cp};
                 const float rollr = std::atan2(U.x * right0.x + U.y * right0.y + U.z * right0.z,
                                                U.x * up0.x + U.y * up0.y + U.z * up0.z);
+                Vec3  place = holster_room_to_world(gpos, hpos);
+                float pd = pitchr * RAD2DEG, yd = yawr * RAD2DEG, rd = rollr * RAD2DEG;
+                // The in-hand tuning (reloadhandoff / reloadhandrot), in the hand's frame: UE local
+                // axes are x forward, y right, z up, so (right, up, forward) maps to (z, x, y).
+                {
+                    const Quat qh = rotator_to_quat(pd, yd, rd);
+                    const Vec3 lo{g_cfg.reload_hand_off[2] * 100.0f, g_cfg.reload_hand_off[0] * 100.0f, g_cfg.reload_hand_off[1] * 100.0f};
+                    const Vec3 wo = quat_rotate(qh, lo);
+                    place = Vec3{place.x + wo.x, place.y + wo.y, place.z + wo.z};
+                    const Quat qr = quat_mul(qh, rotator_to_quat(g_cfg.reload_hand_rot[0], g_cfg.reload_hand_rot[1], g_cfg.reload_hand_rot[2]));
+                    quat_to_rotator(qr.x, qr.y, qr.z, qr.w, &pd, &yd, &rd);
+                }
+                // THE SLIDE (Gesture publishes it): from the hand's pose to the well's, eased.
+                // Rotation goes through a normalised quaternion blend so the mag turns the short
+                // way into the seated orientation instead of spinning through a rotator wrap.
+                const float st = g_reload_slide_t.load(std::memory_order_relaxed);
+                if (st >= 0.0f) {
+                    const float e = st * st * (3.0f - 2.0f * st);   // smoothstep
+                    const Vec3 tgt{g_reload_slide_x.load(std::memory_order_relaxed),
+                                   g_reload_slide_y.load(std::memory_order_relaxed),
+                                   g_reload_slide_z.load(std::memory_order_relaxed)};
+                    place = Vec3{place.x + (tgt.x - place.x) * e,
+                                 place.y + (tgt.y - place.y) * e,
+                                 place.z + (tgt.z - place.z) * e};
+                    if (g_reload_slide_rot_valid.load(std::memory_order_relaxed)) {
+                        const Quat qa = rotator_to_quat(pd, yd, rd);
+                        Quat qb = rotator_to_quat(g_reload_slide_pitch.load(std::memory_order_relaxed),
+                                                  g_reload_slide_yaw.load(std::memory_order_relaxed),
+                                                  g_reload_slide_roll.load(std::memory_order_relaxed));
+                        float d = qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w;
+                        if (d < 0.0f) { qb.x = -qb.x; qb.y = -qb.y; qb.z = -qb.z; qb.w = -qb.w; }
+                        Quat q{qa.x + (qb.x - qa.x) * e, qa.y + (qb.y - qa.y) * e,
+                               qa.z + (qb.z - qa.z) * e, qa.w + (qb.w - qa.w) * e};
+                        const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+                        if (n > 1e-6f) { q.x /= n; q.y /= n; q.z /= n; q.w /= n; }
+                        quat_to_rotator(q.x, q.y, q.z, q.w, &pd, &yd, &rd);
+                    }
+                }
                 holster_marker_show(m, true);
-                holster_marker_place_rot(m, holster_room_to_world(gpos, hpos),
-                                         pitchr * RAD2DEG, yawr * RAD2DEG, rollr * RAD2DEG);
+                holster_marker_place_rot(m, place, pd, yd, rd);
                 holster_marker_scale(m, (double)g_cfg.reload_mag_scale);
+                marker_render_anchor_rot(m, holster_world_to_room(place, hpos), pd, yd, rd);
             } else {
                 holster_marker_show(m, false);
+                marker_render_drop(m);
             }
         }
     }
@@ -900,7 +1090,80 @@ void holster_update(float dt) {
     if (s_unarmed || (s_grenade_armed && !s_carry_off)) set_weapon_hidden(true);
     else if (s_unhide_ticks > 0) { --s_unhide_ticks; set_weapon_hidden(false); }
 
+    // ---- POLL-PATH RECONCILIATION. The hook threw between ticks: press and aim hold are already
+    // out the door; this is everything else the release branch does. Runs BEFORE the tick's own
+    // release edge below -- s_grenade_armed drops here, so the same grenade cannot throw twice.
+    if (g_pollthrow_fired.exchange(false, std::memory_order_relaxed)) {
+        if (s_grenade_armed) {
+            const bool coff = s_carry_off;
+            s_grenade_armed = false;
+            s_last_action = now_ticks();
+            if (!coff && !s_unarmed) { set_weapon_hidden(false); s_unhide_ticks = 30; }
+            haptic_on(coff ? off_is_right() : aim_is_right(), 0.10f, 1.0f);
+            if (g_cfg.holster_log)
+                API::get()->log_info("[Halo-CampE-UEVR] HOLSTER THROW (poll-rate release, %s hand)",
+                                     coff ? "off" : "aim");
+        }
+    }
+
+    // ---- POLL-PATH PUBLISH: the standing verdict the hook acts on. Armed grenade, carrier hand
+    // OUTSIDE every pouch (in a pouch, a release is a put-back and stays the tick's call), and the
+    // aim-hold direction from the current peak -- all at most one tick old at fire time.
+    {
+        unsigned short pmask = 0;
+        if (g_cfg.holster_poll_throw && s_grenade_armed) {
+            const bool coff = s_carry_off;
+            const HolsterSlot czone = coff ? zone_g : zone_p;
+            if (czone == HolsterSlot::None) {
+                pmask = (unsigned short)((coff ? off_is_right() : aim_is_right())
+                                         ? g_cfg.grip_mask_r : g_cfg.grip_mask_l);
+                const Vec3& cpeak = coff ? s_gpeak_velw : s_peak_velw;
+                const float vlen = std::sqrt(cpeak.x * cpeak.x + cpeak.y * cpeak.y + cpeak.z * cpeak.z);
+                if (vlen > 0.2f) {
+                    g_pollthrow_hy.store(wrap180(std::atan2(cpeak.x, -cpeak.z) * RAD2DEG
+                                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed)),
+                                         std::memory_order_relaxed);
+                    g_pollthrow_hp.store(std::asin(std::fmax(-1.0f, std::fmin(1.0f, cpeak.y / vlen))) * RAD2DEG,
+                                         std::memory_order_relaxed);
+                    g_pollthrow_hold.store(true, std::memory_order_relaxed);
+                } else {
+                    g_pollthrow_hold.store(false, std::memory_order_relaxed);
+                }
+            }
+        }
+        g_pollthrow_mask.store(pmask, std::memory_order_relaxed);
+    }
+
+    // Carrier hand in Blam units, for the grenhand spawn-origin experiment. UE world / 304.8 with
+    // Y negated -- the same fit that placed the vehicle camera (BlamDrive, unit+0x20 vs camera).
+    if (s_grenade_armed) {
+        const Vec3 cpos = s_carry_off ? gpos : pos;
+        const Vec3 hw = holster_room_to_world(cpos, hpos);
+        g_hand_blam_x.store(hw.x / 304.8f, std::memory_order_relaxed);
+        g_hand_blam_y.store(-hw.y / 304.8f, std::memory_order_relaxed);
+        g_hand_blam_z.store(hw.z / 304.8f, std::memory_order_relaxed);
+        g_hand_blam_valid.store(true, std::memory_order_relaxed);
+        // The peak swing direction, room frame -> Blam frame, by differencing room_to_world at
+        // two points (the translation cancels, leaving exactly the rotation + swizzle + scale
+        // that frame applies -- no second frame-math implementation to drift out of sync).
+        const Vec3& cpk = s_carry_off ? s_gpeak_velw : s_peak_velw;
+        const float pklen = std::sqrt(cpk.x * cpk.x + cpk.y * cpk.y + cpk.z * cpk.z);
+        if (pklen > 0.2f) {
+            const Vec3 pw = holster_room_to_world(Vec3{cpos.x + cpk.x, cpos.y + cpk.y, cpos.z + cpk.z}, hpos);
+            float bx = (pw.x - hw.x), by = -(pw.y - hw.y), bz = (pw.z - hw.z);
+            const float bl = std::sqrt(bx * bx + by * by + bz * bz);
+            if (bl > 1e-4f) {
+                g_throw_blam_x.store(bx / bl, std::memory_order_relaxed);
+                g_throw_blam_y.store(by / bl, std::memory_order_relaxed);
+                g_throw_blam_z.store(bz / bl, std::memory_order_relaxed);
+                g_throw_blam_valid.store(true, std::memory_order_relaxed);
+            }
+        }
+    }
+
     // Release comes from the CARRIER's grip, and every measured quantity below is the carrier's.
+    // (The tick path stays in full: it is the fallback when holsterpollthrow=0, when the grip
+    // mask is wrong for a profile, and it is still the sole owner of the put-back.)
     const bool crel = s_carry_off ? greleased : areleased;
     if (crel && s_grenade_armed) {
         const bool coff = s_carry_off;
@@ -925,7 +1188,14 @@ void holster_update(float dt) {
         // at release is not a proxy -- it is the intent. The zone test is the same 13 cm sphere a
         // grab uses, so putting back happens exactly where taking out does.
         const bool in_pouch = (czone != HolsterSlot::None);
-        const bool threw = !in_pouch;
+        // MIN THROW SPEED (grenminthrow, 0 = off). a tester's ask for the shipped default: new
+        // players do not know a pouch release is the cancel, so a release that never swung
+        // (peak below the threshold) is treated as a put-back wherever the hand is. Judged on
+        // the PEAK, the same number the retired gate read: every measured throw peaked at 2.04
+        // or above and the deliberate put-back at 0.16, so 1.2 sits in a 13x gap. the player's own
+        // doctrine (positional-only, "however soft") is the 0 default -- his cfg keeps it off.
+        const bool too_slow = g_cfg.gren_min_throw > 0.0f && cpeak_spd < g_cfg.gren_min_throw;
+        const bool threw = !in_pouch && !too_slow;
         const bool cright = coff ? off_is_right() : aim_is_right();
         if (!threw) haptic_on(cright, 0.06f, 0.4f);   // the pouch accepted it back
         if (threw) {
@@ -965,11 +1235,13 @@ void holster_update(float dt) {
             // Both numbers stay in the log so the next session can confirm the peak really is
             // the one that decided it, rather than taking this fit on trust.
             API::get()->log_info("[Halo-CampE-UEVR] HOLSTER %s (%s hand): release fwd %.2f |v| %.2f | PEAK fwd %.2f |v| %.2f (%.0f ms ago) | gate %.2f | held %.0f ms | stale %d/%d",
-                                 threw ? "THROW" : "put back (in pouch)", coff ? "off" : "aim",
+                                 threw ? "THROW" : (in_pouch ? "put back (in pouch)" : "put back (below grenminthrow)"),
+                                 coff ? "off" : "aim",
                                  fwd_speed, speed, cpeak_fwd, cpeak_spd, peak_ms,
                                  g_cfg.holster_throw_speed, hold_ms, cstale, ctotal);
         }
     }
 }
+
 
 } // namespace halo

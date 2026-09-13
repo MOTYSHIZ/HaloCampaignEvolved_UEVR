@@ -32,6 +32,11 @@
 #include "MotionAimControl.hpp"
 #include "TwoHandAim.hpp"
 #include "Config.hpp"
+#include "PaletteTwoHand.hpp"
+#include "ArmDriver.hpp"   // palette_weapon_mode(): which aim chain owns the derivation
+#include "BlamPalette.hpp"   // palette_trim_rotations (aimbore)
+
+#include <chrono>
 #include "Math.hpp"
 #include "UeObject.hpp"
 #include "AimTrace.hpp"
@@ -74,9 +79,12 @@ bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
 // adding the calibrated controller offset on top: ~9 deg yaw / ~18 deg pitch off the barrel with
 // the shipped fit, and a jump on every swap to or from it. Found by the v0.4.5 pre-release audit.
 static bool shotpoint_aim_active() {
-    return g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 &&
+    // Stands down while the palette weapon (armdriver mode 3) owns placement and aim.
+    return !palette_weapon_mode() && g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 &&
            (shotpoint_bore_local(nullptr) || shotpoint_dir(nullptr));
 }
+void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring (FRAMEAUDIT)
+extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
 
 // ---- aim reference ---------------------------------------------------------------------------
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
@@ -372,6 +380,10 @@ Quat apply_aim_fix(const Quat& q_src) {
     return quat_mul(q_src, f);
 }
 
+// The palette's measured barrel axis in the trimmed pose frame (Plugin.cpp BARRELAXIS), for aimbore=3.
+extern std::atomic<float> g_barrel_axis_x, g_barrel_axis_y, g_barrel_axis_z;
+extern std::atomic<bool>  g_barrel_axis_valid;
+
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
                         bool allow_two_hand) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
@@ -384,7 +396,8 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // pose BEFORE the forward is taken, so it rolls with the wrist like the rendered gun does; the
     // weapon publisher and the direct-write path route through the same call, so ray and barrel
     // agree by construction. See apply_aim_fix's definition above for why it is a right-multiply.
-    Vec3 fwd = quat_forward(apply_aim_fix(cq));
+    Quat q_src = apply_aim_fix(cq);
+    Vec3 fwd = quat_forward(q_src);
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -419,12 +432,14 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            fwd = quat_forward(apply_aim_fix(gq));
+            q_src = apply_aim_fix(gq);
+            fwd = quat_forward(q_src);
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
     }
 
+    if (!palette_weapon_mode()) {
     // ---- SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): aim along the weapon MESH bore ---------
     //
     // Aim from the rendered weapon's barrel (the fx_muzzleflash marker's forward) instead of the
@@ -472,7 +487,78 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // it is differenced against, and cancels. Blending the ANGLES after that term would break the
     // cancellation and bring back the v0.2 snap-turn bug, which is a discharged public promise.
     // Blend the VECTOR, always.
+    //
+    // Every consumer of aim -- the control law, the direct drive, the reticle, the rendered
+    // weapon pose -- takes its direction from this one derivation, so blending at this point
+    // keeps them agreeing by construction. The palette applies the SAME rotation to the weapon
+    // pose (two_hand_delta, built on two_hand_blend); blending only one of the pair was
+    // field-observed as the gun turning two-handed while the shots kept following the single
+    // hand. two_hand_blend is therefore tried first; the swing-based bend (two_hand_bend_forward,
+    // the arm rig's hold) only takes the ray when the blend declines it, so the two never stack.
     if (allow_two_hand) two_hand_bend_forward(&fwd);
+    } else {
+    // ---- THE TWO-HANDED HOLD, here and deliberately: after the source pose is chosen, before
+    // the sightline. Every consumer of aim -- the control law, the direct drive, the reticle,
+    // the rendered weapon pose -- takes its direction from this one derivation, so blending at
+    // this point keeps them agreeing by construction. The palette applies the SAME rotation to
+    // the weapon pose (two_hand_delta); blending only one of the pair was field-observed as the
+    // gun turning two-handed while the shots kept following the single hand.
+    // ---- AIMBORE (aimbore=1): the aim IS the drawn barrel. The palette renders the weapon as
+    // f(aim-fixed hand) * G * W in UE convention, f(q) = (-q.z, q.x, q.y, -q.w). f is a
+    // homomorphism, so the same pose in this XR frame is hand * f^-1(G) * f^-1(W), with
+    // f^-1(u) = (u.y, u.z, -u.x, -u.w) (checked numerically to 1e-15 over 2000 random poses; the AR
+    // trim alone gives +2.000 deg pitch, the measured barrel-over-aim). The gun is not touched.
+    // The two-handed hold stays ONE rotation for the whole assembly, as on the weapon: the shortest
+    // arc the blend puts on the hand forward is applied to the bore forward.
+    bool bore_done = false;
+    if (g_cfg.aim_bore != 0) {
+        float gq4[4], wq4[4];
+        if (palette_trim_rotations(gq4, wq4)) {
+            auto qn = [](Quat q) {
+                const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+                return (n > 1.0e-6f && std::isfinite(n)) ? Quat{q.x / n, q.y / n, q.z / n, q.w / n}
+                                                         : Quat{0.0f, 0.0f, 0.0f, 1.0f};
+            };
+            const Quat gx = qn(Quat{gq4[1], gq4[2], -gq4[0], -gq4[3]});
+            const Quat wx = qn(Quat{wq4[1], wq4[2], -wq4[0], -wq4[3]});
+            // The roll trim sits between the grip rotation and the weapon trim, as in the pullback.
+            const float rh = g_cfg.palette_roll_trim * 0.5f * DEG2RAD;
+            const Quat rx = qn(Quat{0.0f, 0.0f, -std::sin(rh), -std::cos(rh)});
+            // Barrel axis in the trimmed pose frame, UE convention, then mapped to this frame
+            // (x = ue.y, y = ue.z, z = -ue.x). Mode 1 is the pose forward (+X).
+            Vec3 b_ue{1.0f, 0.0f, 0.0f};
+            const bool live_axis = (g_cfg.aim_bore == 3) && g_barrel_axis_valid.load(std::memory_order_relaxed);
+            if (live_axis) {
+                b_ue = Vec3{g_barrel_axis_x.load(std::memory_order_relaxed), g_barrel_axis_y.load(std::memory_order_relaxed),
+                            g_barrel_axis_z.load(std::memory_order_relaxed)};
+            } else if (g_cfg.aim_bore >= 2) {
+                const float bp = g_cfg.aim_bore_axis[0] * DEG2RAD, byw = g_cfg.aim_bore_axis[1] * DEG2RAD;
+                b_ue = Vec3{std::cos(bp) * std::cos(byw), std::cos(bp) * std::sin(byw), std::sin(bp)};
+            }
+            const Vec3 b_xr{b_ue.y, b_ue.z, -b_ue.x};
+            Vec3 bore = quat_rotate(quat_mul(quat_mul(quat_mul(q_src, gx), rx), wx), b_xr);
+            {
+                const float bl = std::sqrt(bore.x * bore.x + bore.y * bore.y + bore.z * bore.z);
+                if (bl > 1.0e-4f) bore = Vec3{bore.x / bl, bore.y / bl, bore.z / bl};
+            }
+            Vec3 blended = fwd;
+            if (palette_two_hand_blend(&blended)) {
+                const float d = fwd.x * blended.x + fwd.y * blended.y + fwd.z * blended.z;
+                if (d > -0.99f) {
+                    const Quat arc = qn(Quat{fwd.y * blended.z - fwd.z * blended.y,
+                                             fwd.z * blended.x - fwd.x * blended.z,
+                                             fwd.x * blended.y - fwd.y * blended.x, 1.0f + d});
+                    bore = quat_rotate(arc, bore);
+                }
+            }
+            if (std::isfinite(bore.x) && std::isfinite(bore.y) && std::isfinite(bore.z)) {
+                fwd = bore;
+                bore_done = true;
+            }
+        }
+    }
+    if (!bore_done) palette_two_hand_blend(&fwd);
+    }
 
     Vec3 origin{};
     const bool have_origin = aim_sightline_origin(&origin);
@@ -548,6 +634,9 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     return true;
 }
 
+
+
+
 // The aim setpoint, sampled now. See the header for why a consumer would want this instead of
 // g_desired_yaw. The body is deliberately identical to the setpoint arithmetic in
 // aim_control_law() below -- the hand's rotation since calibration, added to the aim captured at
@@ -556,6 +645,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
 // Defined below, next to the atomics it reads. Forward-declared because desired_aim_now() needs
 // the same hold and sits above that definition.
 static void apply_melee_aim_hold(float* cy, float* cp);
+static void aim_writer_compare_direct(float yaw_deg, float pitch_deg);   // AIMWRITERS, defined at get_pose
 
 bool desired_aim_now(float* out_yaw, float* out_pitch) {
     const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
@@ -908,7 +998,15 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
 
         const double want_yaw   = (double)wy;
         const double want_pitch = g_cfg.drive_pitch ? (double)wp : aim_pitch;
-        if (aim_direct_set(want_pitch, want_yaw)) {
+        aim_writer_compare_direct(wy, wp);
+        // AIMDIRECTWRITE (Config.hpp aim_direct_write). 0 = keep the direct branch (stick held at
+        // zero, so the loop cannot become a third writer) but skip the UE write, leaving the Blam
+        // record as the ONLY aim writer. The honest single-writer test: blamangles=0 instead left
+        // nothing moving the aim at all (hand vs ControlRotation corr +0.21/-0.34/-0.09).
+        if (g_cfg.aim_direct_write ? aim_direct_set(want_pitch, want_yaw) : true) {
+            // Point 22: the UE direct write, stamped with the snapshot this thread's hand came from.
+            if (g_cfg.stomp_log != 0) stomp_mark(22, (float)want_yaw, (float)want_pitch, (float)pose_latch_last_gen(),
+                       (float)g_tick_id.load(std::memory_order_relaxed));
             *out_rx = 0.0f;
             *out_ry = 0.0f;
             // Traced from INSIDE the direct path. The old code returned above the sample call, so a
@@ -1063,8 +1161,204 @@ bool aim_sightline_origin(Vec3* out) {
     return false;
 }
 
+// ---- POSELATCH (2026-09-12). ONE HAND SAMPLE PER FRAME FOR EVERY READER.
+//
+// Every consumer of the controller reads it through this function, at its own moment, on its own
+// thread: the Blam aim writer (sim thread, ~2600 calls/s), the UE aim writer (XInput hook), the
+// weapon placement (game tick), the frame republish (render thread). UEVR returns the freshest
+// prediction at each call, so the hand the sim aimed from, the hand UE aimed from and the hand the
+// gun was placed at are different samples a fraction of a frame apart. The fitted model of the
+// judder is exactly that: two aim reads about one frame apart with a random slip, and it only
+// involves the hand that drives the aim, which is why spawned objects and the left hand are smooth.
+//
+// With the latch on, a snapshot of every device is taken ONCE at a chosen point and every reader
+// in that frame gets the identical numbers. A stale snapshot (no refresh for 100 ms, e.g. a menu
+// that stops the tick) falls through to the live read so nothing can freeze.
+//   0 = off, live reads (every build before this)
+//   1 = controllers latched at the engine tick start
+//   2 = controllers AND the HMD latched at the engine tick start
+//   3 = controllers latched at the aim law's own sample (XInput hook), the instant the aim is taken
+// ---- FRAMEAUDIT (2026-09-12). Every snapshot carries a generation; every reader records the
+// generation it was served on its own thread, so each aim write and each placement can be stamped
+// with the exact hand sample it used, and the log shows at which hop the two-frame aim delay and
+// the one-frame bone delay appear.
+void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring
+extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
+std::atomic<uint32_t> g_latch_gen{0};
+std::atomic<uint32_t> g_intent_prev_gen{0};
+std::atomic<uint32_t> g_intent_cur_gen{0};
+static thread_local uint32_t t_last_gen = 0;
+uint32_t pose_latch_last_gen() { return t_last_gen; }
+
+namespace {
+struct PoseSnapDev {
+    int32_t idx = -1;
+    API::VR::Pose grip{}, aim{};
+};
+SRWLOCK g_snap_lock = SRWLOCK_INIT;
+PoseSnapDev g_snap[3];
+long long g_snap_ms = 0;
+uint32_t g_snap_gen = 0;
+std::atomic<uint32_t> g_snap_refreshes{0}, g_snap_served{0}, g_snap_live{0};
+std::atomic<int32_t> g_snap_max_age{0};
+
+long long snap_now_ms() {
+    return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
+
+std::atomic<float> g_intent_prev_y{0.0f}, g_intent_prev_p{0.0f}, g_intent_cur_y{0.0f}, g_intent_cur_p{0.0f};
+std::atomic<bool>  g_intent_prev_ok{false}, g_intent_cur_ok{false};
+// RETSTAMP: the intent from TWO snapshots back. At render the game shows exactly this aim
+// (frame audit: ControlRotation at render = intent(gen-2) on 99.5% of frames).
+std::atomic<float> g_intent_prev2_y{0.0f}, g_intent_prev2_p{0.0f};
+std::atomic<bool>  g_intent_prev2_ok{false};
+
+void pose_latch_refresh(int site) {
+    // Only while the palette weapon (armdriver mode 3) owns the aim: a latched hand sample is part of
+    // that stack's frame audit, and the author's aim path reads the live pose.
+    const int mode = palette_weapon_mode() ? g_cfg.pose_latch : 0;
+    if (mode == 0) return;
+    if (site == 1 && mode != 1 && mode != 2) return;
+    if (site == 3 && mode != 3) return;
+    // DRAWAIM (palettecam 14/15, 2026-09-12 fit): the frame draws bones written one frame earlier
+    // but composes them with its own aim, and that aim is exactly the intent of the snapshot BEFORE
+    // the build's (aim(t) = intent(t-2), median error 0.0000 deg). So the intent of the outgoing
+    // snapshot is stored here, before the swap, and the placement divides by that stored number.
+    if (g_cfg.palette_cam == 14 || g_cfg.stomp_log != 0 || g_cfg.aim_reticule_stamp != 0) {
+        // Shift the outgoing previous intent down one slot before computing the new one.
+        g_intent_prev2_y.store(g_intent_prev_y.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_intent_prev2_p.store(g_intent_prev_p.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_intent_prev2_ok.store(g_intent_prev_ok.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        float py = 0.0f, pp = 0.0f;
+        const bool ok = desired_aim_now(&py, &pp) && std::isfinite(py) && std::isfinite(pp);
+        if (ok) { g_intent_prev_y.store(py, std::memory_order_relaxed); g_intent_prev_p.store(pp, std::memory_order_relaxed); }
+        g_intent_prev_ok.store(ok, std::memory_order_relaxed);
+        g_intent_prev_gen.store(t_last_gen, std::memory_order_relaxed);
+    } else {
+        g_intent_prev_ok.store(false, std::memory_order_relaxed);   // never serve a stale value after a mode switch
+        g_intent_prev2_ok.store(false, std::memory_order_relaxed);
+    }
+    const int32_t ids[3] = {API::VR::get_hmd_index(), API::VR::get_left_controller_index(),
+                            API::VR::get_right_controller_index()};
+    PoseSnapDev fresh[3];
+    for (int i = 0; i < 3; ++i) {
+        fresh[i].idx = ids[i];
+        if (ids[i] < 0) continue;
+        fresh[i].grip = API::VR::get_pose(ids[i]);
+        fresh[i].aim  = API::VR::get_aim_pose(ids[i]);
+    }
+    const long long now = snap_now_ms();
+    AcquireSRWLockExclusive(&g_snap_lock);
+    for (int i = 0; i < 3; ++i) g_snap[i] = fresh[i];
+    g_snap_ms = now;
+    const uint32_t new_gen = g_latch_gen.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_snap_gen = new_gen;
+    ReleaseSRWLockExclusive(&g_snap_lock);
+    g_snap_refreshes.fetch_add(1, std::memory_order_relaxed);
+    if (g_cfg.palette_cam == 15 || g_cfg.stomp_log != 0) {
+        float cy = 0.0f, cp = 0.0f;
+        const bool ok = desired_aim_now(&cy, &cp) && std::isfinite(cy) && std::isfinite(cp);
+        if (ok) { g_intent_cur_y.store(cy, std::memory_order_relaxed); g_intent_cur_p.store(cp, std::memory_order_relaxed); }
+        g_intent_cur_ok.store(ok, std::memory_order_relaxed);
+        g_intent_cur_gen.store(new_gen, std::memory_order_relaxed);
+        // Point 26: the generation table, this snapshot's intent, so every aim value can be
+        // matched back to the sample that produced it.
+        if (ok) stomp_mark(26, cy, cp, (float)new_gen, (float)g_tick_id.load(std::memory_order_relaxed));
+    } else {
+        g_intent_cur_ok.store(false, std::memory_order_relaxed);
+    }
+
+    static long long s_last_log = 0;
+    if (s_last_log == 0) s_last_log = now;
+    if (g_cfg.palette_weapon_log != 0 && now - s_last_log >= 10000) {
+        const double secs = (double)(now - s_last_log) / 1000.0;
+        API::get()->log_info("[Halo-CampE-UEVR] POSELATCH mode %d: %.1f refreshes/s, %.0f reads/s served "
+                             "from the snapshot, %.0f reads/s live (stale or unlatched device), oldest "
+                             "snapshot served %d ms",
+                             mode, g_snap_refreshes.exchange(0) / secs, g_snap_served.exchange(0) / secs,
+                             g_snap_live.exchange(0) / secs, (int)g_snap_max_age.exchange(0));
+        s_last_log = now;
+    }
+}
+
+namespace {
+// The latched pose for idx, or false when the live read must be used.
+bool pose_latch_lookup(UEVR_TrackedDeviceIndex idx, bool use_aim, API::VR::Pose* out) {
+    const int mode = palette_weapon_mode() ? g_cfg.pose_latch : 0;
+    if (mode == 0 || idx < 0) return false;
+    bool hit = false;
+    int32_t age = 0;
+    AcquireSRWLockShared(&g_snap_lock);
+    if (g_snap_ms != 0) {
+        age = (int32_t)(snap_now_ms() - g_snap_ms);
+        if (age >= 0 && age < 100) {
+            for (int i = 0; i < 3; ++i) {
+                if (g_snap[i].idx != idx) continue;
+                if (i == 0 && mode != 2) break;          // HMD latched only in mode 2
+                *out = use_aim ? g_snap[i].aim : g_snap[i].grip;
+                t_last_gen = g_snap_gen;
+                hit = true;
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_snap_lock);
+    if (hit) {
+        g_snap_served.fetch_add(1, std::memory_order_relaxed);
+        int32_t m = g_snap_max_age.load(std::memory_order_relaxed);
+        while (age > m && !g_snap_max_age.compare_exchange_weak(m, age, std::memory_order_relaxed)) {}
+    } else {
+        g_snap_live.fetch_add(1, std::memory_order_relaxed);
+        t_last_gen = 0;            // FRAMEAUDIT: 0 = this read did not come from a snapshot
+    }
+    return hit;
+}
+}
+
+// ---- WRITER AGREEMENT. The Blam writer notes the angle it wrote; the UE writer compares its own
+// against it when both belong to the same frame. With one hand sample per frame the difference is
+// zero by construction, so this line is the number that proves the latch did what it claims.
+namespace {
+std::atomic<float> g_wa_blam_y{0.0f}, g_wa_blam_p{0.0f};
+std::atomic<long long> g_wa_blam_ms{0};
+}
+void aim_writer_note_blam(float yaw_deg, float pitch_deg) {
+    if (g_cfg.palette_weapon_log == 0) return;
+    g_wa_blam_y.store(yaw_deg, std::memory_order_relaxed);
+    g_wa_blam_p.store(pitch_deg, std::memory_order_relaxed);
+    g_wa_blam_ms.store(snap_now_ms(), std::memory_order_relaxed);
+}
+static void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
+    if (g_cfg.palette_weapon_log == 0) return;     // diagnostic only; no work in play
+    static double s_sum = 0.0, s_max = 0.0;
+    static uint32_t s_n = 0, s_skip = 0;
+    static long long s_last = 0;
+    const long long now = snap_now_ms();
+    const long long bms = g_wa_blam_ms.load(std::memory_order_relaxed);
+    if (bms != 0 && now - bms <= 8) {
+        const double d = std::fabs((double)wrap180(yaw_deg - g_wa_blam_y.load(std::memory_order_relaxed)))
+                       + std::fabs((double)(pitch_deg - g_wa_blam_p.load(std::memory_order_relaxed)));
+        s_sum += d; if (d > s_max) s_max = d; ++s_n;
+    } else {
+        ++s_skip;
+    }
+    if (s_last == 0) s_last = now;
+    if (now - s_last >= 10000) {
+        API::get()->log_info("[Halo-CampE-UEVR] AIMWRITERS UE-direct vs Blam angle written within 8 ms: "
+                             "n=%u mean |dyaw|+|dpitch| %.3f deg, max %.3f deg, %u unpaired  "
+                             "[poselatch=%d aimdirectwrite=%d; 0.000 = both writers used one hand sample]",
+                             s_n, s_n ? s_sum / s_n : 0.0, s_max, s_skip, g_cfg.pose_latch, g_cfg.aim_direct_write);
+        s_sum = s_max = 0.0; s_n = s_skip = 0; s_last = now;
+    }
+}
+
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
-    const auto pose = use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx);
+    API::VR::Pose pose{};
+    if (!pose_latch_lookup(idx, use_aim, &pose)) {
+        pose = use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx);
+    }
     const auto& q = pose.rotation;
     const float m2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
     // UEVR withholds real poses until it has observed controller INPUT, returning a non-unit

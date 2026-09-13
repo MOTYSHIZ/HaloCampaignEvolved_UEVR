@@ -42,6 +42,7 @@
 
 // API.hpp, NOT Plugin.hpp -- see UeObject.hpp.
 #include "uevr/API.hpp"
+#include "Config.hpp"
 
 #include <windows.h>
 #include <string>
@@ -79,11 +80,17 @@ void wpn_calib_write_file();
 
 void wpn_calib_load();
 
-// The weapon in hand, as both tables key it ("FP_AssaultRifle", "FP_Magnum"); empty if none.
+// The weapon in hand, as both tables key it: the weapon actor's class name with the BP_ prefix and
+// the _WeaponActor_C suffix stripped; empty if none.
 //
 // Costs one reflected call, so it is for the CAPTURE EDGE only -- a per-tick consumer wants
 // weapon_offset_current_class(), which is already published.
 std::string weapon_key();
+
+// PALETTE per-weapon rigid delta (Config::WeaponFix): the entry whose match is a substring of the
+// key, or nullptr. LAST match wins, the same rule weapon_fix_for() applies, so a captured entry
+// outranks the shipped baseline it sits behind in the table. Consumed by BlamPalette.cpp.
+const WeaponFix* wpnfix_find(const std::string& key);
 
 // Store a captured palette rigid delta for `key` and rewrite halo_vr_weapons.cfg.
 //

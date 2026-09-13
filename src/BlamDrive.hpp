@@ -47,6 +47,8 @@ namespace halo {
 // Install/remove the sim-thread hook and keep it in step with config. Call once per frame from the
 // game thread. Cheap: a flag compare once the hook is up.
 void blam_drive_tick();
+// FRAMEAUDIT: the control record's angles in UE-convention degrees (false if unresolved).
+bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg);
 
 // The sim's TLS block, published when the control record resolves (gs:[0x58] only means anything
 // ON the sim thread, but the block it yields is ordinary heap memory readable from anywhere).
@@ -59,6 +61,56 @@ extern std::atomic<uintptr_t> g_sim_tls_block;
 // that retired AimDirect's watchpoint hunt. A hit would mean resolution no longer needs the sim
 // thread, i.e. neither the getter hook nor tier 2's TEB walk would be load-bearing for FINDING it.
 uintptr_t blam_control_record();
+
+// Resolve ANY object datum through the sim's object table. SIM THREAD ONLY (walks gs:[0x58]).
+uintptr_t resolve_object_by_datum(uint32_t datum);
+
+// GRENTRACK (dev, throwdump): the projectile object the spawn hook just created, and when. The
+// hook (sim thread) writes them; throw_dump_probe samples the object's position for ~1.2 s so the
+// log shows whether the grenade FLIES from spawn or sits held until an animation event.
+extern std::atomic<uintptr_t> g_grentrack_obj;
+extern std::atomic<long long> g_grentrack_at_ms;
+
+// GRENINSTANT (dev, greninstant): the grenade released at spawn, and the velocity to keep
+// re-asserting on it for 400 ms so the animation keyframe's own late release is overwritten.
+extern std::atomic<uintptr_t> g_greninst_obj;
+extern std::atomic<long long> g_greninst_at_ms;
+extern std::atomic<float>     g_greninst_vx, g_greninst_vy, g_greninst_vz;
+
+// ---- WRIST RADAR blips (blipdump survey, 2026-08-28): unit+0x177 is the TEAM byte -- 0x0E
+// human (player + marines, armed or corpse), 0x0D covenant (the one carrier photographed held
+// PLASMA grenades). Published by the sim (slow cached table scan + per-publish position reads):
+// relative Blam-unit offsets from the player, team, and a moving flag. Consumed by WristHud.
+constexpr int MAX_BLIPS = 12;
+extern std::atomic<int>   g_blip_count;
+extern std::atomic<float> g_blip_dx[MAX_BLIPS], g_blip_dy[MAX_BLIPS];
+extern std::atomic<int>   g_blip_team[MAX_BLIPS];     // 0 = human, 1 = covenant
+extern std::atomic<bool>  g_blip_moving[MAX_BLIPS];
+// Identity (low dword of the object pointer): publish order compacts as contacts drop in and
+// out of range, so an INDEX is not a contact -- the renderer's per-blip smoothing must key on
+// this or it smears one dot's motion onto another's.
+extern std::atomic<uint32_t> g_blip_id[MAX_BLIPS];
+// The RAW +0x177 byte, published alongside the two-way classification. The original survey saw
+// three humans and one Covenant, which is far too thin to call the byte "team" -- different
+// enemies paint different colours in the field, so at least one more value exists. Logged so the
+// real value set can be read off instead of assumed.
+extern std::atomic<uint32_t> g_blip_raw[MAX_BLIPS];
+// SPECIES ID: the object's leading dword, a tag/definition id. THIS is the real species key --
+// surveyed 2026-08-29, it groups instances exactly (six of one type, two of another) and it
+// separates a MARINE from an ELITE, which +0x177 cannot (both read 0x0E there). Blip colour is
+// keyed on this. Assumed stable across runs; if colours ever shuffle between sessions, re-survey
+// -- a per-run pointer or handle would look just like this in a single capture.
+extern std::atomic<uint32_t> g_blip_type[MAX_BLIPS];
+// The movement test's own numbers per contact: measured speed (blam units/sec), the window it
+// was measured over (ms), and the consecutive-window run. Published because contacts that were
+// visibly walking metres reported mv=0, and the test has to be read rather than reasoned about.
+// ABSOLUTE Blam position per contact, for the species-naming match: a contact is identified by
+// finding the Unreal actor standing at the same place and reading its CLASS NAME, which -- unlike
+// the tag id -- is the same on every level.
+extern std::atomic<float> g_blip_wx[MAX_BLIPS], g_blip_wy[MAX_BLIPS], g_blip_wz[MAX_BLIPS];
+extern std::atomic<float> g_blip_speed[MAX_BLIPS];
+extern std::atomic<int>   g_blip_dtm[MAX_BLIPS];
+extern std::atomic<int>   g_blip_run[MAX_BLIPS];
 
 // A loaded module's `_tls_index`, read from its own PE TLS directory (IMAGE_TLS_DIRECTORY's
 // AddressOfIndex, which the loader has already relocated). EXACT on any build of any variant of the
@@ -107,18 +159,38 @@ void blam_drive_offthread_write();
 // blam_drive_tick() must run BEFORE blam_aim_tick() so that on a 0->non-zero transition this file
 // removes its hook in the same frame the diagnostics install theirs.
 
-
-// ---- GRENADE STATE FROM THE BLAM UNIT OBJECT -- DECLARED, NOT POPULATED IN THIS TREE.
-//
-// Holster.cpp reads these to draw the chest pouches and gate a grab. In blindcowboy24's PR they
-// are filled from raw offsets into the unit object (u8[0x380/0x382/0x383]) -- hardcoded struct
-// offsets with no ADDR-HYGIENE marker and no addrcascade guard, which is the class of constant
-// this project requires a paper trail for. That plumbing is deliberately NOT part of this
-// extraction: we took the WEAPON SWITCHING, not the grenades.
-//
-// g_unit_gvalid stays FALSE for ever here, which is the fail-closed answer -- Holster.cpp treats
-// it as "counts unknown" and the pouches stay empty rather than inventing a grenade. If the
-// grenade feature is ported later, populate these and the pouches light up with no other change.
+// Unit state read from the player's unit object on the sim thread (see publish_unit_state):
+// grenade type (0 frag / 1 plasma), pouch counts, whether the read is live, and whether the unit
+// has a parent object (vehicle seat / turret). Consumed by the holsters.
 extern std::atomic<int>  g_unit_gtype, g_unit_gfrag, g_unit_gplasma;
 extern std::atomic<bool> g_unit_gvalid;
+extern std::atomic<bool> g_unit_mounted;
+// The unit's WORLD POSITION (+0x20, Blam world units) and FACING (+0x50, unit vector, Blam
+// frame), published beside the grenade state for the seat camera and the in-vehicle view.
+// Measured: over 972 samples the large-motion delta ratios against the camera are +308/-306/+332,
+// i.e. the 304.8 cm world unit with Blam's Y negation, constant residual = the eye height.
+extern std::atomic<float> g_unit_px, g_unit_py, g_unit_pz;
+extern std::atomic<bool>  g_unit_pvalid;
+extern std::atomic<float> g_unit_fx, g_unit_fy;
+// The MOUNTED VEHICLE's facing (+0x1D4 pair -- swept 3226 deg as a unit vector in the spin test
+// while every +0x50 field stayed constant) and its own position (+0x20, same layout as the
+// biped's). Resolved once per mount from the biped's parent datum and cached; retried ~1 s while
+// mounted-unresolved, because a mount-edge failure used to latch a backwards camera all ride.
+extern std::atomic<float> g_veh_fx, g_veh_fy;
+extern std::atomic<bool>  g_veh_fvalid;
+extern std::atomic<float> g_vehpx, g_vehpy, g_vehpz;
+
+// SEAT PUBLISH EVIDENCE (vehlog). seq advances on every successful rider read from any path (sim
+// publish or direct read), so the camera can tell a live rider from a frozen one. calls = sim
+// publishes, norec = stick-mode calls that had no control record to publish from, reresolve =
+// stick-mode record re-resolves, direct = vehseatdirect reads.
+extern std::atomic<uint32_t> g_seat_pub_seq, g_seat_pub_calls, g_seat_norec, g_seat_reresolve,
+                             g_seat_direct_reads;
+// The rider object and its vehicle object as the last sim publish saw them (vehseatdirect).
+extern std::atomic<uintptr_t> g_seat_obj, g_seat_vobj;
+
+// vehseatdirect: refresh the seat atomics from the cached object pointers. Any thread; acts only
+// while stick mode holds the sim publish's normal path off. No-op when the key is 0.
+void seat_direct_refresh();
+
 } // namespace halo

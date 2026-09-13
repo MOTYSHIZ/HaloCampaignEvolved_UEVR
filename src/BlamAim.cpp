@@ -4,6 +4,7 @@
 
 #include "BlamDrive.hpp"
 #include "Config.hpp"
+#include "Holster.hpp"      // throw-press gate + hand position for the grenhand experiment
 #include "MotionAimControl.hpp"
 #include "AimConverge.hpp"
 #include "addrcascade/AddressCascade.hpp"
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <intrin.h>
 
 using namespace uevr;
@@ -41,10 +43,11 @@ namespace {
 // ADDR-HYGIENE: dev-only -- this file's hooks are installed only when `blamaim` is enabled, a
 // dev-catalog key that ships at 0. NOTE it is the same function BlamDrive resolves BY SIGNATURE; if
 // this path is ever promoted, take the resolved address from there rather than this second copy.
-// 2026-08-17 game update: the +0x10 .text shift caught BOTH of this file's recorded RVAs. Verified
-// statically against the shipped DLL: 0x5A6AD0 reads 5F 5E 5D 5B C3 (pops/ret), 0x5A6AE0 is a .pdata
-// function start with the prologue below. Installing on the old address patches the previous
-// function's epilogue, so the hook is gated on the prologue.
+// 2026-08-27: the game update's +0x10 .text shift caught BOTH of this file's recorded RVAs (the
+// shipping hooks were re-found at the time; these dev-only ones were not, and installing on the
+// old addresses -- each now the EPILOGUE of the previous function -- crashed level load). Verified
+// statically against the shipped DLL: 0x5A6AD0 reads 5F 5E 5D 5B C3 (pops/ret), 0x5A6AE0 reads a
+// clean prologue. Gated on that prologue below, same doctrine as RVA_FP_BUILD in BlamPalette.
 constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AE0;
 // First bytes of the function, checked before the hook goes in. The trailing rip-relative
 // displacement of the `mov r9d,[rip+..]` is excluded on purpose -- it re-links every build.
@@ -61,7 +64,7 @@ constexpr uint8_t GET_ORIENTATION_PROLOGUE[] = {
 // ADDR-HYGIENE: dev-only -- verification hook for the redirect experiments, installed only under
 // `blamaim` (dev-catalog key, ships at 0).
 // Same +0x10 shift, same static verification: 0x5A0FB0 now reads 81 C4 98 00 00 00 .. C3 (the
-// previous function's add-rsp/ret tail), 0x5A0FC0 is a .pdata function start with this prologue.
+// previous function's add-rsp/ret tail), 0x5A0FC0 reads the prologue below.
 constexpr uintptr_t RVA_CREATE_PROJECTILE = 0x5A0FC0;
 constexpr uint8_t CREATE_PROJECTILE_PROLOGUE[] = {
     0x48,0x89,0x4C,0x24,0x08, 0x41,0x54, 0x41,0x55, 0x48,0x81,0xEC,0x98,0x04,0x00,0x00
@@ -1099,14 +1102,24 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
             dumped.store(0, std::memory_order_relaxed);
         }
         if (dumped.fetch_add(1, std::memory_order_relaxed) < 40) {
+            // 64 dwords, not 32: the grenade replay (Route C) needs the WHOLE struct classified --
+            // the +0x28 redirect proved direction is re-derived from a field we had not dumped, so
+            // the answer is by definition in the part we were not looking at. Two lines, same row
+            // (the shared #seq ties them), guarded to the readable size.
+            const bool wide = !IsBadReadPtr((const void*)params, 0x100);
+            const int  nd   = wide ? 64 : 32;
             const uint32_t* d = (const uint32_t*)params;
             char buf[512];
-            int n = 0;
-            for (int i = 0; i < 32 && n < (int)sizeof(buf) - 12; ++i) {
-                n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
+            const auto seq = g_spawns.load(std::memory_order_relaxed);
+            for (int half = 0; half < nd / 32; ++half) {
+                int n = 0;
+                for (int i = half * 32; i < half * 32 + 32 && n < (int)sizeof(buf) - 12; ++i) {
+                    n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
+                }
+                API::get()->log_info("[Halo-CampE-UEVR] BLAMPARAMS #%llu +0x%02X caller=dll+0x%llX | %s",
+                                     (unsigned long long)seq, half * 0x80,
+                                     (unsigned long long)rva, buf);
             }
-            API::get()->log_info("[Halo-CampE-UEVR] BLAMPARAMS caller=dll+0x%llX | %s",
-                                 (unsigned long long)rva, buf);
         }
     }
 
@@ -1159,10 +1172,111 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
                          g_aim_fx.load(), g_aim_fy.load(), g_aim_fz.load(),
                          shot_yaw, shot_pitch, dy, dp, err,
                          g_cfg.blam_yaw_off, (unsigned long long)rva);
-    return g_orig_create ? g_orig_create(params) : 0;
+    // ---- GRENHAND (doctrine in Config.hpp): rewrite the spawn ORIGIN to the carrier hand,
+    // BEFORE the constructor consumes the params. Gated on the synthetic throw press (the spawn
+    // measured ~42 ms into the 120 ms press window), so gunfire and NPC spawns are never touched.
+    if (g_cfg.gren_hand_spawn != 0 && holster_throw_press_active()
+        && params != 0 && !IsBadReadPtr((void*)(params + P_VEC1), 12)) {
+        float hx = 0.0f, hy2 = 0.0f, hz = 0.0f;
+        if (holster_hand_blam(&hx, &hy2, &hz)) {
+            float* o = (float*)(params + P_VEC1);
+            API::get()->log_info("[Halo-CampE-UEVR] GRENHAND origin (%.4f,%.4f,%.4f) -> (%.4f,%.4f,%.4f)",
+                                 o[0], o[1], o[2], hx, hy2, hz);
+            o[0] = hx; o[1] = hy2; o[2] = hz;
+        }
+    }
+    const uintptr_t cret = g_orig_create ? g_orig_create(params) : 0;
+    // ---- GRENTRACK arm: try the return value as an object datum, on this thread (the resolve
+    // walks the sim TLS, which only this thread owns). A failed resolve is logged as itself --
+    // it means the return value is not a datum, and the tracker needs a different handle.
+    if ((g_cfg.throw_dump != 0 || g_cfg.gren_instant != 0) && holster_throw_press_active() && cret != 0) {
+        const long long tnow_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const uintptr_t gobj = resolve_object_by_datum((uint32_t)cret);
+        if (g_cfg.throw_dump != 0) {
+            g_grentrack_obj.store(gobj, std::memory_order_relaxed);
+            g_grentrack_at_ms.store(tnow_ms, std::memory_order_relaxed);
+            API::get()->log_info("[Halo-CampE-UEVR] GRENTRACK: create ret=0x%llX -> datum 0x%08X obj=0x%llX",
+                                 (unsigned long long)cret, (uint32_t)cret, (unsigned long long)gobj);
+        }
+        // ---- GRENINSTANT (doctrine in Config.hpp): perform the release RIGHT NOW, exactly as
+        // GRENSNAP watched the keyframe do it at ~250 ms -- detach from the throw-hand bone,
+        // set the released state and flag, write velocity along the player's own swing.
+        if (g_cfg.gren_instant == 1 && gobj != 0 && !IsBadReadPtr((void*)gobj, 0x80)) {
+            float dx = 0.0f, dy = 1.0f, dz = 0.0f;
+            const bool have_dir = holster_throw_blam_dir(&dx, &dy, &dz);
+            uint8_t* p8 = (uint8_t*)gobj;
+            *(uint32_t*)(p8 + 0x0C) = 0xFFFFFFFFu;
+            *(uint32_t*)(p8 + 0x14) = 0xFFFFFFFFu;
+            *(uint32_t*)(p8 + 0x18) = 0xFFFF00FFu;
+            *(uint32_t*)(p8 + 0x08) = 0x00000004u;
+            *(uint32_t*)(p8 + 0x04) |= 0x80u;
+            float* vel = (float*)(p8 + 0x68);
+            vel[0] = dx * g_cfg.gren_speed;
+            vel[1] = dy * g_cfg.gren_speed;
+            vel[2] = dz * g_cfg.gren_speed;
+            g_greninst_vx.store(vel[0], std::memory_order_relaxed);
+            g_greninst_vy.store(vel[1], std::memory_order_relaxed);
+            g_greninst_vz.store(vel[2], std::memory_order_relaxed);
+            g_greninst_obj.store(gobj, std::memory_order_relaxed);
+            g_greninst_at_ms.store(tnow_ms, std::memory_order_relaxed);
+            API::get()->log_info("[Halo-CampE-UEVR] GRENINSTANT: released at spawn, vel=(%.2f,%.2f,%.2f) swing_dir=%d",
+                                 vel[0], vel[1], vel[2], (int)have_dir);
+        }
+    }
+    return cret;
 }
 
 } // namespace
+
+// THE SPAWN HOOK ALONE, for the grenade-windup capture. blamaim=1 proved unusable for this: it
+// takes ownership of the aim-write function, which (a) replaces months of shipping aim with the
+// investigation-era law -- "aim completely off" in the headset -- and (b) stands down BlamDrive's
+// hook, killing publish_unit_state and with it the THROWDUMP probe. One session produced spawn
+// rows with frozen aim and no press marks: worthless twice over. This installs ONLY the
+// create_projectile hook, driven by the same `throwdump` key as the probe, so press timeline and
+// spawn timestamps come from one session with normal aim.
+void blam_spawnlog_tick() {
+    if (g_cfg.blam_aim != 0) return;   // blamaim owns both hooks; stand down to it entirely
+    const bool want = g_cfg.throw_dump != 0;
+    if (!want) {
+        if (g_create_hook_id >= 0 && g_hook_id < 0) {   // ours, not blamaim's
+            API::get()->param()->functions->unregister_inline_hook(g_create_hook_id);
+            g_create_hook_id = -1;
+            g_orig_create = nullptr;
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: removed (throwdump off)");
+        }
+        return;
+    }
+    if (g_create_hook_id >= 0) return;
+    HMODULE sim = GetModuleHandleA("HaloSimulation_tag_release.dll");
+    if (sim == nullptr) return;
+    g_sim_base = (uintptr_t)sim;
+    void* ctarget = (void*)(g_sim_base + RVA_CREATE_PROJECTILE);
+    static bool s_refused = false;   // one refusal line, not one per tick
+    if (IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) ||
+        memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) != 0) {
+        if (!s_refused) {
+            s_refused = true;
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: prologue mismatch at dll+0x%llX -- "
+                                 "the game moved; spawn hook stays off",
+                                 (unsigned long long)RVA_CREATE_PROJECTILE);
+        }
+        return;
+    }
+    const int cid = API::get()->param()->functions->register_inline_hook(
+        ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create);
+    if (cid < 0 || g_orig_create == nullptr) {
+        if (!s_refused) {
+            s_refused = true;
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: hook FAILED (id=%d)", cid);
+        }
+        return;
+    }
+    g_create_hook_id = cid;
+    API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: installed standalone on 0x%llX (dll+0x%llX) id=%d",
+                         (unsigned long long)ctarget, (unsigned long long)RVA_CREATE_PROJECTILE, cid);
+}
 
 void blam_aim_tick() {
     const int want = g_cfg.blam_aim;
@@ -1223,8 +1337,8 @@ void blam_aim_tick() {
         }
 
         void* target = (void*)(g_sim_base + RVA_GET_ORIENTATION);
-        // VERIFY BEFORE PATCHING. An offset is only true for one build; installing over what moved
-        // in crashes level load.
+        // VERIFY BEFORE PATCHING (doctrine at the RVA definitions). An offset is only true for
+        // one build; installing over what moved in crashed level load on 2026-08-27.
         if (IsBadReadPtr(target, sizeof(GET_ORIENTATION_PROLOGUE)) ||
             memcmp(target, GET_ORIENTATION_PROLOGUE, sizeof(GET_ORIENTATION_PROLOGUE)) != 0) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMHOOK: prologue mismatch at dll+0x%llX -- "
@@ -1248,18 +1362,15 @@ void blam_aim_tick() {
                              id, g_tls_index);
 
         void* ctarget = (void*)(g_sim_base + RVA_CREATE_PROJECTILE);
-        const bool cprologue_ok =
-            !IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) &&
-            memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) == 0;
-        const int cid = cprologue_ok
-            ? API::get()->param()->functions->register_inline_hook(
-                  ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create)
-            : -1;
-        if (!cprologue_ok) {
+        if (IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) ||
+            memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) != 0) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: prologue mismatch at dll+0x%llX -- "
                                  "the game moved; spawn hook stays off",
                                  (unsigned long long)RVA_CREATE_PROJECTILE);
-        } else if (cid < 0 || g_orig_create == nullptr) {
+        } else {
+        const int cid = API::get()->param()->functions->register_inline_hook(
+            ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create);
+        if (cid < 0 || g_orig_create == nullptr) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: hook FAILED (id=%d) - spawn direction "
                                  "cannot be verified, only the getter is instrumented", cid);
         } else {
@@ -1267,6 +1378,7 @@ void blam_aim_tick() {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: installed on 0x%llX (dll+0x%llX) id=%d",
                                  (unsigned long long)ctarget,
                                  (unsigned long long)RVA_CREATE_PROJECTILE, cid);
+        }
         }
 
         g_prev_flag = want;

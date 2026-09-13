@@ -126,6 +126,22 @@ uevr::API::UObject* widget_quad_begin(uevr::API::UObject* owner, int blend_mode,
 // DEGENERATE (0,0) quad that renders nothing -- a failure that cost a full field session.
 void widget_quad_finish(uevr::API::UObject* owner, uevr::API::UObject* comp, float bounds_scale);
 
+// ---- hosted-widget colour chain ---------------------------------------------------------------
+// Both halves of "the hosted widget renders black" -- and the first is also the crash guard: an
+// unbound SlateUI faults in the translucency pass (measured, 4/4 runs). Any module hosting a
+// widget on a quad from widget_quad_begin must run BOTH per tick on its component. The exposure
+// state is shared deliberately: every quad uses the same material chain, so one truth serves all.
+bool bind_widget_slate_ui(uevr::API::UObject* comp);
+void apply_widget_tint(uevr::API::UObject* comp, bool force);
+// Same, with a per-component gain multiplier -- different HUD art needs different lift (the
+// tracker's glow art starves at the gain that suits the shield bar).
+void apply_widget_tint_scaled(uevr::API::UObject* comp, float mul, bool force);
+
+// Build a render target filled with a solid colour, for use as a SlateUI texture on the
+// Widget3DPassThrough materials. Game thread; nullptr on failure (each step logs). Exported for
+// the wrist radar's coloured dots -- the reticule's colour path is the proven original.
+uevr::API::UObject* make_color_rt(float r, float g, float b, float a, int size);
+
 // ---- widget reticule -------------------------------------------------------------------------
 void reticule_widget_ensure(uevr::API::UObject* rig);
 void reticule_widget_move(const Vec3& target, const Vec3& origin);

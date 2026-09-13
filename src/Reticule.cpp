@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <map>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -61,8 +62,24 @@ uint32_t g_reticle_scan_tick = 0;
 //
 // `path` is a full object path ("/Game/HaloVR/M_HaloVRReticle.M_HaloVRReticle") or a package path
 // ("/Game/HaloVR/M_HaloVRReticle"), which is completed by repeating the trailing name.
+namespace {
+std::map<std::string, ULONGLONG> s_load_failed;   // path -> when it last came back null
+}
+bool load_asset_recently_failed(const char* path) {
+    const auto it = s_load_failed.find(path);
+    if (it == s_load_failed.end()) return false;
+    if (GetTickCount64() - it->second < 300000ull) return true;
+    s_load_failed.erase(it);
+    return false;
+}
+void load_asset_remember_failure(const char* path) { s_load_failed[path] = GetTickCount64(); }
 API::UObject* load_asset_by_path(const char* path) {
     if (path == nullptr || path[0] != '/') return nullptr;
+    // A FAILED LOAD IS REMEMBERED (2026-09-06): the nav markers are rebuilt on every weapon swap
+    // and every menu, and each rebuild re-ran this blocking disk load for a material this install
+    // does not ship -- 124 times in thirteen minutes, a freeze every six seconds. A path that came
+    // back null is not tried again for five minutes.
+    if (load_asset_recently_failed(path)) return nullptr;
 
     std::string pkg{path};
     std::string asset;
@@ -93,8 +110,9 @@ API::UObject* load_asset_by_path(const char* path) {
     ksl->call_function(L"LoadAsset_Blocking", q);
     auto* obj = *reinterpret_cast<API::UObject**>(q + 40);
 
-    API::get()->log_info("[Halo-CampE-UEVR] LoadAsset_Blocking('%s.%s') -> %p",
-                         pkg.c_str(), asset.c_str(), (void*)obj);
+    API::get()->log_info("[Halo-CampE-UEVR] LoadAsset_Blocking('%s.%s') -> %p%s",
+                         pkg.c_str(), asset.c_str(), (void*)obj, obj ? "" : " (remembered: not retried for 5 min)");
+    if (obj == nullptr) load_asset_remember_failure(path);
     return obj;
 }
 
@@ -1636,7 +1654,7 @@ bool bind_widget_slate_ui(API::UObject* comp) {
     // black and is immune to both gain and exposure, which is every symptom we have.
     {
         static uint32_t t = 0;
-        if ((t++ % 32) == 0) {
+        if (g_cfg.widget_log && (t++ % 32) == 0) {
             float mid_tint[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
             auto* getv = mi->get_class()->find_function(L"K2_GetVectorParameterValue");
             if (getv != nullptr) {
@@ -1682,10 +1700,17 @@ bool bind_widget_slate_ui(API::UObject* comp) {
 //
 // CREDIT: the pre-exposure diagnosis and the fallback-gain approach are elliotttate's.
 void apply_widget_tint(API::UObject* comp, bool force) {
+    apply_widget_tint_scaled(comp, 1.0f, force);
+}
+
+// `mul` scales the gain per COMPONENT: one global gain cannot serve art of different brightness
+// (the shield bar reads perfectly at a gain that leaves the tracker's dim glow art "washed out
+// dark" -- field verdict), so hosts pass their own multiplier.
+void apply_widget_tint_scaled(API::UObject* comp, float mul, bool force) {
     if (comp == nullptr) return;
 
     const float gain = g_ret_widget_exposure_compensated ? 1.0f
-                                                         : g_cfg.aim_widget_gain;
+                                                         : g_cfg.aim_widget_gain * mul;
     const float rgb   = gain * g_cfg.aim_widget_tint;
     // HIDE BY ALPHA, NOT BY VISIBILITY -- see reticule_widget_set_scene_hidden.
     const bool hide_alpha = g_ws_scene_hidden.load(std::memory_order_relaxed) &&
@@ -1988,6 +2013,10 @@ void reticule_widget_move(const Vec3& target, const Vec3& origin) {
       }
       auto* d = reinterpret_cast<double*>(p); d[0] = sc; d[1] = sc; d[2] = sc;
       comp->call_function(L"SetWorldScale3D", p); }
+
+    // Late re-assert for modes 3/4: this runs after anything earlier in the tick that rebuilt the
+    // component. No-op unless xrlayer=1 and xrlayerhidews is 3 or 4.
+    reticule_mode3_reassert();
 }
 
 // GIVE THE CROSSHAIR BACK when the feature is switched off.
