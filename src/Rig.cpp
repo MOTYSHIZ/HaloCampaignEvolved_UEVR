@@ -836,6 +836,14 @@ static std::unordered_map<std::wstring, Vec3> g_bore_cache;
 static std::atomic<float> g_bl_x{0.0f}, g_bl_y{0.0f}, g_bl_z{0.0f};
 static std::atomic<bool>  g_bl_valid{false};
 
+// THE DEFAULT for uncaptured weapons is the ASSAULT RIFLE's bore_local (the user's chosen
+// reference): a weapon with no capture of its own aims with the AR's forward instead of the
+// animation-following live-mesh bootstrap. Set when the AR is captured. In this dev build it exists
+// once the AR has been held steady once (in-memory); persisting it / baking it as a compiled
+// constant so it works with zero captures and in release is the remaining step.
+static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
+static std::atomic<bool>  g_def_valid{false};
+
 void shotpoint_tick() {
     Vec3 p{}, f{};
     if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
@@ -845,12 +853,16 @@ void shotpoint_tick() {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
 
-    // Publish the frozen bore_local for the currently held weapon, if one has been captured.
+    // Publish the frozen bore_local for the currently held weapon: its own capture if it has one,
+    // else the AR reference DEFAULT, else nothing (caller then uses the live-mesh bootstrap).
     bool have = false;
     if (auto* wpn = fp_weapon_actor()) {
         auto it = g_bore_cache.find(class_name_of(wpn));
         if (it != g_bore_cache.end()) {
             g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z);
+            have = true;
+        } else if (g_def_valid.load()) {
+            g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load());
             have = true;
         }
     }
@@ -989,11 +1001,19 @@ static bool capture_bore_local(API::UObject* wpn) {
                              class_name_of(wpn).c_str(), dyaw, dpit);
         return false;
     }
-    g_bore_cache[class_name_of(wpn)] = bore_local;
+    const std::wstring cn = class_name_of(wpn);
+    g_bore_cache[cn] = bore_local;
     API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: captured '%ls' bore_local=(%.3f,%.3f,%.3f); "
                          "reproduces bore yaw=%.1f pit=%.1f (err yaw=%.2f pit=%.2f) -- frozen aim armed",
-                         class_name_of(wpn).c_str(), bore_local.x, bore_local.y, bore_local.z,
+                         cn.c_str(), bore_local.x, bore_local.y, bore_local.z,
                          bore_yaw, bore_pit, dyaw, dpit);
+    // The AR is the reference weapon: its capture also becomes the DEFAULT for uncaptured weapons.
+    if (cn.find(L"AssaultRifle") != std::wstring::npos) {
+        g_def_x.store(bore_local.x); g_def_y.store(bore_local.y); g_def_z.store(bore_local.z);
+        g_def_valid.store(true);
+        API::get()->log_info("[Halo-CampE-UEVR] SHOTFIX: AR captured -> it is now the DEFAULT for "
+                             "uncaptured weapons");
+    }
     return true;
 }
 
