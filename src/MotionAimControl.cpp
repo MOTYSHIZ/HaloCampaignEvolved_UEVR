@@ -425,17 +425,21 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     //   * It ALREADY reflects any snap-turn (the rendered world is turned), so it takes NO turn
     //     offset -- the controller path adds one because it is in tracking space. Measured: mesh
     //     world yaw == the final aim setpoint yaw with a turn already active.
-    // Consequences, both intended for this opt-in source: it skips the sightline reprojection (the
-    // bore already IS the aim ray) and the two-hand blend (the rendered pose already carries the
-    // hold). WEAPON-ONLY + CASCADE: if the published direction is unavailable (no weapon, no marker,
-    // not yet sampled), fall through to the controller path below -- which is also the unarmed path.
+    // It skips the sightline reprojection (the bore already IS the aim ray) but STILL applies the
+    // two-hand swing below -- the frozen bore does NOT carry the hold (the mesh gets it on a
+    // separate path), so the aim must swing by the same rotation or the barrel you SEE and where you
+    // aim diverge under a two-handed hold. WEAPON-ONLY + CASCADE: if the published direction is
+    // unavailable (no weapon, no marker, not yet sampled), fall through to the controller path below.
     if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
         Vec3 bl{};
         if (shotpoint_bore_local(&bl)) {
-            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose and
-            // re-add the snap turn. Roll-invariant (a constant in the controller frame) and
-            // animation-immune (reads no mesh). cq is the RAW pose the constant was captured against.
-            const Vec3 bvr = quat_rotate(cq, bl);
+            // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose.
+            // Roll-invariant + animation-immune. cq is the RAW pose the constant was captured against.
+            Vec3 bvr = quat_rotate(cq, bl);
+            // TWO-HAND: swing the bore by the same rotation the hold applies to the mesh, so the
+            // gun and the aim stay together. Self-gates on twohandaim / an active swing; suppressed
+            // during calibration capture via allow_two_hand, exactly like the controller path below.
+            if (allow_two_hand) two_hand_bend_forward(&bvr);
             *out_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
             *out_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
             return true;

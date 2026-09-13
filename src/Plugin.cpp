@@ -7595,7 +7595,10 @@ void update() {
             // FROZEN per-weapon bore: rotate the controller-local constant by the LIVE aim pose,
             // re-add the snap turn. Animation-immune + roll-invariant. cq is the raw captured pose.
             // Feeds ctrl_yaw/pitch so the calibration reference and stick path see the same frame.
-            const Vec3 bvr = quat_rotate(cq, bl);
+            Vec3 bvr = quat_rotate(cq, bl);
+            // TWO-HAND: apply the same swing the mesh gets, gated exactly like the normal path
+            // above (not while capturing the reference), so gun and aim stay together.
+            if (!capturing_reference) halo::two_hand_bend_forward(&bvr);
             ctrl_yaw   = wrap180(std::atan2(bvr.x, -bvr.z) * RAD2DEG + g_cfg.aim_turn * g_turn_offset.load());
             ctrl_pitch = std::asin(clampf(bvr.y, -1.0f, 1.0f)) * RAD2DEG;
         } else {
