@@ -26,7 +26,12 @@ namespace {
 // ADDR-HYGIENE: resolved -- find_getter_by_signature() locates this function by SHAPE at startup and
 // refuses an ambiguous match; this constant is only the fallback when the scan finds nothing, and
 // the watchdog below catches the case where the fallback is also wrong (installed but never called).
-constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AD0;
+// 2026-08-17 game update: .text shifted by +0x10, so the getter moved 0x5A6AD0 -> 0x5A6AE0.
+// Verified statically against the shipped DLL: GETTER_SIG matches exactly once, at 0x5A6AE0 (a
+// .pdata function start, end 0x5A6B67, whose mov r9d resolves to _tls_index at 0xD72730). The old
+// address holds the previous function's epilogue (5F 5E 5D 5B C3). The scan finds the new address
+// either way; this keeps the fallback and the self-test's AGREE line honest.
+constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AE0;
 
 // Where _tls_index sat on the build these offsets were derived from. NO LONGER USED TO READ IT --
 // the PE TLS directory is the canonical source and is exact on any build (see
@@ -103,7 +108,7 @@ constexpr uint32_t TEB_SCAN_RETRY_TICKS = 2;
 //
 // MEASURED on the 2026-07-29 build before shipping this: the bare `gs:[58]` TLS idiom occurs
 // 6,888 times in .text, so anything shorter than this is useless as an anchor. This 28-byte
-// pattern matches EXACTLY ONCE, at 0x5A6AD0 -- the getter itself.
+// pattern matches EXACTLY ONCE, at 0x5A6AD0 -- the getter itself (0x5A6AE0 since the 2026-08-17 update).
 //
 // Uniqueness is therefore a REQUIREMENT, not a nicety: two matches means we cannot tell which is
 // the getter, and a confidently-wrong hook is worse than none. Multiple matches fall back to the

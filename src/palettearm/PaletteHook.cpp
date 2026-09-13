@@ -34,7 +34,12 @@ static_assert(sizeof(kBuildMask) - 1 == sizeof(kBuildSig), "signature and mask m
 // ADDR-HYGIENE: resolved -- fallback only. palettehook_install() scans kBuildSig first and requires
 // a UNIQUE match; this RVA is used only if the scan finds nothing, and even then only after the
 // signature bytes are confirmed present AT this address. If both fail the hook stays off.
-constexpr uintptr_t FP_WEAPON_BUILD_RVA = 0x46EC10;
+// 2026-08-17 game update: .text shifted by +0x10 (.data did not move), so the builder moved
+// 0x46EC10 -> 0x46EC20. Verified statically against the shipped DLL: 0x46EC20 is a .pdata function
+// start (end 0x46FCB2), kBuildSig matches there and nowhere else, and it references
+// SHARED_CAPTURE_PTR_RVA at 0x46FA07 and 0x46FBC2. The old address holds the previous function's
+// tail (44 89 42 38 C3). The scan above already finds the new address; this keeps the fallback honest.
+constexpr uintptr_t FP_WEAPON_BUILD_RVA = 0x46EC20;
 
 // ADDR-HYGIENE: resolved -- fallback only. addrcascade::tls_index() reads the PE TLS directory,
 // which is structural and survives patches; this recorded slot is compared against it and used
@@ -364,7 +369,7 @@ HookInstall palettehook_install(PaletteDriveFn drive) {
                       (unsigned long long)(target - reinterpret_cast<uintptr_t>(sim)));
     } else {
         // Rung 2: the recorded RVA -- but only if the prologue really is there. Without that check
-        // this is just "hook whatever lives at 0x46EC10", which succeeds on any readable address.
+        // this is just "hook whatever lives at 0x46EC20", which succeeds on any readable address.
         const uintptr_t candidate = reinterpret_cast<uintptr_t>(sim) + FP_WEAPON_BUILD_RVA;
         const bool bytes_match =
             addrcascade::readable_bytes(reinterpret_cast<const void*>(candidate),
