@@ -873,31 +873,11 @@ static void copy_trim(char* dst, size_t cap, const char* val) {
 // note above. See the matching Config.hpp section for what each one means.
 // EXPERIMENTAL, PORTED FROM THE FORK: the palette weapon stack's tuning keys, auto height and head
 // block, and the manual reload's frame keys. Hoisted like the other families (C1061).
-// heightmode takes a word (absolute, seated, eyes) or its number.
-static int parse_height_mode(const char* val, double v) {
-    while (*val == ' ' || *val == '\t') ++val;
-    if (_strnicmp(val, "absolute", 8) == 0) return 0;
-    if (_strnicmp(val, "seated", 6) == 0)   return 1;
-    if (_strnicmp(val, "eyes", 4) == 0)     return 2;
-    return (int)clampf((float)v, 0.0f, 2.0f);
-}
+#include "features/heightcal/Config_parse_mode.inl"   // fork feature: heightcal (heightmode words)
 
 static bool parse_fork_port_key(const char* key, const char* val, double v) {
     (void)val;
-    if (_stricmp(key, "heightmode")       == 0) { g_cfg.height_mode     = parse_height_mode(val, v); return true; }
-    if (_stricmp(key, "heightscale")      == 0) { g_cfg.height_scale    = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "heighteye")        == 0) { g_cfg.height_eye      = (int)clampf((float)v, 1.0f, 3.0f); return true; }
-    if (_stricmp(key, "heighttracechannel") == 0) { g_cfg.height_trace_channel = (int)clampf((float)v, 0.0f, 32.0f); return true; }
-    if (_stricmp(key, "heighttracemax")   == 0) { g_cfg.height_trace_max = clampf((float)v, 50.0f, 2000.0f); return true; }
-    if (_stricmp(key, "heightholdms")     == 0) { g_cfg.height_hold_ms  = clampf((float)v, 0.0f, 5000.0f); return true; }
-    if (_stricmp(key, "heightestep")      == 0) { g_cfg.height_e_step   = clampf((float)v, 0.1f, 50.0f); return true; }
-    if (_stricmp(key, "heightbipedscale") == 0) { g_cfg.height_biped_scale = clampf((float)v, 1.0f, 1000.0f); return true; }
-    if (_stricmp(key, "heightbipedfeet")  == 0) { g_cfg.height_biped_feet  = clampf((float)v, -500.0f, 500.0f); return true; }
-    if (_stricmp(key, "heightpawnfeet")   == 0) { g_cfg.height_pawn_feet   = clampf((float)v, -500.0f, 500.0f); return true; }
-    if (_stricmp(key, "heightseattarget") == 0) { g_cfg.height_seat_target = clampf((float)v, 0.0f, 400.0f); return true; }
-    if (_stricmp(key, "heightautoseat")   == 0) { g_cfg.height_auto_seat   = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "heightseatbelow")  == 0) { g_cfg.height_seat_below  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
-    if (_stricmp(key, "heightseatdwell")  == 0) { g_cfg.height_seat_dwell  = clampf((float)v, 0.5f, 60.0f); return true; }
+    #include "features/heightcal/Config_parse_a.inl"   // fork feature: heightcal (keys, first run)
     if (_stricmp(key, "scopelens") == 0) { g_cfg.scope_lens = (v != 0.0); return true; }
     if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
@@ -912,20 +892,7 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "fpmeshlog")      == 0) { g_cfg.fpmesh_log = (int)v; return true; }
     if (_stricmp(key, "fppin")          == 0) { g_cfg.fp_pin = (int)v; return true; }
     #include "features/headblock/Config_parse.inl"   // fork feature: headblock (key family)
-    if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
-    if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "heightkey")        == 0) {
-        const int k = (int)strtol(val, nullptr, 0);
-        g_cfg.height_key = (k == 0x2D) ? 0 : k;   // Insert opens UEVR's menu: never a height key
-        return true;
-    }
-    if (_stricmp(key, "heightlog")        == 0) { g_cfg.height_log      = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
-    if (_stricmp(key, "heightmin")        == 0) { g_cfg.height_min_abs  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
-    if (_stricmp(key, "heightsample")     == 0) { g_cfg.height_sample   = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "heightslew")       == 0) { g_cfg.height_slew     = clampf((float)v, 0.0f, 500.0f) * 0.01f; return true; }
-    if (_stricmp(key, "heightsrc")        == 0) { g_cfg.height_src      = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "heighttrim")       == 0) { g_cfg.height_trim     = clampf((float)v, -50.0f, 50.0f) * 0.01f; return true; }
-    if (_stricmp(key, "heightwindow")     == 0) { g_cfg.height_window_s = clampf((float)v, 1.0f, 60.0f); return true; }
+    #include "features/heightcal/Config_parse_b.inl"   // fork feature: heightcal (keys, second run)
     if (_stricmp(key, "liftyaw") == 0) {
         int m = (int)v; if (m < 0) m = 0; if (m > 2) m = 2;
         g_cfg.lift_yaw = m; return true;
