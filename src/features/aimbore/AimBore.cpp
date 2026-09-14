@@ -1,6 +1,12 @@
 #include "features/aimbore/AimBore.hpp"
 
 #include "Config.hpp"
+#include "Math.hpp"   // clampf
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include "Math.hpp"
 #include "core/PalettePose.hpp"
 #include "core/Services.hpp"
@@ -10,6 +16,13 @@
 namespace halo {
 
 namespace {
+bool aim_bore_parse_key(const char* key, const char* val, double v) {
+    (void)val; (void)v;
+    if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
+    if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
+    return false;
+}
+
 bool aim_bore_enabled() { return g_cfg.aim_bore != 0; }
 
 // The aim derivation's palette branch (features_aim_forward), before the palette's two-handed blend: true =
@@ -76,6 +89,7 @@ bool aim_bore_forward(const Quat& q_src, Vec3* fwd_out) {
 
 constinit const FeatureHooks kAimBoreHooks{
     .key      = "aimbore",
+    .parse_key = &aim_bore_parse_key,
     .aim_bore_forward = &aim_bore_forward,
     .enabled  = &aim_bore_enabled,
     .services = 0,

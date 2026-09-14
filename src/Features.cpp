@@ -2,6 +2,7 @@
 
 #include "Config.hpp"
 #include "features/FeatureList.hpp"
+#include "features/hooks/ConfigHooks.hpp"   // features_menu_status_line
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -146,7 +147,7 @@ const FeatureRow kFeatures[] = {
       "Keeps your head out of walls when you lean into them.",
       "headblockradius", "", FEATURE_INT(head_block) },
     { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
-      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, holster marker tint and minimum throw speed.",
+      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate, holster marker tint and minimum throw speed.",
       "turnlog,widgetlog,markertint,holstermarkercolor,grenminthrow", "", FEATURE_BOOL(stability_fixes) },
 };
 
@@ -277,7 +278,106 @@ void features_apply() {
     if (s_pose_latch_layer < 0)   g_cfg.pose_latch   = g_cfg.palette_weapon ? 2 : 0;
 }
 
+// ---- WHAT IS ACTUALLY RUNNING (data\halo_vr_effective.txt). The catalog carries each switch's
+// DEFAULT, but halo_vr.cfg, the dev file and the dependency rules can all change the value the plugin
+// runs with, so a menu that shows the default can show a checkbox that disagrees with the game. This
+// mirror is the running value of every feature switch, rewritten after every real reload and
+// re-created if deleted. Same key=value shape as the cfg files.
+struct EffectiveKey { const char* key; double (*get)(); };
+static const EffectiveKey kEffectiveKeys[] = {
+    { "enabled",          [] { return (double)g_cfg.enabled; } },
+    { "armdriver",        [] { return (double)g_cfg.arm_driver; } },
+    { "aimdirect",        [] { return (double)g_cfg.aim_direct; } },
+    { "blamangles",       [] { return (double)g_cfg.blam_angles; } },
+    { "stickmode",        [] { return (double)g_cfg.stick_mode; } },
+    { "aimbore",          [] { return (double)g_cfg.aim_bore; } },
+    { "aimreticule",      [] { return (double)g_cfg.aim_reticule; } },
+    { "aimreticulestamp", [] { return (double)g_cfg.aim_reticule_stamp; } },
+    { "xrlayer",          [] { return (double)g_cfg.xr_layer; } },
+    { "cutscenemono",     [] { return (double)g_cfg.cutscene_mono; } },
+    { "cullfix",          [] { return (double)g_cfg.cull_fix; } },
+    { "roomscale",        [] { return (double)g_cfg.roomscale; } },
+    { "heightcal",        [] { return (double)g_cfg.height_cal; } },
+    { "headblock",        [] { return (double)g_cfg.head_block; } },
+    { "palettehook",      [] { return (double)g_cfg.palette_hook; } },
+    { "palettewpn",       [] { return (double)g_cfg.palette_weapon; } },
+    { "twohand",          [] { return (double)g_cfg.two_hand; } },
+    { "armhide",          [] { return (double)g_cfg.arm_hide; } },
+    { "reloadvr",         [] { return (double)g_cfg.reload_vr; } },
+    { "slidevr",          [] { return (double)g_cfg.slide_vr; } },
+    { "coophide",         [] { return (double)g_cfg.coop_hide; } },
+    { "hidesolo",         [] { return (double)g_cfg.hide_solo; } },
+    { "meleeswing",       [] { return (double)g_cfg.melee_swing; } },
+    { "meleeleft",        [] { return (double)g_cfg.melee_left; } },
+    { "grenadeswallow",   [] { return (double)g_cfg.grenade_swallow; } },
+    { "holster",          [] { return (double)g_cfg.holster_enabled; } },
+    { "holsterpollthrow", [] { return (double)g_cfg.holster_poll_throw; } },
+    { "scope",            [] { return (double)g_cfg.scope_enabled; } },
+    { "scopelens",        [] { return (double)g_cfg.scope_lens; } },
+    { "wristhud",         [] { return (double)g_cfg.wrist_hud; } },
+    { "forcetube",        [] { return (double)g_cfg.force_tube; } },
+    { "vehcam",           [] { return (double)g_cfg.veh_cam; } },
+    { "vehview",          [] { return (double)g_cfg.veh_view; } },
+    { "vehiclewheel",     [] { return (double)g_cfg.vehicle_wheel; } },
+    { "vehhidebody",      [] { return (double)g_cfg.veh_hide_body; } },
+    { "stabilityfixes",   [] { return (double)g_cfg.stability_fixes; } },
+};
+
+static void effective_mirror_path(char* out, size_t cap) {
+    sprintf_s(out, cap, "%s\\halo_vr_effective.txt", g_data_dir);
+}
+
+static void publish_effective_values() {
+    if (g_data_dir[0] == 0) return;
+    std::string text = "# Running value of every feature switch (all cfg layers + dependency rules). Written by\r\n"
+                       "# halo_vr.dll for the settings menu; editing it changes nothing.\r\n";
+    char line[96];
+    for (const auto& e : kEffectiveKeys) {
+        sprintf_s(line, sizeof(line), "%s=%g\r\n", e.key, e.get());
+        text += line;
+    }
+    char path[MAX_PATH] = {0};
+    effective_mirror_path(path, sizeof(path));
+    write_text(path, text);
+}
+
+namespace {
+int s_last_ref = -1, s_last_dev = -1;   // the menu status extras as last written
+std::string s_last_height;
+void publish_feature_list(const char* data_dir);
+} // namespace
+
+// Whether the two shipped catalogs exist: a missing catalog mirrors as EMPTY, which on its own
+// looks exactly like "plugin not loaded"; the flags let the menu name the missing file instead.
+// Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
+// heightcal is off.
+bool features_menu_status_changed() {
+    const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+    const int dev_missing = (GetFileAttributesA(g_dev_cfg_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+    return features_menu_status_line() != s_last_height || ref_missing != s_last_ref || dev_missing != s_last_dev;
+}
+std::string features_menu_status_text(const char* status) {
+    const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+    const int dev_missing = (GetFileAttributesA(g_dev_cfg_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+    const std::string height_line = features_menu_status_line();
+    char extra[64];
+    sprintf_s(extra, sizeof(extra), "refmissing=%d\r\ndevmissing=%d\r\n", ref_missing, dev_missing);
+    s_last_ref = ref_missing;
+    s_last_dev = dev_missing;
+    s_last_height = height_line;
+    std::string status_text = status;
+    status_text += extra;
+    if (!height_line.empty()) status_text += height_line + "\r\n";
+    return status_text;
+}
+
 void features_publish(const char* data_dir) {
+    publish_effective_values();
+    publish_feature_list(data_dir);
+}
+
+namespace {
+void publish_feature_list(const char* data_dir) {
     if (data_dir == nullptr || data_dir[0] == 0) return;
     std::string text = "# Feature list for the settings menu, generated by halo_vr.dll from its feature registry.\r\n"
                        "# Editing it changes nothing.\r\n";
@@ -305,12 +405,19 @@ void features_publish(const char* data_dir) {
     features_path(data_dir, path, sizeof(path));
     write_text(path, text);
 }
-
+} // namespace
 void features_publish_if_missing(const char* data_dir) {
+    // The running-values mirror is written by load_config on every real reload; this only covers
+    // someone deleting data\ mid-session, which must not blank the menu until the next cfg edit.
+    {
+        char eff[MAX_PATH] = {0};
+        effective_mirror_path(eff, sizeof(eff));
+        if (GetFileAttributesA(eff) == INVALID_FILE_ATTRIBUTES) publish_effective_values();
+    }
     if (data_dir == nullptr || data_dir[0] == 0) return;
     char path[MAX_PATH] = {0};
     features_path(data_dir, path, sizeof(path));
-    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) features_publish(data_dir);
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) publish_feature_list(data_dir);
 }
 
 void features_append_dev_reference(std::string& text) {

@@ -476,77 +476,12 @@ static void strip_calib_keys(const char* const* keys, size_t count) {
 // share one definition of "changed".
 uint64_t cfg_file_stamp(const char* path);
 
-// ---- WHAT IS ACTUALLY RUNNING (data\halo_vr_effective.txt). The catalog carries each switch's
-// DEFAULT, but halo_vr.cfg, the dev file and the dependency rules can all change the value the plugin
-// runs with, so a menu that shows the default can show a checkbox that disagrees with the game. This
-// mirror is the running value of every feature switch, rewritten after every real reload and
-// re-created if deleted. Same key=value shape as the cfg files.
-struct EffectiveKey { const char* key; double (*get)(); };
-static const EffectiveKey kEffectiveKeys[] = {
-    { "enabled",          [] { return (double)g_cfg.enabled; } },
-    { "armdriver",        [] { return (double)g_cfg.arm_driver; } },
-    { "aimdirect",        [] { return (double)g_cfg.aim_direct; } },
-    { "blamangles",       [] { return (double)g_cfg.blam_angles; } },
-    { "stickmode",        [] { return (double)g_cfg.stick_mode; } },
-    { "aimbore",          [] { return (double)g_cfg.aim_bore; } },
-    { "aimreticule",      [] { return (double)g_cfg.aim_reticule; } },
-    { "aimreticulestamp", [] { return (double)g_cfg.aim_reticule_stamp; } },
-    { "xrlayer",          [] { return (double)g_cfg.xr_layer; } },
-    { "cutscenemono",     [] { return (double)g_cfg.cutscene_mono; } },
-    { "cullfix",          [] { return (double)g_cfg.cull_fix; } },
-    { "roomscale",        [] { return (double)g_cfg.roomscale; } },
-    { "heightcal",        [] { return (double)g_cfg.height_cal; } },
-    { "headblock",        [] { return (double)g_cfg.head_block; } },
-    { "palettehook",      [] { return (double)g_cfg.palette_hook; } },
-    { "palettewpn",       [] { return (double)g_cfg.palette_weapon; } },
-    { "twohand",          [] { return (double)g_cfg.two_hand; } },
-    { "armhide",          [] { return (double)g_cfg.arm_hide; } },
-    { "reloadvr",         [] { return (double)g_cfg.reload_vr; } },
-    { "slidevr",          [] { return (double)g_cfg.slide_vr; } },
-    { "coophide",         [] { return (double)g_cfg.coop_hide; } },
-    { "hidesolo",         [] { return (double)g_cfg.hide_solo; } },
-    { "meleeswing",       [] { return (double)g_cfg.melee_swing; } },
-    { "meleeleft",        [] { return (double)g_cfg.melee_left; } },
-    { "grenadeswallow",   [] { return (double)g_cfg.grenade_swallow; } },
-    { "holster",          [] { return (double)g_cfg.holster_enabled; } },
-    { "holsterpollthrow", [] { return (double)g_cfg.holster_poll_throw; } },
-    { "scope",            [] { return (double)g_cfg.scope_enabled; } },
-    { "scopelens",        [] { return (double)g_cfg.scope_lens; } },
-    { "wristhud",         [] { return (double)g_cfg.wrist_hud; } },
-    { "forcetube",        [] { return (double)g_cfg.force_tube; } },
-    { "vehcam",           [] { return (double)g_cfg.veh_cam; } },
-    { "vehview",          [] { return (double)g_cfg.veh_view; } },
-    { "vehiclewheel",     [] { return (double)g_cfg.vehicle_wheel; } },
-    { "vehhidebody",      [] { return (double)g_cfg.veh_hide_body; } },
-    { "stabilityfixes",   [] { return (double)g_cfg.stability_fixes; } },
-};
-
-static void effective_mirror_path(char* out, size_t cap) {
-    sprintf_s(out, cap, "%s\\halo_vr_effective.txt", g_data_dir);
-}
-
-static void publish_effective_values() {
-    if (g_data_dir[0] == 0) return;
-    std::string text = "# Running value of every feature switch (all cfg layers + dependency rules). Written by\r\n"
-                       "# halo_vr.dll for the settings menu; editing it changes nothing.\r\n";
-    char line[96];
-    for (const auto& e : kEffectiveKeys) {
-        sprintf_s(line, sizeof(line), "%s=%g\r\n", e.key, e.get());
-        text += line;
-    }
-    char path[MAX_PATH] = {0};
-    effective_mirror_path(path, sizeof(path));
-    write_text_file(path, text);
-}
-
 int menu_bridge_tick() {
     if (g_data_dir[0] == 0) return 0;
 
     int applied = 0;
     std::string cmd;
-    // An attributes query first: the command file is almost never there, and a failed open every
-    // poll was the last un-gated file operation on the tick path (perf audit, 2026-09-06).
-    if (GetFileAttributesA(g_menu_cmd_path) != INVALID_FILE_ATTRIBUTES && read_text_file(g_menu_cmd_path, cmd)) {
+    if (!features_menu_command_file_absent(g_menu_cmd_path) && read_text_file(g_menu_cmd_path, cmd)) {
         std::string user, dev;
         bool user_loaded = false, user_changed = false;
         bool dev_loaded = false,  dev_changed = false;
@@ -754,27 +689,10 @@ int menu_bridge_tick() {
     // Same authority argument as scopearm: the capture CONSUMES the arm, so a menu button that
     // tracked its own click would keep claiming "armed" after the gesture had already spent it.
     const int griparm   = grip_offset_armed()  ? 1 : 0;
-    // The running-values mirror is written by load_config on every real reload; this only covers
-    // someone deleting data\ mid-session, which must not blank the menu until the next cfg edit.
-    {
-        char eff[MAX_PATH] = {0};
-        effective_mirror_path(eff, sizeof(eff));
-        if (GetFileAttributesA(eff) == INVALID_FILE_ATTRIBUTES) publish_effective_values();
-        features_publish_if_missing(g_data_dir);   // FEATURE REGISTRY hook
-    }
-    // Whether the two shipped catalogs exist: a missing catalog mirrors as EMPTY, which on its own
-    // looks exactly like "plugin not loaded"; the flags let the menu name the missing file instead.
-    static int s_last_ref = -1, s_last_dev = -1;
-    const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
-    const int dev_missing = (GetFileAttributesA(g_dev_cfg_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
-    // Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
-    // heightcal is off, so the author's status file is unchanged by default.
-    static std::string s_last_height;
-    const std::string height_line = features_menu_status_line();
+    features_publish_if_missing(g_data_dir);   // FEATURE REGISTRY hook
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
-        griparm != s_last_griparm || height_line != s_last_height ||
-        ref_missing != s_last_ref || dev_missing != s_last_dev ||
+        griparm != s_last_griparm || features_menu_status_changed() ||
         strncmp(s_last_bindkey, g_bind_capture_key, sizeof(s_last_bindkey)) != 0) {
         s_last_status = mode;
         s_last_bind   = barmed;
@@ -786,14 +704,9 @@ int menu_bridge_tick() {
         char status[352];   // widened for scopearm= and griparm=
         sprintf_s(status, sizeof(status),
                   "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n"
-                  "griparm=%d\r\nrefmissing=%d\r\ndevmissing=%d\r\n",
-                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm, ref_missing, dev_missing);
-        s_last_ref = ref_missing;
-        s_last_dev = dev_missing;
-        s_last_height = height_line;
-        std::string status_text = status;
-        if (!height_line.empty()) status_text += height_line + "\r\n";
-        write_text_file(g_status_path, status_text.c_str());
+                  "griparm=%d\r\n",
+                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm);
+        write_text_file(g_status_path, features_menu_status_text(status));
     }
     return applied;
 }
@@ -862,30 +775,6 @@ static void copy_trim(char* dst, size_t cap, const char* val) {
 
 // VIEW-CONSUMER FIX keys (audio listener / navpoints / dev exec), early-return per the C1061
 // note above. See the matching Config.hpp section for what each one means.
-// EXPERIMENTAL, PORTED FROM THE FORK: the palette weapon stack's tuning keys, auto height and head
-// block, and the manual reload's frame keys. Hoisted like the other families (C1061).
-static bool parse_fork_port_key(const char* key, const char* val, double v) {
-    (void)val;
-    if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
-    if (_stricmp(key, "aimreticulefresh") == 0) { g_cfg.aim_reticule_fresh = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "aimreticulestamp") == 0) { g_cfg.aim_reticule_stamp = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    #include "features/palettewpn/Config_parse_a.inl"   // fork feature: palettewpn (keys, first run)
-    if (_stricmp(key, "liftyaw") == 0) {
-        int m = (int)v; if (m < 0) m = 0; if (m > 2) m = 2;
-        g_cfg.lift_yaw = m; return true;
-    }
-    if (_stricmp(key, "magrender")      == 0) { g_cfg.mag_render = (int)v; return true; }
-    #include "features/palettewpn/Config_parse_b.inl"   // fork feature: palettewpn (keys, second run)
-    if (_stricmp(key, "reloadframe")    == 0) { g_cfg.reload_frame = (int)v; return true; }
-    if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "stomplog")       == 0) { g_cfg.stomp_log = (int)v; return true; }
-    if (_stricmp(key, "termlog")        == 0) { g_cfg.term_log = (int)v; return true; }
-    if (_stricmp(key, "wpnerrlog")      == 0) { g_cfg.wpn_err_log = (int)v; return true; }
-    if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
-    return false;
-}
-
 static bool parse_viewfix_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "audiofix")   == 0) { g_cfg.audio_fix   = (v != 0.0); return true; }
     if (_stricmp(key, "audiocomp")  == 0) { g_cfg.audio_comp  = (v != 0.0); return true; }
@@ -1371,6 +1260,8 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "holstermarkers") == 0) { g_cfg.holster_markers = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "holstermarkerscale") == 0) { g_cfg.holster_marker_scale = clampf((float)v, 0.02f, 0.5f); return true; }
     if (_stricmp(key, "holsteraimhold") == 0) { g_cfg.holster_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }
     if (_stricmp(key, "holsteryawdead") == 0) { g_cfg.holster_yaw_dead = clampf((float)v, 0.0f, 180.0f); return true; }
     if (_stricmp(key, "holsteryawrate") == 0) { g_cfg.holster_yaw_rate = clampf((float)v, 0.0f, 360.0f); return true; }
     if (_stricmp(key, "holsterneckdown") == 0) { g_cfg.holster_neck_down = clampf((float)v, 0.0f, 0.5f); return true; }
@@ -1390,10 +1281,6 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadmagoff")   == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_off[0], &g_cfg.reload_mag_off[1], &g_cfg.reload_mag_off[2]); return true; }
     if (_stricmp(key, "reloadmagrad")   == 0) { g_cfg.reload_mag_radius = clampf((float)v, 0.05f, 0.5f); return true; }
     if (_stricmp(key, "reloadmagscale") == 0) { g_cfg.reload_mag_scale = clampf((float)v, 0.05f, 20.0f); return true; }
-    // The minimum throw speed.
-    if (_stricmp(key, "grenminthrow")   == 0) { g_cfg.gren_min_throw = clampf((float)v, 0.0f, 6.0f); return true; }
-        if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
-    if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }
     return false;
 }
 
@@ -1557,297 +1444,16 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "magmesh")        == 0) {
         strncpy_s(g_cfg.mag_mesh_path, sizeof(g_cfg.mag_mesh_path), val, _TRUNCATE); return true;
     }
-    // ---- GESTURE RELOAD tuning, the Wwise reload-sound adoption (ak*) and the animation probes.
-    // Flat links in this family for the reason the note above gives.
-    if (_stricmp(key, "turnlog")        == 0) { g_cfg.turn_log       = (v != 0.0); return true; }
-    if (_stricmp(key, "widgetlog")      == 0) { g_cfg.widget_log     = (v != 0.0); return true; }
-    if (_stricmp(key, "moveprobe")      == 0) { g_cfg.move_probe     = (v != 0.0); return true; }
-    if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }
-    if (_stricmp(key, "maghidename") == 0) { strncpy_s(g_cfg.mag_hide_name, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "animvarset")  == 0) { strncpy_s(g_cfg.anim_var_set, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "animseqset")  == 0) { strncpy_s(g_cfg.anim_seq_set, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "magdump")     == 0) { g_cfg.mag_dump = (int)v; return true; }
-    if (_stricmp(key, "animdump")    == 0) { g_cfg.anim_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "animvars")    == 0) { g_cfg.anim_vars = (v != 0.0); return true; }
-    if (_stricmp(key, "animobjs")    == 0) { g_cfg.anim_objs = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadaudiodump") == 0) { g_cfg.reload_audio_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadwwisedump") == 0) { g_cfg.reload_wwise_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadakmute")    == 0) { g_cfg.reload_ak_mute = (int)clampf((float)v, 0.0f, 4.0f); return true; }
-    if (_stricmp(key, "reloadstepsound") == 0) {
-        std::string cur = g_cfg.reload_step_override;
-        if (!cur.empty() && cur.back() != ';') cur += ';';
-        cur += val;
-        strncpy_s(g_cfg.reload_step_override, cur.c_str(), _TRUNCATE);
-        return true;
-    }
-    if (_stricmp(key, "reloadpressat")   == 0) { g_cfg.reload_press_at = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "akpostrva")      == 0) { g_cfg.ak_post_rva = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akmutenames")    == 0) { strncpy_s(g_cfg.ak_mute_names, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "akrtpc")         == 0) { strncpy_s(g_cfg.ak_rtpc, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "akrtpcvalue")    == 0) { g_cfg.ak_rtpc_value = (float)v; return true; }
-    if (_stricmp(key, "akrtpcglobal")   == 0) { g_cfg.ak_rtpc_global = (v != 0.0); return true; }
-    if (_stricmp(key, "akrtpcrestore")  == 0) { g_cfg.ak_rtpc_restore = (float)v; return true; }
-    if (_stricmp(key, "akmimic")        == 0) { g_cfg.ak_mimic = (int)clampf((float)v, 0.0f, 7.0f); return true; }
-    if (_stricmp(key, "akmimic4event")  == 0) { strncpy_s(g_cfg.ak_mimic4_event, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "akfnsetlisteners") == 0) { g_cfg.ak_fn_setlisteners = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akfnsetswitch")  == 0) { g_cfg.ak_fn_setswitch = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akfnsetrtpc")    == 0) { g_cfg.ak_fn_setrtpc = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akfnsetposition") == 0) { g_cfg.ak_fn_setposition = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akfnregister")   == 0) { g_cfg.ak_fn_register = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akfnunregister") == 0) { g_cfg.ak_fn_unregister = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akstack")        == 0) { g_cfg.ak_stack = (v != 0.0); return true; }
-    if (_stricmp(key, "aklog")          == 0) { g_cfg.ak_log = (v != 0.0); return true; }
-    if (_stricmp(key, "akvtdump")       == 0) { g_cfg.ak_vt_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "akvtglobal")     == 0) { g_cfg.ak_vt_global = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "akvtcount")      == 0) { g_cfg.ak_vt_count = (int)clampf((float)v, 1.0f, 400.0f); return true; }
-    if (_stricmp(key, "reloadmutevariant") == 0) { g_cfg.reload_mute_variant = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "reloadmutems")    == 0) { g_cfg.reload_mute_ms = (int)clampf((float)v, 0.0f, 10000.0f); return true; }
-    if (_stricmp(key, "reloadstepvia")   == 0) { g_cfg.reload_step_via = (int)clampf((float)v, 0.0f, 5.0f); return true; }
-    if (_stricmp(key, "reloadstepvariant") == 0) { g_cfg.reload_step_variant = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "reloadlift")     == 0) { g_cfg.reload_lift = clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "reloadwellfwd")  == 0) { g_cfg.reload_well_fwd = clampf((float)v, 0.0f, 0.6f); return true; }
-    if (_stricmp(key, "reloadwellmarker") == 0) { g_cfg.reload_well_marker = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadslidems")  == 0) { g_cfg.reload_slide_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
-    if (_stricmp(key, "reloadmaskms")   == 0) { g_cfg.reload_mask_ms  = (int)clampf((float)v, 0.0f, 6000.0f); return true; }
-    if (_stricmp(key, "reloadanimrate") == 0) { g_cfg.reload_anim_rate = clampf((float)v, 0.0f, 200.0f); return true; }
-    if (_stricmp(key, "reloadanimms")   == 0) { g_cfg.reload_anim_ms   = (int)clampf((float)v, 0.0f, 6000.0f); return true; }
-    if (_stricmp(key, "reloadholdstate") == 0) { g_cfg.reload_hold_state = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadpauseanim") == 0) { g_cfg.reload_pause_anim = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadwellmarkerscale") == 0) { g_cfg.reload_well_marker_scale = clampf((float)v, 0.01f, 0.5f); return true; }
-    if (_stricmp(key, "reloadinsertmode") == 0) { g_cfg.reload_insert_mode = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "reloadinsert")   == 0) { g_cfg.reload_insert = clampf((float)v, 0.01f, 0.5f); return true; }
-    if (_stricmp(key, "reloadinsertdone") == 0) { g_cfg.reload_insert_done = clampf((float)v, 0.0f, 0.1f); return true; }
-    if (_stricmp(key, "reloadinsertsign") == 0) { g_cfg.reload_insert_sign = (v < 0.0) ? -1.0f : 1.0f; return true; }
-    if (_stricmp(key, "roomanchor")     == 0) { g_cfg.room_anchor = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "reloadhandoff")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_hand_off[0], &g_cfg.reload_hand_off[1], &g_cfg.reload_hand_off[2]); return true; }
-    if (_stricmp(key, "reloadhandrot")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_hand_rot[0], &g_cfg.reload_hand_rot[1], &g_cfg.reload_hand_rot[2]); return true; }
     return false;
 }
-
-// ---- GESTURE RELOAD / RACK-SLIDE / PALETTE WEAPON / COOP keys. Hoisted, early-return, same
-// C1061 reasoning. The wpn*/arm*/twohand/reloadgrip/calibroll/rollstatic keys that used to open
-// this family are parsed by parse_melee_key and parse_config_file, which own those names.
-static bool parse_weaponvr_key(const char* key, const char* val, double v) {
-    if (_stricmp(key, "twohandmin")     == 0) { g_cfg.two_hand_min_m     = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "twohandmax")     == 0) { g_cfg.two_hand_max_m     = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "twohandmarker")  == 0) { g_cfg.two_hand_marker    = (v != 0.0); return true; }
-    if (_stricmp(key, "twohandmarkerscale") == 0) { g_cfg.two_hand_marker_scale = clampf((float)v, 0.01f, 0.5f); return true; }
-    if (_stricmp(key, "twohandrad")     == 0) { g_cfg.two_hand_radius_m  = clampf((float)v, 0.01f, 1.0f); return true; }
-    if (_stricmp(key, "twohandagreemin")== 0) { g_cfg.two_hand_agree_min = clampf((float)v, -1.0f, 1.0f); return true; }
-    if (_stricmp(key, "twohandagreefull")==0) { g_cfg.two_hand_agree_full= clampf((float)v, -1.0f, 1.0f); return true; }
-    if (_stricmp(key, "twohandblendms") == 0) { g_cfg.two_hand_blend_ms  = clampf((float)v, 1.0f, 2000.0f); return true; }
-    if (_stricmp(key, "twohandhaptic")  == 0) { g_cfg.two_hand_haptic    = (v != 0.0); return true; }
-    if (_stricmp(key, "palettescan")    == 0) { g_cfg.palette_scan       = (int)v; return true; }
-    if (_stricmp(key, "palettepoke")    == 0) { g_cfg.palette_poke       = (int)v; return true; }
-    if (_stricmp(key, "palettepokenode")==0) { g_cfg.palette_poke_node   = (int)v; return true; }
-    if (_stricmp(key, "palettepokecount")==0){ g_cfg.palette_poke_count  = (int)clampf((float)v, 1.0f, 76.0f); return true; }
-    if (_stricmp(key, "wpnnodedump")    == 0) { g_cfg.wpn_node_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "wpnnodecopyscan") == 0) { g_cfg.wpn_node_copy_scan = (v != 0.0); return true; }
-    if (_stricmp(key, "wpnnodepoke")    == 0) { g_cfg.wpn_node_poke = (int)clampf((float)v, -1.0f, 63.0f); return true; }
-    if (_stricmp(key, "wpnnodepokeamt") == 0) { g_cfg.wpn_node_poke_amt = clampf((float)v, -2.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidevr")        == 0) { g_cfg.slide_vr = (v != 0.0); return true; }
-    if (_stricmp(key, "slideweapons")   == 0) { strncpy_s(g_cfg.slide_weapons, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidechamberweapons") == 0) { strncpy_s(g_cfg.slide_chamber_weapons, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "reloadskipweapons")   == 0) { strncpy_s(g_cfg.reload_skip_weapons, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidenode")      == 0) { g_cfg.slide_node = (int)clampf((float)v, -1.0f, 63.0f); return true; }
-    if (_stricmp(key, "slidetravel")    == 0) { g_cfg.slide_travel = clampf((float)v, 0.001f, 0.2f); return true; }
-    if (_stricmp(key, "slideradius")    == 0) { g_cfg.slide_radius = clampf((float)v, 0.02f, 0.5f); return true; }
-    if (_stricmp(key, "slidesign")      == 0) { g_cfg.slide_sign = (v < 0.0) ? -1.0f : 1.0f; return true; }
-    if (_stricmp(key, "slideoff")       == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.slide_off[0], &g_cfg.slide_off[1], &g_cfg.slide_off[2]); return true; }
-    if (_stricmp(key, "slidezone")      == 0) { g_cfg.slide_zone = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "markertint")         == 0) { g_cfg.marker_tint_on = (v != 0.0); return true; }
-    if (_stricmp(key, "slidemarkersize")    == 0) { g_cfg.slide_marker_size = clampf((float)v, 0.01f, 0.5f); return true; }
-    if (_stricmp(key, "slidemarkercolor")   == 0) { strncpy_s(g_cfg.slide_marker_color, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "twohandmarkercolor") == 0) { strncpy_s(g_cfg.two_hand_marker_color, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "wellmarkercolor")    == 0) { strncpy_s(g_cfg.well_marker_color, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "holstermarkercolor") == 0) { strncpy_s(g_cfg.holster_marker_color, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidezonepriority") == 0) { g_cfg.slide_zone_priority = (v != 0.0); return true; }
-    if (_stricmp(key, "slidezoneback")  == 0) { g_cfg.slide_zone_back = clampf((float)v, -0.2f, 0.2f); return true; }
-    if (_stricmp(key, "slidelockreload") == 0) { g_cfg.slide_lock_reload = (v != 0.0); return true; }
-    if (_stricmp(key, "slidechamber")   == 0) { g_cfg.slide_chamber = (v != 0.0); return true; }
-    if (_stricmp(key, "reloadpressms")  == 0) { g_cfg.reload_press_ms = (int)clampf((float)v, 30.0f, 2000.0f); return true; }
-    if (_stricmp(key, "reloadpressmscoop") == 0) { g_cfg.reload_press_ms_coop = (int)clampf((float)v, 30.0f, 2000.0f); return true; }
-    if (_stricmp(key, "coopauto")       == 0) { g_cfg.coop_auto = (v != 0.0); return true; }
-    if (_stricmp(key, "coopstopat")     == 0) { g_cfg.coop_stop_at = (int)clampf((float)v, 0.0f, 10.0f); return true; }
-    if (_stricmp(key, "coophide")       == 0) { g_cfg.coop_hide = (v != 0.0); return true; }
-    if (_stricmp(key, "hidesolo")       == 0) { g_cfg.hide_solo = (v != 0.0); return true; }
-    if (_stricmp(key, "coopmaskms")     == 0) { g_cfg.coop_mask_ms = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
-    if (_stricmp(key, "reloadanimmscoop") == 0) { g_cfg.reload_anim_ms_coop = (int)clampf((float)v, 0.0f, 8000.0f); return true; }
-    if (_stricmp(key, "slidephantom")   == 0) { g_cfg.slide_phantom = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slideundoreload") == 0) { g_cfg.slide_undo_reload = (v != 0.0); return true; }
-    if (_stricmp(key, "reserveoff")     == 0) { g_cfg.reserve_off = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "slidecopy")      == 0) { g_cfg.slide_copy = (v != 0.0); return true; }
-    if (_stricmp(key, "slidecopybone")  == 0) { strncpy_s(g_cfg.slide_copy_bone, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidecopyaxis")  == 0) { g_cfg.slide_copy_axis = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidecopysign")  == 0) { g_cfg.slide_copy_sign = (v < 0.0) ? -1.0f : 1.0f; return true; }
-    if (_stricmp(key, "slidecopytest")  == 0) { g_cfg.slide_copy_test = clampf((float)v, -50.0f, 50.0f); return true; }
-    if (_stricmp(key, "slidecopyhide")  == 0) { g_cfg.slide_copy_hide = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidecopyfp")    == 0) { g_cfg.slide_copy_fp = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidecopyclass") == 0) { g_cfg.slide_copy_class = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidecopynonanite") == 0) { g_cfg.slide_copy_no_nanite = (v != 0.0); return true; }
-    if (_stricmp(key, "slidecopyfollower") == 0) { g_cfg.slide_copy_follower = (v != 0.0); return true; }
-    if (_stricmp(key, "slidecopyleader") == 0) { g_cfg.slide_copy_leader = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidecopymode")  == 0) { g_cfg.slide_copy_mode = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidecopyseq")   == 0) { strncpy_s(g_cfg.slide_copy_seq, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidecopyrel")   == 0) { g_cfg.slide_copy_rel = clampf((float)v, 0.01f, 3.0f); return true; }
-    if (_stricmp(key, "slidecopysweep") == 0) { g_cfg.slide_copy_sweep = (v != 0.0); return true; }
-    if (_stricmp(key, "slidecopyalign") == 0) { g_cfg.slide_copy_align = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepart")      == 0) { g_cfg.slide_part = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartbone")  == 0) { strncpy_s(g_cfg.slide_part_bone, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidepartaxis")  == 0) { g_cfg.slide_part_axis = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidepartsign")  == 0) { g_cfg.slide_part_sign = (v < 0.0) ? -1.0f : 1.0f; return true; }
-    if (_stricmp(key, "slideparttest")  == 0) { g_cfg.slide_part_test = clampf((float)v, -50.0f, 50.0f); return true; }
-    if (_stricmp(key, "slideparthide")  == 0) { g_cfg.slide_part_hide = (int)clampf((float)v, 0.0f, 7.0f); return true; }
-    if (_stricmp(key, "slidefarcm")     == 0) { g_cfg.slide_far_cm = clampf((float)v, -100000.0f, 100000.0f); return true; }
-    if (_stricmp(key, "slidefararray")  == 0) { g_cfg.slide_far_array = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidemorph")     == 0) { strncpy_s(g_cfg.slide_morph, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidehidemat")   == 0) { strncpy_s(g_cfg.slide_hide_mat, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slidehidematslot") == 0) { g_cfg.slide_hide_mat_slot = (int)clampf((float)v, -1.0f, 31.0f); return true; }
-    if (_stricmp(key, "slidehidepbo")   == 0) { g_cfg.slide_hide_pbo = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidepartbind")  == 0) { g_cfg.slide_part_bind = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidepartpivot") == 0) { g_cfg.slide_part_pivot = (int)clampf((float)v, -1.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidepartmat")   == 0) { g_cfg.slide_part_mat = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartorphans") == 0) { g_cfg.slide_part_orphans = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartmaghide") == 0) { g_cfg.slide_part_maghide = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartmagdrop") == 0) { g_cfg.slide_part_magdrop = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartdropmode") == 0) { g_cfg.slide_part_dropmode = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidepartkids")  == 0) { g_cfg.slide_part_kids = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidepartframe") == 0) { g_cfg.slide_part_frame = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidepartui")    == 0) { g_cfg.slide_part_ui = (v != 0.0); return true; }
-    if (_stricmp(key, "slidepartshadow") == 0) { g_cfg.slide_part_shadow = (v != 0.0); return true; }
-    if (_stricmp(key, "slidebones")     == 0) {
-        std::string cur = g_cfg.slide_bones_override;
-        if (!cur.empty() && cur.back() != ',') cur += ',';
-        cur += val;
-        strncpy_s(g_cfg.slide_bones_override, cur.c_str(), _TRUNCATE);
-        return true;
-    }
-    if (_stricmp(key, "slidepartrotaxis") == 0) { g_cfg.slide_part_rot_axis = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidepartrotdeg") == 0) { g_cfg.slide_part_rot_deg = clampf((float)v, -90.0f, 90.0f); return true; }
-    if (_stricmp(key, "slidepartopendeg") == 0) { g_cfg.slide_part_open_deg = clampf((float)v, -180.0f, 180.0f); return true; }
-    if (_stricmp(key, "slidealways")    == 0) { strncpy_s(g_cfg.slide_always_weapons, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "stealextra")     == 0) { g_cfg.steal_extra_mask = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "slidehidesection") == 0) { g_cfg.slide_hide_section = (int)clampf((float)v, -1.0f, 31.0f); return true; }
-    if (_stricmp(key, "slidecopyplay")  == 0) { g_cfg.slide_copy_play = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "slidecopyroot")  == 0) { strncpy_s(g_cfg.slide_copy_root, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "roundsoff")      == 0) { g_cfg.rounds_off = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "slidehook")      == 0) { g_cfg.slide_hook = (v != 0.0); return true; }
-    if (_stricmp(key, "slidemontage")   == 0) { g_cfg.slide_montage = (v != 0.0); return true; }
-    if (_stricmp(key, "slideseq")       == 0) { strncpy_s(g_cfg.slide_seq, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slideslot")      == 0) { strncpy_s(g_cfg.slide_slot, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "slideseqfwd")    == 0) { g_cfg.slide_seq_fwd = clampf((float)v, 0.0f, 30.0f); return true; }
-    if (_stricmp(key, "slideseqback")   == 0) { g_cfg.slide_seq_back = clampf((float)v, 0.0f, 30.0f); return true; }
-    if (_stricmp(key, "slideseqsweep")  == 0) { g_cfg.slide_seq_sweep = clampf((float)v, 0.0f, 60.0f); return true; }
-    if (_stricmp(key, "slidefire")      == 0) { g_cfg.slide_fire = (v != 0.0); return true; }
-    if (_stricmp(key, "slidefirestate") == 0) { g_cfg.slide_fire_state = (int)clampf((float)v, 0.0f, 255.0f); return true; }
-    if (_stricmp(key, "slidefireback")  == 0) { g_cfg.slide_fire_back = clampf((float)v, 0.0f, 5.0f); return true; }
-    if (_stricmp(key, "slidefireentry") == 0) { g_cfg.slide_fire_entry = clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "slidefirefwd")   == 0) { g_cfg.slide_fire_fwd = clampf((float)v, 0.0f, 5.0f); return true; }
-    if (_stricmp(key, "slidemarker")    == 0) { g_cfg.slide_marker = (v != 0.0); return true; }
-    if (_stricmp(key, "wpnammodump")    == 0) { g_cfg.wpn_ammo_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "slidewatch")     == 0) { g_cfg.slide_watch = (v != 0.0); return true; }
-    if (_stricmp(key, "ammoseq")        == 0) { strncpy_s(g_cfg.ammo_seq, val, _TRUNCATE); return true; }
-    if (_stricmp(key, "ammoscrub")      == 0) { g_cfg.ammo_scrub = clampf((float)v, 0.0f, 120.0f); return true; }
-    if (_stricmp(key, "magdrop")        == 0) { g_cfg.mag_drop = (v != 0.0); return true; }
-    if (_stricmp(key, "magdropms")      == 0) { g_cfg.mag_drop_ms = (int)clampf((float)v, 500.0f, 30000.0f); return true; }
-    if (_stricmp(key, "slidelog")       == 0) { g_cfg.slide_log = (v != 0.0); return true; }
-    if (_stricmp(key, "palettepokeamt") == 0) { g_cfg.palette_poke_amt   = clampf((float)v, -10.0f, 10.0f); return true; }
-    if (_stricmp(key, "palettewatch")   == 0) { g_cfg.palette_watch      = (int)v; return true; }
-    if (_stricmp(key, "palettehook")    == 0) { g_cfg.palette_hook       = (int)v; return true; }
-    if (_stricmp(key, "palettehooktest")==0) { g_cfg.palette_hook_test   = (int)v; return true; }
-    if (_stricmp(key, "palettewpn")     == 0) { g_cfg.palette_weapon      = (v != 0.0); return true; }
-    if (_stricmp(key, "palettewpnoffx") == 0) { g_cfg.palette_weapon_off_x = clampf((float)v,-200.0f,200.0f); return true; }
-    if (_stricmp(key, "palettewpnoffy") == 0) { g_cfg.palette_weapon_off_y = clampf((float)v,-200.0f,200.0f); return true; }
-    if (_stricmp(key, "palettewpnoffz") == 0) { g_cfg.palette_weapon_off_z = clampf((float)v,-200.0f,200.0f); return true; }
-    if (_stricmp(key, "palettewpnscale")== 0) { g_cfg.palette_weapon_scale = clampf((float)v, 0.05f, 20.0f); return true; }
-    if (_stricmp(key, "palettecalibkey")== 0) { g_cfg.palette_calib_key = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
-    if (_stricmp(key, "judderlog")      == 0) { g_cfg.judder_log           = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
-    if (_stricmp(key, "palettelerp")    == 0) { g_cfg.palette_lerp         = (v != 0.0); return true; }
-    if (_stricmp(key, "palettebank")    == 0) { g_cfg.palette_bank         = (int)clampf((float)v, -1.0f, 3.0f); return true; }
-    if (_stricmp(key, "palettecam")     == 0) { g_cfg.palette_cam          = (int)clampf((float)v, 0.0f, 15.0f); return true; }
-    if (_stricmp(key, "palettebarrellock") == 0) { g_cfg.palette_barrel_lock = (v != 0.0); return true; }
-    if (_stricmp(key, "tremor") == 0) {
-        int m = (int)v; if (m < 0) m = 0; if (m > 3) m = 3;
-        g_cfg.tremor = m; return true;
-    }
-    if (_stricmp(key, "tremorhz") == 0) { g_cfg.tremor_hz = clampf((float)v, 0.5f, 20.0f); return true; }
-    if (_stricmp(key, "tremorq")  == 0) { g_cfg.tremor_q  = clampf((float)v, 0.2f, 20.0f); return true; }
-    if (_stricmp(key, "revclamp") == 0) {
-        int m = (int)v; if (m < 0) m = 0; if (m > 3) m = 3;
-        g_cfg.rev_clamp = m; return true;
-    }
-    if (_stricmp(key, "revclampdps") == 0) { g_cfg.rev_clamp_dps = clampf((float)v, 0.0f, 20000.0f); return true; }
-    if (_stricmp(key, "meshconst") == 0) {
-        int m = (int)v; if (m < 0) m = 0; if (m > 3) m = 3;
-        g_cfg.mesh_const = m; return true;
-    }
-    if (_stricmp(key, "meshconstgate") == 0) {
-        float g = (float)v; if (g < 0.0f) g = 0.0f; if (g > 45.0f) g = 45.0f;
-        g_cfg.mesh_const_gate = g; return true;
-    }
-    if (_stricmp(key, "paletterolltrim")   == 0) { g_cfg.palette_roll_trim = clampf((float)v, -180.0f, 180.0f); return true; }
-    if (_stricmp(key, "fpscalefix")         == 0) { g_cfg.fp_scale_fix = (v != 0.0); return true; }
-    if (_stricmp(key, "pinuevrframe")       == 0) { g_cfg.pin_uevr_frame = (v != 0.0); return true; }
-    if (_stricmp(key, "palettewpnlockgain")  == 0) return true;
-    if (_stricmp(key, "palettewpnlockpitch") == 0) return true;
-    if (_stricmp(key, "palettewpnlockcorr")  == 0) return true;
-    if (_stricmp(key, "palettewpnsweep")     == 0) return true;
-    if (_stricmp(key, "palettewpnfix")       == 0) return true;
-    if (_stricmp(key, "palettewpnfixframe")  == 0) return true;
-    if (_stricmp(key, "gripfix") == 0) {
-        // 7 comma-separated floats: quaternion x,y,z,w then translation x,y,z in metres,
-        // controller frame. Written by the Page Up gesture; see Config::grip_fix.
-        const char* s = val; int n = 0;
-        while (n < 7 && s != nullptr && *s != 0) {
-            g_cfg.grip_fix[n++] = (float)atof(s);
-            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
-        }
-        g_cfg.grip_fix_valid = (n == 7); return true;
-    }
-    if (_stricmp(key, "aimfix") == 0) {
-        // 4 comma-separated floats: quaternion x,y,z,w in the aim source pose's frame. A
-        // measurement from the calibration file; see Config::aim_fix.
-        const char* s = val; int n = 0;
-        while (n < 4 && s != nullptr && *s != 0) {
-            g_cfg.aim_fix[n++] = (float)atof(s);
-            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
-        }
-        g_cfg.aim_fix_valid = (n == 4); return true;
-    }
-    return false;
-}
-
-// Cutscenes: the flat-view lever and its hint overlay, plus the API-layer picture. Hoisted like
-// the other families so the dispatch chain stays under MSVC's C1061 nesting limit.
-static bool parse_cutscene_key(const char* key, const char* val, double v) {
-    (void)val;
-    if (_stricmp(key, "cutscene2d")   == 0) { g_cfg.cutscene_2d   = (int)v; return true; }
-    if (_stricmp(key, "cuthint")      == 0) { g_cfg.cut_hint      = (v != 0.0); return true; }
-    if (_stricmp(key, "cuthintdist")  == 0) { g_cfg.cut_hint_dist = cm_to_m(v, 50.0f,  50.0f,  500.0f, "cuthintdist"); return true; }
-    if (_stricmp(key, "cuthintdrop")  == 0) { g_cfg.cut_hint_drop = cm_to_m(v,  3.0f, -200.0f, 200.0f, "cuthintdrop"); return true; }
-    if (_stricmp(key, "cuthintw")     == 0) { g_cfg.cut_hint_w    = cm_to_m(v, 30.0f,  30.0f,  300.0f, "cuthintw"); return true; }
-    // The mode clamps to the range the layer knows; LayerMain.cpp clamps the same way, so a value
-    // past 6 reads as 6 on both sides. dist is cm here and metres at the layer (Plugin.cpp
-    // converts); size and dist ranges match api_set_mono_screen's own clamps.
-    if (_stricmp(key, "cutscenemono") == 0) { g_cfg.cutscene_mono = (int)clampf((float)v, 0.0f, 6.0f); return true; }
-    if (_stricmp(key, "cutscenedist") == 0) { g_cfg.cutscene_dist = clampf((float)v, 0.0f, 10000.0f); return true; }
-    if (_stricmp(key, "cutscenesize") == 0) { g_cfg.cutscene_size = clampf((float)v, 0.25f, 1.5f); return true; }
-    if (_stricmp(key, "cutscenedump") == 0) { g_cfg.cutscene_dump = (int)v; return true; }
-    return false;
-}
-
-#include "features/reloadvr/Config_parse_state.inl"   // fork feature: reloadvr (reload state keys)
 
 void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_blam_key(key, val, v)) return;
         if (parse_viewfix_key(key, val, v)) return;
-        if (parse_fork_port_key(key, val, v)) return;
         if (parse_melee_key(key, val, v)) return;
         if (parse_xrlayer_key(key, v)) return;
         if (parse_holster_key(key, val, v)) return;
         if (features_parse_key(key, val, v)) return;
-        if (parse_weaponvr_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);
         else if (_stricmp(key, "huddump")    == 0) g_cfg.hud_dump      = (v != 0.0);
@@ -2027,6 +1633,11 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "brakemode")     == 0) g_cfg.brake_mode      = (int)v;
         else if (_stricmp(key, "brakemask")     == 0) g_cfg.brake_mask      = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "brakekey")      == 0) g_cfg.brake_key       = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "cutscene2d")    == 0) g_cfg.cutscene_2d     = (int)v;
+        else if (_stricmp(key, "cuthint")       == 0) g_cfg.cut_hint        = (v != 0.0);
+        else if (_stricmp(key, "cuthintdist")   == 0) g_cfg.cut_hint_dist   = cm_to_m(v, 50.0f,  50.0f,  500.0f, "cuthintdist");
+        else if (_stricmp(key, "cuthintdrop")   == 0) g_cfg.cut_hint_drop   = cm_to_m(v,  3.0f, -200.0f, 200.0f, "cuthintdrop");
+        else if (_stricmp(key, "cuthintw")      == 0) g_cfg.cut_hint_w      = cm_to_m(v, 30.0f,  30.0f,  300.0f, "cuthintw");
 }
 
 bool parse_config_file(const char* path) {
@@ -2398,7 +2009,6 @@ void load_config() {
 
     // Only here, past every early return: g_cfg now holds the values that are actually on disk.
     ++g_cfg_load_gen;
-    publish_effective_values();
     features_publish(g_data_dir);   // FEATURE REGISTRY hook: the menu's feature list
 }
 
@@ -2509,25 +2119,7 @@ void write_calib_file() {
         w_dox, w_doy, w_doz,
         w_ox, w_oy, w_oz);
 
-    if (g_cfg.grip_fix_valid) {
-        fprintf(f,
-            "# Rigid grip offset for the PALETTE weapon (Page Up freeze-and-align). Quaternion\r\n"
-            "# x,y,z,w then translation x,y,z in METRES, controller frame. Applied upstream to the\r\n"
-            "# controller pose; repeated captures compose. A measurement -- do not hand-edit.\r\n"
-            "gripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
-            g_cfg.grip_fix[0], g_cfg.grip_fix[1], g_cfg.grip_fix[2], g_cfg.grip_fix[3],
-            g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]);
-    }
-
-    if (g_cfg.aim_fix_valid) {
-        fprintf(f,
-            "# RIGID hand-to-aim mapping (Page Down). Quaternion x,y,z,w in the aim source pose's\r\n"
-            "# frame, applied to the pose before the forward vector is taken, so it rolls with the\r\n"
-            "# wrist like the gun does. Supersedes aimoffyaw/aimoffpitch. A measurement -- do not\r\n"
-            "# hand-edit.\r\n"
-            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
-            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
-    }
+    features_calib_file_write(f);
 
     if (g_cfg.aim_off_valid) {
         fprintf(f,

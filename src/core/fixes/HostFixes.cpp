@@ -324,4 +324,10 @@ void stability_gesture_reset_two_hand() {
     if (two_hand_latched()) two_hand_reset("gesture reset");   // his reset logs; only drop a hold that exists
 }
 
+// MENU COMMAND FILE: an attributes query first. The command file is almost never there, and a failed open every
+// poll was the last un-gated file operation on the tick path (perf audit, 2026-09-06).
+bool stability_menu_command_file_absent(const char* path) {
+    return GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES;
+}
+
 } // namespace halo

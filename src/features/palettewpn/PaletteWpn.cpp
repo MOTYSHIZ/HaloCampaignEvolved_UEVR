@@ -7,11 +7,36 @@
 #include "features/palettewpn/PalettePoseProvider.hpp"
 #include "features/palettewpn/PoseLatch.hpp"
 #include "features/palettewpn/PaletteFrame.hpp"
+#include "features/palettewpn/PaletteKeys.hpp"
+#include <cstdio>
 #include "core/Services.hpp"
 
 namespace halo {
 
 namespace {
+// The calibration file's palette lines (write_calib_file, between the rig fit and the aim offset). Written
+// whether or not the feature is enabled, so a measured fix is never dropped from the file.
+void palette_wpn_calib_file_write(FILE* f) {
+    if (g_cfg.grip_fix_valid) {
+        fprintf(f,
+            "# Rigid grip offset for the PALETTE weapon (Page Up freeze-and-align). Quaternion\r\n"
+            "# x,y,z,w then translation x,y,z in METRES, controller frame. Applied upstream to the\r\n"
+            "# controller pose; repeated captures compose. A measurement -- do not hand-edit.\r\n"
+            "gripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.grip_fix[0], g_cfg.grip_fix[1], g_cfg.grip_fix[2], g_cfg.grip_fix[3],
+            g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]);
+    }
+
+    if (g_cfg.aim_fix_valid) {
+        fprintf(f,
+            "# RIGID hand-to-aim mapping (Page Down). Quaternion x,y,z,w in the aim source pose's\r\n"
+            "# frame, applied to the pose before the forward vector is taken, so it rolls with the\r\n"
+            "# wrist like the gun does. Supersedes aimoffyaw/aimoffpitch. A measurement -- do not\r\n"
+            "# hand-edit.\r\n"
+            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
+    }
+}
 bool palette_wpn_enabled() { return g_cfg.palette_weapon || g_cfg.arm_driver == 3; }
 // The palette weapon's own hold (armdriver mode 3); a no-op when idle.
 void palette_wpn_gesture_reset() { palette_two_hand_reset(); }
@@ -21,6 +46,7 @@ bool palette_wpn_rig_resolve_wanted() { return palette_weapon_mode(); }
 
 constinit const FeatureHooks kPaletteWpnHooks{
     .key      = "palettewpn",
+    .parse_key = &palette_wpn_parse_key,
     .gesture_reset      = &palette_wpn_gesture_reset,
     .rig_resolve_wanted = &palette_wpn_rig_resolve_wanted,
     .sim_record_written = &palette_wpn_sim_record_written,
@@ -54,6 +80,7 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .stereo_pre_eye_meters      = &palette_wpn_stereo_pre_eye_meters,
     .stereo_post_eye_sample     = &palette_wpn_stereo_post_eye_sample,
     .stereo_post_eye_late       = &palette_wpn_stereo_post_eye_late,
+    .calib_file_write           = &palette_wpn_calib_file_write,
     .teardown                   = &palette_wpn_teardown,
     .aim_law_sampling           = &palette_wpn_aim_law_sampling,
     .aim_law_sampled            = &palette_wpn_aim_law_sampled,

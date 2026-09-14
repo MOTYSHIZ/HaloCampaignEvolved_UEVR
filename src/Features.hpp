@@ -29,4 +29,9 @@ void features_append_dev_reference(std::string& text);
 // Once at startup: every feature's key, running value and where the value came from.
 void features_log_resolved();
 
+// menu_bridge_tick's status file: whether the registry's extras changed since last written, and the author's
+// status text with them appended (refmissing, devmissing, the auto-height line).
+bool features_menu_status_changed();
+std::string features_menu_status_text(const char* status);
+
 } // namespace halo

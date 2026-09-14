@@ -14,6 +14,7 @@
 //     reticle mode 3/4 late re-assert after a widget move, the widget probe log gate (widgetlog)
 //     holster marker tint (markertint, holstermarkercolor) and minimum throw speed (grenminthrow)
 //     the two-handed hold drops on a gesture reset (stick mode, calibration, the kill switch)
+//     the menu command file: an attributes query before the open, on the tick path
 //   SVC_RIG_GUARD      fault recovery rig drop, stale rig and parent guard
 //   SVC_LEASH_GATE     HMD pose plausibility gate in the leash block
 //   SVC_RETICULE_FIXES asset load failure memo (no retry for 5 minutes)
