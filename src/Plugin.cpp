@@ -96,6 +96,8 @@
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/MotionAimHooks.hpp"
 #include "core/MarkerFaces.hpp"
+#include "core/PalettePose.hpp"     // the stamp publish fragment
+#include "core/ReticuleDepth.hpp"   // the on-foot reticule and stamp fragments
 #include "BlamPalette.hpp"
 #include "features/palettewpn/PaletteReadbacks.hpp"   // the palette fragments' socket and record readbacks
 #include "features/palettewpn/PoseLatch.hpp"   // the palette fragments' pose latch and intents
@@ -5836,8 +5838,6 @@ static void reticule_ray_angles(double aim_yaw, double aim_pitch, float* out_yaw
 // reticules placed on it, and the compositor publish. Moved out of the rig driver unchanged so the
 // palette-weapon path (rig=0) can run it without any rig writes. `rig` is the resolved FP rig
 // component (actor owner for the reticule components), `comp_world` its world location.
-#include "features/aimreticulestamp/Plugin_stamp_state.inl"   // fork feature: aimreticulestamp (stamp state)
-
 #include "features/palettewpn/Plugin_onfoot_reticule.inl"   // fork feature: palettewpn (on-foot reticule)
 
 void update() {

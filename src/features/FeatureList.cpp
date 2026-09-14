@@ -512,6 +512,25 @@ bool palette_pose_barrel_axis(Vec3* out) {
     return p != nullptr && p->barrel_axis != nullptr && p->barrel_axis(out);
 }
 
+bool palette_pose_stamp_available() {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->stamp_available != nullptr && p->stamp_available();
+}
+bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->stamped_intent != nullptr && p->stamped_intent(two_back, yaw, pitch);
+}
+void palette_pose_mark(int point, float yaw, float e0, float e1, float e2) {
+    const auto* p = palette_pose_provider();
+    if (p != nullptr && p->mark != nullptr) p->mark(point, yaw, e0, e1, e2);
+}
+int features_reticule_render_publish_mode() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->reticule_render_publish_mode != nullptr && f->enabled != nullptr && f->enabled())
+            if (const int m = f->reticule_render_publish_mode(); m > 0) return m;
+    return 0;
+}
+
 bool features_aim_owned_by_feature() { return palette_pose_owns_aim(); }
 Quat features_aim_source(const Quat& q_src) { t_aim_source = q_src; return q_src; }
 bool features_aim_forward(Vec3* fwd) {
@@ -659,6 +678,7 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
     { SVC_WEAPON_OBJECT,     "weaponobject" },
     { SVC_RACK_AVAILABLE,    "rackavailable" },
     { SVC_MANUAL_RELOAD_AVAILABLE, "manualreloadavailable" },
+    { SVC_POSE_INTENTS,      "poseintents" },
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed

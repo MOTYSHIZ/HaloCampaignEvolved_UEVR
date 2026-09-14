@@ -13,11 +13,17 @@ struct PalettePoseProvider {
     bool (*trim_rotations)(float grip_q[4], float weapon_q[4]);  // the drawn weapon's rotations on the aim-fixed hand
     bool (*two_hand_blend)(Vec3* fwd);                           // the two-handed hold's blend of a forward
     bool (*barrel_axis)(Vec3* out);                              // the measured barrel axis in the trimmed pose frame
+    bool (*stamp_available)();                                   // the hand intent is stamped per snapshot (the pose latch runs)
+    bool (*stamped_intent)(bool two_back, float* yaw, float* pitch);   // the intent one or two snapshots back
+    void (*mark)(int point, float yaw, float e0, float e1, float e2);  // the provider's STOMPLOG ring
 };
 
 bool palette_pose_owns_aim();
 bool palette_pose_trim_rotations(float grip_q[4], float weapon_q[4]);
 bool palette_pose_two_hand_blend(Vec3* fwd);
 bool palette_pose_barrel_axis(Vec3* out);
+bool palette_pose_stamp_available();
+bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch);
+void palette_pose_mark(int point, float yaw, float e0, float e1, float e2);
 
 } // namespace halo

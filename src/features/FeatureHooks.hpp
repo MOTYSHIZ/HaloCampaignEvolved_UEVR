@@ -248,6 +248,10 @@ struct FeatureHooks {
     // features_aim_law_sampled: the XInput hook's aim law, after the aim read. While enabled.
     void (*aim_law_sampled)(double ay, double ap);
 
+    // features_reticule_render_publish_mode: the on-foot reticule's compositor publish: > 0 = a feature publishes
+    // the reticle at render rate in that mode, and the tick publish stands down. While enabled.
+    int (*reticule_render_publish_mode)();
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

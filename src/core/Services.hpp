@@ -36,9 +36,10 @@ enum Service : uint32_t {
     // core code reads the bit instead of any feature's master key.
     SVC_RACK_AVAILABLE    = 1u << 14,  // the rack is available (slide node publish, capture pre-hook)
     SVC_MANUAL_RELOAD_AVAILABLE = 1u << 15,  // the manual magazine reload is available
+    SVC_POSE_INTENTS      = 1u << 16,  // a consumer wants the pose latch's stamped hand intents (the stamped reticle)
 };
 
-constexpr int kServiceCount = 16;
+constexpr int kServiceCount = 17;
 
 // True while at least one enabled feature declares the service.
 bool service_active(uint32_t service);

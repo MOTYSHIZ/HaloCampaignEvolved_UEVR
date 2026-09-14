@@ -2,7 +2,10 @@
 
 #include "BlamPalette.hpp"      // palette_trim_rotations
 #include "PaletteTwoHand.hpp"   // palette_two_hand_blend
+#include "Config.hpp"
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
+#include "features/palettewpn/PaletteFrame.hpp"      // stomp_mark
+#include "features/palettewpn/PoseLatch.hpp"         // the stamped intents
 
 #include <atomic>
 
@@ -19,6 +22,22 @@ bool barrel_axis(Vec3* out) {
                 g_barrel_axis_z.load(std::memory_order_relaxed)};
     return true;
 }
+// RETSTAMP render placement (aimreticulestamp 1/2) draws the STAMPED hand intent, and that stamp is
+// only taken while the pose latch runs in palette weapon mode: poselatch 0 never stores it, and
+// poselatch 3 stores it from the XInput-rate law (aimrate=1) only.
+bool stamp_available() {
+    if (g_cfg.pose_latch == 0) return false;
+    if (g_cfg.pose_latch == 3 && !g_cfg.aim_rate_render) return false;
+    return true;
+}
+bool stamped_intent(bool two_back, float* yaw, float* pitch) {
+    const bool ok = two_back ? g_intent_prev2_ok.load(std::memory_order_relaxed)
+                             : g_intent_prev_ok.load(std::memory_order_relaxed);
+    if (!ok) return false;
+    *yaw   = two_back ? g_intent_prev2_y.load(std::memory_order_relaxed) : g_intent_prev_y.load(std::memory_order_relaxed);
+    *pitch = two_back ? g_intent_prev2_p.load(std::memory_order_relaxed) : g_intent_prev_p.load(std::memory_order_relaxed);
+    return true;
+}
 } // namespace
 
 constinit const PalettePoseProvider kPalettePoseProvider{
@@ -26,6 +45,9 @@ constinit const PalettePoseProvider kPalettePoseProvider{
     &palette_trim_rotations,
     &palette_two_hand_blend,
     &barrel_axis,
+    &stamp_available,
+    &stamped_intent,
+    &stomp_mark,
 };
 
 } // namespace halo

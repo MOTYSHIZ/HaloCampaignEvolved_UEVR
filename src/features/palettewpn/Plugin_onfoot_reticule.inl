@@ -360,18 +360,16 @@ static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, doub
                 // on_post_calculate_stereo_view_offset -- exactly like the
                 // navpoint markers above, and for exactly the same reason.
                 // RETSTAMP (fork): the latest trace depth and when it was taken, for the render-time publish.
-                g_ret_last_d.store(d, std::memory_order_relaxed);
-                g_ret_last_d_ms.store((long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
+                reticule_depth_note(d);
                 if (g_cfg.stomp_log != 0) {
                     halo::stomp_mark(40, origin.x, origin.y, origin.z, d);
-                    halo::stomp_mark(41, target.x, target.y, target.z, (float)g_cfg.aim_reticule_stamp);
+                    halo::stomp_mark(41, target.x, target.y, target.z, (float)features_reticule_render_publish_mode());
                     halo::stomp_mark(42, r_yaw, r_pitch, (float)ray_yaw, (float)ray_pitch);
                     halo::stomp_mark(43, g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load(), (float)tick);
                 }
                 // Stamped reticle placement (aimreticulestamp 1/2) publishes at render instead, and only while
                 // the palette weapon (armdriver mode 3) owns the aim. Otherwise the author's tick publish.
-                if (!reticule_stamp_render_active()) {
+                if (features_reticule_render_publish_mode() == 0) {
                     xrlayer_note_publish_gate(0);   // reached the publish
                     xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
                                             g_ret_scale_mul.load());

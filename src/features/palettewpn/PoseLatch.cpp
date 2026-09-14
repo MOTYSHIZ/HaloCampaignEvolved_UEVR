@@ -1,6 +1,7 @@
 #include "features/palettewpn/PoseLatch.hpp"
 
 #include "Config.hpp"
+#include "core/Services.hpp"   // SVC_POSE_INTENTS: a consumer wants the stamped intents
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // desired_aim_now
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
@@ -81,7 +82,7 @@ void pose_latch_refresh(int site) {
     // but composes them with its own aim, and that aim is exactly the intent of the snapshot BEFORE
     // the build's (aim(t) = intent(t-2), median error 0.0000 deg). So the intent of the outgoing
     // snapshot is stored here, before the swap, and the placement divides by that stored number.
-    if (g_cfg.palette_cam == 14 || g_cfg.stomp_log != 0 || g_cfg.aim_reticule_stamp != 0) {
+    if (g_cfg.palette_cam == 14 || g_cfg.stomp_log != 0 || service_active(SVC_POSE_INTENTS)) {
         // Shift the outgoing previous intent down one slot before computing the new one.
         g_intent_prev2_y.store(g_intent_prev_y.load(std::memory_order_relaxed), std::memory_order_relaxed);
         g_intent_prev2_p.store(g_intent_prev_p.load(std::memory_order_relaxed), std::memory_order_relaxed);

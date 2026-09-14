@@ -42,11 +42,10 @@ namespace {
 // ADDR-HYGIENE: dev-only -- this file's hooks are installed only when `blamaim` is enabled, a
 // dev-catalog key that ships at 0. NOTE it is the same function BlamDrive resolves BY SIGNATURE; if
 // this path is ever promoted, take the resolved address from there rather than this second copy.
-// 2026-08-27: the game update's +0x10 .text shift caught BOTH of this file's recorded RVAs (the
-// shipping hooks were re-found at the time; these dev-only ones were not, and installing on the
-// old addresses -- each now the EPILOGUE of the previous function -- crashed level load). Verified
-// statically against the shipped DLL: 0x5A6AD0 reads 5F 5E 5D 5B C3 (pops/ret), 0x5A6AE0 reads a
-// clean prologue. Gated on that prologue below, same doctrine as RVA_FP_BUILD in BlamPalette.
+// 2026-08-17 game update: the +0x10 .text shift caught BOTH of this file's recorded RVAs. Verified
+// statically against the shipped DLL: 0x5A6AD0 reads 5F 5E 5D 5B C3 (pops/ret), 0x5A6AE0 is a .pdata
+// function start with the prologue below. Installing on the old address patches the previous
+// function's epilogue, so the hook is gated on the prologue.
 constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AE0;
 // First bytes of the function, checked before the hook goes in. The trailing rip-relative
 // displacement of the `mov r9d,[rip+..]` is excluded on purpose -- it re-links every build.
@@ -63,7 +62,7 @@ constexpr uint8_t GET_ORIENTATION_PROLOGUE[] = {
 // ADDR-HYGIENE: dev-only -- verification hook for the redirect experiments, installed only under
 // `blamaim` (dev-catalog key, ships at 0).
 // Same +0x10 shift, same static verification: 0x5A0FB0 now reads 81 C4 98 00 00 00 .. C3 (the
-// previous function's add-rsp/ret tail), 0x5A0FC0 reads the prologue below.
+// previous function's add-rsp/ret tail), 0x5A0FC0 is a .pdata function start with this prologue.
 constexpr uintptr_t RVA_CREATE_PROJECTILE = 0x5A0FC0;
 constexpr uint8_t CREATE_PROJECTILE_PROLOGUE[] = {
     0x48,0x89,0x4C,0x24,0x08, 0x41,0x54, 0x41,0x55, 0x48,0x81,0xEC,0x98,0x04,0x00,0x00
@@ -1101,24 +1100,14 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
             dumped.store(0, std::memory_order_relaxed);
         }
         if (dumped.fetch_add(1, std::memory_order_relaxed) < 40) {
-            // 64 dwords, not 32: the grenade replay (Route C) needs the WHOLE struct classified --
-            // the +0x28 redirect proved direction is re-derived from a field we had not dumped, so
-            // the answer is by definition in the part we were not looking at. Two lines, same row
-            // (the shared #seq ties them), guarded to the readable size.
-            const bool wide = !IsBadReadPtr((const void*)params, 0x100);
-            const int  nd   = wide ? 64 : 32;
             const uint32_t* d = (const uint32_t*)params;
             char buf[512];
-            const auto seq = g_spawns.load(std::memory_order_relaxed);
-            for (int half = 0; half < nd / 32; ++half) {
-                int n = 0;
-                for (int i = half * 32; i < half * 32 + 32 && n < (int)sizeof(buf) - 12; ++i) {
-                    n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
-                }
-                API::get()->log_info("[Halo-CampE-UEVR] BLAMPARAMS #%llu +0x%02X caller=dll+0x%llX | %s",
-                                     (unsigned long long)seq, half * 0x80,
-                                     (unsigned long long)rva, buf);
+            int n = 0;
+            for (int i = 0; i < 32 && n < (int)sizeof(buf) - 12; ++i) {
+                n += snprintf(buf + n, sizeof(buf) - n, "%08X ", d[i]);
             }
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMPARAMS caller=dll+0x%llX | %s",
+                                 (unsigned long long)rva, buf);
         }
     }
 
@@ -1238,8 +1227,8 @@ void blam_aim_tick() {
         }
 
         void* target = (void*)(g_sim_base + RVA_GET_ORIENTATION);
-        // VERIFY BEFORE PATCHING (doctrine at the RVA definitions). An offset is only true for
-        // one build; installing over what moved in crashed level load on 2026-08-27.
+        // VERIFY BEFORE PATCHING. An offset is only true for one build; installing over what moved
+        // in crashes level load.
         if (IsBadReadPtr(target, sizeof(GET_ORIENTATION_PROLOGUE)) ||
             memcmp(target, GET_ORIENTATION_PROLOGUE, sizeof(GET_ORIENTATION_PROLOGUE)) != 0) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMHOOK: prologue mismatch at dll+0x%llX -- "
@@ -1263,15 +1252,18 @@ void blam_aim_tick() {
                              id, g_tls_index);
 
         void* ctarget = (void*)(g_sim_base + RVA_CREATE_PROJECTILE);
-        if (IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) ||
-            memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) != 0) {
+        const bool cprologue_ok =
+            !IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) &&
+            memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) == 0;
+        const int cid = cprologue_ok
+            ? API::get()->param()->functions->register_inline_hook(
+                  ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create)
+            : -1;
+        if (!cprologue_ok) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: prologue mismatch at dll+0x%llX -- "
                                  "the game moved; spawn hook stays off",
                                  (unsigned long long)RVA_CREATE_PROJECTILE);
-        } else {
-        const int cid = API::get()->param()->functions->register_inline_hook(
-            ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create);
-        if (cid < 0 || g_orig_create == nullptr) {
+        } else if (cid < 0 || g_orig_create == nullptr) {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: hook FAILED (id=%d) - spawn direction "
                                  "cannot be verified, only the getter is instrumented", cid);
         } else {
@@ -1279,7 +1271,6 @@ void blam_aim_tick() {
             API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: installed on 0x%llX (dll+0x%llX) id=%d",
                                  (unsigned long long)ctarget,
                                  (unsigned long long)RVA_CREATE_PROJECTILE, cid);
-        }
         }
 
         g_prev_flag = want;

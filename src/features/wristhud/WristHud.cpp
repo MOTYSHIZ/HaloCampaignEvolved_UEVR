@@ -10,8 +10,7 @@
 #include "Rig.hpp"              // call_ret_vec3
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
 #include "Reticule.hpp"           // widget_quad_begin/finish -- THE one copy of the quad recipe
-#include "ArmDriver.hpp"          // palette_weapon_mode: hudwpnanchor 3
-#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
+#include "core/PalettePose.hpp"   // palette_pose_owns_aim: hudwpnanchor 3
 #include "UeObject.hpp"
 #include "core/Clock.hpp"               // clock::now_ms: the radar's wall-clock cadences
 #include "core/HiddenReload.hpp"        // g_wristhud_hide_cradle
@@ -857,7 +856,7 @@ bool wh_socket_rot(API::UObject* comp, const wchar_t* socket, Vec3* out_pyr) {
 bool wh_weapon_anchor(WhWpnAnchor* out) {
     if (!s_wpn_live.load(std::memory_order_relaxed)) return false;
     int how = g_cfg.hud_wpn_anchor;
-    if (how == 3 && !palette_weapon_mode()) how = 2;
+    if (how == 3 && !palette_pose_owns_aim()) how = 2;
     if (how == 1) {
         auto* root = static_cast<API::UObject*>(s_wpn_root.load(std::memory_order_relaxed));
         Vec3 p{}, r{};

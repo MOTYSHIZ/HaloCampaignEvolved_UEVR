@@ -138,6 +138,9 @@ void features_teardown_restore();
 // state saves on a weapon swap, seen through this resolve. The resolve only reads; the rig WRITES stay in
 // the rig_enabled block.
 bool features_rig_resolve_wanted();
+// the on-foot reticule's compositor publish and the stereo post-callback: > 0 = a feature publishes the reticle
+// at render rate in that mode (the tick publish stands down).
+int features_reticule_render_publish_mode();
 // update(), right after the shipping Blam aim write.
 void features_game_tick_after_blam_drive();
 // update(), after the per-weapon delta stage marker, before the vehicle hook.
