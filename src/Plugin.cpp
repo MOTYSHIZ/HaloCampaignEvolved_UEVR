@@ -12811,6 +12811,65 @@ public:
             }
         }
 
+        // ---- PAUSE BY HEAD-TAP. Y (left controller) while a controller is near the head opens the
+        // pause menu by injecting the pad START -- which the game reads even when its window is
+        // UNFOCUSED, unlike its native Escape (keyboard input is focus-gated; XInput is not). Placed
+        // LAST, after every other button write, so the injected START and the eaten Y are final.
+        // Mirrors the d-pad head-proximity radius + hysteresis (Config.hpp) but with NO dwell -- the
+        // Y press is itself the deliberate trigger, so proximity only has to be true at the press.
+        if (g_cfg.pause_head) {
+            static bool s_pau_y_prev = false;   // physical-Y edge
+            static bool s_pau_near   = false;   // hysteresis latch
+            static bool s_pau_ate_y  = false;   // eating Y for the hold that paused (no weapon swap)
+            static int  s_pau_pulse  = 0;       // remaining polls to hold START
+
+            const bool y_now = (raw_btn & XINPUT_GAMEPAD_Y) != 0;   // Y = 0x8000 = left-hand upper face button
+
+            // NEAR THE HEAD -- same test as the d-pad shift: nearest controller-to-HMD distance with
+            // arm/release hysteresis. Gated out in a menu or stick mode (vehicle/cutscene/death), so
+            // a pause can only be initiated from live gameplay. An empty (0,0,0) pose is a tracking
+            // dropout, not a hand at the head, and is skipped -- the same guard AimPoseGuard exists for.
+            bool near_now = false;
+            if (!g_stick_mode.load() && !g_in_menu.load()) {
+                const auto hi = API::VR::get_hmd_index();
+                Vec3 hp{}; Quat hq{};
+                if (hi >= 0 && get_pose((int32_t)hi, &hp, &hq, /*use_aim=*/false)) {
+                    const int32_t idxs[2] = { API::VR::get_left_controller_index(),
+                                              API::VR::get_right_controller_index() };
+                    float best_cm = 1.0e9f;
+                    for (int32_t ci : idxs) {
+                        Vec3 cp{}; Quat cq{};
+                        if (ci < 0 || !get_pose(ci, &cp, &cq, /*use_aim=*/false)) continue;
+                        if (cp.x == 0.0f && cp.y == 0.0f && cp.z == 0.0f) continue;
+                        const float dx = cp.x - hp.x, dy = cp.y - hp.y, dz3 = cp.z - hp.z;
+                        const float d = std::sqrt(dx * dx + dy * dy + dz3 * dz3) * 100.0f;
+                        if (d < best_cm) best_cm = d;
+                    }
+                    const float arm = g_cfg.dpad_head_cm, rel = g_cfg.dpad_head_cm + g_cfg.dpad_head_hyst_cm;
+                    near_now = s_pau_near ? (best_cm < rel) : (best_cm < arm);
+                }
+            }
+            s_pau_near = near_now;
+
+            // Fire on the Y press EDGE while near the head. Pulse START for a few polls so the game
+            // sees a clean down->up = ONE press (each hook call is one game input poll).
+            if (y_now && !s_pau_y_prev && near_now) {
+                s_pau_pulse = 3;
+                s_pau_ate_y = true;
+                if (g_cfg.map_btn_log)
+                    API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START");
+            }
+            if (!y_now) s_pau_ate_y = false;   // Y released: stop eating, so a later Y swaps normally
+            s_pau_y_prev = y_now;
+
+            if (s_pau_ate_y) state->Gamepad.wButtons &= (WORD)~XINPUT_GAMEPAD_Y;   // no weapon swap on the pausing Y
+            if (s_pau_pulse > 0) {
+                state->Gamepad.wButtons |= XINPUT_GAMEPAD_START;
+                --s_pau_pulse;
+                state->dwPacketNumber++;
+            }
+        }
+
         // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the
         // whole reason it needed one.
         //
