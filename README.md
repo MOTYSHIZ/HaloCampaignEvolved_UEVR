@@ -240,6 +240,8 @@ leading `#`, set your value, save. It applies live while you play (~2 s), and th
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step (`turnmode=2` for smooth turning) |
 | `scope` | 1 | Left-trigger weapon scope (magnified lens on the gun) |
 | `scopezoom` | 16 | Scope magnification |
+| `xrlayer` / `xrlayernav` | 1 / 1 | Draw the reticule / waypoints with the headset's compositor (0 = draw them in the world) |
+| `cutscenesize` | 0.75 | Size of the cutscene screen (1.0 = edge to edge) |
 
 [`halo_vr_user_reference.txt`](profile/halo_vr_user_reference.txt) is the full player-facing
 catalog — organised by concern, safe to explore, and refreshed by every update, so newly added
@@ -249,17 +251,21 @@ change. Because it is generated rather than shipped, an update can never reset i
 the next launch).
 
 **Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
-scroll to **Script UI** — three panels live there:
+scroll to **Script UI** — four panels live there:
 
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
   catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
   Saves to `halo_vr_user.cfg` (so it survives updates like any hand edit) and applies live
   within a couple of seconds.
-- **Halo VR Calibration** — the two calibration gestures as buttons, no keyboard needed: arm
-  one, close the menu (controllers don't reach the game while it's open), line your controller
-  up, then **right trigger saves & finishes** — or **left trigger saves & re-arms** on release,
-  for consecutive passes. Triggers won't fire your weapon while a calibration is armed. One-press
-  resets take you back to the shipped fit, per gesture or wholesale.
+- **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
+  scope, equipment, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
+  press the button, and it records what your controller actually sends.
+- **Halo VR Calibration** — the calibration gestures as buttons, no keyboard needed: arm one,
+  close the menu (controllers don't reach the game while it's open), line your controller up, then
+  **right trigger saves & finishes** — or **left trigger saves & re-arms** on release, for
+  consecutive passes. Triggers won't fire your weapon while a calibration is armed. The scope's
+  placement is armed from here too — for every weapon, or as a trim for just the one in your hands.
+  One-press resets take you back to the shipped fit, per gesture or wholesale.
 - **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
   unless troubleshooting asks.
 
@@ -275,8 +281,9 @@ or lose. Two other files do ship next to yours:
 - [`halo_vr_dev.cfg`](profile/halo_vr_dev.cfg) is the catalog of internal tuning, research and
   diagnostic knobs — including the aim-drive tunables — every line commented out. **Leave it alone
   unless you know exactly what you are doing**: wrong values there can wreck performance or aim.
-  Its one everyday use is troubleshooting, where you may be asked to uncomment a key (for example
-  `perflog=1` for a stutter report). Updates overwrite it, so experiments never linger.
+  Troubleshooting may ask you to uncomment a key in it; the everyday diagnostics, like `perflog=1`
+  for a stutter report, are in the player catalog instead. Updates overwrite it, so experiments
+  never linger.
 
 ## Left-handed aim
 
@@ -306,14 +313,17 @@ The shipped calibration was measured on **Quest Touch controllers**, so it encod
 of hardware and one particular way of holding it. It's a starting point, not a universal fit — try
 the mod as-is first, and expect to want this section if you're on different controllers.
 
-If the visual weapon doesn't sit right in your hand, or shots don't land where you're pointing, two
-keyboard-driven calibrations let you match the mod to your own hardware and grip. Both run in-mission
-and **persist across sessions** once set.
+If the visual weapon doesn't sit right in your hand, or shots don't land where you're pointing, these
+calibrations let you match the mod to your own hardware and grip — from the keyboard, or without one
+from the **Halo VR Calibration** panel (see [Configuration](#configuration)). All of them run
+in-mission and **persist across sessions** once set.
 
 | Key | Calibration | Workflow |
 |---|---|---|
 | `End` | **Pose-match** (grip) | Hold the key, physically line your controller up with the on-screen weapon, then release. This aligns the weapon's grip to how you actually hold your controller. |
 | `Page Down` | **Aim ray** | Hold the key, point at the frozen reticle, then release. This aligns the direction shots travel with where the weapon points. The magnum was used in the original calibration. With both eyes open, I lined up the magnum sight picture with the floating reticle's center. |
+| `Delete` | **Scope placement** | Raise the scope, hold the key, move the lens to where you want it on the gun, then release. To store the result for the weapon in your hands only, arm **per-weapon scope trim** in the Calibration panel first. |
+| `Insert` | **Per-weapon grip** | The same gesture as `End`, but it stores an adjustment for the weapon in your hands and leaves the global fit alone. `Insert` is also UEVR's own overlay key, so if the overlay opening gets in the way, move this calibration to another key with `wpncalibkey` (the catalog lists the key codes). |
 
 Do the pose-match first (it sets where the weapon sits), then the aim-ray calibration (it sets where
 that weapon shoots). If a calibration ever feels off, just repeat it — the latest one wins.
@@ -327,30 +337,31 @@ wherever you wander afterwards. If you skip this, aim will settle for a moment a
 `Page Down` and the fit will be a little noisier; nothing is broken, it's just not as good as it
 could be.
 
-**One calibration covers every weapon.** Per-weapon calibration isn't supported yet — it's planned.
-Until then, a grip tuned on one weapon is the grip used for all of them, which is why the original
-calibration was done on the magnum: a middle-of-the-road result beats one that's perfect on a pistol
-and wrong on a rocket launcher.
+**One global fit, adjusted per weapon.** The global calibration is what every weapon starts from,
+which is why the original calibration was done on the magnum: a middle-of-the-road result beats one
+that's perfect on a pistol and wrong on a rocket launcher. Where a particular weapon still sits
+wrong, hold that weapon and store an adjustment for it alone with the per-weapon calibration.
 
 ### Where your calibration is stored
 
-Both calibrations write to a separate file next to the config:
+Calibrations write to two files next to the config:
 
 ```
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg      (the global fit)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg    (per-weapon adjustments)
 ```
 
-It's applied after every other config file, so it overrides the shipped calibration in
-`halo_vr.cfg`. Keeping it separate is deliberate: updates refresh the shipped calibration freely
-while your measured fit is never touched.
+They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: updates
+refresh the shipped calibration freely while your measured fit is never touched.
 
-**To go back to the shipped calibration, delete `halo_vr_calib.cfg`.** It isn't part of the download —
-it only exists once you've calibrated — so there's no original copy to restore, and deleting it simply
-lets the shipped defaults apply again. The mod recreates it next time you calibrate.
+**To go back to the shipped calibration, delete `halo_vr_calib.cfg` — and `halo_vr_weapons.cfg` to
+clear every per-weapon adjustment.** Neither is part of the download — each only exists once you've
+calibrated — so there's no original copy to restore, and deleting one simply lets the shipped
+defaults apply again. The mod recreates them next time you calibrate.
 
-Once you have a calibration you like, it's worth copying that file somewhere safe. It's small, it's
-plain text, and it's the only thing in the profile that's specific to *you* — everything else can be
-re-downloaded.
+Once you have a calibration you like, it's worth copying both files somewhere safe, along with
+`halo_vr_user.cfg` if you've changed settings. They're small, plain text, and they're the only things
+in the profile that are specific to *you* — everything else can be re-downloaded.
 
 ## Known issues
 
