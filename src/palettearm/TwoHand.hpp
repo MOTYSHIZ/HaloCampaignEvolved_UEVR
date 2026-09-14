@@ -93,7 +93,6 @@ struct TwoHandInput {
     Vec3 support_grip_position{};   // the other hand
     bool support_tracked = false;   // false when the support controller drops tracking
     bool support_grip_held = false; // the grip button on the support hand
-    bool support_blocked   = false; // the support hand is inside a live rack zone (reload gestures): no NEW latch
     bool gameplay_active = false;   // false in menus, cutscenes, pause -- forces a release
     float delta_seconds = 0.0f;
 

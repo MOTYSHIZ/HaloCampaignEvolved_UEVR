@@ -1,5 +1,5 @@
-// reloadvr (fork feature, Experimental): the hidden reload's on-weapon ammo display and gesture_render_tick().
-// Textual fragment, included by Gesture.cpp at namespace halo scope, after the tap/hold tracking. Moved verbatim; not compiled on its own.
+// core reload engine (runs while reloadvr or slidevr is on): the hidden reload's on-weapon ammo display and gesture_render_tick().
+// Textual fragment, included by core/reload/ReloadEngine.cpp at namespace halo scope, after the anonymous namespace. Moved verbatim; not compiled on its own.
 // ---- THE ON-WEAPON AMMO DISPLAY (the hidden reload, 2026-09-07). The AR's counter is a
 // material (MI_AssaultRifle_Display_*, a digit atlas T_..._AmmoCounter) on a display mesh; the
 // count is a scalar parameter. The component is found once per weapon actor (material 0's name

@@ -38,4 +38,15 @@ bool features_holster_throw_too_slow(float peak_speed);
 // holster_update (game thread), the release log's put-back text.
 const char* features_holster_putback_text(const char* his_text, bool in_pouch);
 
+// ---- THE RELOAD ENGINE'S BELT MAGAZINE (core/reload), game thread.
+// mag_mesh_for_weapon, first: the weapon's own magazine component (writes rank 4), or null.
+uevr::API::UObject* features_holster_mag_mesh(int* out_rank);
+// holster_update, the belt magazine block: the belt point for the weapon in hand (the author's offset in).
+Vec3 features_holster_mag_belt_point(const Vec3& his_offset);
+// holster_update, the magazine mesh pick, after the resurvey guard: true = re-arm it (every candidate is dead).
+bool features_holster_mag_cands_stale(int rank);
+// holster_update, the magazine in hand, in place of the placement: true = placed (in-hand tuning, the slide
+// into the well, the render anchor).
+bool features_holster_mag_in_hand(uevr::API::UObject* m, const Vec3& gpos, const Vec3& hpos, float pitchr, float yawr, float rollr);
+
 } // namespace halo

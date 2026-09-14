@@ -17,6 +17,8 @@ struct GestureState {
     long long (*ms_to_ticks)(int ms);     // ms_to_ticks()
     Vec3*        vel;                     // s_vel: the aim hand's smoothed hand-minus-head velocity
     float*       ext;                     // s_ext: the aim hand's smoothed extension rate
+    void (*set_state)(ReloadState next, const char* why);   // set_state(): the reload machine's transition
+    const char* (*state_name)(ReloadState s);               // state_name()
 };
 
 extern const GestureState g_gesture_state;
@@ -34,4 +36,6 @@ extern const GestureState g_gesture_state;
         &ms_to_ticks,                                                           \
         &s_vel,                                                                 \
         &s_ext,                                                                 \
+        &set_state,                                                             \
+        &state_name,                                                            \
     };

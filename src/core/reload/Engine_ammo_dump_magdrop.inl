@@ -1,5 +1,5 @@
-// reloadvr (fork feature, Experimental): the rounds-loaded probe (wpnammodump) and the dropped magazine (magdrop).
-// Textual fragment, included by Gesture.cpp in its anonymous namespace, before the reload state machine. Moved verbatim; not compiled on its own.
+// core reload engine (runs while reloadvr or slidevr is on): the rounds-loaded probe (wpnammodump) and the dropped magazine (magdrop).
+// Textual fragment, included by core/reload/ReloadEngine.cpp in its anonymous namespace, after the rack. Moved verbatim; not compiled on its own.
 // ---- WPNAMMODUMP (dev): which field of the weapon object is ROUNDS LOADED? Every tick the
 // first 0x400 bytes of the resolved weapon object are compared to the previous tick as 16-bit
 // words; a word that dropped by exactly one is logged with its offset. Firing a few rounds

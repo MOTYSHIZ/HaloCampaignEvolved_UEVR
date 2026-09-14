@@ -1,4 +1,5 @@
 #include "TwoHand.hpp"
+#include "features/hooks/TwoHandHooks.hpp"
 
 #include <algorithm>
 
@@ -70,8 +71,7 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
                   lateral < tuning.zone_radius_m;
 
         // Acquisition needs the zone; RETENTION needs only the button. See the header.
-        // A blocked support hand (inside a live rack zone) may not acquire; an existing hold keeps.
-        latched = input.support_grip_held && (was_latched || (in_zone && !input.support_blocked));
+        latched = input.support_grip_held && (was_latched || (in_zone && !features_two_hand_support_blocked()));
 
         // Remember the line while it is good, so a tracking drop mid-hold can ease out along it
         // instead of snapping the weapon back to one-handed aim.

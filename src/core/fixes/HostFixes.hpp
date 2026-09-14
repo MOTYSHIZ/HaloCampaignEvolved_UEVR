@@ -38,5 +38,6 @@ void stability_teardown_restore();               // teardown: the API layer's pr
 void stability_holster_marker_tint(uevr::API::UObject* marker);   // holstermarkercolor on a pouch marker
 bool stability_throw_too_slow(float peak_speed);  // grenminthrow
 const char* stability_putback_text(const char* his_text, bool in_pouch);
+void stability_gesture_reset_two_hand();         // gesture_reset: the two-handed hold drops too
 
 } // namespace halo

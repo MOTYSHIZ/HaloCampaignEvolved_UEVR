@@ -17,8 +17,6 @@ using namespace uevr;
 
 namespace halo {
 
-std::atomic<unsigned short> g_pad_buttons{0};
-
 std::atomic<bool>  g_th_latched{false};
 std::atomic<bool>  g_th_in_zone{false};
 std::atomic<float> g_th_blend{0.0f};

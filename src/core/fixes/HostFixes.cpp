@@ -1,4 +1,5 @@
 #include "core/fixes/HostFixes.hpp"
+#include "TwoHandAim.hpp"   // two_hand_latched / two_hand_reset
 
 #include "Config.hpp"
 #include "MotionAimControl.hpp"   // g_turn_offset
@@ -313,6 +314,14 @@ bool stability_throw_too_slow(float peak_speed) {
 
 const char* stability_putback_text(const char* his_text, bool in_pouch) {
     return in_pouch ? his_text : "put back (below grenminthrow)";
+}
+
+// GESTURE RESET, the two-handed hold (moved from gesture_reset):
+// The two-handed hold rides along. It is latched on a button and blended into aim, so a
+// transition the player did not choose (kill switch, stick mode, a tracking stall) must drop it
+// too -- otherwise the aim stays blended toward a support hand nothing is tracking any more.
+void stability_gesture_reset_two_hand() {
+    if (two_hand_latched()) two_hand_reset("gesture reset");   // his reset logs; only drop a hold that exists
 }
 
 } // namespace halo

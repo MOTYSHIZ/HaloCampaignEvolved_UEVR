@@ -8132,18 +8132,7 @@ void update() {
     // ------------------------------------------------------------------ WEAPON RIG
     // Drives the FP rig from the same controller pose the aim loop uses, so the gun visually
     // follows the hand while aim follows the gun.
-    //
-    // The RESOLVE runs for the palette weapon too, not just rigmode. It maintains the FP
-    // weapon-actor route and the rig component every downstream consumer reads -- the stick-mode
-    // detector's rigcomp, the mesh-constant measurement the palette's pullback stands on, and
-    // the pivot latch. A session booted with rig=0 and only the gate below proved what happens
-    // otherwise: the route never resolves, the constants never measure, and the palette weapon
-    // silently never applies while the stock rig keeps rendering.
-    // Also for the fork's manual reload (reloadvr / slidevr): its per-weapon state saves on a weapon
-    // swap, and the swap is seen through this resolve, so it must run under every arm driver mode --
-    // including rig=0 with the author's palettearm route. The resolve only reads; the rig WRITES stay
-    // in the rig_enabled block below.
-    if (g_cfg.rig_enabled || palette_weapon_mode() || g_cfg.reload_vr || g_cfg.slide_vr) {
+    if (g_cfg.rig_enabled || features_rig_resolve_wanted()) {
         // Re-resolve on a timer ALWAYS, not only when we hold nothing. A pointer to a recycled
         // component never becomes null -- it keeps accepting writes -- so "resolve once, cache
         // until null" can pin the driver to residue with no symptom other than nothing moving.
@@ -11614,7 +11603,7 @@ public:
         // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
         // frame is drawn from, so the forearm panels land against it instead of against a camera
         // several milliseconds stale. Once per frame, not per eye.
-        if (index == 0) { features_render_frame(); halo::gesture_render_tick(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
+        if (index == 0) { features_render_frame(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
         #include "features/palettewpn/Plugin_render_meters.inl"   // fork feature: palettewpn (FPMESH meter)
         const float out_now = g_dbg_view_out.load();
         if (g_have_prev_out.load()) {

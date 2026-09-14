@@ -9,6 +9,7 @@
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
+#include "features/hooks/TwoHandHooks.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
 
 #include "Config.hpp"
@@ -22,6 +23,7 @@
 #include "core/MarkerFaces.hpp"
 #include "core/UnitState.hpp"
 #include "core/WeaponObject.hpp"
+#include "core/reload/ReloadEngine.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
@@ -133,6 +135,7 @@ void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double)
 void features_render_frame() {
     for (const FeatureHooks* f : kFeatureList)
         if (f->render_frame != nullptr) f->render_frame();
+    if (reload_engine_active()) gesture_render_tick();
 }
 
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
@@ -372,6 +375,48 @@ void features_holster_pouches_measured() {
         if (f->holster_pouches_measured != nullptr) f->holster_pouches_measured();
 }
 
+// ---- THE RELOAD ENGINE (core/reload). The state machine's hooks run only inside the author's enabled
+// reload (reloadvr on), so they read the manual availability; the rest read either availability.
+void features_gesture_tick_begin(float dt) { reload_engine_tick_begin(dt, reload_engine_active()); }
+void features_reload_state_set(ReloadState prev, ReloadState next) { if (reload_engine_active()) reload_engine_state_set(prev, next); }
+int  features_reload_fire_suppressed() { return reload_engine_active() ? reload_engine_fire_suppressed() : -1; }
+void features_reload_disabled() { if (reload_engine_active()) reload_engine_disabled(); }
+void features_reload_update_begin() { if (reload_engine_active()) reload_engine_update_begin(); }
+void features_reload_timed_out() { if (reload_engine_active()) reload_engine_timed_out(); }
+void features_reload_buttons_read() { if (reload_engine_active()) reload_engine_swap_cancel(); }
+bool features_reload_grip_held() { return reload_manual_available() && reload_engine_grip_held(); }
+bool features_reload_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head) {
+    return reload_manual_available() ? reload_engine_fetch_pose(pose_ok, hand_l, head) : pose_ok;
+}
+bool features_reload_press_ignored() { return reload_manual_available() && reload_engine_press_ignored(); }
+void features_reload_press_accepted() { if (reload_manual_available()) reload_engine_press_accepted(); }
+bool features_reload_belt_grab_ok(bool belt) { return reload_manual_available() ? reload_engine_belt_grab_ok(belt) : belt; }
+void features_reload_grabbed(float hand_y) { if (reload_manual_available()) reload_engine_grabbed(hand_y); }
+bool features_reload_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r, const Vec3* head) {
+    return reload_manual_available() && reload_engine_seat(have_left, hand_l, hand_r, head);
+}
+void features_gesture_reset() {
+    if (reload_engine_active()) reload_engine_gesture_reset();
+    if (service_active(SVC_STABILITY)) stability_gesture_reset_two_hand();
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->gesture_reset != nullptr && f->enabled != nullptr && f->enabled()) f->gesture_reset();
+}
+void features_reload_ticks(bool poses_ok, const Vec3& hpos) { if (reload_engine_active()) reload_engine_ticks(poses_ok, hpos); }
+bool features_two_hand_support_blocked() {
+    return reload_engine_active() && g_slide_zone_hot.load(std::memory_order_relaxed);
+}
+uevr::API::UObject* features_holster_mag_mesh(int* out_rank) { return reload_manual_available() ? reload_engine_mag_mesh(out_rank) : nullptr; }
+Vec3 features_holster_mag_belt_point(const Vec3& his_offset) { return reload_manual_available() ? reload_engine_mag_belt_point() : his_offset; }
+bool features_holster_mag_cands_stale(int rank) { return reload_manual_available() && reload_engine_mag_cands_stale(rank); }
+bool features_holster_mag_in_hand(uevr::API::UObject* m, const Vec3& gpos, const Vec3& hpos, float pitchr, float yawr, float rollr) {
+    return reload_manual_available() && reload_engine_mag_in_hand(m, gpos, hpos, pitchr, yawr, rollr);
+}
+bool features_rig_resolve_wanted() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->rig_resolve_wanted != nullptr && f->rig_resolve_wanted()) return true;
+    return reload_engine_active();
+}
+
 void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }
 bool features_holster_throw_too_slow(float peak_speed) { return stability_throw_too_slow(peak_speed); }
 const char* features_holster_putback_text(const char* his_text, bool in_pouch) { return stability_putback_text(his_text, in_pouch); }
@@ -489,6 +534,9 @@ void features_config_loaded() {
     // Core state a service held while it was active, released on the service's own off edge.
     const uint32_t svc_now = active_services();
     const uint32_t svc_off = s_service_mask & ~svc_now;
+    // The reload engine first: its release reads the weapon object the resets below clear.
+    const uint32_t kEngine = SVC_MANUAL_RELOAD_AVAILABLE | SVC_RACK_AVAILABLE;
+    if ((s_service_mask & kEngine) != 0 && (svc_now & kEngine) == 0) reload_engine_released();
     if ((svc_off & SVC_CAMERA_BOB) != 0) camera_bob_reset();
     if ((svc_off & SVC_HIDDEN_RELOAD) != 0) hidden_reload_reset();
     if ((svc_off & SVC_RACK_AVAILABLE) != 0) weapon_object_rack_reset();

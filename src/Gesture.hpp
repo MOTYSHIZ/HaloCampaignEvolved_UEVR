@@ -28,8 +28,6 @@ namespace halo {
 // for releasing a button. Time is the one shared reference both threads already agree on.
 extern std::atomic<long long> g_melee_hold_until;
 
-// The gesture aim hold: see MotionAimControl.hpp.
-
 // TRUE while the synthetic melee press should be asserted. Safe from any thread; does not allocate.
 // This is the whole surface the XInput hook consumes.
 bool melee_press_active();
@@ -57,27 +55,13 @@ enum class ReloadState { Idle = 0, MagOut = 1, MagHeld = 2 };
 // Raw pad buttons as they arrived from the player, published by the XInput hook BEFORE any of the
 // plugin's own remapping. The state machine must react to what was physically pressed, not to what
 // the remapper turned it into.
-extern std::atomic<unsigned short> g_pad_buttons;   // the raw pad, published by the XInput hook
+extern std::atomic<unsigned short> g_pad_buttons;
 
 // TRUE while the trigger should be swallowed -- the magazine is out.
 bool reload_fire_suppressed();
-// The held weapon's OWN magazine mesh: the first-person gun is separate static mesh
-// components on the skeleton's sockets, and one of them is the magazine. nullptr when the
-// weapon has none (plasma weapons) or nothing is held. Exact per weapon, no survey.
-uevr::API::UObject* native_mag_mesh();
 
 // Deadline for the synthesised reload press, same scheme as melee.
 extern std::atomic<long long> g_reload_hold_until;
-
-// THE SLIDE. Once the held magazine comes inside the capture radius, it leaves the hand and
-// travels into the well over reload_slide_ms, landing on the weapon's own magazine transform.
-// Published for the belt-mag marker (Holster.cpp) to render: t in [0,1] while sliding, < 0
-// otherwise; target = world location + UE rotator of the well (rot_valid false = keep the hand's
-// rotation and slide position only, the fallback well has no orientation of its own).
-extern std::atomic<float> g_reload_slide_t;
-extern std::atomic<float> g_reload_slide_x, g_reload_slide_y, g_reload_slide_z;
-extern std::atomic<float> g_reload_slide_pitch, g_reload_slide_yaw, g_reload_slide_roll;
-extern std::atomic<bool>  g_reload_slide_rot_valid;
 bool reload_press_active();
 
 // ---- BUTTON SHARING ----------------------------------------------------------------------------
@@ -102,9 +86,6 @@ void reload_note_buttons(unsigned short buttons);
 
 // Current state, for logging and for anything that needs to know the gun is empty-handed.
 ReloadState reload_state();
-// Render path (once per frame, from the stereo callback): the on-weapon ammo display is written
-// to 0 while the hidden reload is pending, after the game's own tick has set it.
-void gesture_render_tick();
 
 // Game thread, once per tick, with the tick's dt in seconds. Samples the aim hand, decides whether
 // a swing happened, and arms the deadline above.

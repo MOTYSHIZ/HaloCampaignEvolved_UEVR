@@ -7,6 +7,8 @@
 #include "Math.hpp"       // Vec3
 #include "UeObject.hpp"
 
+#include <cstddef>
+
 namespace halo::host {
 
 struct HolsterState {
@@ -25,6 +27,8 @@ struct HolsterState {
     bool (*off_is_right)();       // off_is_right()
     void (*haptic_on)(bool right, float dur, float amp);   // haptic_on()
     void (*set_weapon_hidden)(bool hidden);                // set_weapon_hidden()
+    size_t (*mag_cand_count)();                            // s_mag_cands.size(): the magazine survey's candidates
+    bool (*mag_cand_alive)(size_t i);                      // s_mag_cands[i].obj.get() != nullptr
 };
 
 extern const HolsterState g_holster_state;
@@ -50,4 +54,6 @@ extern const HolsterState g_holster_state;
         &off_is_right,                                                          \
         &haptic_on,                                                             \
         &set_weapon_hidden,                                                     \
+        +[]() -> size_t { return s_mag_cands.size(); },                         \
+        +[](size_t i) -> bool { return s_mag_cands[i].obj.get() != nullptr; },  \
     };

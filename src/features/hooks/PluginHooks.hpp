@@ -130,5 +130,13 @@ void features_turn_snap_note(float step);
 // settings restore.
 void features_teardown_early();
 void features_teardown_restore();
+// update() (game thread), the weapon rig block's resolve gate beside rig_enabled: true = the FP weapon-actor
+// route and the rig component are resolved for a feature or the reload engine. The palette weapon needs it
+// (the stick-mode detector's rigcomp, the mesh constants its pullback stands on, the pivot latch: booted
+// with rig=0 the route never resolved and the palette weapon silently never applied). The reload engine
+// needs it under every arm driver mode, including rig=0 with the author's palettearm route: its per-weapon
+// state saves on a weapon swap, seen through this resolve. The resolve only reads; the rig WRITES stay in
+// the rig_enabled block.
+bool features_rig_resolve_wanted();
 
 } // namespace halo

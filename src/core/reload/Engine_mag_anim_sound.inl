@@ -1,5 +1,5 @@
-// reloadvr (fork feature, Experimental): the weapon's own magazine, the well marker, the reload animation hold, the Wwise reload sound and the ammo probes.
-// Textual fragment, included by Gesture.cpp in its anonymous namespace, after the reload state declarations. Moved verbatim; not compiled on its own.
+// core reload engine (runs while reloadvr or slidevr is on): the weapon's own magazine, the well marker, the reload animation hold, the Wwise reload sound and the ammo probes.
+// Textual fragment, included by core/reload/ReloadEngine.cpp in its anonymous namespace, after the engine's reload state. Moved verbatim; not compiled on its own.
 // ---- THE WEAPON'S OWN MAGAZINE -----------------------------------------------------------------
 // The gun ships its magazine as a component on the weapon actor, so during MAG_OUT it can be
 // genuinely removed instead of the rifle pretending nothing happened ("the magazine still appears

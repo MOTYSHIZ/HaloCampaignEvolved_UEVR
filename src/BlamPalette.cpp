@@ -2,6 +2,7 @@
 
 #include "BlamDrive.hpp"     // resolve_object_by_datum: the weapon object through the sim's table
 #include "core/UnitState.hpp"
+#include "core/reload/ReloadEngine.hpp"   // the reload engine's pose hold request
 #include "core/WeaponObject.hpp"   // the weapon object service and the slide node it publishes
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"
@@ -3728,7 +3729,8 @@ void apply_after_pose(int32_t local_player, int32_t weapon_slot) {
         struct PoseHold { PaletteNode hold[FP_NODE_COUNT]; bool valid; int32_t tag; uint32_t writes; };
         static PoseHold s_ph[4] = {};
         PoseHold& ph = s_ph[(weapon_slot < 0) ? 0 : ((weapon_slot > 3) ? 3 : weapon_slot)];
-        const long long until = g_pose_hold_until.load(std::memory_order_acquire);
+        const long long until = (std::max)(g_pose_hold_until.load(std::memory_order_acquire),
+                                           g_reload_pose_hold_until.load(std::memory_order_acquire));
         const long long nowt  = std::chrono::steady_clock::now().time_since_epoch().count();
         if (until != 0 && nowt < until && live.count == FP_NODE_COUNT) {
             if (!ph.valid || ph.tag != live.model_tag) {

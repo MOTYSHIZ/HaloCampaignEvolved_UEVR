@@ -164,6 +164,12 @@ struct FeatureHooks {
     // features_holster_pouches_measured: the holster tick, right after the pouch loop.
     void (*holster_pouches_measured)();
 
+    // features_gesture_reset: gesture_reset, after the reload engine's reset and before the melee reset.
+    void (*gesture_reset)();
+
+    // features_rig_resolve_wanted: the rig resolve gate in update(). True = resolve for this feature.
+    bool (*rig_resolve_wanted)();
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

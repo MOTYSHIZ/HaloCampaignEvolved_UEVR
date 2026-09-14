@@ -1,5 +1,5 @@
-// reloadvr (fork feature, Experimental): the per-weapon reload state (reloadstate) and reload_release_all().
-// Textual fragment, included by Gesture.cpp at namespace halo scope, after reload_fire_suppressed(). Moved verbatim; not compiled on its own.
+// core reload engine (runs while reloadvr or slidevr is on): the per-weapon reload state (reloadstate) and reload_release_all().
+// Textual fragment, included by core/reload/ReloadEngine.cpp at namespace halo scope, after the hidden display. Moved verbatim; not compiled on its own.
 // ---- RELOAD STATE PER WEAPON (reloadstate, Config.hpp) -----------------------------------------
 // The old memory had four holes, and each one hands a weapon back "mag in, racked":
 //  1. it saved only when the weapon changed WHILE a reload was in flight, so a seated magazine

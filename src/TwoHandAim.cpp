@@ -19,7 +19,6 @@
 using uevr::API;
 
 namespace halo {
-extern std::atomic<bool> g_slide_zone_hot;   // Gesture.cpp: the support hand is inside a live rack zone
 namespace {
 
 namespace pa = ::halo::palettearm;
@@ -566,7 +565,6 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
         in.support_grip_held = s_grip != nullptr && API::VR::is_action_active(s_grip, grip_src);
     }
     if (in.support_grip_held) s_grip_ever = true;
-    in.support_blocked = g_slide_zone_hot.load(std::memory_order_relaxed);   // the reload gestures own the rack zone
 
     // THE ZONE IS MEASURED IN THE GUN'S FRAME, by the rig block earlier in this same tick. Along =
     // down the barrel, lateral = off it. Handing the hold these two scalars is what moves the grab

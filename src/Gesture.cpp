@@ -1,26 +1,10 @@
 #include "Gesture.hpp"
-#include "TwoHandAim.hpp"
-#include "Holster.hpp"
+#include "TwoHandAim.hpp"   // two_hand_latched(): the grip is shared with the barrel hold
 
-#include "BlamPalette.hpp"
-#include "PaletteTwoHand.hpp"   // palette_two_hand_reset / g_th_latched: the palette weapon mode hold
-#include "core/HiddenReload.hpp"   // g_wristhud_hide_cradle: the hidden reload hides the ammo cradle
 #include "Config.hpp"
-#include "core/FireInput.hpp"      // g_ft_fire_at: the reload family's fire timing
-#include "Markers.hpp"            // the magwell insert marker rides the holster marker machinery
-#include "core/MarkerFaces.hpp"
-#include "core/WeaponObject.hpp"   // the held weapon's object and the slide node
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "features/hooks/GestureHooks.hpp"
-#include "Rig.hpp"                // fp_weapon_actor -- the mag hide walks its components
-#include "UeObject.hpp"
-#include "WeaponCalib.hpp"
-#include <intrin.h>
-
-#include <string>
-#include <vector>
-#include <algorithm>
 
 #include <chrono>
 #include <cmath>
@@ -28,15 +12,10 @@
 using uevr::API;
 
 namespace halo {
-std::atomic<bool> g_slide_zone_hot{false};   // read by TwoHand: the off hand is inside a live rack zone
 
 std::atomic<long long> g_melee_hold_until{0};
 std::atomic<long long> g_reload_hold_until{0};
-std::atomic<float> g_reload_slide_t{-1.0f};
-std::atomic<float> g_reload_slide_x{0.0f}, g_reload_slide_y{0.0f}, g_reload_slide_z{0.0f};
-std::atomic<float> g_reload_slide_pitch{0.0f}, g_reload_slide_yaw{0.0f}, g_reload_slide_roll{0.0f};
-std::atomic<bool>  g_reload_slide_rot_valid{false};
-// beside the derivations they feed. This module consumes both through their headers.
+std::atomic<unsigned short> g_pad_buttons{0};
 
 namespace {
 
@@ -66,8 +45,6 @@ float s_peak_speed = 0.0f;
 float s_peak_ext   = 0.0f;
 float s_peak_reach = 0.0f;
 bool  s_in_swing   = false;
-// The weapon whose magazine the in-flight reload belongs to (weapon_key at the Idle exit).
-std::string s_reload_weapon;
 
 // Below this relative speed the hand counts as at rest and a swing is considered over. Not
 // configurable on purpose: it exists to segment the LOG, and a knob to tune the tuning instrument
@@ -76,29 +53,14 @@ constexpr float REST_SPEED_MPS = 0.35f;
 
 // ---- RELOAD STATE ------------------------------------------------------------------------------
 ReloadState s_reload = ReloadState::Idle;
-// A MAGAZINE THAT IS OUT STAYS OUT ACROSS A WEAPON SWAP (from the headset, 2026-09-04): drop gun A's mag,
-// swap to B, fire, swap back -- A still needs the whole reload. What the machine knew about A
-// when it left the hand, by weapon key, restored when A returns.
-struct WpnMem { std::string key; bool mag_out; int chamber_left; bool empty; bool lock_pending; bool true_empty; };
-WpnMem s_wpn_mem[8];
-WpnMem* wpn_mem_find(const std::string& key) { for (auto& m : s_wpn_mem) if (!m.key.empty() && m.key == key) return &m; return nullptr; }
-WpnMem* wpn_mem_slot(const std::string& key) { if (auto* m = wpn_mem_find(key)) return m; for (auto& m : s_wpn_mem) if (m.key.empty()) return &m; return &s_wpn_mem[0]; }
-void wpn_mem_clear(const std::string& key) { if (auto* m = wpn_mem_find(key)) *m = WpnMem{}; }
-bool s_restoring_mag_out = false;   // set_state must not drop a second magazine on a restore
 unsigned short s_prev_buttons = 0;
+
+// When the CURRENT state was entered. Only meaningful outside Idle, and only the watchdog reads it.
+long long s_reload_since = 0;
 
 // How long the synthesised reload press is held. Same reasoning as melee_hold_ms: one poll can
 // land between the game's own input samples and be missed entirely.
 constexpr int RELOAD_HOLD_MS = 90;
-
-#include "features/reloadvr/Gesture_mag_anim_sound.inl"   // fork feature: reloadvr (magazine, animation, sound)
-
-#include "features/slidevr/Gesture_rack.inl"   // fork feature: slidevr (the rack)
-
-#include "features/reloadvr/Gesture_ammo_dump_magdrop.inl"   // fork feature: reloadvr (ammo probe + dropped magazine)
-
-// When the CURRENT state was entered. Only meaningful outside Idle, and only the watchdog reads it.
-long long s_reload_since = 0;
 
 const char* state_name(ReloadState s) {
     switch (s) {
@@ -114,19 +76,8 @@ void set_state(ReloadState next, const char* why) {
         API::get()->log_info("[Halo-CampE-UEVR] RELOAD %s -> %s (%s)",
                              state_name(s_reload), state_name(next), why);
     }
-    const ReloadState prev = s_reload;
+    features_reload_state_set(s_reload, next);
     s_reload = next;
-    // The weapon's own mag leaves with the state and returns with it -- Idle is the only state
-    // where the gun should be showing a magazine.
-    mag_hide_apply(next != ReloadState::Idle);
-    // ...and on the way out it FALLS: the drop is spawned from the component just hidden.
-    if (prev == ReloadState::Idle && next == ReloadState::MagOut && !s_restoring_mag_out) { if (!slide_parts_mag_drop()) mag_drop_spawn(); ak_dump("drop"); ak_step_sound("drop"); ak_step_sound("open");
-        if (g_cfg.reload_press_at == 1 && slide_weapon_ok()) {
-            const bool empty_now = weapon_empty_now();
-            if (empty_now) { s_sl_pressed_early = true; reload_press_now("mag drop"); }
-            else { s_sl_press_pending = true; if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD press waits for the chambered shot or the seat"); }
-        }
-    }
     // Restart the watchdog on EVERY transition, not only on leaving Idle: MAG_HELD -> MAG_OUT
     // (fumbling the magazine) is real progress and should buy the player the full window again.
     s_reload_since = now_ticks();
@@ -166,7 +117,6 @@ namespace {
 std::atomic<long long>  s_reload_down_at{0};    // when the reload button went down, 0 = up
 std::atomic<bool>       s_reload_passing{false};// hold threshold crossed: stop swallowing
 std::atomic<bool>       s_reload_tap{false};    // a completed tap, waiting for the tick to consume
-static float            s_grab_y = 0.0f;         // left-hand height (VR y) at the belt grab
 }
 
 void reload_note_buttons(unsigned short buttons) {
@@ -227,31 +177,12 @@ bool reload_swallow_grip() {
     return s_reload != ReloadState::Idle;
 }
 
-#include "features/reloadvr/Gesture_hidden_display.inl"   // fork feature: reloadvr (hidden reload display)
 ReloadState reload_state() { return s_reload; }
 
 bool reload_fire_suppressed() {
-    // Slide weapons keep the trigger LIVE with the magazine out: whatever the game still has
-    // loaded is the chambered round(s), and the game locks the slide back itself when they run
-    // out. Everything else keeps the original suppression.
-    if (g_cfg.reload_suppress_fire && s_reload != ReloadState::Idle) {
-        if (!(g_cfg.slide_vr && slide_weapon_ok() && slide_chamber_ok())) return true;
-        if (s_sl_chamber_left <= 0) return true;   // the one chambered round is spent (or never was)
-    }
-    // THE SLIDE: no shot with the chamber open. Dead while the slide is pulled more than a
-    // third of its travel, and dead from a reload's seat until the rack completes.
-    // Truly empty never fires, whatever slidevr says: the phantom re-asserts one round every tick,
-    // so a trigger left live with slidevr off fired it forever; the dry stop and the hidden reload
-    // promise a dead trigger too.
-    if (s_true_empty) return true;
-    if (g_cfg.slide_vr) {
-        if (s_sl_lock_pending) return true;
-        if (s_sl_held && g_slide_pull.load(std::memory_order_relaxed) > g_cfg.slide_travel * 0.33f) return true;
-    }
-    return false;
+    if (int r = features_reload_fire_suppressed(); r >= 0) return r != 0;
+    return g_cfg.reload_suppress_fire && s_reload != ReloadState::Idle;
 }
-
-#include "features/reloadvr/Gesture_reload_state.inl"   // fork feature: reloadvr (per-weapon reload state)
 
 // The reload half of the tick. Separate from the melee detector because it is a state machine over
 // BUTTONS and ZONES, not a derivative over velocity -- sharing a function would only tangle them.
@@ -259,20 +190,13 @@ bool reload_fire_suppressed() {
 // The poses are NULLABLE. Both are needed to make progress, but the watchdog below must run even
 // when they are missing -- losing tracking mid-gesture is one of the ways a player gets stuck, so
 // that is the last moment to stop servicing the state machine.
-static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
-    static bool s_reload_on = true;   // one release on the off edge (at a boot with reloadvr 0 there is nothing to release)
+static void reload_update(const Vec3* hand_r, const Vec3* head) {
     if (!g_cfg.enabled || !g_cfg.reload_vr) {
-        if (s_reload_on) { s_reload_on = false; reload_release_all("manual reload switched off"); }
+        features_reload_disabled();
         if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, "disabled");
         return;
     }
-    s_reload_on = true;
-    // The well marker and the slide exist only while the magazine is in hand; every other state
-    // hides the one and resets the other.
-    if (s_reload != ReloadState::MagHeld) {
-        reload_well_marker_update(false, Vec3{});
-        reload_slide_reset();
-    }
+    features_reload_update_begin();
 
     // WATCHDOG FIRST. Logged unconditionally rather than under reload_log, because the symptom it
     // explains -- the fire trigger going dead -- is one a player will otherwise report as the mod
@@ -282,9 +206,7 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
             "[Halo-CampE-UEVR] RELOAD TIMED OUT after %.1fs in %s -- gesture never completed, "
             "returning to IDLE and releasing the fire trigger. (reloadtimeout=0 disables this.)",
             (double)g_cfg.reload_timeout_s, state_name(s_reload));
-        // The slide bookkeeping goes the way the weapon-swap cancel below clears it, so a timed-out
-        // reload does not leave a lock pending on a gun the sim never emptied.
-        s_sl_lock_pending = false; s_sl_reload_due = false; s_sl_pressed_early = false; s_sl_locked_back = false; s_sl_press_pending = false; s_sl_press_due_at = 0;
+        features_reload_timed_out();
         set_state(ReloadState::Idle, "timed out");
         return;
     }
@@ -292,43 +214,27 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
     const unsigned short btn = g_pad_buttons.load(std::memory_order_relaxed);
     const unsigned short rising = (unsigned short)(btn & ~s_prev_buttons);
     s_prev_buttons = btn;
-
-    #include "features/reloadvr/Gesture_update_swap_cancel.inl"   // fork feature: reloadvr (swap cancel)
+    features_reload_buttons_read();
 
     // A completed TAP, not a rising edge. The rising edge cannot tell a reload from the start of
     // an Interact hold, and treating them alike is what cost a chapter of vehicles.
     const bool reload_pressed = s_reload_tap.exchange(false, std::memory_order_relaxed);
-    // THE GRIP: UEVR's per-hand ACTION, with the XInput mask kept only as a fallback. The mask
-    // (reloadgrip, default 0x0100 = left shoulder) was the ONLY path here, and whether a physical
-    // grip produces that bit depends on the controller and the runtime -- the plugin even ships a
-    // remap that puts left X on the same bit. Field report from another machine: reload stalled in
-    // MAG_OUT with the trigger suppressed and two-handing never latched, together, because both
-    // gated on it. Holsters never had this problem; they have always read the action.
-    const bool fetch_right    = g_cfg.aim_left_hand;   // the hand that is NOT aiming fetches
-    const bool grip_held      = holster_grip_held(fetch_right) ||
-                                ((g_cfg.reload_grip_mask != 0) &&
-                                 ((btn & (unsigned short)g_cfg.reload_grip_mask) != 0));
+    const bool grip_held      = features_reload_grip_held() || ((g_cfg.reload_grip_mask != 0) &&
+                                ((btn & (unsigned short)g_cfg.reload_grip_mask) != 0));
 
     // The LEFT hand is the one that fetches. If aim is left-handed the roles swap, so this asks
     // for "the hand that is not aiming" rather than hardcoding a side.
     const auto lidx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
                                           : API::VR::get_left_controller_index();
     Vec3 hand_l{}; Quat lrot{};
-    #include "features/reloadvr/Gesture_update_dead_pose.inl"   // fork feature: reloadvr (fetch hand pose)
+    const bool have_left = features_reload_fetch_pose(get_pose(lidx, &hand_l, &lrot, /*use_aim=*/false), hand_l, head);
 
     switch (s_reload) {
     case ReloadState::Idle:
-        if (reload_pressed && weapon_in_list(g_cfg.reload_skip_weapons)) {
-            // No magazine on this weapon (plasma rifle, plasma pistol, sentinel beam): nothing to
-            // drop, nothing to seat, and the game's own reload does nothing to it either.
-            if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD ignored: %s has no magazine", weapon_key().c_str());
-        } else if (reload_pressed) {
+        if (reload_pressed && !features_reload_press_ignored()) {
             // Deliberately does NOT forward the press. The game is told to reload only when the
             // magazine goes in -- that deferral IS the feature.
-            s_reload_weapon = weapon_key();   // whose magazine this is (see the swap-cancel above)
-            s_sl_empty_at_drop = weapon_empty_now();   // decides whether the seat wants a rack
-            s_sl_locked_back = s_sl_empty_at_drop;
-            s_sl_chamber_left  = s_sl_empty_at_drop ? 0 : 1;   // the one round already chambered
+            features_reload_press_accepted();
             set_state(ReloadState::MagOut, "reload pressed, mag dropped");
         }
         break;
@@ -338,30 +244,23 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
             set_state(ReloadState::Idle, "cancelled, mag re-seated");
             break;
         }
-        if (!have_left) break;
-        const Vec3& head = *head_p;   // have_left implies a head pose (see the gate above)
-        // The grab. With the visible magazine on (and the holster tick alive to run its body
-        // frame), the hand must take the MAG -- the point the mesh is drawn at, published by
-        // Holster. Otherwise the legacy belt ring: below the head, near the body's vertical axis.
-        // Y is up in this space -- the same convention quat_forward assumes for the VR frame.
-        bool grab_ok;
-        if (g_cfg.reload_mag != 0 && g_cfg.holster_enabled) {
-            grab_ok = holster_mag_hand_in();
-        } else {
-            const float drop = head.y - hand_l.y;
-            const float dx = hand_l.x - head.x, dz = hand_l.z - head.z;
-            const float horiz = std::sqrt(dx * dx + dz * dz);
-            grab_ok = drop >= g_cfg.reload_belt_drop && horiz <= g_cfg.reload_belt_radius;
-        }
+        if (!have_left || head == nullptr) break;
+        // Belt zone: below the head, and near the body's vertical axis. Y is up in this space --
+        // the same convention quat_forward assumes for the VR frame.
+        const float drop = head->y - hand_l.y;
+        const float dx = hand_l.x - head->x, dz = hand_l.z - head->z;
+        const float horiz = std::sqrt(dx * dx + dz * dz);
         // NOT WHILE BOTH HANDS ARE ON THE GUN. The two-handed hold and this state machine read
-        // the SAME physical grip. They do not collide in code; they collide in the player's hand,
-        // and a support hand that dips past the belt zone mid-hold would silently start a reload.
+        // the SAME physical button -- this one through the XInput mask, the hold through the
+        // OpenXR action. They do not collide in code; they collide in the player's hand, and a
+        // support hand that dips past the belt zone mid-hold would silently start a reload.
         //
         // Zone-disjointness rather than a new binding: you cannot pull a magazine with both hands
         // on the weapon, so the suppression is also what a player expects. bindtwohand exists for
         // anyone whose grip is genuinely double-booked.
-        if (grip_held && grab_ok && !two_hand_latched()) {
-            s_grab_y = hand_l.y;   // where the mag was picked up: the lift gate measures from here
+        if (grip_held && !two_hand_latched() &&
+            features_reload_belt_grab_ok(drop >= g_cfg.reload_belt_drop && horiz <= g_cfg.reload_belt_radius)) {
+            features_reload_grabbed(hand_l.y);
             set_state(ReloadState::MagHeld, "grabbed from belt");
         }
         break;
@@ -372,7 +271,17 @@ static void reload_update(const Vec3* hand_r_p, const Vec3* head_p) {
             set_state(ReloadState::MagOut, "grip released, dropped it");
             break;
         }
-        #include "features/reloadvr/Gesture_update_seat.inl"   // fork feature: reloadvr (well and seat)
+        if (features_reload_seat(have_left, hand_l, hand_r, head)) break;
+        if (!have_left || hand_r == nullptr) break;
+        // Hand to hand, not hand to weapon: the gun is a separate actor whose grip point moves
+        // per weapon, while both controllers are always known.
+        const float ddx = hand_l.x - hand_r->x, ddy = hand_l.y - hand_r->y, ddz = hand_l.z - hand_r->z;
+        const float join = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        if (join <= g_cfg.reload_join_dist) {
+            g_reload_hold_until.store(now_ticks() + ms_to_ticks(RELOAD_HOLD_MS),
+                                      std::memory_order_relaxed);
+            set_state(ReloadState::Idle, "magazine seated, reload fired");
+        }
         break;
     }
     }
@@ -392,20 +301,7 @@ static void melee_reset() {
 }
 
 void gesture_reset() {
-    reload_state_on_reset();   // before anything below clears it: the state goes to its weapon
-    s_sl_reload_due = false; s_sl_pressed_early = false; s_sl_locked_back = false; s_sl_press_pending = false; s_sl_press_due_at = 0;
-    s_true_empty = false;
-    sc_teardown("reset");
-    sp_teardown("reset");
-    // sp_teardown clears the rack flag for the rebuild mode, but the NATIVE part is not torn down
-    // here and slide_part_tick only re-finds it on a weapon or component change: after a ride or a
-    // cutscene the held gun read "no rack" (no lock-back at the seat, no phantom) until a swap.
-    if (s_np_have && s_np_slide.get() != nullptr) g_slide_rack_found = true;
-    // The two-handed hold rides along. It is latched on a button and blended into aim, so a
-    // transition the player did not choose (kill switch, stick mode, a tracking stall) must drop it
-    // too -- otherwise the aim stays blended toward a support hand nothing is tracking any more.
-    if (two_hand_latched()) two_hand_reset("gesture reset");   // his reset logs; only drop a hold that exists
-    palette_two_hand_reset();   // the palette weapon's own hold (armdriver mode 3); a no-op when idle
+    features_gesture_reset();
     melee_reset();
     // Releasing the reload state is not optional: leaving it in MAG_OUT would keep the trigger
     // suppressed with no way for the player to notice why. Same rule as the arm hide.
@@ -414,49 +310,8 @@ void gesture_reset() {
     s_prev_buttons = 0;
 }
 
-API::UObject* native_mag_mesh() { return native_mag_mesh_impl(); }
-
 void gesture_update(float dt) {
-    s_gest_dt = dt;
-    // The deferred hold check runs BEFORE the gates, because the gates are exactly the states that
-    // would swallow it (a melee into a vehicle, a death) and a check that only reports when nothing
-    // went wrong is not a check.
-    // The fork's manual reload family (reloadvr / slidevr, experimental, default off). Every tick below
-    // is idle-cheap on its own, but several resolve the weapon actor by reflection, so with both
-    // masters off none of them runs and this function is the author's again. The two restore
-    // windows (anim rate, state hold) stay outside: a window armed before a switch-off must close.
-    const bool fork_reload = g_cfg.reload_vr || g_cfg.slide_vr;
-    reload_anim_rate_tick();
-    reload_state_hold_tick();
-    if (fork_reload) {
-    mag_dump_probe();
-    anim_dump_tick();
-    anim_vars_tick();
-    audio_dump_tick();
-    ak_mute_tick();
-    anim_var_set_tick();
-    anim_seq_set_tick();
-    wpn_ammo_dump_tick();
-    ammo_seq_tick();
-    mag_drop_tick();
-    // The held weapon's Blam object index, for the sim-side node probe (every ~30 ticks).
-    {
-        static int s_n = 0;
-        // Every tick while the reload state tracker runs: the phantom's object guard compares it.
-        if ((++s_n % 30) == 0 || g_cfg.reload_state_id != 0) {
-            int32_t idx = -1;
-            if (auto* wpn = fp_weapon_actor()) {
-                auto** pc = wpn->get_property_data<API::UObject*>(L"BlamObjectSynchronization");
-                if (pc != nullptr && !IsBadReadPtr(pc, sizeof(void*)) && *pc != nullptr && !IsBadReadPtr(*pc, sizeof(void*))) {
-                    auto* p = (*pc)->get_property_data<int32_t>(L"BlamObjectIndex");
-                    if (p != nullptr && !IsBadReadPtr(p, sizeof(int32_t))) idx = *p;
-                }
-            }
-            g_wpn_obj_index.store(idx, std::memory_order_relaxed);
-        }
-    }
-    }   // fork_reload
-
+    features_gesture_tick_begin(dt);
     features_melee_hold_check();
 
     // ---- GLOBAL STAND-DOWN. States the player did not ask to gesture in AT ALL, so both features
@@ -495,7 +350,7 @@ void gesture_update(float dt) {
     // Reload runs off the same two poses the melee detector uses, so it costs no extra reads. It is
     // driven from here rather than from its own tick entry for exactly that reason.
     reload_update(poses_ok ? &pos : nullptr, poses_ok ? &hpos : nullptr);
-    #include "features/reloadvr/Gesture_ticks.inl"   // fork feature: reloadvr (reload ticks)
+    features_reload_ticks(poses_ok, hpos);
 
     // ---- MELEE ONLY from here down.
     if (!g_cfg.melee_swing) {

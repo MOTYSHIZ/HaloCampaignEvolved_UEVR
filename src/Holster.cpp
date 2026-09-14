@@ -15,7 +15,6 @@
 
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cwctype>
 #include <string>
 #include <vector>
@@ -102,7 +101,6 @@ bool s_mag_search_done = false;      // the survey ran to completion once; do no
 bool s_mag_zone_prev = false;        // fetch hand inside the mag zone (haptic edge)
 std::atomic<bool> s_mag_hand_in{false};   // ...published for Gesture's grab test (prior tick)
 
-
 // ---- PER-WEAPON MAGS. The 2026-08-27 survey settled the old blocking unknown: this game SHIPS a
 // standalone magazine StaticMesh per weapon (SM_Magnum_Magazine_Default, SM_BattleRifle_Magazine_
 // M_Default, ...) plus SM_ammo_pickup_* for the ones that load shells instead. So the survey now
@@ -114,14 +112,8 @@ struct MagCand { std::wstring lname; TrackedObject obj; int rank = 0; };
 std::vector<MagCand> s_mag_cands;
 std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; sentinel = never set
 
-#include "features/reloadvr/Holster_belt_point.inl"   // fork feature: reloadvr (belt point)
-
 API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
-    // The weapon's own magazine component first (exact, rank 4); the survey below is the fallback.
-    if (auto* nm = native_mag_mesh()) {
-        if (out_rank != nullptr) *out_rank = 4;
-        return nm;
-    }
+    if (auto* nm = features_holster_mag_mesh(out_rank)) return nm;
     std::wstring tok;
     {
         std::string k = wkey;
@@ -672,7 +664,7 @@ void holster_update(float dt) {
     // as the grenades do.
     if (g_cfg.reload_mag != 0) {
         const ReloadState rs = reload_state();
-        const Vec3 mo = mag_belt_point();
+        const Vec3 mo = features_holster_mag_belt_point({g_cfg.reload_mag_off[0], g_cfg.reload_mag_off[1], g_cfg.reload_mag_off[2]});
         // The fetch hand's distance to the belt point, published for Gesture's grab test. Gated on
         // MAG_OUT so a hand idling at the hip between reloads publishes nothing.
         bool in = false;
@@ -703,7 +695,6 @@ void holster_update(float dt) {
                 if (!wk.empty() && wk != s_mag_mesh_key) {
                     int rank = 0;
                     auto* mesh = mag_mesh_for_weapon(wk, &rank);
-                    const bool stale = rank < 4 && mag_cands_stale();   // rank 4 = the weapon's own component, no survey involved
                     // A pick that is not a real MAGAZINE gets ONE re-survey before it is accepted.
                     // The survey runs once per session, so its candidate handles die at every
                     // level transition -- the weapon's own SM_*_Magazine drops out while some
@@ -711,12 +702,8 @@ void holster_update(float dt) {
                     // (field report). Once per weapon key, so shell loaders with no magazine
                     // asset settle on their pickup after a single rebuild instead of thrashing
                     // a ~290k-object walk every tick.
-                    //
-                    // EXCEPT when the whole candidate list is dead handles: that is a level
-                    // transition, not a shell loader, and the once-per-key guard must not hold --
-                    // it is exactly how the belt mag ended up rendering as a frag grenade.
                     static std::string s_resurveyed_for;
-                    if (stale) s_resurveyed_for.clear();   // a dead list re-arms the once-per-key guard
+                    if (features_holster_mag_cands_stale(rank)) s_resurveyed_for.clear();
                     if (rank < 3 && s_resurveyed_for != wk) {
                         s_resurveyed_for = wk;
                         s_mag_cands.clear();
@@ -773,11 +760,12 @@ void holster_update(float dt) {
                 const Vec3 up0{-sp * cy, -sp * sy, cp};
                 const float rollr = std::atan2(U.x * right0.x + U.y * right0.y + U.z * right0.z,
                                                U.x * up0.x + U.y * up0.y + U.z * up0.z);
-                #include "features/reloadvr/Holster_mag_in_hand.inl"   // fork feature: reloadvr (magazine in hand)
                 holster_marker_show(m, true);
-                holster_marker_place_rot(m, place, pd, yd, rd);
+                if (!features_holster_mag_in_hand(m, gpos, hpos, pitchr, yawr, rollr)) {
+                holster_marker_place_rot(m, holster_room_to_world(gpos, hpos),
+                                         pitchr * RAD2DEG, yawr * RAD2DEG, rollr * RAD2DEG);
+                }
                 holster_marker_scale(m, (double)g_cfg.reload_mag_scale);
-                marker_render_anchor_rot(m, holster_world_to_room(place, hpos), pd, yd, rd);
             } else {
                 holster_marker_show(m, false);
                 marker_render_drop(m);
@@ -1006,6 +994,5 @@ void holster_update(float dt) {
         }
     }
 }
-
 
 } // namespace halo

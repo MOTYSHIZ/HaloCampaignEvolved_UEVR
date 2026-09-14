@@ -1,5 +1,5 @@
-// slidevr (fork feature, Experimental): the slide rack, the gesture frame helpers, the montage, slide fire, chamber and phantom, the slide copy and the slide parts. The gesture frame helpers and the reload press/co-op helpers here are shared with the manual reload.
-// Textual fragment, included by Gesture.cpp in its anonymous namespace, between the reload magazine block and the dropped magazine. Moved verbatim; not compiled on its own.
+// core reload engine (runs while reloadvr or slidevr is on): the slide rack, the gesture frame helpers, the montage, slide fire, chamber and phantom, the slide copy and the slide parts. The gesture frame helpers and the reload press/co-op helpers here are shared with the manual reload.
+// Textual fragment, included by core/reload/ReloadEngine.cpp in its anonymous namespace, after the magazine block. Moved verbatim; not compiled on its own.
 // ---- THE SLIDE RACK (slidevr). The pistol's slide is node `slidenode` of the weapon object's
 // own node block (BlamPalette publishes its world position and forward every sim tick, and
 // applies g_slide_pull to it). Here, on the game thread: the off hand's grip closing within
@@ -229,7 +229,6 @@ void slide_node_write_tick() {
     }
 }
 
-const char* state_name(ReloadState s);   // defined below; the refusal line names the reload state
 void slide_update(const Vec3& head) {
     auto release = [&](const char* why) {
         if (s_sl_held) {
@@ -298,7 +297,7 @@ void slide_update(const Vec3& head) {
     // Only the rack ends this lock, and with slidevr off nothing can rack (the gate below releases
     // the hand): release it as racked, so the pose goes forward and a seated magazine's reload goes
     // out instead of s_sl_reload_due waiting forever behind a frozen slide.
-    if (!g_cfg.slide_vr && s_sl_lock_pending) {
+    if (!reload_rack_available() && s_sl_lock_pending) {
         s_sl_rack_done = true;
         if (reload_weapon_anim_instance() == nullptr) { s_sl_lock_pending = false; s_sl_rack_done = false; s_sl_locked_back = false; }
     }
@@ -328,7 +327,7 @@ void slide_update(const Vec3& head) {
         g_slide_pull.store(s_sl_release_pull * (1.0f - t), std::memory_order_relaxed);
         if (t >= 1.0f) { s_sl_release_at = 0; g_slide_pull.store(0.0f, std::memory_order_relaxed); }
     }
-    if (!g_cfg.slide_vr || !g_slide_node_valid.load(std::memory_order_relaxed) || !slide_weapon_ok()) {
+    if (!reload_rack_available() || !g_slide_node_valid.load(std::memory_order_relaxed) || !slide_weapon_ok()) {
         release("unavailable"); return;
     }
     // THE ZONE IS AIM-HAND-RELATIVE, NOT THE NODE'S WORLD POSITION. The published node sits on
@@ -572,7 +571,7 @@ void sm_stop(API::UObject* animbp, API::UObject* mont) {
 }
 void slide_montage_tick() {
     auto* animbp = reload_weapon_anim_instance();
-    const bool usable = g_cfg.slide_montage && g_cfg.slide_vr && animbp != nullptr && slide_weapon_ok();
+    const bool usable = g_cfg.slide_montage && reload_rack_available() && animbp != nullptr && slide_weapon_ok();
     if (!usable) {
         if (s_sm_active) {
             if (auto* inst = s_sm_inst.get()) if (auto* m = s_sm_mont.get()) sm_stop(inst, m);
@@ -696,7 +695,7 @@ void slide_fire_restore() {
 void slide_fire_tick() {
     auto* animbp = reload_weapon_anim_instance();
     auto* comp = reload_weapon_default_comp();
-    const bool usable = g_cfg.slide_fire && !g_cfg.slide_copy && g_cfg.slide_vr && animbp != nullptr && comp != nullptr && slide_weapon_ok()
+    const bool usable = g_cfg.slide_fire && !g_cfg.slide_copy && reload_rack_available() && animbp != nullptr && comp != nullptr && slide_weapon_ok()
                         && s_reload == ReloadState::Idle;
     if (!usable) { if (s_sf_active) { slide_fire_restore(); if (g_cfg.slide_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDEFIRE: stopped (unavailable)"); } return; }
     auto* state = animbp->get_property_data<uint8_t>(L"FirstPersonState");
@@ -849,7 +848,7 @@ void slide_phantom_tick() {
     static long long s_key_at = 0, s_shot_at = 0;
     // Tracked only while the tracker runs (it lives in reload_update, behind reloadvr): with it
     // stopped nothing saves or loads the flags on a swap, and its datum goes stale.
-    const bool tracked = g_cfg.reload_state_id != 0 && g_cfg.reload_vr;
+    const bool tracked = g_cfg.reload_state_id != 0 && reload_manual_available();
     if (key != s_key || (tracked && s_ph_rebase)) {
         // Tracked: the flags already belong to the weapon now in hand (the tracker saved the old
         // weapon's and loaded this one's earlier in this tick); only the counter caches re-seed.
@@ -914,7 +913,7 @@ void slide_phantom_tick() {
     // weapon's counter reads 0 while it initialises and on a swap to a plasma weapon (60 -> 0 in
     // the log), and the first build fired the dry trigger in the mission's first second and froze
     // the pose under a live gun (the climbing pitch, 2026-09-07).
-    if (g_cfg.reload_vr && hidden && !s_true_empty && s_prev == 1 && cur == 0 && nowt_c - s_key_at > ms_to_ticks(2000)
+    if (reload_manual_available() && hidden && !s_true_empty && s_prev == 1 && cur == 0 && nowt_c - s_key_at > ms_to_ticks(2000)
         && s_reload == ReloadState::Idle && !s_sl_reload_due && !s_sl_pressed_early && !weapon_in_list(g_cfg.reload_skip_weapons)) {
         // The last round went out and the game is reloading: freeze the pose, mute it, show empty,
         // dead trigger. Nothing clears this but our own reload (reload_press_now) or a swap.
@@ -922,13 +921,13 @@ void slide_phantom_tick() {
         ak_mute_begin();
         reload_state_hold_begin();
         reload_anim_rate_begin();
-        if (g_cfg.coop_mask_ms > 0) blam_palette_hold_pose(g_cfg.coop_mask_ms);   // the hands too, until our gesture
+        if (g_cfg.coop_mask_ms > 0) reload_pose_hold(g_cfg.coop_mask_ms);   // the hands too, until our gesture
         if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] DRY (%s): last round fired, the game reloads underneath; pose frozen, muted, locked until our reload", coop ? "coop" : "solo");
         s_prev = cur;
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
     }
-    if (g_cfg.reload_vr && coop && !g_cfg.coop_hide && !s_true_empty && cur >= 1 && cur <= stop_at && !reserve_empty && nowt_c - s_key_at > ms_to_ticks(500)
+    if (reload_manual_available() && coop && !g_cfg.coop_hide && !s_true_empty && cur >= 1 && cur <= stop_at && !reserve_empty && nowt_c - s_key_at > ms_to_ticks(500)
         && s_reload == ReloadState::Idle && !s_sl_reload_due && !s_sl_pressed_early
         && !weapon_in_list(g_cfg.reload_skip_weapons)) {   // every weapon with a magazine, rack or not (the SMG has no rack part)
         // The dry stop: no write, the last round stays in the counter and the trigger is dead.
@@ -938,7 +937,7 @@ void slide_phantom_tick() {
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
     }
-    if (g_cfg.reload_vr && !coop && !hidden && !s_true_empty && s_prev == 1 && cur == 0 && slide_weapon_ok() && slide_chamber_ok() && slide_rack_available() && g_cfg.slide_phantom > 0) {
+    if (reload_manual_available() && !coop && !hidden && !s_true_empty && s_prev == 1 && cur == 0 && slide_weapon_ok() && slide_chamber_ok() && slide_rack_available() && g_cfg.slide_phantom > 0) {
         *r = 1;
         s_true_empty = true;
         if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: magazine empty; one phantom round held so the game does not auto-reload (trigger dead, slide back)");
@@ -988,8 +987,8 @@ void reload_press_now(const char* why) {
     }
     g_reload_hold_until.store(nowt + ms_to_ticks(net_is_coop() ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms), std::memory_order_relaxed);
     s_sl_press_at = nowt;
-    if (reload_hidden_mode()) blam_palette_hold_pose(g_cfg.reload_mask_ms);   // the hidden reload's hand hold ends here (0 releases)
-    else if (g_cfg.reload_mask_ms > 0) blam_palette_hold_pose(g_cfg.reload_mask_ms);
+    if (reload_hidden_mode()) reload_pose_hold(g_cfg.reload_mask_ms);   // the hidden reload's hand hold ends here (0 releases)
+    else if (g_cfg.reload_mask_ms > 0) reload_pose_hold(g_cfg.reload_mask_ms);
     reload_anim_rate_begin();
     reload_state_hold_begin();
     ak_mute_begin();
@@ -1498,7 +1497,7 @@ void sc_align_roots(API::UObject* src, API::UObject* copy) {
 void slide_copy_tick() {
     auto* src = reload_weapon_default_comp();
     auto* actor = fp_weapon_actor();
-    const bool usable = g_cfg.slide_copy && g_cfg.slide_vr && src != nullptr && actor != nullptr && slide_weapon_ok();
+    const bool usable = g_cfg.slide_copy && reload_rack_available() && src != nullptr && actor != nullptr && slide_weapon_ok();
     const std::string key = weapon_key();
     if (!usable || (s_sc_copy.get() != nullptr && (key != s_sc_key || s_sc_src.get() != src))) {
         sc_teardown(usable ? "weapon changed" : "unavailable");
@@ -2482,7 +2481,7 @@ bool slide_parts_mag_drop() {
 void slide_part_tick() {
     auto* src = reload_weapon_default_comp();
     auto* actor = fp_weapon_actor();
-    const bool usable = g_cfg.slide_part && g_cfg.slide_vr && src != nullptr && actor != nullptr && slide_weapon_ok();
+    const bool usable = g_cfg.slide_part && reload_rack_available() && src != nullptr && actor != nullptr && slide_weapon_ok();
     const std::string key = weapon_key();
     static int s_bind_mode = -1; static int s_shadow_mode = -1; static int s_pivot_mode = -2; static int s_mat_mode = -1; static int s_orphan_mode = -1; static int s_kids_mode = -1; static int s_ui_mode = -1;
     const bool mode_changed = (g_cfg.slide_part_hide != s_sp_mode) || (g_cfg.slide_part_bind != s_bind_mode) || ((int)g_cfg.slide_part_shadow != s_shadow_mode) || (g_cfg.slide_part_pivot != s_pivot_mode)
