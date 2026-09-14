@@ -114,45 +114,7 @@ struct MagCand { std::wstring lname; TrackedObject obj; int rank = 0; };
 std::vector<MagCand> s_mag_cands;
 std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; sentinel = never set
 
-// The belt point for the weapon in hand: a reloadmagoffw entry if one matches, the global
-// reloadmagoff otherwise. Both the rendered mag and the grab zone read this, so what you see and
-// what you reach for stay the same point.
-Vec3 mag_belt_point() {
-    Vec3 mo{g_cfg.reload_mag_off[0], g_cfg.reload_mag_off[1], g_cfg.reload_mag_off[2]};
-    const std::string key = weapon_key();
-    if (key.empty() || g_cfg.reload_mag_off_w[0] == 0) return mo;
-    std::string lk = key; for (auto& ch : lk) ch = (char)tolower((unsigned char)ch);
-    const std::string tbl = g_cfg.reload_mag_off_w;
-    size_t pos = 0;
-    while (pos <= tbl.size()) {
-        size_t comma = tbl.find(',', pos); if (comma == std::string::npos) comma = tbl.size();
-        std::string ent = tbl.substr(pos, comma - pos);
-        while (!ent.empty() && (unsigned char)ent.back()  <= ' ') ent.pop_back();
-        while (!ent.empty() && (unsigned char)ent.front() <= ' ') ent.erase(ent.begin());
-        const size_t colon = ent.find(':');
-        if (colon != std::string::npos && colon > 0) {
-            std::string name = ent.substr(0, colon);
-            for (auto& ch : name) ch = (char)tolower((unsigned char)ch);
-            if (lk.find(name) != std::string::npos) {
-                float x = mo.x, y = mo.y, z = mo.z;
-                if (sscanf_s(ent.c_str() + colon + 1, "%f/%f/%f", &x, &y, &z) == 3) mo = Vec3{x, y, z};
-                return mo;
-            }
-        }
-        if (comma >= tbl.size()) break;
-        pos = comma + 1;
-    }
-    return mo;
-}
-
-// The survey HAS candidates and every one is a dead handle -- a level transition recycled them.
-// The caller must re-survey on that, or the fallback chain bottoms out at the frag mesh and the
-// belt mag renders as a grenade (field report, 2026-08-31). An empty list is "never surveyed".
-bool mag_cands_stale() {
-    if (s_mag_cands.empty()) return false;
-    for (auto& cnd : s_mag_cands) if (cnd.obj.get() != nullptr) return false;
-    return true;
-}
+#include "features/reloadvr/Holster_belt_point.inl"   // fork feature: reloadvr (belt point)
 
 API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
     // The weapon's own magazine component first (exact, rank 4); the survey below is the fallback.
@@ -893,44 +855,7 @@ void holster_update(float dt) {
                 const Vec3 up0{-sp * cy, -sp * sy, cp};
                 const float rollr = std::atan2(U.x * right0.x + U.y * right0.y + U.z * right0.z,
                                                U.x * up0.x + U.y * up0.y + U.z * up0.z);
-                Vec3  place = holster_room_to_world(gpos, hpos);
-                float pd = pitchr * RAD2DEG, yd = yawr * RAD2DEG, rd = rollr * RAD2DEG;
-                // The in-hand tuning (reloadhandoff / reloadhandrot), in the hand's frame: UE local
-                // axes are x forward, y right, z up, so (right, up, forward) maps to (z, x, y).
-                {
-                    const Quat qh = rotator_to_quat(pd, yd, rd);
-                    const Vec3 lo{g_cfg.reload_hand_off[2] * 100.0f, g_cfg.reload_hand_off[0] * 100.0f, g_cfg.reload_hand_off[1] * 100.0f};
-                    const Vec3 wo = quat_rotate(qh, lo);
-                    place = Vec3{place.x + wo.x, place.y + wo.y, place.z + wo.z};
-                    const Quat qr = quat_mul(qh, rotator_to_quat(g_cfg.reload_hand_rot[0], g_cfg.reload_hand_rot[1], g_cfg.reload_hand_rot[2]));
-                    quat_to_rotator(qr.x, qr.y, qr.z, qr.w, &pd, &yd, &rd);
-                }
-                // THE SLIDE (Gesture publishes it): from the hand's pose to the well's, eased.
-                // Rotation goes through a normalised quaternion blend so the mag turns the short
-                // way into the seated orientation instead of spinning through a rotator wrap.
-                const float st = g_reload_slide_t.load(std::memory_order_relaxed);
-                if (st >= 0.0f) {
-                    const float e = st * st * (3.0f - 2.0f * st);   // smoothstep
-                    const Vec3 tgt{g_reload_slide_x.load(std::memory_order_relaxed),
-                                   g_reload_slide_y.load(std::memory_order_relaxed),
-                                   g_reload_slide_z.load(std::memory_order_relaxed)};
-                    place = Vec3{place.x + (tgt.x - place.x) * e,
-                                 place.y + (tgt.y - place.y) * e,
-                                 place.z + (tgt.z - place.z) * e};
-                    if (g_reload_slide_rot_valid.load(std::memory_order_relaxed)) {
-                        const Quat qa = rotator_to_quat(pd, yd, rd);
-                        Quat qb = rotator_to_quat(g_reload_slide_pitch.load(std::memory_order_relaxed),
-                                                  g_reload_slide_yaw.load(std::memory_order_relaxed),
-                                                  g_reload_slide_roll.load(std::memory_order_relaxed));
-                        float d = qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w;
-                        if (d < 0.0f) { qb.x = -qb.x; qb.y = -qb.y; qb.z = -qb.z; qb.w = -qb.w; }
-                        Quat q{qa.x + (qb.x - qa.x) * e, qa.y + (qb.y - qa.y) * e,
-                               qa.z + (qb.z - qa.z) * e, qa.w + (qb.w - qa.w) * e};
-                        const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-                        if (n > 1e-6f) { q.x /= n; q.y /= n; q.z /= n; q.w /= n; }
-                        quat_to_rotator(q.x, q.y, q.z, q.w, &pd, &yd, &rd);
-                    }
-                }
+                #include "features/reloadvr/Holster_mag_in_hand.inl"   // fork feature: reloadvr (magazine in hand)
                 holster_marker_show(m, true);
                 holster_marker_place_rot(m, place, pd, yd, rd);
                 holster_marker_scale(m, (double)g_cfg.reload_mag_scale);
