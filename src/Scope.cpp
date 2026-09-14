@@ -2947,6 +2947,14 @@ void scope_frame_end(uint32_t tick) {
             g_scope_active = false;
         }
         hide_pane_if_shown();
+        // DISARM THE SECOND SCENE RENDER HERE TOO. The disarm in scope_notice_ray() sits below its
+        // `!scope_enabled` early return and only runs on ticks that produce a ray, so it misses the
+        // closes that happen HERE: scope switched off while open, the kill switch (update() returns
+        // before the ray site, so the ray goes stale), and seats, cutscenes and death. Hiding the
+        // pane does not stop the capture -- it is a sibling under the socket -- so each of those
+        // left a full per-frame scene capture running for the rest of the mission, which is the
+        // 0.4 fps regression again. On-change only, so a closed scope still costs nothing per tick.
+        set_capture_every_frame(false);
     }
 }
 
