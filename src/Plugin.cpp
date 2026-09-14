@@ -13445,22 +13445,7 @@ public:
         // release and its synthetic press share one poll. See holster_note_buttons.
         holster_note_buttons(state->Gamepad.wButtons);
         #include "features/forcetube/Plugin_fire_note.inl"   // fork feature: forcetube (fire note)
-        // ---- THE GRENADE BUTTON, BY ACTION. UEVR says whether the left hand's A-face button is
-        // down; the pad code it produced is stripped so the gesture is the only path to a throw.
-        // Not in menus, where that button navigates.
-        if (g_cfg.grenade_swallow != 0 && !g_in_menu.load(std::memory_order_relaxed)) {
-            static decltype(API::VR::get_action_handle("")) s_a = nullptr;
-            static bool s_tried = false;
-            if (s_a == nullptr && !s_tried) { s_tried = true; s_a = API::VR::get_action_handle("/actions/default/in/AButtonLeft");
-                API::get()->log_info("[Halo-CampE-UEVR] GREN: AButtonLeft action %s", s_a ? "resolved" : "NOT found"); }
-            static ULONGLONG s_gren_at = 0; static bool s_gren_down = false;
-            { const ULONGLONG t = GetTickCount64(); if (s_a != nullptr && t - s_gren_at >= 4) { s_gren_at = t; s_gren_down = API::VR::is_action_active(s_a, API::VR::get_left_joystick_source()); } }
-            if (s_a != nullptr && s_gren_down) {
-                static bool s_said = false;
-                if (!s_said && g_cfg.map_btn_log) { s_said = true; API::get()->log_info("[Halo-CampE-UEVR] GREN: left A-face down, raw pad 0x%04X, stripping 0x%04X", (unsigned)state->Gamepad.wButtons, (unsigned)g_cfg.grenade_code); }
-                state->Gamepad.wButtons &= (WORD)~(WORD)g_cfg.grenade_code;
-            }
-        }
+        #include "features/grenadeswallow/Plugin_grenade_button.inl"   // fork feature: grenadeswallow (grenade button)
 
         // ---- GRIP SWALLOW, BEFORE THE REBIND. The position is the whole point.
         //
