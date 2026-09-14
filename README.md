@@ -31,8 +31,12 @@ appropriately.
 - **Waypoints in the world** — objective markers sit out in the world in the direction of the
   objective instead of sliding around with your aim, and they're compositor-drawn too, so a wall
   can't hide them.
-- **Two-handed aiming** — bring your off hand to the barrel and squeeze its grip, and your aim
-  steadies onto the line between your hands. A "Grip" prompt shows when your hand is in reach.
+- **Two-handed aiming** — bring your off hand to the weapon's front handle and squeeze its grip: the
+  gun is held at both points and steers like a rifle, including weapons whose handle sits off to the
+  side of the barrel. A "Grip" prompt shows when your hand is in reach.
+- **Aim follows the barrel** — shots go where the weapon's barrel actually points, measured from the
+  weapon itself, so there is no aim calibration to do. Most weapons ship with their barrel
+  pre-measured.
 - **Weapon scope** — while you're gripping two-handed (pistols too), the left trigger raises a
   magnified lens on the gun, aimed down the ray your shots actually follow. Without the grip, the
   same trigger throws a grenade. Halo's flat zoom (which hides the weapon and masks your view) stays
@@ -49,9 +53,9 @@ appropriately.
 - **Cutscenes and sound that work in VR** — pre-rendered cutscenes play on a single flat screen in
   front of you (size adjustable), and positional audio follows your head rather than your gun.
 - **Pose-match calibration** — optional per-hardware tuning: line your controller up with the visual
-  weapon to calibrate grip, align the aim ray and place the scope lens, all persisting across
-  sessions, with per-weapon adjustments on top (see [Custom calibration](#custom-calibration)). The
-  shipped defaults work without it.
+  weapon to calibrate grip, record where a weapon's front handle is, and place the scope lens — all
+  armed from the in-game menu and persisting across sessions, with per-weapon adjustments on top
+  (see [Custom calibration](#custom-calibration)). The shipped defaults work without it.
 - **In-game settings, and settings that survive updates** — a settings menu in the UEVR overlay
   (Script UI) edits your personal `halo_vr_user.cfg` live, no restart; updates never touch that
   file. Calibration can be run from the menu too — no keyboard needed.
@@ -186,7 +190,7 @@ first time the layer loads into the game.
 | Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
 | Right grip | Reach over your shoulder and squeeze to switch weapons |
 | Right A | Jump |
-| Right Y | Switch weapon |
+| Left Y | Switch weapon — with a controller near your head, **pause** instead |
 | Left X | Equipment / overshield |
 | Right B | Reload (in menus: **Back**) |
 
@@ -313,29 +317,33 @@ The shipped calibration was measured on **Quest Touch controllers**, so it encod
 of hardware and one particular way of holding it. It's a starting point, not a universal fit — try
 the mod as-is first, and expect to want this section if you're on different controllers.
 
-If the visual weapon doesn't sit right in your hand, or shots don't land where you're pointing, these
-calibrations let you match the mod to your own hardware and grip — from the keyboard, or without one
-from the **Halo VR Calibration** panel (see [Configuration](#configuration)). All of them run
-in-mission and **persist across sessions** once set.
+If the visual weapon doesn't sit right in your hand, these calibrations let you match the mod to your
+own hardware and grip. They run in-mission, **persist across sessions** once set, and are armed from
+the **Halo VR Calibration** panel (see [Configuration](#configuration)): arm one, close the menu, line
+up, then **right trigger saves & finishes** or **left trigger saves & re-arms**. Nothing calibrates
+from the keyboard alone, so a stray key press can't overwrite your fit.
 
-| Key | Calibration | Workflow |
+| Panel button | Calibration | Workflow |
 |---|---|---|
-| `End` | **Pose-match** (grip) | Hold the key, physically line your controller up with the on-screen weapon, then release. This aligns the weapon's grip to how you actually hold your controller. |
-| `Page Down` | **Aim ray** | Hold the key, point at the frozen reticle, then release. This aligns the direction shots travel with where the weapon points. The magnum was used in the original calibration. With both eyes open, I lined up the magnum sight picture with the floating reticle's center. |
-| `Delete` | **Scope placement** | Raise the scope, hold the key, move the lens to where you want it on the gun, then release. To store the result for the weapon in your hands only, arm **per-weapon scope trim** in the Calibration panel first. |
-| `Insert` | **Per-weapon grip** | The same gesture as `End`, but it stores an adjustment for the weapon in your hands and leaves the global fit alone. `Insert` is also UEVR's own overlay key, so if the overlay opening gets in the way, move this calibration to another key with `wpncalibkey` (the catalog lists the key codes). |
+| **Calibrate weapon pose** | **Pose-match** (grip) | Line your controller up with the frozen on-screen weapon, then save. This aligns the weapon's grip to how you actually hold your controller. `End` works in place of the trigger while this is armed. |
+| **Calibrate weapon pose — THIS WEAPON only** | **Per-weapon pose** | The same gesture, stored as an adjustment for the weapon in your hands. Every other weapon keeps the global fit. |
+| **Calibrate weapon grip (off-centre handles)** | **Front handle** | Click it and the weapon freezes. Put your support hand where that weapon's front handle really is, then click **SAVE grip**. Only the two-handed hold changes. |
+| **Arm per-weapon scope trim** / **Arm BASE scope calibration** | **Scope placement** | The scope pane stays visible while either is armed. Hold `Delete`, move the lens to where you want it on the gun, then release — stored for the weapon in your hands, or for every weapon. |
 
-Do the pose-match first (it sets where the weapon sits), then the aim-ray calibration (it sets where
-that weapon shoots). If a calibration ever feels off, just repeat it — the latest one wins.
+**Aim needs no calibration.** Shots follow the weapon's own barrel. If a particular weapon still
+shoots off its barrel for you, hold it steady where it should point and tap `Page Down` to capture
+that weapon's barrel line; it's remembered from then on.
+
+Do the weapon pose first — it sets where the weapon sits. If a calibration ever feels off, just repeat
+it — the latest one wins.
 
 **Reset your play area first, and calibrate standing where you normally play.** This matters only if
 you've turned the head leash off (`hmdleash=0`); with the default leash it's automatic. Unleashed,
 your eye can be metres from where the game thinks you are, and the mod bends your aim to compensate —
 so calibrating from over there measures your grip through that correction instead of measuring your
 grip. Recentre, calibrate from your neutral position, and the result is exact and stays correct
-wherever you wander afterwards. If you skip this, aim will settle for a moment after you release
-`Page Down` and the fit will be a little noisier; nothing is broken, it's just not as good as it
-could be.
+wherever you wander afterwards. If you skip this, the fit will be a little noisier; nothing is
+broken, it's just not as good as it could be.
 
 **One global fit, adjusted per weapon.** The global calibration is what every weapon starts from,
 which is why the original calibration was done on the magnum: a middle-of-the-road result beats one
@@ -347,8 +355,8 @@ wrong, hold that weapon and store an adjustment for it alone with the per-weapon
 Calibrations write to two files next to the config:
 
 ```
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg      (the global fit)
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg    (per-weapon adjustments)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg      (the global fit, captured barrel lines)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg    (per-weapon adjustments, front handles)
 ```
 
 They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: updates
@@ -378,8 +386,6 @@ in the profile that are specific to *you* — everything else can be re-download
      something to recover. Though this doesn't always appear to work. Any feedback on reliable fixes are welcome.
 - **Buttons mapped wrong?** You're on the OpenVR runtime. See [Runtime](#runtime-use-openxr) for the
   one-line fix.
-- **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A
-  controller binding is coming.
 - **Your hands are invisible until you pick up your first weapon.** Motion aim and turning work
   normally while you're unarmed — but you won't see arms. The game T-poses the empty first-person
   arms, because on a flat screen holding nothing means there's simply no viewmodel to draw; in VR
@@ -389,8 +395,6 @@ in the profile that are specific to *you* — everything else can be re-download
   Work in progress.
 - **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
   weapons, then toggle the scope off and on again. Also work in progress.
-- **The Sentinel Beam is held like an ordinary rifle.** Some weapons want the support hand
-  somewhere else; a per-weapon offset for the off hand in two-handed aiming is planned.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
