@@ -32,6 +32,30 @@ struct TwoHandTuning {
     float minimum_agreement = -1.0f;
     float full_agreement    = -1.0f;
 
+    // ---- MINIMUM BASELINE. How far apart the hands must be before their line means anything.
+    //
+    // effective_basis() takes normalized(support - aim) as the gun's forward, and the ANGULAR
+    // sensitivity of that is 1/separation: at 20 cm apart every centimetre of hand movement swings
+    // the aim 2.9 degrees, at 5 cm it is 11.5, at 2 cm it is 29. Below a few centimetres the
+    // direction is tracking noise with a unit length.
+    //
+    // THE EXISTING GUARD CANNOT CATCH THIS and it looks like it should, which is why this is
+    // spelled out: `length_squared(two_hand_forward) < 0.8f` runs on the ALREADY NORMALIZED vector,
+    // so it is 1.0 or 0.0 and only ever fires for exact coincidence (normalized() returns zero
+    // below 1e-8 squared -- a tenth of a millimetre). Everything between that and a usable
+    // separation passed straight through.
+    //
+    // Field report that found it, 2026-09-09: with a per-weapon grip offset recorded on the
+    // sentinel beam (26.9 cm off-axis, captured at a 20.5 cm reach), moving the support hand right
+    // of the primary hand slid the CORRECTED point through the aim grip and the weapon spun. The
+    // offset made a pre-existing hole reachable rather than creating one -- a bare hand crossing
+    // over does the same thing.
+    //
+    // A BAND, not a cliff: full authority at twice the minimum, fading to none at it, through the
+    // same smoothstep the agreement gate uses. A hard cut here would pop the weapon at the
+    // threshold, which is the failure the agreement band was widened to avoid.
+    float min_baseline_m = 0.10f;
+
     // Seconds for the influence to fade fully in or out.
     float blend_seconds = 0.15f;
 
@@ -108,6 +132,19 @@ struct TwoHandState {
     float along_m   = 0.0f;     // distance along the aim ray from the aim grip
     float lateral_m = 0.0f;     // perpendicular distance off that ray
     bool  measured  = false;    // false when the poses were unusable, so 0,0 is not read as "here"
+
+    // ---- THE SEPARATION, AND THE AUTHORITY IT EARNED -----------------------------------------
+    //
+    // Computed in update() rather than inside effective_basis() so it can be REPORTED, not just
+    // applied. A weapon that yaws when the hands cross is the symptom of this number moving, and
+    // without it the only evidence is a player saying "it jitters" -- which cannot distinguish the
+    // band doing its job from the band being the cause.
+    //
+    // baseline_m is the separation AFTER any per-weapon grip offset, because that is the line
+    // effective_basis actually normalises; the raw hand distance can look perfectly healthy while
+    // the corrected one passes through zero.
+    float baseline_m = 0.0f;
+    float baseline_w = 1.0f;    // 0..1 from min_baseline_m..2x, via the same smoothstep
 };
 
 // The hold, as an object so its state is visible and testable rather than ambient.

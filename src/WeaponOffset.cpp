@@ -19,9 +19,29 @@ static char s_current_class[128] = {0};
 namespace {
 
 // The calibrated values exactly as the FILE supplies them, before any delta.
+//
+// BOTH TRIMS, and that is the whole fix for "the per-weapon calibration does nothing" (2026-09-10).
+//
+// The rig has two independent grip trims and rig_mode picks which one it composes from: mode 2
+// uses the FITTED pair (grip_deg / off_*), mode 3 -- DIRECT DRIVE, and the shipped default --
+// builds from rig_dir_grip_* and never consults the fitted one at all. This file only ever wrote
+// the fitted pair, so under the mode almost everyone is running, every per-weapon delta was
+// measured, stored in halo_vr_weapons.cfg, and then applied to numbers nothing read.
+//
+// The capture was innocent and looked it: the log printed a correct-looking delta with all three
+// rotation axes populated, which is why this read as "rotations are not being captured" rather
+// than as an apply-side fault.
+//
+// The solve writes the two trims in lockstep (a capture leaves grip == dirgrip; see any
+// halo_vr_calib.cfg), so ONE delta is correct for both and no mode-dependent branch is needed
+// here. Carrying both bases rather than assuming they agree is what keeps that true if they ever
+// diverge -- a delta must be differenced from, and added to, the same base. That is the scope
+// pane's -88.7 degree lesson, in a second place.
 struct Base {
     float grip = 0.0f, grip_yaw = 0.0f, grip_roll = 0.0f;
     float off_x = 0.0f, off_y = 0.0f, off_z = 0.0f;
+    float dir_grip = 0.0f, dir_grip_yaw = 0.0f, dir_grip_roll = 0.0f;
+    float dir_off_x = 0.0f, dir_off_y = 0.0f, dir_off_z = 0.0f;
     bool  valid = false;
 };
 Base s_base;
@@ -42,6 +62,14 @@ void publish_base() {
     g_cfg.wpn_base_off_x     = s_base.off_x;
     g_cfg.wpn_base_off_y     = s_base.off_y;
     g_cfg.wpn_base_off_z     = s_base.off_z;
+    // The direct trim's base, so write_calib_file() round-trips the calibration rather than the
+    // calibration plus the held weapon's delta. See Config::wpn_base_dir_grip.
+    g_cfg.wpn_base_dir_grip      = s_base.dir_grip;
+    g_cfg.wpn_base_dir_grip_yaw  = s_base.dir_grip_yaw;
+    g_cfg.wpn_base_dir_grip_roll = s_base.dir_grip_roll;
+    g_cfg.wpn_base_dir_off_x     = s_base.dir_off_x;
+    g_cfg.wpn_base_dir_off_y     = s_base.dir_off_y;
+    g_cfg.wpn_base_dir_off_z     = s_base.dir_off_z;
 }
 
 } // namespace
@@ -52,6 +80,16 @@ void weapon_offset_update() {
             g_cfg.grip_deg = s_base.grip;   g_cfg.grip_yaw = s_base.grip_yaw;
             g_cfg.grip_roll = s_base.grip_roll;
             g_cfg.off_x = s_base.off_x; g_cfg.off_y = s_base.off_y; g_cfg.off_z = s_base.off_z;
+            // The direct trim too, or switching wpnoffsets OFF would strand the last weapon's
+            // delta in the numbers rig_mode 3 actually composes from -- leaving the feature
+            // "disabled" and still moving the gun, which is the worst state a kill switch can
+            // produce.
+            g_cfg.rig_dir_grip_deg  = s_base.dir_grip;
+            g_cfg.rig_dir_grip_yaw  = s_base.dir_grip_yaw;
+            g_cfg.rig_dir_grip_roll = s_base.dir_grip_roll;
+            g_cfg.rig_dir_off_x     = s_base.dir_off_x;
+            g_cfg.rig_dir_off_y     = s_base.dir_off_y;
+            g_cfg.rig_dir_off_z     = s_base.dir_off_z;
             s_base.valid = false;
             s_have_applied = false;
             s_last_weapon.clear();
@@ -79,6 +117,12 @@ void weapon_offset_update() {
         s_base.off_x     = g_cfg.off_x;
         s_base.off_y     = g_cfg.off_y;
         s_base.off_z     = g_cfg.off_z;
+        s_base.dir_grip      = g_cfg.rig_dir_grip_deg;
+        s_base.dir_grip_yaw  = g_cfg.rig_dir_grip_yaw;
+        s_base.dir_grip_roll = g_cfg.rig_dir_grip_roll;
+        s_base.dir_off_x     = g_cfg.rig_dir_off_x;
+        s_base.dir_off_y     = g_cfg.rig_dir_off_y;
+        s_base.dir_off_z     = g_cfg.rig_dir_off_z;
         s_base.valid     = true;
         s_have_applied   = false;
         publish_base();
@@ -123,6 +167,14 @@ void weapon_offset_update() {
     g_cfg.off_x     = s_base.off_x;
     g_cfg.off_y     = s_base.off_y;
     g_cfg.off_z     = s_base.off_z;
+    // The DIRECT trim gets the identical treatment, assignment included -- rig_mode 3 reads these
+    // and nothing else, so leaving them out is what made a per-weapon capture inert.
+    g_cfg.rig_dir_grip_deg  = s_base.dir_grip;
+    g_cfg.rig_dir_grip_yaw  = s_base.dir_grip_yaw;
+    g_cfg.rig_dir_grip_roll = s_base.dir_grip_roll;
+    g_cfg.rig_dir_off_x     = s_base.dir_off_x;
+    g_cfg.rig_dir_off_y     = s_base.dir_off_y;
+    g_cfg.rig_dir_off_z     = s_base.dir_off_z;
 
     if (hit != nullptr) {
         g_cfg.grip_deg  += hit->d_grip;
@@ -133,6 +185,12 @@ void weapon_offset_update() {
         g_cfg.off_x     += hit->d_x;
         g_cfg.off_y     += hit->d_y;
         g_cfg.off_z     += hit->d_z;
+        g_cfg.rig_dir_grip_deg += hit->d_grip;
+        g_cfg.rig_dir_grip_yaw += hit->d_grip_yaw;
+        if (g_cfg.wpn_roll) g_cfg.rig_dir_grip_roll += hit->d_grip_roll;
+        g_cfg.rig_dir_off_x    += hit->d_x;
+        g_cfg.rig_dir_off_y    += hit->d_y;
+        g_cfg.rig_dir_off_z    += hit->d_z;
         s_applied = *hit;
         s_have_applied = true;
     } else {
@@ -179,6 +237,10 @@ void weapon_offset_adopt_solve() {
             g_cfg.wpn[i].d_x = 0.0f; g_cfg.wpn[i].d_y = 0.0f; g_cfg.wpn[i].d_z = 0.0f;
             g_cfg.wpn[i].d_grip = 0.0f; g_cfg.wpn[i].d_grip_yaw = 0.0f;
             g_cfg.wpn[i].d_grip_roll = 0.0f;
+            // PERSIST THE ZERO even when the delta was a shipped baseline: the writer keeps only the
+            // player's entries, and without this the shipped delta would come straight back on the
+            // next reload and the weapon End just made the baseline would move again.
+            g_cfg.wpn[i].captured = true;
             API::get()->log_info("[Halo-CampE-UEVR] END: '%s' is the baseline now, delta cleared",
                                  g_cfg.wpn[i].match);
             break;
@@ -193,6 +255,12 @@ void weapon_offset_adopt_solve() {
     s_base.off_x     = g_cfg.off_x;
     s_base.off_y     = g_cfg.off_y;
     s_base.off_z     = g_cfg.off_z;
+    s_base.dir_grip      = g_cfg.rig_dir_grip_deg;
+    s_base.dir_grip_yaw  = g_cfg.rig_dir_grip_yaw;
+    s_base.dir_grip_roll = g_cfg.rig_dir_grip_roll;
+    s_base.dir_off_x     = g_cfg.rig_dir_off_x;
+    s_base.dir_off_y     = g_cfg.rig_dir_off_y;
+    s_base.dir_off_z     = g_cfg.rig_dir_off_z;
     publish_base();
 
     // The file is about to receive this, so the next reload reads back the same numbers and the

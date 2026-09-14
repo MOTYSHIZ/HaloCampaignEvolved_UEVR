@@ -249,6 +249,12 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
 // and it cancels exactly, so the hold would do nothing at all. The aim calibration is worse still
 // -- it PERSISTS that pair to disk, so one hold live at the release edge bakes a two-hand offset
 // into every future one-handed session.
+// The controller-frame aim correction: q_src RIGHT-multiplied by Config::aim_fix (identity when
+// aim_fix_valid is false, i.e. no behaviour change by default). Applied to the controller pose
+// before its forward is taken, so it rolls with the wrist. The lane-independent seam every aim
+// path routes through; see the definition in MotionAimControl.cpp for why it is a right-multiply.
+Quat apply_aim_fix(const Quat& q_src);
+
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override = -1,
                         bool allow_two_hand = true);
 

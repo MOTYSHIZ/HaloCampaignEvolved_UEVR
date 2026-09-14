@@ -38,6 +38,11 @@ struct WeaponAdjust {
     char  match[64] = "";      // substring of the weapon actor class, e.g. "AssaultRifle"
     float d_x = 0.0f, d_y = 0.0f, d_z = 0.0f;              // centimetres
     float d_grip = 0.0f, d_grip_yaw = 0.0f, d_grip_roll = 0.0f;  // degrees
+    // True when this entry is the PLAYER's -- parsed from the capture file, or produced by a
+    // capture -- rather than a shipped baseline from halo_vr.cfg. Only these are written back, the
+    // same rule WeaponFix::captured already enforces: a copied baseline outlives the value it was
+    // copied from, so a release that improves a shipped pose never reaches the player who has one.
+    bool  captured = false;
 };
 constexpr int kMaxWeaponAdjust = 24;
 
@@ -52,6 +57,46 @@ struct ScopeAdjust {
     float d_rot_p = 0.0f, d_rot_y = 0.0f, d_rot_r = 0.0f;   // degrees
 };
 constexpr int kMaxScopeAdjust = 24;
+
+// One per-weapon SUPPORT-HAND GRIP OFFSET for two-handed aiming.
+//
+// WHAT IT FIXES. The two-hand hold assumes the support hand goes ON the barrel: the grab zone is a
+// cylinder along the aim ray, and the aim direction is the hand-to-hand line. Both are right for a
+// rifle and wrong for anything whose front handle sits off that axis -- a rocket launcher, a
+// sentinel beam. Such a weapon fails to latch where it is actually held, and if it does latch the
+// gun points along the hand-to-hand line rather than down its own barrel.
+//
+// THE SECOND HALF IS THE ONE THAT SURPRISES PEOPLE. `along` does not cancel the skew, it SCALES it:
+// the aim error is atan(lateral / along), so a 10 cm handle gripped 40 cm down the barrel points
+// the weapon 14 degrees off. Nothing damps it either -- the agreement band ships fully open
+// (minimum_agreement = full_agreement = -1, and smoothstep returns 1.0 for any dot product), so a
+// latched hold hands the hand-to-hand line straight to the aim at full authority.
+//
+// SO THE OFFSET IS SUBTRACTED, NOT CLAMPED. Removing the handle's REST offset reconstructs where
+// the hand would sit on an equivalent rifle: at rest the weapon points down its barrel, and moving
+// the support hand still steers it by exactly the angle a rifle would give. Steering is preserved;
+// only the baseline it is measured from moves onto the handle.
+//
+// FRAME AND UNITS: the GUN's frame, game centimetres -- the same measurement TwoHandZoneMeas
+// carries, because that is the only frame in which "the handle is 10 cm to the left" is a fixed
+// property of the weapon rather than of how you are holding it.
+struct WeaponGrip {
+    char  match[64] = "";    // substring of the weapon actor class, e.g. "FP_RocketLauncher"
+    float off_y = 0.0f;      // lateral, gun frame, game cm
+    float off_z = 0.0f;
+    // WHERE ALONG THE BARREL IT WAS CAPTURED. Recorded, deliberately NOT applied.
+    //
+    // `along` is a permitted RANGE (zone_min_along_m..zone_max_along_m), not a point: you may grip
+    // anywhere down the barrel. Constraining it to the captured distance would narrow the grip
+    // window for no benefit and would make a capture taken at an unusual reach permanently harder
+    // to satisfy. It is here so a log line can say what the capture actually saw.
+    float at_x  = 0.0f;
+    // Player capture, or a shipped baseline? Same load-bearing reason as WeaponFix::captured: the
+    // writer rewrites its file IN FULL, so without this the first capture would copy the shipped
+    // baseline into the player's file, where it would outlive the value it was copied from.
+    bool  captured = false;
+};
+constexpr int kMaxWeaponGrip = 24;
 
 // One per-weapon RIGID DELTA for the PALETTE weapon carry (src\palettearm\PaletteArm.cpp).
 //
@@ -120,6 +165,10 @@ constexpr int kHandFixSchema = 1;
 // can pass weapon_offset_current_class() -- a pointer read -- rather than paying for reflection.
 // Returns nullptr when nothing matches.
 const WeaponFix* weapon_fix_for(const char* class_name);
+
+// The held weapon's support-hand grip offset, or nullptr for "no entry -- behave as before".
+// Returns nullptr when gripoffsets is off, so every consumer gets the switch for free.
+const WeaponGrip* weapon_grip_for(const char* class_name);
 
 struct Config {
     bool  enabled      = true;
@@ -242,6 +291,32 @@ struct Config {
     // once, done. Measure first with aimrolllog -- if BOTH aim and grip yaw move with roll, the
     // coupling is upstream of this choice and switching sources will not help.
     int   aim_src = 0;
+
+    // ---- SHOT-POINT AIM (shotaim): derive aim from the WEAPON, not the controller pose ----------
+    // 1 = ON, the ship default since 2026-09-13 (canonized from the tuned profile, which ran it as a
+    // dev override). 0 = OFF. The controller-aim-pose + calibration path is UNCHANGED and remains
+    // the ONLY path when no weapon is equipped -- unarmed play, and the future third-person /
+    // vehicle aim-split features that have no weapon to read from. This is an ADDITIVE, weapon-only
+    // source layered on top, never a replacement for that path.
+    //
+    // 1 = when a weapon IS equipped, take the aim from its authored muzzle marker (fx_muzzleflash)
+    // on the weapon's own skeletal mesh: the shot point becomes the real barrel, so the reticle,
+    // the convergence and the scope all describe a ray leaving the muzzle you see. The selection
+    // cascades (logged via shotaimlog): marker resolved -> shot point; weapon but no marker ->
+    // grip+offset; no weapon -> the controller path above.
+    int   shot_aim = 1;
+
+    // Direction source for shot-point aim. 0 = the barrel-lock-derived direction (well-conditioned,
+    // and already proven to align with where shots actually go). 1 = the barrel's OWN direction:
+    // the per-weapon bore frozen by Page Down (or baked, see kBakedBores in Rig.cpp), falling back
+    // to the live muzzle marker. The ship default since 2026-09-13, canonized with shot_aim above;
+    // still A/B-able live.
+    int   shot_aim_dir = 1;
+
+    // SHOTPOINT dev readout: log the marker resolution + world position every N ticks, 0 = off.
+    // Dev builds only. Confirms the in-plugin socket read live and characterises the marker, so the
+    // aim injection and the direction tunable can be designed from measurement rather than guess.
+    int   shot_aim_log = 0;
 
     // AIMROLL diagnostic: log the roll->aim coupling every N calls, 0 = off. Dev builds only.
     int   aim_roll_log = 0;
@@ -446,8 +521,11 @@ struct Config {
     // view and restores it when gameplay returns.
     //
     // MODES -- what "flatten" means. The movies are PRE-RENDERED MP4s (Content\Movies\
-    // CinematicsPreRenders) drawn by the engine's NATIVE fullscreen movie player, outside the
-    // per-eye 3D render -- which is why they double in stereo and why no in-world fix exists.
+    // CinematicsPreRenders). CORRECTED 2026-09-08 by an eye dump: they are NOT drawn outside
+    // the per-eye render. Each eye image carries one copy, composited in screen space at the
+    // same pixel coordinates in both views, and the doubling is the headset's asymmetric FOV
+    // declaring those identical pixels 30 deg apart. The fix that follows from that lives in
+    // cutscene_mono (mode 5, via the API layer); the two modes below predate it.
     //   1 = UEVR's 2D SCREEN MODE (VR_2DScreenMode). THE DEFAULT -- the community-preferred
     //       behaviour. CAVEAT, field-tested: over SteamVR's OpenXR runtime the screen never
     //       composites in-headset (SteamVR drops UEVR's eye-visibility quad layers; they DO
@@ -564,6 +642,13 @@ struct Config {
     // while orientation kept flipping. This is the other half.
     // SHIPS ON (2026-08-23), together with rig_socket below -- they are two halves of one fix and
     // splitting them was an error on our side, not his design.
+    //
+    // RIG MODE 2 ONLY. Direct drive (rigmode=3, the default) never cancelled the socket's rotation
+    // and should not: it drives the MESH and keeps that rotation on the weapon, which is also where
+    // the stock per-weapon hold, recoil and sway arrive (measured ~17 deg on 2026-09-13, not the few
+    // degrees above). The END solve must therefore fit mode 3 against the mesh, and until 2026-09-13
+    // it did not -- every mode-3 calibration snapped the weapon's rotation by the socket's at
+    // release. See the release solve in Plugin.cpp.
     bool  rig_sock_rot = true;
     // Cancel the MEASURED weapon-to-component separation instead of the pinned piv_* constant.
     // The weapon is socketed onto the rig mesh, so that separation is the only term standing
@@ -860,6 +945,18 @@ struct Config {
     float aim_off_yaw   = 0.0f;
     float aim_off_pitch = 0.0f;
     bool  aim_off_valid = false;
+
+    // Controller-frame AIM correction (quaternion x,y,z,w), applied by apply_aim_fix() as a RIGHT
+    // multiply on the controller pose -- so it lives in the controller's own frame and rolls with
+    // the wrist, exactly as the rendered gun does. Identity (default) = no correction. This is the
+    // LANE-INDEPENDENT seam: the loop, the direct write and the weapon publisher all take
+    // controller x aim_fix, so a future producer (the per-weapon bore measurement, or a quaternion
+    // Page Down) corrects every path at once. Unlike aim_off (a WORLD yaw/pitch delta, which a
+    // wrist roll sweeps off the barrel by up to ~8 deg), a controller-frame quaternion is
+    // roll-invariant. Name/(x,y,z,w) layout match the calib file's `aimfix` line for palette-lane
+    // interop. See docs\BLAM_AIM_FINDINGS.md.
+    float aim_fix[4]   = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool  aim_fix_valid = false;
 
     // ---- THE CALIBRATION FRAME ---------------------------------------------------------------
     // Both persisted yaw calibrations -- `aimoffyaw` and `gripyaw` -- are measured against the yaw
@@ -2040,6 +2137,12 @@ struct Config {
     float dpad_head_cm    = 18.0f;   // hand-to-head distance that ARMS the shift
     float dpad_head_hyst_cm = 8.0f;  // extra distance before it releases, so it cannot chatter
     int   dpad_head_dwell_ms = 120;  // how long the hand must stay there before it commits
+    // PAUSE BY HEAD-TAP: Y (left controller) while a controller is within the dpad_head radius opens
+    // the pause menu by injecting the pad START button -- which the game reads even when UNFOCUSED,
+    // unlike its native Escape. Shares the dpad_head_cm/hyst radius (one notion of "near the head");
+    // no dwell, because the Y press is itself the deliberate trigger. Y is otherwise weapon-swap, so
+    // a pausing press is eaten (it does not also switch weapons).
+    bool  pause_head      = true;
     int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it
     float map_dpad_dz     = 0.50f;    // left-stick deflection needed to count as a d-pad direction
@@ -2723,7 +2826,8 @@ struct Config {
                                     // 16 is the canonical in-headset fit for the default lens
                                     // size -- effectiveness scales with the pane, so this sits
                                     // far above Halo's flat-screen 2x/8x on purpose.
-    int   scope_rt_size = 1024;     // render-target edge in px; rebuilt live on change
+    int   scope_rt_size = 512;      // render-target edge in px; rebuilt live on change. 512 since
+                                    // 2026-09-13, canonized from the tuned profile (was 1024)
     int   scope_div     = 1;       // capture every Nth tick (~32 Hz / N) -- the perf valve
     float scope_dist    = 63.57f;   // pane distance along the aim ray, cm (headset-fitted)
     // Where the CAPTURE CAMERA sits along the ray, cm from the origin. It must be FURTHER out
@@ -3171,6 +3275,137 @@ struct Config {
     // Quad size as a fraction of frame HEIGHT, and its centre within each eye's half, normalised.
     float scope_blit_size = 0.35f;
     float scope_blit_x    = 0.5f;
+    // ---- CUTSCENE BLIT (cutsceneblit, default OFF) --------------------------------------------
+    //
+    // The other half of the cutscene problem. docs\CUTSCENE_FINDINGS.md establishes that the
+    // campaign cutscenes are pre-rendered MP4s drawn by the engine's native MoviePlayer through
+    // its own Slate pass, OUTSIDE the per-eye 3D render -- so there is no MediaTexture to host on
+    // a world quad, and the per-eye composite arrives doubled. It also establishes that a CLEAN
+    // MONO FRAME EXISTS every frame (the desktop mirror is a clean letterboxed image).
+    //
+    // ** THE PREMISE THIS KEY WAS BUILT ON WAS WRONG, MEASURED 2026-09-08. ** It assumed the
+    // on_post_render_vr_framework_dx12 destination is the frame about to be submitted to the eyes.
+    // It is D3D12::RTV::IMGUI -- UEVR's UI overlay render target (Framework.cpp:838), which UEVR
+    // composites as a flat quad OVER the scene. Worse, every plugin render hook fires AFTER UEVR
+    // has already copied and submitted the eyes (mods->on_present runs before any plugin callback,
+    // and VR precedes PluginLoader in the mod list), so NO plugin-side hook can touch the eye
+    // images at all. With cutsceneblit=1 the blit ran every cutscene frame, drew the scene into
+    // the overlay target, and the doubled image was untouched -- exactly as this now predicts.
+    //
+    // KEPT, default OFF, as the honest record of that measurement: it is the only thing that
+    // draws game pixels into UEVR's overlay, which may yet be useful. It is NOT a cutscene fix.
+    // The fix lives one layer down -- see cutscene_mono.
+    bool  cutscene_blit   = false;
+    // Fraction of the eye the overlay draw fills (1.0 = edge to edge), centred below 1.0.
+    float cutscene_blit_fill = 1.0f;
+
+    // ---- CUTSCENE MONO (cutscenemono, default OFF until verified) ------------------------------
+    //
+    // The lane that CAN reach the eyes: our OpenXR API layer, which sits between UEVR and the
+    // runtime and sees the projection layer at xrEndFrame -- downstream of every copy the plugin
+    // is upstream of. While a cutscene plays, the layer gives the RIGHT eye's view the LEFT eye's
+    // sub-image (XrLayerAbi.h: set_projection_mono). Zero GPU work; one struct field on a clone.
+    // The 3D scene goes mono for the duration, which a cutscene does not care about.
+    //
+    // WHY THIS IS ALSO THE DISCRIMINATOR. docs\CUTSCENE_FINDINGS.md never established WHERE the
+    // doubling enters. If it is baked into the submitted eye images, this removes it outright and
+    // the lane is the fix. If the movie still doubles while the world has gone mono, the doubling
+    // arrives via a layer OTHER than the projection (a quad UEVR submits, or the runtime), and we
+    // will finally have located it. Either result moves the problem; only a headset can read it.
+    //
+    // Driven by the SAME cine_signal predicate as the flat-view actuator, on change only. Requires
+    // the API layer build that carries set_projection_mono; an older layer negotiates fine and
+    // simply cannot do this, which the plugin logs once rather than pretending.
+    // 0 = off. 1 = LEFT eye's image to both eyes. 2 = RIGHT eye's image to both eyes. Live.
+    //
+    // MEASURED 2026-09-08 20:27 WITH MODE 1: the layer rewrote every projection frame
+    // (patched= climbed at frame rate, runtime accepted every frame) and the doubled cutscene
+    // did NOT change. So the doubling is not a left/right mismatch inside the projection
+    // layer. Mode 2 exists as the live A/B: flipping 1 <-> 2 mid-cutscene either shifts the
+    // picture (the movie IS in the projection images, and the doubling is something else
+    // about them) or does nothing (the movie rides a layer this rewrite cannot reach). The
+    // layer's own log prints an inventory of every submitted layer on the first patched
+    // frame -- read that first.
+    // 3 = DROP the app's quad layers (UEVR's Slate-UI quad), keep the projection.
+    // 4 = DROP the projection, keep the app's quads -- the movie alone on a flat mono screen.
+    //     If the doubling is "the movie twice, once in each place", 4 is the fix outright.
+    //
+    // MEASURED 2026-09-08 20:37-20:51, and this settles it. Modes 1-3: no change. Mode 4: the
+    // movie GONE, subtitles only -- so the movie is inside the projection eye images. The eye
+    // dump (cutscenedump, below) then showed each eye holding ONE copy of the movie, letterboxed
+    // mid-frame, and the two eyes PIXEL-IDENTICAL (mean abs diff 0.00 over the whole frame).
+    // The game composites the movie in screen space, at the same pixel coordinates in both
+    // views. What doubles it is the headset's ASYMMETRIC FOV: UEVR renders and submits each eye
+    // through its own frustum (this rig: left eye tan -1.376..+0.839, right eye mirrored), so
+    // the pixel centre points ~15 deg LEFT of forward in the left eye and ~15 deg RIGHT in the
+    // right eye. Same pixels, 30 deg apart -- unfusable, two ships. Vertically both eyes agree
+    // (~13 deg below the axis), which is why the doubling is horizontal only. Every earlier
+    // model -- Slate quad, movie-twice, left/right image mismatch -- was wrong, and mode 2 of
+    // cutscene_2d (mono collapse) could never have worked: the difference is angular, not
+    // translational.
+    // 5 = FOV-SHIFT ATTEMPT (kept for the record; NOT the fix). Every eye gets view[0]'s image
+    //     through one symmetric fov re-centred on the forward axis, shifted per-eye toward a
+    //     computed convergence depth. MEASURED 2026-09-08 21:56: the movie fused, but the
+    //     subtitles and pause menu (UEVR's stereo-correct UI quad) still doubled, and the layer
+    //     log proved the shift applied exactly as designed. So SteamVR did not honour a projection
+    //     fov shift as depth -- the movie sat wherever the trick landed it, not at the UI.
+    //     (UEVR's own Horizontal Projection = Symmetrical fuses the movie the same way, session-
+    //     wide, at a ~20% angular-resolution cost, and a plugin cannot flip it live: set_mod_value
+    //     changes the value but only the UEVR menu raises should_recalculate_eye_projections. Still
+    //     the zero-build A/B from the UEVR menu.)
+    // 6 = THE FIX (2026-09-08). Drop the doubled projection and present the movie as ITS OWN quad
+    //     -- the same layer type the subtitles use, at a real pose. A quad is stereo-correct by
+    //     construction (the runtime renders it to both eyes from one pose), so it fuses at its
+    //     distance the way the subtitle quad fuses at UI_Distance. The quad's distance IS
+    //     UI_Distance, so the movie and the subtitles share one depth and one convergence, and
+    //     every other layer passes through untouched -- exactly what the user asked for ("target
+    //     the cutscene image specifically without altering per-eye draw wholesale"). Head-locked,
+    //     recomputed each frame; zero GPU work; cutscene-scoped.
+    // Mode 5 was confirmed in headset to fuse the movie (2026-09-08 21:15) but left the UI
+    // doubled, so 6 supersedes it. CONFIRMED IN HEADSET 2026-09-08 22:36 ("Appears to work
+    // great"): movie, subtitles and pause menu all single, at one depth. 6 ships.
+    int   cutscene_mono   = 6;
+    // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
+    // should hinge convergence on the distance of the cutscene pane").
+    //
+    // CONVERGENCE was the mode-5 concern: mode 5 re-centres the projection so both eyes fuse the
+    // movie, and a flat picture at any depth but the UI quad's (subtitles/menu at UI_Distance,
+    // 2.43 m shipped) leaves that quad ~1.5 deg doubled -- so mode 5 matched UI_Distance exactly.
+    // MODE 6 (the shipped cutscenemono) instead draws the movie as its own head-locked QUAD, which
+    // converges at its own real depth with no doubling. There the failure is different: an opaque
+    // movie quad AT the UI quad's depth is COPLANAR with the subtitle quad and the two FIGHT under
+    // reprojection (reported in-headset 2026-09-13). So the shipped default sits the movie a little
+    // BEHIND the UI quad -- 290 cm (2.9 m), ~0.5 m back of the 2.43 m subtitles -- confirmed
+    // in-headset to clear the flicker with the subtitles clearly in front. cutscenedist is in cm;
+    // 0 = match UI_Distance exactly (read live from UEVR -- the mode-5 behaviour, and what a player
+    // who wants the movie ON the UI depth sets). Clamp 0..10000 cm.
+    float cutscene_dist   = 290.0f;
+    // FRAMING is the comfort choice, and for a flat picture it is entirely SIZE: 1.0 = as the
+    // game draws it (edge to edge, ~96 deg wide), 0.75 reads as a comfortable cinema screen a bit
+    // further off, focus unchanged. Scales the declared tangent extents, which is exactly how a
+    // real screen shrinks with distance. Live (~2 s). 0.25..1.5.
+    // Default 0.75, canonized 2026-09-08 after the headset call ("works great" at 0.75) -- edge to
+    // edge at 1.0 is a lot of screen this close; 0.75 is the comfortable frame.
+    float cutscene_size   = 0.75f;
+    // PLACEMENT of the head-locked movie panel (mode 6 = the shipped cutscenemono). Both are
+    // comfort tuning like cutscenesize, live (~2 s), and default 0 = the panel centred on the
+    // forward gaze exactly as before.
+    //   cutsceneup    -- vertical shift in CENTIMETRES (every distance key here is cm, per Unreal).
+    //                    NEGATIVE lowers the panel; the movie sits a touch high at 0 because it is
+    //                    centred at eye-forward. Range +-100 cm (the layer clamps to +-1 m).
+    //   cutscenepitch -- tilt in DEGREES about the panel's horizontal axis. NEGATIVE tips the top
+    //                    toward you, so a lowered panel can face a slightly downward gaze. +-34 deg.
+    float cutscene_up     = 0.0f;
+    float cutscene_pitch  = 0.0f;
+    // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
+    // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
+    // side-by-side scene render target and writes it as a BMP into the profile's data\ folder,
+    // then logs the path. Set back to 0 to re-arm. This is the picture that decides what "the
+    // movie is doubled" actually looks like inside ONE eye -- modes 1-4 above proved the movie
+    // lives in the projection images and that both eyes already carry the same thing, so the
+    // shape of the doubling (two full copies, a full plus a half, one half) is a fact about a
+    // single eye image, and only the pixels can say which. Compiled out of player builds.
+    int   cutscene_dump   = 0;
     float scope_blit_y    = 0.5f;
 
     // ---- [dev build] THE BLACK-FINAL-COLOUR LEVERS --------------------------------------------
@@ -3892,6 +4127,18 @@ struct Config {
     // recalibration.
     float wpn_base_grip = 0.0f, wpn_base_grip_yaw = 0.0f, wpn_base_grip_roll = 0.0f;
     float wpn_base_off_x = 0.0f, wpn_base_off_y = 0.0f, wpn_base_off_z = 0.0f;
+    // The DIRECT trim's base, published for exactly the reason the fitted one above is: so
+    // write_calib_file() persists the calibration and NOT the calibration plus whatever weapon
+    // happens to be in hand.
+    //
+    // Needed since WeaponOffset began adding each weapon's pose delta into rig_dir_grip_* /
+    // rig_dir_off_* (rig_mode 3 composes from nothing else, so that is where the delta has to go).
+    // The writer guarded the fitted pair with wpn_base_* all along, but wrote the direct pair RAW --
+    // harmless while nothing touched it, and a compounding fault the moment something did: any
+    // calibration write while holding a weapon with a delta (a scope capture, an aim capture)
+    // baked that delta into the global dirgrip, and the next ~2 s reload added it again on top.
+    float wpn_base_dir_grip = 0.0f, wpn_base_dir_grip_yaw = 0.0f, wpn_base_dir_grip_roll = 0.0f;
+    float wpn_base_dir_off_x = 0.0f, wpn_base_dir_off_y = 0.0f, wpn_base_dir_off_z = 0.0f;
     bool  wpn_log         = false;
     WeaponAdjust wpn[kMaxWeaponAdjust];
     int   wpn_count       = 0;
@@ -3907,6 +4154,24 @@ struct Config {
     bool  scope_offsets   = true;
     ScopeAdjust wpn_scope[kMaxScopeAdjust];
     int   scope_count     = 0;
+
+    // ---- PER-WEAPON SUPPORT-HAND GRIP OFFSET (wpngrip) ---------------------------------------
+    // See WeaponGrip above for what it fixes and why the aim half matters as much as the zone.
+    // A weapon with no entry behaves EXACTLY as before, which is what makes this safe to ship on.
+    WeaponGrip wpn_grip[kMaxWeaponGrip];
+    int   grip_count      = 0;
+    // Master switch for the whole feature. 0 ignores every entry without deleting it.
+    bool  grip_offsets    = true;
+    // Apply the offset to the AIM DIRECTION as well as to the grab zone.
+    //
+    // Separate from grip_offsets on purpose. The zone half only decides WHERE YOU MAY GRAB and
+    // cannot move a shot; this half changes where the weapon POINTS while held, which is the part
+    // riding on direct drive. Its own key means it can be A/B'd -- and switched off on its own if
+    // an off-axis weapon ever reads better with the raw hand-to-hand line.
+    bool  grip_fix_aim    = true;
+    // Log the matched entry on every weapon CHANGE. The instrument for "is my capture applied at
+    // all", answerable without repeating the calibration.
+    bool  grip_log        = false;
     // Log which weapon matched which trim, on every weapon CHANGE. Off by default; this is the
     // instrument for "is the trim being applied at all", answerable without a capture.
     bool  scope_wpn_log   = false;
@@ -3939,6 +4204,9 @@ struct Config {
     // once per reload rather than per tick: a silently ignored calibration file is indistinguishable
     // from a feature that does not work, and that is the report nobody can act on.
     int   wpnfix_dropped  = 0;
+    // How many copies of the v0.4 shipped 200-degree shotgun test line were ignored this load. See
+    // parse_weapon_offset(); reported once per reload for the same reason as wpnfix_dropped.
+    int   wpnoff_dropped  = 0;
 
     // ---- VR RELOAD -------------------------------------------------------------------------
     // Two-stage reload: press reload to drop the mag, then physically fetch a fresh one from your

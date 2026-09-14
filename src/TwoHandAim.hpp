@@ -70,6 +70,11 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick);
 bool two_hand_bend_orientation(Quat* q);
 bool two_hand_bend_forward(Vec3* fwd);
 
+// The inverse of the RIG's bend, for a direction in raw VR space: removes exactly the swing that
+// two_hand_bend_orientation() applied to the rig this tick, and nothing when twohandrig kept it from
+// applying one. Game thread, between the rig's bend and two_hand_update(). See TwoHandZoneMeas::gun1_*.
+bool two_hand_unbend_rig_forward(Vec3* fwd);
+
 // True while the hold is engaged. For the reticule policy and the reload gesture's magazine
 // suppression -- you cannot pull a magazine with both hands on the gun.
 // ---- THE REACH, for the grab guide -------------------------------------------------------------
@@ -125,9 +130,88 @@ struct TwoHandZoneMeas {
     Vec3 hand_gun{};           // support hand from the AIM GRIP, in the gun's frame, game cm
     Vec3 rig_off{};            // aim grip -> rig component, same frame. Drawing adds this; the
                                // zone test must not.
+
+    // ---- THE HELD WEAPON'S SUPPORT-HAND GRIP OFFSET, IN BOTH FRAMES ---------------------------
+    //
+    // Off-axis handles (rocket launcher, sentinel beam) need the same offset applied to two things
+    // that live in DIFFERENT frames, which is why it is published twice rather than converted at
+    // the consumer:
+    //
+    //   grip_off_gun  the grab zone, which is measured in the GUN's frame (game cm) -- subtract
+    //                 from hand_gun's y/z before taking the lateral magnitude.
+    //   grip_off_vr   the aim direction, which effective_basis() builds from RAW VR-SPACE
+    //                 positions (metres) -- subtract from the support position before it is used.
+    //
+    // BOTH ARE FILLED HERE, and that is the whole point. Converting between them needs the blessed
+    // VR-to-game transform AND the gun's world orientation, and Plugin.cpp's rig block is the only
+    // place that holds both (see the note above). A consumer that tried to rotate one into the
+    // other would be re-deriving vr_to_rig by hand, which the comment at its definition explicitly
+    // warns against -- two copies drift, and the drift lands in the player's aim.
+    //
+    // x of grip_off_gun is always 0: `along` is a permitted range, not a point. See WeaponGrip.
+    bool grip_off_valid = false;
+    Vec3 grip_off_gun{};
+    Vec3 grip_off_vr{};
+
+    // ---- THE ONE-HANDED GUN'S AXES, IN RAW VR SPACE, WITH THIS TICK'S SWING TAKEN BACK OUT ------
+    //
+    // For gun mode (twohandgun), which swings the one-handed barrel (x) onto the hands with the
+    // handle offset taken off along y/z. Unit vectors: x down the barrel, y/z the gun's y/z -- the
+    // frame hand_gun and grip_off_gun are in, so wpngrip's y/z apply to them directly. The mapping
+    // into VR space includes a handedness flip, which is harmless: only lengths and angles of vectors
+    // built from these are used.
+    //
+    // UNSWUNG IS THE POINT. The rig composed this tick's gun with the swing published last tick, so
+    // measuring from its axes as drawn would feed every swing into the next one -- the loop that
+    // spun the sentinel beam. The rig block removes that swing with two_hand_unbend_rig_forward(),
+    // which is gated exactly like the bend it undoes.
+    //
+    // Independent of the support pose (unlike `valid` above), so a tick where the off hand drops
+    // out does not also drop the frame the remembered hand line is measured against.
+    bool gun1_valid = false;
+    Vec3 gun1_x{};
+    Vec3 gun1_y{};
+    Vec3 gun1_z{};
 };
 void two_hand_set_zone_measurement(const TwoHandZoneMeas& m);
 const TwoHandZoneMeas& two_hand_zone_measurement();
+
+// ---- GRIP-OFFSET CALIBRATION ------------------------------------------------------------------
+//
+// TWO CLICKS, NO KEYBOARD. Press the Script UI button and the WEAPON FREEZES; put your support
+// hand where that weapon's handle actually is; press it again to save.
+//
+// WHY THIS ONE DOES NOT NEED A HELD KEY, when the pose-match calibration does. That gesture asks
+// you to line your CONTROLLER up with the frozen weapon, so the act of holding and the act of
+// measuring are the same thing and it must end with your hand in place. This measures the SUPPORT
+// hand against the frozen WEAPON. The weapon is not moving, so nothing the other hand does between
+// the clicks can disturb the measurement -- including reaching out to click the button. Asking for
+// a keyboard key while the player holds two hands in a pose inside a headset bought nothing.
+//
+// WHY THE FROZEN WEAPON IS WHAT MAKES THIS MEASURABLE. The quantity being captured is where the
+// handle sits ON THE WEAPON, which is only a fixed property while the weapon is not moving. The
+// freeze is already correct for this without any new work: during the hold the rig composes the
+// gun from g_calib_gun_world, and g_rigw_* -- the orientation the zone measurement is taken
+// against -- is derived from that same composition ("so it stays correct in every rig mode and
+// while calibrating"). So the capture is in the frozen weapon's own frame by construction, and
+// does not repeat the scope pane's mistake of differencing a capture against a base in another
+// frame.
+// Armed = g_menu_calib_mode is 5. There is no separate arm flag: one arming authority for every
+// calibration is what makes the LEFT/RIGHT trigger standard and the trigger swallowing apply here
+// without being reimplemented, and it is why a stray End press can no longer reach a solve.
+bool grip_offset_armed();
+
+// Record the frozen weapon's handle offset for the weapon in hand, and persist it.
+//
+// Returns TRUE if it CLAIMED the press -- including every refusal (not armed is the one false;
+// no weapon in hand and no measurement both claim it). The caller must treat a claim as "this
+// gesture is spoken for" and raise no calibration-finish edge, or one press would also run the
+// weapon solve and overwrite a calibration the player never asked to change.
+bool grip_offset_capture();
+
+// Drop the equipped weapon's wpngrip entry, back to "on the barrel like a rifle". false = nothing
+// to clear. Rewrites halo_vr_weapons.cfg.
+bool grip_offset_clear_current();
 
 bool two_hand_latched();
 
@@ -146,5 +230,9 @@ const char* two_hand_status();
 // that chain is at MSVC's 128-deep block limit and overflowing it is a fatal C1061 that points
 // nowhere near the change that caused it.
 bool two_hand_parse_key(const char* key, double value);
+
+// Put every two-hand key back to its compiled default. load_config() calls it right after resetting
+// g_cfg, so a key deleted from a file reverts on the next reload instead of lingering until restart.
+void two_hand_tuning_reset();
 
 } // namespace halo

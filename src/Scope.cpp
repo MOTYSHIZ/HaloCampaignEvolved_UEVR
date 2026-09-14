@@ -77,6 +77,11 @@ int   s_rt_format_applied = -1;
 int   s_shape_built = -1;
 float s_fov_applied = 0.0f;     // FOVAngle last written (write on change only)
 bool  s_pane_shown = false;
+// bCaptureEveryFrame we last wrote to the capture -- drives on-change writes so the second scene
+// render (mode 1) runs ONLY while the scope is displaying, never for the rest of the mission after
+// one scope-in. Reset to false whenever the capture component is (re)created; see the arm at the
+// cadence block and the disarm in the scope-inactive early-out.
+bool  s_capture_every_frame = false;
 // What the scope was opened holding -- the weapon-switch close compares against it.
 //
 // File scope, not a static inside the detector, because the detector only runs while the pane is
@@ -1919,9 +1924,16 @@ bool ensure_components(API::UObject* rig) {
                                  "(class=%p)", (void*)cls);
             return false;
         }
-        // Cadence per scopecapmode (0 = manual divisor, the perf valve; 1 = every frame). The
+        // Cadence per scopecapmode (0 = manual divisor, the perf valve; 1 = every frame WHILE THE
+        // SCOPE IS DISPLAYING). Created DORMANT (bCaptureEveryFrame=false): a mode-1 capture is a
+        // full second scene render, so it is armed by the cadence block below only on ticks the
+        // scope is actually open, and disarmed in the scope-inactive early-out. Arming it here at
+        // creation is what shipped the regression -- the arm was never paired with a disarm, so one
+        // scope-in left the second render running for the rest of the mission. The tracking var is
+        // seeded to match this fresh component so the first arm actually writes.
         // bCaptureOnMovement default would otherwise re-render the scene on every camera move.
-        comp->set_bool_property(L"bCaptureEveryFrame", g_cfg.scope_cap_mode == 1);
+        comp->set_bool_property(L"bCaptureEveryFrame", false);
+        s_capture_every_frame = false;
         comp->set_bool_property(L"bCaptureOnMovement", false);
         // Keeps exposure/TAA state alive between manual captures so a low-rate scope holds a
         // steady image instead of re-adapting on every capture. Config-driven rather than a
@@ -2689,6 +2701,21 @@ PaneVis read_pane_vis(API::UObject* pane) {
 // bVisible=false AND bHiddenInGame=true. A propagated SetVisibility(true) then still leaves it
 // hidden, and nothing flashes. The read below stays as the backstop for the case where the game
 // propagates hidden-in-game as well -- and will say so in the log if it does.
+// Arm/disarm the second scene render (mode 1). ON-CHANGE ONLY: the disarm call site runs every
+// closed tick, so an unconditional write would be a per-frame reflected engine call for nothing.
+// Re-validates the slot through get_checked so a recycled component cannot be written blind. A
+// freshly created capture is dormant with s_capture_every_frame=false (see ensure_components), so
+// the first arm after a scope-in always lands.
+void set_capture_every_frame(bool on) {
+    if (s_capture_every_frame == on) return;
+    if (auto* cap = s_capture.get_checked(L"SceneCaptureComponent2D")) {
+        cap->set_bool_property(L"bCaptureEveryFrame", on);
+        s_capture_every_frame = on;
+        API::get()->log_info("[Halo-CampE-UEVR] scope: capture every-frame -> %s",
+                             on ? "ON (scope open)" : "off (scope closed)");
+    }
+}
+
 void hide_pane_if_shown() {
     auto* pane = s_pane.get();   // O(1) slot check; no string, unlike get_checked
     if (pane == nullptr) { s_pane_shown = false; return; }
@@ -2844,6 +2871,10 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig,
 
     if (!g_scope_active.load() && !g_cfg.scope_force && !calib_wants_pane) {
         hide_pane_if_shown();
+        // Stop the second scene render while the scope is closed. This is the disarm that pairs
+        // with the mode-1 arm in the cadence block; without it a single scope-in leaves a full
+        // per-frame scene capture running for the rest of the mission (the 0.4 fps regression).
+        set_capture_every_frame(false);
         return;
     }
     // Apply IMMEDIATELY, on the same tick the ray was produced: the consume-on-the-next-tick
@@ -2863,7 +2894,10 @@ void scope_frame_end(uint32_t tick) {
 #if HALO_VR_DEV
     dev_rt_scan(tick);
 #endif
-    scope_blit_tick();
+    // scope_blit_tick() used to be called here. REMOVED 2026-09-08: it registered a UEVR render
+    // callback from inside a tick, which takes a unique_lock on the shared_mutex UEVR is already
+    // holding shared to dispatch this very tick -- a guaranteed self-deadlock the moment scopeblit
+    // was ever switched on. Registration now happens once in on_initialize (scope_blit_register).
 #endif
     // Park-when-stale only; placement lives in scope_notice_ray now. Within a tick the dev ray
     // notices BEFORE this call and the real reticule path notices AFTER it, so an age over one
@@ -3560,16 +3594,13 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         }
     }
 
-    // Capture cadence. Mode 1 hands the cadence to the renderer (bCaptureEveryFrame while the
-    // pane is up); mode 0 issues manual captures every scopediv ticks. The bool is only written
-    // when the mode changes -- the on-change rule for engine calls.
-    static int s_cap_mode_applied = -1;
-    if (s_cap_mode_applied != g_cfg.scope_cap_mode) {
-        s_cap_mode_applied = g_cfg.scope_cap_mode;
-        cap->set_bool_property(L"bCaptureEveryFrame", g_cfg.scope_cap_mode == 1);
-        API::get()->log_info("[Halo-CampE-UEVR] scope: capture mode -> %s",
-                             g_cfg.scope_cap_mode == 1 ? "every-frame" : "manual/divisor");
-    }
+    // Capture cadence. Mode 1 hands the cadence to the renderer (bCaptureEveryFrame); mode 0 issues
+    // manual captures every scopediv ticks. This block runs only from scope_apply, i.e. only on
+    // ticks the scope is DISPLAYING -- so arming here (and disarming in the scope-inactive early-out
+    // above) is what makes "every-frame WHILE THE PANE IS UP" literally true. set_capture_every_frame
+    // is on-change, so this costs one bool compare per scoped tick once armed, and the mode-0 case
+    // keeps the flag off so its manual CaptureScene below is the only capture.
+    set_capture_every_frame(g_cfg.scope_cap_mode == 1);
     const int div = (g_cfg.scope_div < 1) ? 1 : g_cfg.scope_div;
     if (g_cfg.scope_cap_mode == 0 && (tick % (uint32_t)div) == 0) {
         alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};

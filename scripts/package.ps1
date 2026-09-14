@@ -53,7 +53,7 @@ $required = @('config.txt', 'halo_vr.cfg', 'halo_vr_dev.cfg', 'halo_vr_user_refe
               'cvars_data.txt', 'user_script.txt',
               'reticle_ring.png', 'cutscene_hint.png',
               'scripts\halo_vr_settings.lua',
-              'plugins\halo_vr.dll', 'plugins\CutsceneDetectionPlugin.dll',
+              'plugins\halo_vr.dll',
               # The OpenXR API layer ships as a matched SET, and every member is load-bearing:
               # the DLL is the code, the manifest is the only thing that tells the loader the DLL
               # exists, and the two scripts are the only way a player can turn it on or off. Ship
@@ -85,10 +85,18 @@ if ($missing.Count -gt 0) {
 # thoroughly confusing: every player would receive a log of somebody else's session, in the exact
 # file the troubleshooting guide tells them to read to find out whether the layer loaded.
 $forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg',
-                'halo_vr_weapons.cfg', 'apilayer\halo_vr_layer.log') |
+                'halo_vr_weapons.cfg', 'apilayer\halo_vr_layer.log',
+                # The third-party cutscene-detection plugin was RETIRED 2026-09-08: our own fix
+                # (the movie as an OpenXR quad, cutscenemono=6) replaced it and it is gone from the
+                # repo. The profile is copied wholesale, so an author who still has it in a live
+                # %APPDATA% profile could drag a stray copy back into profile\plugins\ and ship it
+                # unnoticed. Fail here instead. Also of note: its licensing was never cleared for
+                # redistribution (docs\GameRecon\Elliotttate-Study.md), so shipping it was a risk
+                # regardless of the feature.
+                'plugins\CutsceneDetectionPlugin.dll') |
     Where-Object { Test-Path (Join-Path $stage $_) }
 if ($forbidden.Count -gt 0) {
-    throw ("Release payload contains user-owned files -- must not ship: {0}" -f ($forbidden -join ', '))
+    throw ("Release payload contains files that must not ship: {0}" -f ($forbidden -join ', '))
 }
 
 # The layer manifest must keep a RELATIVE library_path. An absolute one would be the author's own
@@ -119,9 +127,12 @@ foreach ($catalog in 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt') {
 # compiled Config.hpp defaults are not (a struct default cannot express "the assault rifle needs
 # 2 degrees"). wpnfixver is the frame stamp and is as load-bearing as calibver -- shipping the
 # values without it would have every one of them silently ignored.
+# wpngrip joined it 2026-09-13 for the same reason: where a weapon's front handle sits off its
+# barrel is a measurement of that weapon, captured in a headset, not a setting anyone chooses.
 $calibKeys = @('grip','gripyaw','griproll','calibver','offx','offy','offz','aimoffyaw','aimoffpitch',
                'aimcalibver','dirgrip','dirgripyaw','dirgriproll','diroffx','diroffy','diroffz',
-               'pivauto','pivx','pivy','pivz','calibrelative','wpnfix','wpnfixver','wpnscope','wpnoff')
+               'pivauto','pivx','pivy','pivz','calibrelative','wpnfix','wpnfixver','wpnscope','wpnoff',
+               'wpngrip')
 $cfgActive = @(Select-String -Path (Join-Path $stage 'halo_vr.cfg') -Pattern '^([A-Za-z0-9_]+)=' |
     ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() })
 $stray = @($cfgActive | Where-Object { $calibKeys -notcontains $_ })

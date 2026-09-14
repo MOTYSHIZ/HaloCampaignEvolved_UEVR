@@ -24,19 +24,34 @@ appropriately.
   working exactly as the game intends. Shots converge to your sightline, so what you're pointing
   at is what you hit — even leaning or stepping around the room.
 - **On-target reticle** — the game's own crosshair (hit marker included) placed on the actual
-  surface you're aiming at, traced the same way bullets are. An optional colored ring is available
-  too; both are configurable.
-- **Weapon scope** — left trigger raises a magnified lens on the gun, aimed down the ray your
-  shots actually follow. Halo's flat zoom (which hides the weapon and masks your view) stays
+  surface you're aiming at, traced the same way bullets are. It's drawn by your headset's compositor
+  rather than into the game's scene, so the game's exposure and bloom can't wash it out (see
+  [Crisp reticule and waypoints](#crisp-reticule-and-waypoints)). An optional colored ring is
+  available too; both are configurable.
+- **Waypoints in the world** — objective markers sit out in the world in the direction of the
+  objective instead of sliding around with your aim, and they're compositor-drawn too, so a wall
+  can't hide them.
+- **Two-handed aiming** — bring your off hand to the barrel and squeeze its grip, and your aim
+  steadies onto the line between your hands. A "Grip" prompt shows when your hand is in reach.
+- **Weapon scope** — while you're gripping two-handed (pistols too), the left trigger raises a
+  magnified lens on the gun, aimed down the ray your shots actually follow. Without the grip, the
+  same trigger throws a grenade. Halo's flat zoom (which hides the weapon and masks your view) stays
   suppressed.
+- **Physical melee and weapon switching** — swing your gun hand to melee, and the strike follows the
+  swing rather than wherever the gun ended up pointing. Reach over your shoulder and squeeze the grip
+  to switch weapons.
 - **Head-relative movement** — push the stick where you look, walk where you look, independent of
   where the gun points. Snap turn supported.
-- **VR control layout** — crouch on right-stick-down, equipment on left-X, d-pad access via
-  right-stick-up shift, all remappable. Menu-aware: in menus your right controller's B acts as
-  *back* and the gameplay remaps stand down.
+- **VR control layout** — crouch on right-stick-down, equipment on left-X, and the d-pad on the
+  right stick whenever a hand is near your head (or on the left stick while you hold
+  right-stick-up), all remappable. Menu-aware: in menus your right controller's B acts as *back* and
+  the gameplay remaps stand down.
+- **Cutscenes and sound that work in VR** — pre-rendered cutscenes play on a single flat screen in
+  front of you (size adjustable), and positional audio follows your head rather than your gun.
 - **Pose-match calibration** — optional per-hardware tuning: line your controller up with the visual
-  weapon to calibrate grip, and align the aim ray, both persisting across sessions (see
-  [Custom calibration](#custom-calibration)). The shipped defaults work without it.
+  weapon to calibrate grip, align the aim ray and place the scope lens, all persisting across
+  sessions, with per-weapon adjustments on top (see [Custom calibration](#custom-calibration)). The
+  shipped defaults work without it.
 - **In-game settings, and settings that survive updates** — a settings menu in the UEVR overlay
   (Script UI) edits your personal `halo_vr_user.cfg` live, no restart; updates never touch that
   file. Calibration can be run from the menu too — no keyboard needed.
@@ -91,11 +106,12 @@ already in your `log.txt` — but please do not assume it is the cause and reins
 
 Delete the `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` folder.
 
-If — and only if — you turned on the [optional bright reticule](#bright-reticule-optional) at some
-point, run `apilayer\Unregister-XrApiLayer.ps1` from inside that folder **before** deleting it. That
-is the one thing this mod puts outside its own folder, and the script is the way to take it back
-out. If you have already deleted the folder, re-extract the zip anywhere and run the script from
-there with `-All`.
+If — and only if — you registered the OpenXR layer by hand under the v0.4.0–v0.4.2 instructions
+(see [Crisp reticule and waypoints](#crisp-reticule-and-waypoints)), run
+`apilayer\Unregister-XrApiLayer.ps1` from inside that folder **before** deleting it. That
+registration is the one thing this mod ever put outside its own folder, and the script is the way to
+take it back out. If you have already deleted the folder, re-extract the zip anywhere and run the
+script from there with `-All`.
 
 ## Required game settings
 
@@ -124,44 +140,34 @@ OpenXR does have one trade-off worth knowing: losing session focus (the SteamVR 
 app, a remote-desktop connection) stops controller poses updating until the game has focus and input
 again — see [Known issues](#known-issues). That's an annoyance; wrong button mappings are a blocker.
 
-## Bright reticule (optional)
+## Crisp reticule and waypoints
 
-**Skip this if you are happy with the reticule. Nothing else in the mod depends on it, and it is the
-only feature that asks for anything outside the mod's own folder.**
+**On by default, with nothing to set up.** The reticule and the mission waypoints are drawn by your
+headset's own compositor instead of being painted into the game's scene. Halo's exposure and
+tonemapping apply to everything *in* the scene — a crosshair drawn there dims on a bright beach and
+blows out in shade — but the compositor receives these *after* all of that image processing, so they
+stay readable everywhere, and a waypoint is never hidden behind a wall.
 
-Halo's crosshair is drawn inside the game's scene, so the game's exposure and tonemapping apply to
-it: it dims on a bright beach and blows out in shade, and no single brightness setting wins both.
-This option draws the reticule as an **OpenXR composition layer** instead, which the headset
-receives *after* all of the game's image processing — so it looks the same everywhere.
+Reaching that stage of the pipeline takes an **OpenXR API layer**, which ships in the profile's
+`apilayer\` folder. The mod switches it on for the game's own process as it loads, so there is
+nothing to register and nothing is written outside the mod's folder.
 
-Reaching that stage of the pipeline needs an **OpenXR API layer**, and the OpenXR loader only loads
-layers it has been told about. Because the game is launched by Steam there is no chance to say so
-per-launch, so it is recorded once, for your Windows user account:
+- The layer checks which program it is in the moment it starts, and in anything that is not Halo it
+  does nothing at all — no interception, no work, no files written.
+- To go back to drawing them in the world, set `xrlayer=0` (reticule) and `xrlayernav=0`
+  (waypoints) in `halo_vr_user.cfg`. Setting the environment variable `HALOVR_LAYER_DISABLE=1`
+  stops the layer loading at all.
+- **Run the game normally, not as administrator.** The OpenXR loader ignores layers from per-user
+  locations in elevated programs, so that ordinary software cannot inject code into elevated
+  software.
 
-1. Close the game.
-2. Open `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\apilayer\`.
-3. Right-click `Register-XrApiLayer.ps1` and choose **Run with PowerShell**.
-4. Start the game and inject as usual.
+**How to tell whether it's working:** a `halo_vr_layer.log` file appears in the `apilayer` folder the
+first time the layer loads into the game.
 
-**What that actually changes**, because you should not have to take a mod's word for it:
-
-- It writes **one value** under `HKEY_CURRENT_USER` naming that folder's `.json` file. No
-  administrator rights, no service, no file outside that folder, nothing copied anywhere.
-- The layer is then loaded into **every OpenXR application you run**, not only this game. That is
-  how OpenXR layers work and it cannot be avoided. The layer checks which program it is in the
-  moment it starts, and in anything that is not Halo it does nothing at all — no interception, no
-  work, no files written.
-- To undo it: `Unregister-XrApiLayer.ps1`, in the same folder. It removes only what it added and
-  leaves other software's OpenXR layers alone. Setting the environment variable
-  `HALOVR_LAYER_DISABLE=1` also switches it off without unregistering.
-
-**It will not take effect if you run the game as administrator.** The OpenXR loader deliberately
-ignores per-user layer registrations in elevated programs, so that ordinary software cannot inject
-code into elevated software. Run the game normally, or skip this feature.
-
-**How to tell whether it worked:** a `halo_vr_layer.log` file appears in the `apilayer` folder the
-first time the layer loads into the game. If it never appears, the loader is not picking the layer
-up — see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+> **Registered the layer by hand under the v0.4.0–v0.4.2 instructions?** That registration is no
+> longer needed. Run `apilayer\Unregister-XrApiLayer.ps1` once (right-click → **Run with
+> PowerShell**) to remove it. It removes only what it added and leaves other software's OpenXR layers
+> alone.
 
 ## Controls (Quest-style controllers)
 
@@ -171,12 +177,14 @@ up — see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 | Left stick | Move, relative to where you look |
 | Left stick **click** | Sprint |
 | Right stick left/right | Snap turn |
-| Right stick **up (hold)** | Shift layer: left stick becomes the d-pad:<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad down (hold)** — Drop weapon |
+| Hand **near your head** | Right stick becomes the d-pad (turning and crouch pause until you lower the hand):<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad left** — Equipment<br>**D-pad down (hold)** — Drop weapon |
+| Right stick **up (hold)** | The same d-pad, on the left stick instead |
 | Right stick **down** | Crouch |
-| Right stick **click** | Melee |
+| Right stick **click** | Melee — or just swing your gun hand |
 | Right trigger | Fire |
-| Left trigger | Weapon scope — magnified lens on the gun (`scope`/`scopezoom` to tune) |
-| Left grip | Throw grenade |
+| Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
+| Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
+| Right grip | Reach over your shoulder and squeeze to switch weapons |
 | Right A | Jump |
 | Right Y | Switch weapon |
 | Left X | Equipment / overshield |
@@ -206,8 +214,9 @@ on foot.
 Motion aim, snap turn and the VR-specific button remaps all stand down while you're seated, so
 every other button does exactly what the game's normal gamepad layout does.
 
-The switch is automatic, and it also applies during cutscenes — the mod works it out from the game
-taking your first-person weapon away. If you ever find a seat it misses, please report it; as a
+The switch is automatic, and it also applies during cutscenes — the mod works it out from the game's
+camera leaving first person, so standing on foot with no weapon keeps motion controls. If you ever
+find a seat it misses, please report it; as a
 stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
 `halo_vr_dev.cfg`) to force these controls on, and remove it to go back to automatic.
 
@@ -231,6 +240,8 @@ leading `#`, set your value, save. It applies live while you play (~2 s), and th
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step (`turnmode=2` for smooth turning) |
 | `scope` | 1 | Left-trigger weapon scope (magnified lens on the gun) |
 | `scopezoom` | 16 | Scope magnification |
+| `xrlayer` / `xrlayernav` | 1 / 1 | Draw the reticule / waypoints with the headset's compositor (0 = draw them in the world) |
+| `cutscenesize` | 0.75 | Size of the cutscene screen (1.0 = edge to edge) |
 
 [`halo_vr_user_reference.txt`](profile/halo_vr_user_reference.txt) is the full player-facing
 catalog — organised by concern, safe to explore, and refreshed by every update, so newly added
@@ -240,17 +251,21 @@ change. Because it is generated rather than shipped, an update can never reset i
 the next launch).
 
 **Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
-scroll to **Script UI** — three panels live there:
+scroll to **Script UI** — four panels live there:
 
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
   catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
   Saves to `halo_vr_user.cfg` (so it survives updates like any hand edit) and applies live
   within a couple of seconds.
-- **Halo VR Calibration** — the two calibration gestures as buttons, no keyboard needed: arm
-  one, close the menu (controllers don't reach the game while it's open), line your controller
-  up, then **right trigger saves & finishes** — or **left trigger saves & re-arms** on release,
-  for consecutive passes. Triggers won't fire your weapon while a calibration is armed. One-press
-  resets take you back to the shipped fit, per gesture or wholesale.
+- **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
+  scope, equipment, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
+  press the button, and it records what your controller actually sends.
+- **Halo VR Calibration** — the calibration gestures as buttons, no keyboard needed: arm one,
+  close the menu (controllers don't reach the game while it's open), line your controller up, then
+  **right trigger saves & finishes** — or **left trigger saves & re-arms** on release, for
+  consecutive passes. Triggers won't fire your weapon while a calibration is armed. The scope's
+  placement is armed from here too — for every weapon, or as a trim for just the one in your hands.
+  One-press resets take you back to the shipped fit, per gesture or wholesale.
 - **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
   unless troubleshooting asks.
 
@@ -266,8 +281,9 @@ or lose. Two other files do ship next to yours:
 - [`halo_vr_dev.cfg`](profile/halo_vr_dev.cfg) is the catalog of internal tuning, research and
   diagnostic knobs — including the aim-drive tunables — every line commented out. **Leave it alone
   unless you know exactly what you are doing**: wrong values there can wreck performance or aim.
-  Its one everyday use is troubleshooting, where you may be asked to uncomment a key (for example
-  `perflog=1` for a stutter report). Updates overwrite it, so experiments never linger.
+  Troubleshooting may ask you to uncomment a key in it; the everyday diagnostics, like `perflog=1`
+  for a stutter report, are in the player catalog instead. Updates overwrite it, so experiments
+  never linger.
 
 ## Left-handed aim
 
@@ -297,14 +313,17 @@ The shipped calibration was measured on **Quest Touch controllers**, so it encod
 of hardware and one particular way of holding it. It's a starting point, not a universal fit — try
 the mod as-is first, and expect to want this section if you're on different controllers.
 
-If the visual weapon doesn't sit right in your hand, or shots don't land where you're pointing, two
-keyboard-driven calibrations let you match the mod to your own hardware and grip. Both run in-mission
-and **persist across sessions** once set.
+If the visual weapon doesn't sit right in your hand, or shots don't land where you're pointing, these
+calibrations let you match the mod to your own hardware and grip — from the keyboard, or without one
+from the **Halo VR Calibration** panel (see [Configuration](#configuration)). All of them run
+in-mission and **persist across sessions** once set.
 
 | Key | Calibration | Workflow |
 |---|---|---|
 | `End` | **Pose-match** (grip) | Hold the key, physically line your controller up with the on-screen weapon, then release. This aligns the weapon's grip to how you actually hold your controller. |
 | `Page Down` | **Aim ray** | Hold the key, point at the frozen reticle, then release. This aligns the direction shots travel with where the weapon points. The magnum was used in the original calibration. With both eyes open, I lined up the magnum sight picture with the floating reticle's center. |
+| `Delete` | **Scope placement** | Raise the scope, hold the key, move the lens to where you want it on the gun, then release. To store the result for the weapon in your hands only, arm **per-weapon scope trim** in the Calibration panel first. |
+| `Insert` | **Per-weapon grip** | The same gesture as `End`, but it stores an adjustment for the weapon in your hands and leaves the global fit alone. `Insert` is also UEVR's own overlay key, so if the overlay opening gets in the way, move this calibration to another key with `wpncalibkey` (the catalog lists the key codes). |
 
 Do the pose-match first (it sets where the weapon sits), then the aim-ray calibration (it sets where
 that weapon shoots). If a calibration ever feels off, just repeat it — the latest one wins.
@@ -318,30 +337,31 @@ wherever you wander afterwards. If you skip this, aim will settle for a moment a
 `Page Down` and the fit will be a little noisier; nothing is broken, it's just not as good as it
 could be.
 
-**One calibration covers every weapon.** Per-weapon calibration isn't supported yet — it's planned.
-Until then, a grip tuned on one weapon is the grip used for all of them, which is why the original
-calibration was done on the magnum: a middle-of-the-road result beats one that's perfect on a pistol
-and wrong on a rocket launcher.
+**One global fit, adjusted per weapon.** The global calibration is what every weapon starts from,
+which is why the original calibration was done on the magnum: a middle-of-the-road result beats one
+that's perfect on a pistol and wrong on a rocket launcher. Where a particular weapon still sits
+wrong, hold that weapon and store an adjustment for it alone with the per-weapon calibration.
 
 ### Where your calibration is stored
 
-Both calibrations write to a separate file next to the config:
+Calibrations write to two files next to the config:
 
 ```
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg      (the global fit)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg    (per-weapon adjustments)
 ```
 
-It's applied after every other config file, so it overrides the shipped calibration in
-`halo_vr.cfg`. Keeping it separate is deliberate: updates refresh the shipped calibration freely
-while your measured fit is never touched.
+They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: updates
+refresh the shipped calibration freely while your measured fit is never touched.
 
-**To go back to the shipped calibration, delete `halo_vr_calib.cfg`.** It isn't part of the download —
-it only exists once you've calibrated — so there's no original copy to restore, and deleting it simply
-lets the shipped defaults apply again. The mod recreates it next time you calibrate.
+**To go back to the shipped calibration, delete `halo_vr_calib.cfg` — and `halo_vr_weapons.cfg` to
+clear every per-weapon adjustment.** Neither is part of the download — each only exists once you've
+calibrated — so there's no original copy to restore, and deleting one simply lets the shipped
+defaults apply again. The mod recreates them next time you calibrate.
 
-Once you have a calibration you like, it's worth copying that file somewhere safe. It's small, it's
-plain text, and it's the only thing in the profile that's specific to *you* — everything else can be
-re-downloaded.
+Once you have a calibration you like, it's worth copying both files somewhere safe, along with
+`halo_vr_user.cfg` if you've changed settings. They're small, plain text, and they're the only things
+in the profile that are specific to *you* — everything else can be re-downloaded.
 
 ## Known issues
 
@@ -360,28 +380,17 @@ re-downloaded.
   one-line fix.
 - **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A
   controller binding is coming.
-- **Cutscenes display doubled.** They're pre-rendered movies composited outside the game's 3D
-  render, so they don't resolve in stereo; closing one eye makes them watchable. A proper in-VR
-  cinema screen for them is being worked on — an experimental flat-screen mode exists in the
-  internals (`cutscene2d` in `halo_vr_dev.cfg`) but is hidden from the settings until it's been
-  verified in a headset.
 - **Your hands are invisible until you pick up your first weapon.** Motion aim and turning work
   normally while you're unarmed — but you won't see arms. The game T-poses the empty first-person
   arms, because on a flat screen holding nothing means there's simply no viewmodel to draw; in VR
   they'd be right in front of you, following your hand, T-pose and all. They stay hidden until
   there are proper VR hands to show instead.
-- **UI waypoints and objective markers are misplaced**, and drift with your right-hand aim rather
-  than staying pinned to the world. They're positioned against the game's flat view, which the mod
-  now steers with your controller — so the marker follows your hand instead of the objective.
-  Navigate by the world rather than the markers for now.
-- **Directional sound doesn't follow your head.** Positional audio is spatialised against the game's
-  own view, not against where you're actually looking, so turning your head leaves the sound field
-  behind: a firefight to your left keeps sounding like it's to your left even after you turn to face
-  it. Turning with the stick *does* realign it, because that rotates the game's view as well — so
-  sound stays correct relative to your body and drifts only by however far your head is turned off
-  it. Worst when you rely on audio to locate something off-screen. No workaround beyond stick-turning
-  toward what you're listening for; a proper fix means moving the game's audio listener onto the
-  headset pose, which the mod doesn't currently touch.
+- **The scope view can be too bright**, and its lighting often doesn't match the scene around it.
+  Work in progress.
+- **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
+  weapons, then toggle the scope off and on again. Also work in progress.
+- **The Sentinel Beam is held like an ordinary rifle.** Some weapons want the support hand
+  somewhere else; a per-weapon offset for the off hand in two-handed aiming is planned.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
@@ -404,6 +413,10 @@ Every `.cpp` under `src/` is compiled automatically, so **adding a file needs no
 `scripts\build.ps1 -Deploy` also installs the DLL into your live profile, and `scripts\package.ps1`
 assembles the release zip.
 
+The OpenXR API layer that draws the crisp reticule and waypoints is a separate DLL under
+`apilayer/`, built by `scripts\build-apilayer.ps1`. It needs nothing but the Windows SDK and the
+OpenXR headers vendored in the repo — no UEVR checkout — and `scripts\package.ps1` builds it for you.
+
 Full instructions, the source layout, and the conventions for splitting a new module out of
 `Plugin.cpp` are in [COMPILING.md](COMPILING.md). **Contributions welcome** — the code is being
 split by feature to make that easier.
@@ -412,10 +425,11 @@ split by feature to make that easier.
 
 **Special thanks to [elliotttate](https://github.com/elliotttate)** — for hosting the Flat2VR
 community, without which none of this work would have found the people who made it possible, and for
-writing **CutsceneDetectionPlugin**, which ships in this profile's `plugins\` folder and handles
-cutscene comfort (disabling decoupled pitch and camera offsets around cutscene camera cuts). That
-plugin is his work, not ours — and this mod's own cutscene handling (the flattened cutscene view,
-`cutscene2d`) follows the approach his plugin pioneered.
+writing **CutsceneDetectionPlugin**, which this profile bundled up to v0.4.1 to handle cutscene
+comfort (disabling decoupled pitch and camera offsets around cutscene camera cuts). That plugin is
+his work, not ours — and this mod's first cutscene handling (the flattened cutscene view,
+`cutscene2d`) followed the approach his plugin pioneered. Since v0.4.2 the mod presents cutscenes
+itself, so the plugin is no longer bundled.
 
 He is also the reason this mod's crosshair has colour at all. The world-space crosshair rendered
 near-black for a long time, and the diagnosis that fixed it is his: an unlit widget's output is
@@ -495,10 +509,10 @@ just keep the copyright notice. Note that the UEVR plugin SDK this builds agains
 carries its own terms, which is why it is fetched at build time rather than vendored here.
 
 This is an unofficial fan project, not affiliated with or endorsed by Microsoft, Xbox Game Studios,
-or Halo Studios. It distributes **no game assets** — only configuration, original code, original art,
-and elliotttate's community cutscene plugin (`plugins\CutsceneDetectionPlugin.dll`, credited above,
-which is his work rather than ours and so isn't covered by this project's MIT licence). Halo is a
-trademark of Microsoft Corporation.
+or Halo Studios. It distributes **no game assets** — only configuration, original code and original
+art. (Releases up to v0.4.1 also bundled elliotttate's community cutscene plugin,
+`plugins\CutsceneDetectionPlugin.dll`, credited above, which is his work rather than ours and so
+isn't covered by this project's MIT licence.) Halo is a trademark of Microsoft Corporation.
 
 ### AI Usage
 

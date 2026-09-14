@@ -22,6 +22,14 @@
 namespace halo {
 using uevr::API;
 
+// Defined in Rig.cpp -- shot-point bore persistence (load setters + calib emit + schema gate).
+// Forward-declared rather than including Rig.hpp, which would pull the engine API into this
+// foundational, engine-API-light file.
+void shotpoint_set_intrinsic(const char* cls, float x, float y, float z);
+void shotpoint_set_default(float x, float y, float z);
+void shotpoint_emit_calib(std::FILE* f);
+bool shotpoint_schema_ok(int ver);
+
 Config g_cfg{};
 
 // Every smoothing setting used to be a fraction of the gap closed PER CALL, which is not a filter
@@ -54,20 +62,33 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopezoom")   == 0) g_cfg.scope_zoom     = clampf((float)v, 1.05f, 300.0f);
     else if (_stricmp(key, "scoperes")    == 0) g_cfg.scope_rt_size  = (int)clampf((float)v, 128.0f, 2048.0f);
     else if (_stricmp(key, "scopediv")    == 0) g_cfg.scope_div      = (int)clampf((float)v, 1.0f, 8.0f);
-    else if (_stricmp(key, "scopedist")   == 0) g_cfg.scope_dist     = clampf((float)v, 25.0f, 400.0f);
+    // EVERY PLACEMENT KEY RE-VALIDATES THE BLOCK, exactly as aimoffyaw/aimoffpitch do.
+    //
+    // Without this the scope calibration ERASED ITSELF on the next unrelated capture. The block
+    // in write_calib_file() is gated on scope_calib_valid, which only the CAPTURE set; a config
+    // reload does g_cfg = Config{} and then re-parses, restoring the numbers but not the flag, so
+    // the next pose or aim capture rewrote the file without a scope block at all. Observed
+    // 2026-09-10: three scope captures logged "Saved" at 01:01 and the file written at 01:02:57
+    // contained none of them. Nothing warned, because from the writer's point of view there was
+    // simply no scope calibration to write.
+    //
+    // Safe to set on parse only because no SHIPPED file carries these keys -- the canonical fit
+    // is compiled into Config.hpp. If one ever does, this needs the per-file guard that
+    // s_wpnfix_from_capture provides, or it will copy the shipped fit into the player's file.
+    else if (_stricmp(key, "scopedist")   == 0) { g_cfg.scope_dist     = clampf((float)v, 25.0f, 400.0f); g_cfg.scope_calib_valid = true; }
     else if (_stricmp(key, "scopecamdist")== 0) g_cfg.scope_cam_dist = clampf((float)v, 25.0f, 600.0f);
     else if (_stricmp(key, "scopesize")   == 0) g_cfg.scope_size     = clampf((float)v, 5.0f, 100.0f);
-    else if (_stricmp(key, "scoperight")  == 0) g_cfg.scope_right    = clampf((float)v, -100.0f, 100.0f);
-    else if (_stricmp(key, "scopeup")     == 0) g_cfg.scope_up       = clampf((float)v, -100.0f, 100.0f);
+    else if (_stricmp(key, "scoperight")  == 0) { g_cfg.scope_right    = clampf((float)v, -100.0f, 100.0f); g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scopeup")     == 0) { g_cfg.scope_up       = clampf((float)v, -100.0f, 100.0f); g_cfg.scope_calib_valid = true; }
     // CEILING RAISED 8 -> 8192 (2026-08-25). The old ceiling silently capped every brightness
     // test at 8x. The hosted-widget RETICULE needed aim_widget_tint 1024 x aim_widget_gain 5 --
     // roughly 5000x -- to survive the same scene pre-exposure and tonemapper this pane feeds
     // through, so 8 was never in the right order of magnitude for this material family. A knob
     // whose useful range sits outside its own clamp reads as "the setting does nothing".
     else if (_stricmp(key, "scopebright") == 0) g_cfg.scope_bright   = clampf((float)v, 0.0f, 8192.0f);
-    else if (_stricmp(key, "scoperotp")   == 0) g_cfg.scope_rot_p    = (float)v;
-    else if (_stricmp(key, "scoperoty")   == 0) g_cfg.scope_rot_y    = (float)v;
-    else if (_stricmp(key, "scoperotr")   == 0) g_cfg.scope_rot_r    = (float)v;
+    else if (_stricmp(key, "scoperotp")   == 0) { g_cfg.scope_rot_p    = (float)v; g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scoperoty")   == 0) { g_cfg.scope_rot_y    = (float)v; g_cfg.scope_calib_valid = true; }
+    else if (_stricmp(key, "scoperotr")   == 0) { g_cfg.scope_rot_r    = (float)v; g_cfg.scope_calib_valid = true; }
     else if (_stricmp(key, "scopecamroll")== 0) g_cfg.scope_cam_roll = (float)v;
     else if (_stricmp(key, "scopecamtrack")==0) g_cfg.scope_cam_track = (int)clampf((float)v, 0.0f, 1.0f);
     else if (_stricmp(key, "scopecamorigin")==0)
@@ -125,6 +146,14 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopemainres") == 0) g_cfg.scope_main_res   = (int)clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopemaincam") == 0) g_cfg.scope_main_cam   = (int)clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopeppcopy")  == 0) g_cfg.scope_pp_copy   = (v != 0.0);
+    else if (_stricmp(key, "cutsceneblit") == 0) g_cfg.cutscene_blit   = (v != 0.0);
+    else if (_stricmp(key, "cutscenemono") == 0) g_cfg.cutscene_mono   = (int)clampf((float)v, 0.0f, 6.0f);
+    else if (_stricmp(key, "cutscenedist") == 0) g_cfg.cutscene_dist   = clampf((float)v, 0.0f, 10000.0f);
+    else if (_stricmp(key, "cutscenesize") == 0) g_cfg.cutscene_size   = clampf((float)v, 0.25f, 1.5f);
+    else if (_stricmp(key, "cutsceneup")   == 0) g_cfg.cutscene_up     = clampf((float)v, -100.0f, 100.0f);
+    else if (_stricmp(key, "cutscenepitch")== 0) g_cfg.cutscene_pitch  = clampf((float)v, -34.0f, 34.0f);
+    else if (_stricmp(key, "cutscenedump") == 0) g_cfg.cutscene_dump   = (int)v;
+    else if (_stricmp(key, "cutsceneblitfill") == 0) g_cfg.cutscene_blit_fill = clampf((float)v, 0.2f, 1.0f);
     else if (_stricmp(key, "scopeblitmag") == 0) g_cfg.scope_blit_mag  = clampf((float)v, 1.05f, 32.0f);
     else if (_stricmp(key, "scopeblitsize")== 0) g_cfg.scope_blit_size = clampf((float)v, 0.05f, 1.0f);
     else if (_stricmp(key, "scopeblitx")   == 0) g_cfg.scope_blit_x    = clampf((float)v, 0.0f, 1.0f);
@@ -475,6 +504,20 @@ int menu_bridge_tick() {
             // Scope.cpp, so this only chooses the DESTINATION of a capture that gesture already makes.
             if (line == "calib:wpnscope")  { scope_offset_arm(true);  ++applied; continue; }
             if (line == "calib:wpnscopeoff"){ scope_offset_arm(false); ++applied; continue; }
+            // ---- MODES THAT FREEZE THE WEAPON, joined to the same arming the pose/aim/hand
+            // calibrations already use rather than each carrying its own latch.
+            //
+            // What that buys, and it is the reason for the change: the trigger standard and the
+            // trigger SWALLOWING are both keyed on `mode != 0`, so they extend to these for free --
+            // RIGHT = save & finish, LEFT = save & re-arm, and neither reaches the weapon. It also
+            // makes the keyboard safe by construction: End contributes to the hold ONLY while a
+            // mode is armed, so a stray press can no longer run a calibration nobody asked for.
+            //
+            //   4 = per-weapon weapon fit (was the Insert key, unarmed and therefore dangerous)
+            //   5 = per-weapon support-hand grip offset
+            if (line == "calib:wpnpose")   { g_menu_calib_mode.store(4, std::memory_order_relaxed); ++applied; continue; }
+            if (line == "calib:wpngrip")   { g_menu_calib_mode.store(5, std::memory_order_relaxed); ++applied; continue; }
+            if (line == "calib:wpngripoff"){ g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
             if (line == "calib:scopebase")   { scope_base_arm(true);   ++applied; continue; }
             if (line == "calib:scopebaseoff"){ scope_base_arm(false);  ++applied; continue; }
             if (line == "calib:off")       { g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
@@ -492,6 +535,8 @@ int menu_bridge_tick() {
             // strip_calib_keys. Returns false when there was nothing to clear, which is not an
             // error -- it logs why and the menu button simply does nothing.
             if (line == "calibreset:wpnscope") { scope_offset_clear_current(); ++applied; continue; }
+            if (line == "calibreset:wpngrip")  { grip_offset_clear_current();  ++applied; continue; }
+            if (line == "calibreset:wpnpose")  { wpnoff_clear_current();      ++applied; continue; }
 
             // ---- BIND CAPTURE. `bind:capture=<cfgkey>` arms; `bind:capture=off` disarms.
             //
@@ -633,21 +678,28 @@ int menu_bridge_tick() {
     // claiming "armed" after the gesture had already spent it.
     static int  s_last_scopearm = -1;
     static int  s_last_scopebase = -1;
+    static int  s_last_griparm  = -1;
     const int scopearm  = scope_offset_armed() ? 1 : 0;
     const int scopebase = scope_base_armed()   ? 1 : 0;
+    // Same authority argument as scopearm: the capture CONSUMES the arm, so a menu button that
+    // tracked its own click would keep claiming "armed" after the gesture had already spent it.
+    const int griparm   = grip_offset_armed()  ? 1 : 0;
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
+        griparm != s_last_griparm ||
         strncmp(s_last_bindkey, g_bind_capture_key, sizeof(s_last_bindkey)) != 0) {
         s_last_status = mode;
         s_last_bind   = barmed;
         s_last_hand   = hready;
         s_last_scopearm = scopearm;
         s_last_scopebase = scopebase;
+        s_last_griparm  = griparm;
         strncpy_s(s_last_bindkey, g_bind_capture_key, _TRUNCATE);
-        char status[320];   // widened for scopearm= and scopebasearm=
+        char status[352];   // widened for scopearm= and griparm=
         sprintf_s(status, sizeof(status),
-                  "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n",
-                  mode, barmed, g_bind_capture_key, hready, scopearm);
+                  "calibmode=%d\r\nbindcapture=%d\r\nbindkey=%s\r\nhandready=%d\r\nscopearm=%d\r\n"
+                  "griparm=%d\r\n",
+                  mode, barmed, g_bind_capture_key, hready, scopearm, griparm);
         write_text_file(g_status_path, status);
     }
     return applied;
@@ -827,6 +879,12 @@ static bool parse_scope_offset(const char* val) {
     g_cfg.wpn_scope[g_cfg.scope_count++] = s;
     return true;
 }
+// The wpnfix schema stamp currently in force, and whether the file being parsed is the capture
+// file. Both are PER FILE and reset at the top of parse_config_file() -- see the note there.
+// (Declared ahead of parse_weapon_offset, which reads the capture flag too.)
+static int  s_wpnfix_file_ver     = 0;
+static bool s_wpnfix_from_capture = false;
+
 static bool parse_weapon_offset(const char* val) {
     if (val == nullptr || val[0] == 0) return false;
     if (g_cfg.wpn_count >= kMaxWeaponAdjust) return true;   // full: ignore rather than overflow
@@ -850,6 +908,20 @@ static bool parse_weapon_offset(const char* val) {
         if (tok == nullptr) break;
         *fields[i] = (float)atof(tok);
     }
+    w.captured = s_wpnfix_from_capture;
+
+    // THE v0.4 SHIPPED SHOTGUN TEST LINE. v0.4.0-v0.4.2 shipped `wpnoff=FP_Shotgun,0,0,0,0,200,0` in
+    // halo_vr.cfg: a 200-degree yaw left in from a test. It was inert there -- per-weapon poses never
+    // reached the direct-drive rig until 2026-09-10 -- and the per-weapon writer copied every shipped
+    // entry into the player's own halo_vr_weapons.cfg. So any player who ever captured a weapon pose
+    // on v0.4 carries a copy, and the first build that APPLIES per-weapon rotation would turn their
+    // shotgun around. Nobody sets exactly this by hand, so this exact value is dropped from any file;
+    // the shotgun then falls back to the shipped baseline (all zero).
+    if (_stricmp(w.match, "FP_Shotgun") == 0 && w.d_x == 0.0f && w.d_y == 0.0f && w.d_z == 0.0f &&
+        w.d_grip == 0.0f && w.d_grip_yaw == 200.0f && w.d_grip_roll == 0.0f) {
+        if (g_cfg.wpnoff_dropped < 0x7FFF) ++g_cfg.wpnoff_dropped;
+        return true;
+    }
 
     // REPLACE BY MATCH -- same rule and same reason as parse_scope_offset above. The lookup in
     // WeaponOffset.cpp takes the FIRST match ("hit = &w; break;") and the files load shipped ->
@@ -866,11 +938,6 @@ static bool parse_weapon_offset(const char* val) {
     g_cfg.wpn[g_cfg.wpn_count++] = w;
     return true;
 }
-
-// The wpnfix schema stamp currently in force, and whether the file being parsed is the capture
-// file. Both are PER FILE and reset at the top of parse_config_file() -- see the note there.
-static int  s_wpnfix_file_ver     = 0;
-static bool s_wpnfix_from_capture = false;
 
 // wpnfix=<match>,qx,qy,qz,qw,tx,ty,tz -- the PALETTE path's per-weapon rigid delta.
 //
@@ -932,8 +999,113 @@ static bool parse_weapon_fix(const char* val) {
     return true;
 }
 
+// wpngrip=<match>,<off_y>,<off_z>[,<at_x>] -- the per-weapon SUPPORT-HAND GRIP OFFSET.
+//
+// Gun frame, game centimetres, the same frame and unit TwoHandZoneMeas already publishes. What it
+// is FOR is on WeaponGrip in Config.hpp; this only turns a line into an entry.
+//
+// THE TWO LATERALS ARE REQUIRED; at_x IS OPTIONAL. That is a real difference from wpnfix rather
+// than a looser standard: a short wpnfix line is a half-built rotation, which is not a rotation at
+// all, whereas a three-token line here is a COMPLETE offset missing only a diagnostic. A line
+// naming just a weapon is still dropped, because an all-zero offset cannot be told apart from
+// having no entry, and storing one would cost the next reader the ability to distinguish a
+// deliberate centre-line grip from a typo.
+//
+// NO SCHEMA STAMP, and that is deliberate too. wpnfix carries one because its frame changed once
+// already and a delta from a foreign frame fails silently. This is two lateral distances in the
+// frame the zone measurement has used since it existed; there is no earlier spelling of it sitting
+// in anyone's file waiting to be misread.
+//
+// CLAMPED, unlike wpnfix, because this one IS a bounded physical quantity: how far across its own
+// barrel a weapon's front handle sits. Half a metre is far past any real handle and still leaves
+// every plausible capture untouched -- the bound exists to catch a frame or unit error, which
+// presents as a value orders of magnitude out, not as a slightly generous reach.
+static bool parse_weapon_grip(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.grip_count >= kMaxWeaponGrip) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    char* ctx = nullptr;
+    char* tok = strtok_s(buf, ",", &ctx);
+    if (tok == nullptr || tok[0] == 0) return true;
+
+    WeaponGrip w{};
+    strncpy_s(w.match, sizeof(w.match), tok, _TRUNCATE);
+    w.captured = s_wpnfix_from_capture;
+
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok == nullptr) return true;                       // weapon named and nothing else: drop
+    w.off_y = clampf((float)atof(tok), -50.0f, 50.0f);
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok == nullptr) return true;
+    w.off_z = clampf((float)atof(tok), -50.0f, 50.0f);
+    tok = strtok_s(nullptr, ",", &ctx);
+    if (tok != nullptr) w.at_x = clampf((float)atof(tok), -200.0f, 200.0f);
+
+    // REPLACE BY MATCH, for the same reason wpnfix does it: the lookup returns the first hit, so a
+    // second entry for one weapon would be dead weight that reads like a working override.
+    for (int i = 0; i < g_cfg.grip_count; ++i) {
+        if (_stricmp(g_cfg.wpn_grip[i].match, w.match) == 0) {
+            g_cfg.wpn_grip[i] = w;
+            return true;
+        }
+    }
+    g_cfg.wpn_grip[g_cfg.grip_count++] = w;
+    return true;
+}
+
+// THE ONE GRIP LOOKUP. Backwards, so the last entry parsed for a weapon wins -- the capture file
+// is parsed after halo_vr.cfg, which is what lets a player's own capture beat a shipped baseline.
+// Cheap enough for the tick: a substring test over at most kMaxWeaponGrip short strings.
+const WeaponGrip* weapon_grip_for(const char* class_name) {
+    if (!g_cfg.grip_offsets || class_name == nullptr || class_name[0] == 0) return nullptr;
+    for (int i = g_cfg.grip_count - 1; i >= 0; --i) {
+        const WeaponGrip& w = g_cfg.wpn_grip[i];
+        if (w.match[0] != 0 && strstr(class_name, w.match) != nullptr) return &w;
+    }
+    return nullptr;
+}
+
 // The handfix schema stamp currently in force, PER FILE, reset with the wpnfix one below.
 static int s_handfix_file_ver = 0;
+
+// Shot-point per-weapon bore persistence stamp, PER FILE (reset with the others below).
+static int s_shotfix_file_ver = 0;
+
+// shotfix=<weaponClass>,ix,iy,iz -- the placement-independent intrinsic (Rig.cpp owns the frame).
+// shotfixdefault=ix,iy,iz -- the AR reference default. Stamp-gated like wpnfix: a file whose
+// shotfixver does not match this build's convention has its lines DROPPED, not applied in the
+// wrong frame. A short line is dropped rather than half-applied.
+static bool parse_shot_fix(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (!shotpoint_schema_ok(s_shotfix_file_ver)) return true;
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    char* ctx = nullptr;
+    const char* cls = strtok_s(buf, ",", &ctx);
+    const char* xs  = strtok_s(nullptr, ",", &ctx);
+    const char* ys  = strtok_s(nullptr, ",", &ctx);
+    const char* zs  = strtok_s(nullptr, ",", &ctx);
+    if (cls == nullptr || cls[0] == 0 || xs == nullptr || ys == nullptr || zs == nullptr) return true;
+    shotpoint_set_intrinsic(cls, (float)atof(xs), (float)atof(ys), (float)atof(zs));
+    return true;
+}
+static bool parse_shot_default(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (!shotpoint_schema_ok(s_shotfix_file_ver)) return true;
+    char buf[128] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    char* ctx = nullptr;
+    const char* xs = strtok_s(buf, ",", &ctx);
+    const char* ys = strtok_s(nullptr, ",", &ctx);
+    const char* zs = strtok_s(nullptr, ",", &ctx);
+    if (xs == nullptr || ys == nullptr || zs == nullptr) return true;
+    shotpoint_set_default((float)atof(xs), (float)atof(ys), (float)atof(zs));
+    return true;
+}
 
 // handfix=qx,qy,qz,qw,tx,ty,tz -- the SUPPORT HAND's rigid trim, in that controller's own frame.
 //
@@ -1184,6 +1356,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "dpadheadcm")    == 0) { g_cfg.dpad_head_cm      = clampf((float)v, 5.0f, 80.0f); return true; }
     if (_stricmp(key, "dpadheadhyst")  == 0) { g_cfg.dpad_head_hyst_cm = clampf((float)v, 0.0f, 40.0f); return true; }
     if (_stricmp(key, "dpadheaddwell") == 0) { g_cfg.dpad_head_dwell_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "pausehead")     == 0) { g_cfg.pause_head         = (v != 0.0); return true; }
     // THE BUTTON-REMAP FAMILY, moved off parse_config_key_2's else-if chain (2026-09-05) when
     // adding the rgrip* pair tripped C1061 for the third time. The whole family moved rather than
     // just the two new keys, so the next control binding is an edit and not another refactor --
@@ -1212,10 +1385,20 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopeoffsets")  == 0) { g_cfg.scope_offsets = (v != 0.0); return true; }
     if (_stricmp(key, "scopewpnlog")   == 0) { g_cfg.scope_wpn_log = (v != 0.0); return true; }
     if (_stricmp(key, "wpnfix")        == 0) { return parse_weapon_fix(val); }
+    // Per-weapon support-hand grip offset for two-handed aiming, and its two switches.
+    // gripfixaim is separate from gripoffsets on purpose: the zone half cannot move a shot,
+    // the aim half can. See WeaponGrip in Config.hpp.
+    if (_stricmp(key, "wpngrip")       == 0) { return parse_weapon_grip(val); }
+    if (_stricmp(key, "gripoffsets")   == 0) { g_cfg.grip_offsets = (v != 0.0); return true; }
+    if (_stricmp(key, "gripfixaim")    == 0) { g_cfg.grip_fix_aim = (v != 0.0); return true; }
+    if (_stricmp(key, "griplog")       == 0) { g_cfg.grip_log     = (v != 0.0); return true; }
     // Scoped to the file being parsed, NOT stored in g_cfg -- see parse_config_file()'s reset.
     if (_stricmp(key, "wpnfixver")     == 0) { s_wpnfix_file_ver     = (int)v; return true; }
     if (_stricmp(key, "handfix")       == 0) { return parse_hand_fix(val); }
     if (_stricmp(key, "handfixver")    == 0) { s_handfix_file_ver    = (int)v; return true; }
+    if (_stricmp(key, "shotfixver")    == 0) { s_shotfix_file_ver    = (int)v; return true; }
+    if (_stricmp(key, "shotfix")       == 0) { return parse_shot_fix(val); }
+    if (_stricmp(key, "shotfixdefault")== 0) { return parse_shot_default(val); }
     if (_stricmp(key, "armkeeppose")   == 0) { g_cfg.arm_keep_pose   = (v != 0.0); return true; }
     if (_stricmp(key, "armhidemode")    == 0) { g_cfg.arm_hide_mode  = (int)v; return true; }
     if (_stricmp(key, "armhidebone")    == 0) {
@@ -1468,6 +1651,7 @@ bool parse_config_file(const char* path) {
     // halo_vr_calib.cfg today, but "each file stamps its own lines" has to hold unconditionally or
     // it holds for nothing -- the wpnfix note above is the whole argument.
     s_handfix_file_ver = 0;
+    s_shotfix_file_ver = 0;
     // Is THIS the capture file? Decides whether the entries it contributes are the player's own and
     // therefore belong in the rewrite -- see WeaponFix::captured.
     s_wpnfix_from_capture =
@@ -1547,6 +1731,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimreticulesrc") == 0) g_cfg.aim_reticule_src = (int)v;
         else if (_stricmp(key, "aimhidenative") == 0) g_cfg.aim_hide_native = (v != 0.0);
         else if (_stricmp(key, "aimsrc")       == 0) g_cfg.aim_src         = (int)v;
+        else if (_stricmp(key, "shotaim")      == 0) g_cfg.shot_aim         = (int)v;
+        else if (_stricmp(key, "shotaimdir")   == 0) g_cfg.shot_aim_dir     = (int)v;
+        else if (_stricmp(key, "shotaimlog")   == 0) g_cfg.shot_aim_log     = (int)v;
         else if (_stricmp(key, "aimrolllog")   == 0) g_cfg.aim_roll_log    = (int)v;
         else if (_stricmp(key, "aimreticuletrace") == 0) g_cfg.aim_reticule_trace = (v != 0.0);
         else if (_stricmp(key, "aimreticuletracemax") == 0)
@@ -1606,6 +1793,15 @@ bool parse_config_file(const char* path) {
     else if (_stricmp(key, "killkey")    == 0) g_cfg.kill_key    = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "aimoffyaw")   == 0) { g_cfg.aim_off_yaw   = (float)v; g_cfg.aim_off_valid = true; }
         else if (_stricmp(key, "aimoffpitch") == 0) { g_cfg.aim_off_pitch = (float)v; g_cfg.aim_off_valid = true; }
+        else if (_stricmp(key, "aimfix")      == 0) {
+            // Comma list, so it needs the raw val string, not the single-float v. sscanf leaves
+            // aim_fix untouched (and aim_fix_valid false) unless all four components parse.
+            float a, b, c, d;
+            if (sscanf(val, "%f,%f,%f,%f", &a, &b, &c, &d) == 4) {
+                g_cfg.aim_fix[0] = a; g_cfg.aim_fix[1] = b; g_cfg.aim_fix[2] = c; g_cfg.aim_fix[3] = d;
+                g_cfg.aim_fix_valid = true;
+            }
+        }
         else if (_stricmp(key, "calibrelative") == 0) g_cfg.calib_relative = (v != 0.0);
         else if (_stricmp(key, "calibver")      == 0) g_cfg.calib_ver      = (int)v;
         else if (_stricmp(key, "aimcalibver")   == 0) g_cfg.aim_calib_ver  = (int)v;
@@ -1755,6 +1951,9 @@ void load_config() {
 
     g_cfg = Config{};
     g_cfg.blam_aim = keep_blam_aim;
+    // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset
+    // here -- without it a deleted twohand* key kept its last value until the game restarted.
+    two_hand_tuning_reset();
 
     // The base file is the only REQUIRED one: with it missing there is nothing to override, so we
     // write a default and come back next poll.
@@ -1787,6 +1986,14 @@ void load_config() {
             "put the weapon in the wrong place; the shipped per-weapon calibration is being used "
             "instead. Delete or re-capture those lines.",
             g_cfg.wpnfix_dropped, kWeaponFixSchema);
+    }
+    if (g_cfg.wpnoff_dropped > 0) {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] WPNOFF: ignored %d copy(ies) of the v0.4 shipped shotgun test line "
+            "(wpnoff=FP_Shotgun with a 200 deg yaw). It would turn the shotgun around now that "
+            "per-weapon poses apply; the shipped shotgun baseline is used instead. Recapture the "
+            "shotgun if you want a pose of your own -- the next capture also removes the line.",
+            g_cfg.wpnoff_dropped);
     }
 
     // Only here, past every early return: g_cfg now holds the values that are actually on disk.
@@ -1861,6 +2068,21 @@ void write_calib_file() {
     const float w_ox    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_x     : g_cfg.off_x;
     const float w_oy    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_y     : g_cfg.off_y;
     const float w_oz    = g_cfg.wpn_offsets ? g_cfg.wpn_base_off_z     : g_cfg.off_z;
+    // THE DIRECT PAIR GETS THE SAME GUARD, and it did not until 2026-09-12.
+    //
+    // It was written raw from g_cfg, which was correct only while nothing added a per-weapon delta
+    // to it. Once WeaponOffset began doing exactly that (rig_mode 3 composes from the direct trim
+    // and nothing else, so the delta has to land there), a raw write persisted "calibration +
+    // whatever gun is in hand". Any calibration write while holding a weapon with a pose delta
+    // baked the delta into the global dirgrip, and the next reload stacked it again. The fitted
+    // pair never had this because it was guarded from the start; the guard simply was not extended
+    // when a second consumer of the same pattern appeared.
+    const float w_dg    = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip      : g_cfg.rig_dir_grip_deg;
+    const float w_dgy   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip_yaw  : g_cfg.rig_dir_grip_yaw;
+    const float w_dgr   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_grip_roll : g_cfg.rig_dir_grip_roll;
+    const float w_dox   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_x     : g_cfg.rig_dir_off_x;
+    const float w_doy   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_y     : g_cfg.rig_dir_off_y;
+    const float w_doz   = g_cfg.wpn_offsets ? g_cfg.wpn_base_dir_off_z     : g_cfg.rig_dir_off_z;
     fprintf(f,
         "# halo_vr - CALIBRATION RESULT. Written by the pose-match calibration; applied\r\n"
         "# AFTER halo_vr.cfg, so these override the values in that file.\r\n"
@@ -1881,8 +2103,8 @@ void write_calib_file() {
         // absolute aimoffyaw got stamped v2 by a mesh calibration.
         g_cfg.calib_ver,
         w_grip, w_gyaw, w_groll,
-        g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll,
-        g_cfg.rig_dir_off_x, g_cfg.rig_dir_off_y, g_cfg.rig_dir_off_z,
+        w_dg, w_dgy, w_dgr,
+        w_dox, w_doy, w_doz,
         w_ox, w_oy, w_oz);
 
     if (g_cfg.aim_off_valid) {
@@ -1893,6 +2115,15 @@ void write_calib_file() {
             "# aim calibration itself has been re-run, whatever the mesh calibration did.\r\n"
             "aimcalibver=%d\r\naimoffyaw=%.3f\r\naimoffpitch=%.3f\r\n",
             g_cfg.aim_calib_ver, g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
+    }
+
+    if (g_cfg.aim_fix_valid) {
+        fprintf(f,
+            "# RIGID controller-frame hand-to-aim correction (quaternion x,y,z,w), right-multiplied\r\n"
+            "# onto the controller pose so it rolls with the wrist like the gun does. Roll-invariant,\r\n"
+            "# unlike aimoffyaw/aimoffpitch. A measurement -- do not hand-edit.\r\n"
+            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
     }
 
     if (g_pivot_from_calib) {
@@ -1945,6 +2176,9 @@ void write_calib_file() {
             g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up,
             g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
     }
+    // Shot-point per-weapon bores (+ AR default), placement-independent. Rig.cpp owns the cache and
+    // emits shotfixver + the lines; this keeps the calib file the one home for captured calibration.
+    shotpoint_emit_calib(f);
     fclose(f);
 }
 

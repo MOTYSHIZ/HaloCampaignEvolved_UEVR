@@ -93,10 +93,29 @@ std::string weapon_key();
 // future update to the baseline. See the `captured` flag on WeaponFix.
 void wpnfix_set(const std::string& key, const float q[4], const float t[3]);
 
+// Store a captured SUPPORT-HAND GRIP OFFSET (gun frame, game cm) for `key`, and rewrite the file.
+// Same captured-entries-only rule as wpnfix_set -- see its note.
+void wpngrip_set(const std::string& key, float off_y, float off_z, float at_x);
+
+// Drop `key`'s captured grip offset. false = there was none. Rewrites halo_vr_weapons.cfg.
+bool wpngrip_clear(const std::string& key);
+
 // Consume the "the per-weapon key was just released" latch.
 //
 // The palette freeze path takes it, so the rig-path capture cannot ALSO claim the same press.
 // Without this a single INSERT under the palette driver would write both a wpnfix and a wpnoff.
 bool wpn_calib_take_pending();
+
+// Claim the release that is about to run as a PER-WEAPON capture.
+//
+// Set from the calibration edge in Plugin.cpp when the armed mode was 4, for the same reason
+// wpn_calib_poll() latches it on the Insert key's falling edge: by the time wpn_calib_capture()
+// runs there is no held key or armed mode left to read. Setting it is what makes the solve land in
+// this weapon's delta instead of the global fit.
+void wpn_calib_set_pending();
+
+// Drop the equipped weapon's per-weapon POSE delta -> back to the global fit. false = nothing to
+// clear. Rewrites halo_vr_weapons.cfg.
+bool wpnoff_clear_current();
 
 } // namespace halo

@@ -49,6 +49,27 @@ using namespace uevr;
 
 namespace halo {
 
+// Defined in Rig.cpp. Reads the weapon-mesh bore forward (UE world) published at tick rate by
+// shotpoint_tick(); false when no weapon / no marker, so the aim path keeps its own direction.
+bool shotpoint_dir(Vec3* out_fwd);
+// Defined in Rig.cpp. The FROZEN per-weapon controller-local bore, if one is captured for the held
+// weapon; the aim path rotates it by the live controller pose (animation-immune, roll-invariant).
+bool shotpoint_bore_local(Vec3* out);
+// Defined in Rig.cpp. Reconstruct that frozen bore to game-space yaw/pitch on the SAME composition
+// the rig renders the weapon with (grip-independent, animation-immune). ONE definition shared by
+// this path and the Plugin.cpp inline copy, so setpoint and reference cannot describe different
+// directions. False -> no frozen constant for the held weapon; caller cascades to the bootstrap.
+bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
+                          float* out_yaw, float* out_pitch);
+
+// True when absolute weapon-mesh aim is live: feature on, direction mode on, and a bore forward is
+// currently published. When true the setpoint IS the mesh bore -- an absolute game-space direction
+// -- so it takes NO controller-relative reference and needs NO aim calibration. When false (no
+// weapon, no marker, or the mode off) the aim uses the calibrated controller reference as always.
+static bool shotpoint_aim_active() {
+    return g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 && shotpoint_dir(nullptr);
+}
+
 // ---- aim reference ---------------------------------------------------------------------------
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
 std::atomic<float> g_ref_ctrl_pitch{0.0f}, g_ref_aim_pitch{0.0f};
@@ -320,6 +341,29 @@ float shape(float err_deg, float dt) {
 // calibrated aim pose, the sightline through xdist (so hand TRANSLATION moves aim, not just
 // rotation), and the snap-turn offset. Everything it touches is either a UEVR API read (internally
 // locked) or an atomic, so it is callable from the XInput hook as well as the tick.
+// ---- THE CONTROLLER-FRAME AIM CORRECTION SEAM (apply_aim_fix) --------------------------------
+// A rotation RIGHT-multiplied onto the controller pose, so the correction lives in the controller's
+// OWN frame and rolls with the wrist exactly as the rendered gun does. This is the lane-independent
+// seam a per-weapon bore correction (or a quaternion Page Down) plugs into: every aim path takes
+// its direction from controller x aim_fix, so one producer corrects the loop, the direct write, the
+// reticle and the weapon publisher at once -- they cannot disagree by construction.
+//
+// WHY RIGHT-MULTIPLY, not left. q_src maps the controller's canonical forward into the world.
+// q_src * f applies f FIRST, in the controller's local axes ("tilt toward the handle's own up"), so
+// the tilt travels with the controller -- a laser glued to it at a fixed angle. Rolling the wrist
+// about the bore then leaves the corrected forward on the bore (R * (q_src*f) applied to a vector
+// on R's axis is unchanged). A LEFT-multiply f * q_src is a world-fixed bend that the roll sweeps
+// away -- exactly the ~8 deg roll wander a world yaw/pitch offset produces (bc measured 0.908
+// correlation with sin(wrist roll); the fingerprint of a correction fixed in the wrong frame).
+//
+// Identity default => no correction and no behaviour change until a producer writes aim_fix. The
+// name and (x,y,z,w) layout match the calibration file's `aimfix` line for palette-lane interop.
+Quat apply_aim_fix(const Quat& q_src) {
+    if (!g_cfg.aim_fix_valid) return q_src;
+    const Quat f{g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]};
+    return quat_mul(q_src, f);
+}
+
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
                         bool allow_two_hand) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
@@ -328,7 +372,11 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     Vec3 cpos{}; Quat cq{};
     if (!get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) return false;
 
-    Vec3 fwd = quat_forward(cq);
+    // apply_aim_fix: the controller-frame aim correction (identity by default). Applied to the
+    // pose BEFORE the forward is taken, so it rolls with the wrist like the rendered gun does; the
+    // weapon publisher and the direct-write path route through the same call, so ray and barrel
+    // agree by construction. See apply_aim_fix's definition above for why it is a right-multiply.
+    Vec3 fwd = quat_forward(apply_aim_fix(cq));
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -363,10 +411,49 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            fwd = quat_forward(gq);
+            fwd = quat_forward(apply_aim_fix(gq));
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
+    }
+
+    // ---- SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): aim along the weapon MESH bore ---------
+    //
+    // Aim from the rendered weapon's barrel (the fx_muzzleflash marker's forward) instead of the
+    // controller pose -- so aim follows the barrel you SEE. Measured 2026-09-11: that forward IS the
+    // bore (matched the game aim setpoint to ~1 deg yaw / ~2 deg pitch; the UP/RIGHT axes were 80+
+    // off). Two tiers, both in GAME space (yaw = atan2(y,x), pitch = asin(z)), NOT the VR-space
+    // atan2(x,-z)/asin(y) the controller path uses:
+    //   1. FROZEN (shotpoint_aim_angles): a per-weapon constant captured once, reconstructed against
+    //      the LIVE rig composition -- grip-independent (an End grip change is followed with no
+    //      re-capture), animation-immune, roll-invariant, and it carries the two-hand swing itself
+    //      (the swing is inside the reconstruction, matching the rendered weapon -- no separate bend
+    //      here). The reconstruction re-adds the snap turn.
+    //   2. BOOTSTRAP (live mesh): until a weapon is captured, read its live marker forward. It is
+    //      WORLD space and ALREADY reflects any snap-turn (the rendered world is turned), so it takes
+    //      NO turn offset; it follows recoil/reload animation -- the accepted interim.
+    // Both skip the sightline reprojection (the bore already IS the aim ray). CASCADE: if neither is
+    // available (no weapon / no marker / not yet sampled), fall through to the controller path below.
+    if (g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+        // FROZEN per-weapon bore, reconstructed on the SAME composition the rig renders the weapon
+        // with: the live controller pose + live grip trim (grip-independent -- an End grip change is
+        // followed with no re-capture), snap turn re-added. Animation-immune + roll-invariant.
+        // two_hand=allow_two_hand: swing with the barrel, except while capturing the calibration
+        // snapshot (the controller path below is gated the same way). One shared definition in
+        // Rig.cpp so this setpoint and the inline copy that feeds the reference cannot diverge.
+        if (shotpoint_aim_angles(ridx, cq, allow_two_hand, out_yaw, out_pitch)) return true;
+        Vec3 mf{};
+        if (shotpoint_dir(&mf)) {
+            // BOOTSTRAP until this weapon has a frozen capture: the live mesh bore (world). Follows
+            // recoil/reload animation -- the accepted "predictable, slightly wrong" interim.
+            const float ml = std::sqrt(mf.x * mf.x + mf.y * mf.y + mf.z * mf.z);
+            if (ml > 1e-3f) {
+                *out_yaw   = wrap180(std::atan2(mf.y, mf.x) * RAD2DEG);
+                *out_pitch = std::asin(clampf(mf.z / ml, -1.0f, 1.0f)) * RAD2DEG;
+                return true;
+            }
+        }
+        // else: unavailable -> cascade to the controller path below (grip+offset / unarmed).
     }
 
     // ---- THE TWO-HANDED HOLD.
@@ -470,8 +557,13 @@ bool desired_aim_now(float* out_yaw, float* out_pitch) {
     // Same hold, same reason -- consumers of the setpoint must see the swing target too, or the
     // strike and the reticule disagree about where the blow is going.
     apply_melee_aim_hold(&cy, &cp);
-    *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
-    *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
+    if (shotpoint_aim_active()) {
+        // Absolute mesh bore: cy/cp already ARE the game-space aim direction. See aim_control_law.
+        *out_yaw = cy; *out_pitch = cp;
+    } else {
+        *out_yaw   = g_ref_aim_yaw.load()   + wrap180(cy - g_ref_ctrl_yaw.load());
+        *out_pitch = g_ref_aim_pitch.load() + wrap180(cp - g_ref_ctrl_pitch.load());
+    }
     return true;
 }
 
@@ -575,12 +667,29 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     }
 
     // The hand's rotation SINCE CALIBRATION, kept as its own term because the direct-write path
-    // needs to be able to mirror it independently of the reference it is added to.
+    // needs to mirror it independently of the reference it is added to. Computed unconditionally --
+    // the direct-write path below still references it in its own (non-shot-point) branch.
     const float dctrl_yaw   = wrap180(ctrl_yaw   - g_ref_ctrl_yaw.load());
     const float dctrl_pitch = wrap180(ctrl_pitch - g_ref_ctrl_pitch.load());
 
-    const float desired_yaw   = g_ref_aim_yaw.load()   + dctrl_yaw;
-    const float desired_pitch = g_ref_aim_pitch.load() + dctrl_pitch;
+    // WHERE THE SETPOINT COMES FROM -- two modes, decided once for this tick so the loop path, the
+    // published intent, and the direct-write path below all agree.
+    const bool sp_active = shotpoint_aim_active();
+    float desired_yaw, desired_pitch;
+    if (sp_active) {
+        // ABSOLUTE (shot-point): ctrl_yaw/pitch already ARE the weapon-mesh bore, a game-space aim
+        // direction, so it is the setpoint DIRECTLY. No controller-relative reference means no aim
+        // calibration is needed -- aim points where the barrel does, by construction. The bore is
+        // world-space and already carries snap-turn, so nothing else is added. (ref_ctrl/ref_aim
+        // are still maintained above for the fallback path, just not consulted here.)
+        desired_yaw   = ctrl_yaw;
+        desired_pitch = ctrl_pitch;
+    } else {
+        // RELATIVE (controller): the hand's rotation SINCE CALIBRATION added to the aim captured at
+        // calibration -- the reference maps the abstract controller aim pose onto game aim.
+        desired_yaw   = g_ref_aim_yaw.load()   + dctrl_yaw;
+        desired_pitch = g_ref_aim_pitch.load() + dctrl_pitch;
+    }
 
     // Published for the reticule (see the header). Set before the deadband and shaping so it is the
     // raw setpoint, not something the actuator has already filtered.
@@ -777,8 +886,12 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
     // a build per guess (launches are unreliable), the mapping is a live tunable: +1 reproduces the
     // steered setpoint exactly, -1 mirrors the hand's motion about the calibration reference.
     if (g_cfg.aim_direct && aim_direct_ready()) {
-        float wy = g_ref_aim_yaw.load() + g_cfg.aim_direct_sign_x * dctrl_yaw;
-        float wp = g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch;
+        // ABSOLUTE mesh bore -> write the setpoint directly (== desired), with no reference and no
+        // sign mirroring: those exist to map the controller pose, which shot-point aim replaces.
+        // This is the CANONICAL write (aimdirect=1), so the absolute mode must land HERE too, not
+        // only in the loop's desired above -- otherwise the shot would still ride the calibration.
+        float wy = sp_active ? desired_yaw   : g_ref_aim_yaw.load()   + g_cfg.aim_direct_sign_x * dctrl_yaw;
+        float wp = sp_active ? desired_pitch : g_ref_aim_pitch.load() + g_cfg.aim_direct_sign_y * dctrl_pitch;
         // Corrected HERE TOO, and with the same call, because this is the LOCAL VIEW half of the
         // aim pair -- blamangles writes the simulation, this writes what you see. The two halves
         // disagreeing by even a degree is the documented "heavy jitter" failure, so a correction
