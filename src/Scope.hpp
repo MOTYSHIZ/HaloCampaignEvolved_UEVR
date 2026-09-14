@@ -93,9 +93,6 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, uevr::API::UObject
                       uint32_t tick);
 void scope_frame_end(uint32_t tick);
 
-// =====================================================================================// Game thread, once per tick.
-void scope_update(float dt);
-// Drop everything (level transition, rig loss). Components belong to the pawn and die with it.
-void scope_reset();
-
 } // namespace halo
+
+#include "features/scopelens/ScopeLens.hpp"   // fork feature: scopelens (physical scope lens)

@@ -1,6 +1,7 @@
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
 #include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
+#include "features/scopelens/ScopeLens.hpp"   // fork feature: parse_physscope_key
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
 #include "WeaponCalib.hpp"
@@ -1791,49 +1792,6 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "roomanchor")     == 0) { g_cfg.room_anchor = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "reloadhandoff")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_hand_off[0], &g_cfg.reload_hand_off[1], &g_cfg.reload_hand_off[2]); return true; }
     if (_stricmp(key, "reloadhandrot")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_hand_rot[0], &g_cfg.reload_hand_rot[1], &g_cfg.reload_hand_rot[2]); return true; }
-    return false;
-}
-
-// ---- PHYSICAL PER-WEAPON SCOPES (Scope.hpp: scopewpn= entries and their capture knobs). A
-// second hoisted family beside parse_scope_key above, early-return for the same C1061 reason.
-// `scope`, `scoperes` and `scopelumen` are parsed by parse_scope_key, which owns those names.
-static bool parse_physscope_key(const char* key, const char* val, double v) {
-    if (_stricmp(key, "scopesource")    == 0) { g_cfg.scope_capture_source = (int)v; return true; }
-    if (_stricmp(key, "scopetint")      == 0) { g_cfg.scope_tint = clampf((float)v, 0.01f, 20.0f); return true; }
-    if (_stricmp(key, "scopertfmt")     == 0) { g_cfg.scope_rt_format = (int)v; return true; }
-    if (_stricmp(key, "scopeev")        == 0) { g_cfg.scope_ev = clampf((float)v, -10.0f, 10.0f); return true; }
-    if (_stricmp(key, "scopepp")        == 0) { g_cfg.scope_pp_override = (int)v; return true; }
-    if (_stricmp(key, "scopecvardump")  == 0) { g_cfg.scope_cvar_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "scoperound")     == 0) { g_cfg.scope_round = (int)v; return true; }
-    if (_stricmp(key, "scopeshowflags") == 0) { g_cfg.scope_showflags = (int)v; return true; }
-    if (_stricmp(key, "scopeprobe")     == 0) { g_cfg.scope_probe = (int)v; return true; }
-    if (_stricmp(key, "scopetonecurve") == 0) { g_cfg.scope_tone_curve = clampf((float)v, -1.0f, 1.0f); return true; }
-    if (_stricmp(key, "scopeseptrans")  == 0) { g_cfg.scope_sep_trans = (int)v; return true; }
-    if (_stricmp(key, "scopesfflags")   == 0) { strncpy_s(g_cfg.scope_sf_names, val, sizeof(g_cfg.scope_sf_names) - 1); return true; }
-    if (_stricmp(key, "scopecamfwd")    == 0) { g_cfg.scope_cam_fwd = clampf((float)v, 0.0f, 500.0f); return true; }
-    if (_stricmp(key, "scoperollfix")   == 0) { g_cfg.scope_roll_fix = (int)v; return true; }
-    if (_stricmp(key, "scopereticle")   == 0) { g_cfg.scope_reticle = (int)v; return true; }
-    if (_stricmp(key, "scopereticlescale") == 0) { g_cfg.scope_reticle_scale = clampf((float)v, 0.05f, 2.0f); return true; }
-    if (_stricmp(key, "scopeabtest")    == 0) { g_cfg.scope_ab_test = (int)v; return true; }
-    if (_stricmp(key, "scopeeyedist")   == 0) { g_cfg.scope_eye_dist = clampf((float)v, 0.0f, 300.0f); return true; }
-    if (_stricmp(key, "scopehz")        == 0) { g_cfg.scope_hz = clampf((float)v, 0.0f, 240.0f); return true; }
-    if (_stricmp(key, "scopereticletint")  == 0) {
-            float r = 1, g = 1, b = 1;
-            if (sscanf_s(val, "%f,%f,%f", &r, &g, &b) == 3) { g_cfg.scope_reticle_tint[0] = r; g_cfg.scope_reticle_tint[1] = g; g_cfg.scope_reticle_tint[2] = b; } return true; }
-    if (_stricmp(key, "scopewpn")       == 0) {
-        // scopewpn=KEY,fov,x,y,z,pitch,yaw,roll,size  -- replaces an existing entry for KEY
-        ScopeCfg sc; char k[64] = {0};
-        const int n = sscanf_s(val, "%63[^,],%f,%f,%f,%f,%f,%f,%f,%f", k, (unsigned)sizeof(k),
-                               &sc.fov, &sc.pos[0], &sc.pos[1], &sc.pos[2], &sc.rot[0], &sc.rot[1], &sc.rot[2], &sc.size);
-        if (n >= 2) {
-            strncpy_s(sc.key, k, sizeof(sc.key) - 1);
-            int slot = -1;
-            for (int i = 0; i < g_cfg.scope_cfg_count; ++i) if (_stricmp(g_cfg.scopes[i].key, sc.key) == 0) slot = i;
-            if (slot < 0 && g_cfg.scope_cfg_count < 8) slot = g_cfg.scope_cfg_count++;
-            if (slot >= 0) g_cfg.scopes[slot] = sc;
-        }
-        return true;
-    }
     return false;
 }
 
