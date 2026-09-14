@@ -118,6 +118,10 @@ struct FeatureHooks {
     // features_stereo_post_eye_rendered: the stereo post callback per eye, with the rendered eye, after
     // the aim convergence note.
     void (*stereo_post_eye_rendered)(int index, float ex, float ey, float ez);
+
+    // features_gesture_melee_offhand: the melee half of the gesture tick, before the aim hand's
+    // detector, with the tick's dt.
+    void (*gesture_melee_offhand)(float dt);
 };
 
 } // namespace halo

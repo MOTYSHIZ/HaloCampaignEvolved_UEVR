@@ -1,6 +1,7 @@
 #include "features/FeatureHooks.hpp"
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
+#include "features/hooks/GestureHooks.hpp"
 #include "features/hooks/MarkersHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
@@ -28,6 +29,7 @@ extern const FeatureHooks kRoomscaleHooks;
 extern const FeatureHooks kHeightCalHooks;
 extern const FeatureHooks kWristHudHooks;
 extern const FeatureHooks kVehCamHooks;
+extern const FeatureHooks kMeleeLeftHooks;
 
 namespace {
 
@@ -44,6 +46,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kHeightCalHooks,
     &kWristHudHooks,
     &kVehCamHooks,
+    &kMeleeLeftHooks,
 };
 
 } // namespace
@@ -231,6 +234,11 @@ bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
 void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->stereo_post_eye_rendered != nullptr) f->stereo_post_eye_rendered(index, ex, ey, ez);
+}
+
+void features_gesture_melee_offhand(float dt) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->gesture_melee_offhand != nullptr) f->gesture_melee_offhand(dt);
 }
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {

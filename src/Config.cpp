@@ -1565,12 +1565,8 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "magmesh")        == 0) {
         strncpy_s(g_cfg.mag_mesh_path, sizeof(g_cfg.mag_mesh_path), val, _TRUNCATE); return true;
     }
-    // ---- GESTURE RELOAD tuning, the Wwise reload-sound adoption (ak*), the animation probes and the
-    // melee shot/displacement keys. Flat links in this family for the reason the note above gives.
-    if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
-    if (_stricmp(key, "meleeshotms")    == 0) { g_cfg.melee_shot_ms  = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
-    if (_stricmp(key, "meleeshotdist")  == 0) { g_cfg.melee_shot_dist = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = clampf((float)v, 0.0f, 2.0f); return true; }
+    // ---- GESTURE RELOAD tuning, the Wwise reload-sound adoption (ak*) and the animation probes.
+    // Flat links in this family for the reason the note above gives.
     if (_stricmp(key, "turnlog")        == 0) { g_cfg.turn_log       = (v != 0.0); return true; }
     if (_stricmp(key, "widgetlog")      == 0) { g_cfg.widget_log     = (v != 0.0); return true; }
     if (_stricmp(key, "moveprobe")      == 0) { g_cfg.move_probe     = (v != 0.0); return true; }

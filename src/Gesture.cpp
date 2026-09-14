@@ -6,11 +6,12 @@
 #include "PaletteTwoHand.hpp"   // palette_two_hand_reset / g_th_latched: the palette weapon mode hold
 #include "core/HiddenReload.hpp"   // g_wristhud_hide_cradle: the hidden reload hides the ammo cradle
 #include "Config.hpp"
-#include "core/FireInput.hpp"      // g_ft_fire_at: the off hand stands down while the stock kicks
+#include "core/FireInput.hpp"      // g_ft_fire_at: the reload family's fire timing
 #include "Markers.hpp"            // the magwell insert marker rides the holster marker machinery
 #include "core/MarkerFaces.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
+#include "features/hooks/GestureHooks.hpp"
 #include "Rig.hpp"                // fp_weapon_actor -- the mag hide walks its components
 #include "UeObject.hpp"
 #include "WeaponCalib.hpp"
@@ -167,6 +168,8 @@ bool reload_watchdog_expired() {
 }
 
 } // namespace
+
+HALO_GESTURE_STATE_BRIDGE
 
 bool melee_press_active() {
     const long long until = g_melee_hold_until.load(std::memory_order_relaxed);
@@ -435,8 +438,6 @@ void gesture_reset() {
     s_prev_buttons = 0;
 }
 
-#include "features/meleeleft/Gesture_offhand.inl"   // fork feature: meleeleft (off-hand detector)
-
 API::UObject* native_mag_mesh() { return native_mag_mesh_impl(); }
 
 void gesture_update(float dt) {
@@ -544,8 +545,7 @@ void gesture_update(float dt) {
         return;
     }
 
-    // The off hand reads its own poses, so it does not wait on the aim hand's below.
-    offhand_melee_update(dt);
+    features_gesture_melee_offhand(dt);
 
     // HEAD-RELATIVE, and the head pose is REQUIRED -- no fail-open here. Without it there is no
     // extension measurement at all, and the previous version's fallback (assume the gate passes)

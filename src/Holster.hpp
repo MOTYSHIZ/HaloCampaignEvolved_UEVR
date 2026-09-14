@@ -84,9 +84,6 @@ uevr::API::UObject* holster_mesh_plasma();
 bool holster_grip_held(bool right);
 
 bool holster_melee_veto();
-// Same idea for the OFF-hand detector: the off hand's own pouch proximity + the recent-action
-// window. The aim-hand version reads the AIM hand's proximity and must not gate left punches.
-bool holster_offhand_melee_veto();
 // Deadline for the synthesised grenade-type switch press.
 extern std::atomic<long long> g_holster_gswitch_until;
 bool holster_gswitch_press_active();

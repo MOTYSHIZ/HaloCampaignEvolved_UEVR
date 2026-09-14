@@ -373,8 +373,6 @@ bool holster_melee_veto() {
     return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
 }
 
-#include "features/meleeleft/Holster_offhand_veto.inl"   // fork feature: meleeleft (off-hand veto)
-
 void holster_reset() {
     g_holster_swap_until.store(0, std::memory_order_relaxed);
     g_holster_throw_until.store(0, std::memory_order_relaxed);

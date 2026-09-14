@@ -1,11 +1,55 @@
-// meleeleft (fork feature, Experimental): the off-hand melee detector.
-// Textual fragment, included by Gesture.cpp at namespace halo scope, after gesture_reset(). Moved verbatim; not compiled on its own.
+#include "features/meleeleft/MeleeLeft.hpp"
+
+#include "Config.hpp"
+#include "Gesture.hpp"            // g_melee_hold_until, ReloadState
+#include "Holster.hpp"            // holster_offhand_busy
+#include "Math.hpp"               // ema_alpha, wrap180, RAD2DEG, clampf
+#include "MotionAimControl.hpp"   // get_pose, g_turn_offset, the gesture aim hold
+#include "TwoHandAim.hpp"         // two_hand_latched
+#include "core/FireInput.hpp"     // g_ft_fire_at: the off hand stands down while the stock kicks
+#include "core/host/GestureState.hpp"
+#include "core/host/HolsterState.hpp"
+#include "uevr/API.hpp"
+
+#include <atomic>
+#include <cmath>
+#include <cstring>
+
+using uevr::API;
+
+namespace halo {
+
+// The OFF hand's own veto. holster_melee_veto() (Holster.cpp) tests the AIM hand's zone proximity --
+// correct for the aim-hand detector it was built for, and exactly wrong for a left punch: the
+// right hand holding a rifle at chest height parks inside the pouch space and stood every left
+// punch down (measured 2026-08-31, five punches at speed 4.4-9.4 all killed by it). This one
+// tests the OFF hand's pouch proximity plus the same recent-action window; the armed-grenade
+// case is holster_offhand_busy(), which the caller already checks.
+bool holster_offhand_melee_veto() {
+    // Holster.cpp's own state and clock, through the bridge.
+    const bool& s_gnear_zone = *host::g_holster_state.gnear_zone;
+    const long long& s_last_action = *host::g_holster_state.last_action;
+    const auto now_ticks = host::g_holster_state.now_ticks;
+    const auto ms_to_ticks = host::g_holster_state.ms_to_ticks;
+
+    if (!g_cfg.holster_enabled) return false;
+    if (s_gnear_zone) return true;
+    return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
+}
+
 // ---- OFF-HAND MELEE (meleeleft). A punch does not care which hand throws it. Same three tests
 // and thresholds as the aim hand, own state, SHARED cooldown so the two detectors cannot
 // double-fire one press. What differs is what the off hand does all day -- fetch magazines, pull
 // grenades, brace the weapon -- each a fast, extending reach, so each gets an explicit
 // stand-down here rather than a threshold tweak.
 void offhand_melee_update(float dt) {
+    // Gesture.cpp's own state and clock, through the bridge: the same objects under the same names.
+    long long& s_cooldown_until = *host::g_gesture_state.cooldown_until;
+    const ReloadState& s_reload = *host::g_gesture_state.reload;
+    const float REST_SPEED_MPS = host::g_gesture_state.rest_speed_mps;
+    const auto now_ticks = host::g_gesture_state.now_ticks;
+    const auto ms_to_ticks = host::g_gesture_state.ms_to_ticks;
+
     static Vec3      s2_prev_rel{};
     static float     s2_prev_reach = 0.0f;
     static bool      s2_have = false;
@@ -156,3 +200,20 @@ void offhand_melee_update(float dt) {
                              speed, s2_ext, reach);
     }
 }
+
+bool meleeleft_parse_key(const char* key, const char* val, double v) {
+    (void)val;
+    if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
+    if (_stricmp(key, "meleeshotms")    == 0) { g_cfg.melee_shot_ms  = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeshotdist")  == 0) { g_cfg.melee_shot_dist = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = clampf((float)v, 0.0f, 2.0f); return true; }
+    return false;
+}
+
+constinit const FeatureHooks kMeleeLeftHooks{
+    .key                   = "meleeleft",
+    .parse_key             = &meleeleft_parse_key,
+    .gesture_melee_offhand = &offhand_melee_update,
+};
+
+} // namespace halo
