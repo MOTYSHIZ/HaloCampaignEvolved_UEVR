@@ -1,10 +1,11 @@
 #pragma once
 
-// GESTURE.CPP'S FILE-LOCAL STATE THAT FEATURES READ. Same doctrine as core/host/PluginState.hpp:
-// HALO_GESTURE_STATE_BRIDGE, expanded once in Gesture.cpp after its first anonymous namespace, defines
-// the addresses of the originals, constant-initialised.
+// GESTURE.CPP'S FILE-LOCAL STATE THAT CORE AND FEATURES READ. Same doctrine as
+// core/host/PluginState.hpp: HALO_GESTURE_STATE_BRIDGE, expanded once in Gesture.cpp after its first
+// anonymous namespace, defines the addresses of the originals, constant-initialised.
 
 #include "Gesture.hpp"   // ReloadState
+#include "Math.hpp"      // Vec3
 
 namespace halo::host {
 
@@ -14,6 +15,8 @@ struct GestureState {
     float        rest_speed_mps;          // REST_SPEED_MPS: below this the hand counts as at rest
     long long (*now_ticks)();             // now_ticks(): the steady clock in its own ticks
     long long (*ms_to_ticks)(int ms);     // ms_to_ticks()
+    Vec3*        vel;                     // s_vel: the aim hand's smoothed hand-minus-head velocity
+    float*       ext;                     // s_ext: the aim hand's smoothed extension rate
 };
 
 extern const GestureState g_gesture_state;
@@ -29,4 +32,6 @@ extern const GestureState g_gesture_state;
         REST_SPEED_MPS,                                                         \
         &now_ticks,                                                             \
         &ms_to_ticks,                                                           \
+        &s_vel,                                                                 \
+        &s_ext,                                                                 \
     };

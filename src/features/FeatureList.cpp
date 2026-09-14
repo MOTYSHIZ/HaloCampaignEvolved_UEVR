@@ -14,6 +14,7 @@
 #include "core/MarkerFaces.hpp"
 #include "core/UnitState.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
+#include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
 
 #include <string>
@@ -239,6 +240,22 @@ void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez) 
 void features_gesture_melee_offhand(float dt) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->gesture_melee_offhand != nullptr) f->gesture_melee_offhand(dt);
+}
+
+void features_melee_hold_check() {
+    melee_hold_check();
+}
+
+void features_melee_swing_moving(bool in_swing) {
+    melee_swing_moving(in_swing);
+}
+
+bool features_melee_vetoed(long long now, float speed, float reach) {
+    return melee_vetoed(now, speed, reach);
+}
+
+bool features_melee_fired(long long now, float speed, float reach) {
+    return melee_fired(now, speed, reach);
 }
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
