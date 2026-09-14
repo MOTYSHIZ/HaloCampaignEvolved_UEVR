@@ -4622,8 +4622,10 @@ struct Config {
     // The synthesized reload press, ms: standalone, and networked. 90 ms stopped reloading in
     // standalone too (2026-09-06 evening: the seat press went out, the game ran nothing, a held
     // button reloaded); at 350 ms every seat press ran the game's full reload event sequence.
-    int   reload_press_ms = 350;
-    int   reload_press_ms_coop = 350;
+    // 110 ms for both (2026-09-13): in co-op, 350 ms picked up ground weapons 278-328 ms into the
+    // press, and 110 ms reloaded with no pickup (no weapon change, host refill 55 -> 60 rounds).
+    int   reload_press_ms = 110;
+    int   reload_press_ms_coop = 110;
     bool  slide_undo_reload = true;
     int   reserve_off = -1;
     // SLIDECOPY (2026-09-03): the rack is rendered on OUR OWN copy of the weapon mesh. The real
