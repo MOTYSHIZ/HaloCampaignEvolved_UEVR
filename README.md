@@ -24,19 +24,34 @@ appropriately.
   working exactly as the game intends. Shots converge to your sightline, so what you're pointing
   at is what you hit — even leaning or stepping around the room.
 - **On-target reticle** — the game's own crosshair (hit marker included) placed on the actual
-  surface you're aiming at, traced the same way bullets are. An optional colored ring is available
-  too; both are configurable.
-- **Weapon scope** — left trigger raises a magnified lens on the gun, aimed down the ray your
-  shots actually follow. Halo's flat zoom (which hides the weapon and masks your view) stays
+  surface you're aiming at, traced the same way bullets are. It's drawn by your headset's compositor
+  rather than into the game's scene, so the game's exposure and bloom can't wash it out (see
+  [Crisp reticule and waypoints](#crisp-reticule-and-waypoints)). An optional colored ring is
+  available too; both are configurable.
+- **Waypoints in the world** — objective markers sit out in the world in the direction of the
+  objective instead of sliding around with your aim, and they're compositor-drawn too, so a wall
+  can't hide them.
+- **Two-handed aiming** — bring your off hand to the barrel and squeeze its grip, and your aim
+  steadies onto the line between your hands. A "Grip" prompt shows when your hand is in reach.
+- **Weapon scope** — while you're gripping two-handed (pistols too), the left trigger raises a
+  magnified lens on the gun, aimed down the ray your shots actually follow. Without the grip, the
+  same trigger throws a grenade. Halo's flat zoom (which hides the weapon and masks your view) stays
   suppressed.
+- **Physical melee and weapon switching** — swing your gun hand to melee, and the strike follows the
+  swing rather than wherever the gun ended up pointing. Reach over your shoulder and squeeze the grip
+  to switch weapons.
 - **Head-relative movement** — push the stick where you look, walk where you look, independent of
   where the gun points. Snap turn supported.
-- **VR control layout** — crouch on right-stick-down, equipment on left-X, d-pad access via
-  right-stick-up shift, all remappable. Menu-aware: in menus your right controller's B acts as
-  *back* and the gameplay remaps stand down.
+- **VR control layout** — crouch on right-stick-down, equipment on left-X, and the d-pad on the
+  right stick whenever a hand is near your head (or on the left stick while you hold
+  right-stick-up), all remappable. Menu-aware: in menus your right controller's B acts as *back* and
+  the gameplay remaps stand down.
+- **Cutscenes and sound that work in VR** — pre-rendered cutscenes play on a single flat screen in
+  front of you (size adjustable), and positional audio follows your head rather than your gun.
 - **Pose-match calibration** — optional per-hardware tuning: line your controller up with the visual
-  weapon to calibrate grip, and align the aim ray, both persisting across sessions (see
-  [Custom calibration](#custom-calibration)). The shipped defaults work without it.
+  weapon to calibrate grip, align the aim ray and place the scope lens, all persisting across
+  sessions, with per-weapon adjustments on top (see [Custom calibration](#custom-calibration)). The
+  shipped defaults work without it.
 - **In-game settings, and settings that survive updates** — a settings menu in the UEVR overlay
   (Script UI) edits your personal `halo_vr_user.cfg` live, no restart; updates never touch that
   file. Calibration can be run from the menu too — no keyboard needed.
@@ -171,12 +186,14 @@ up — see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 | Left stick | Move, relative to where you look |
 | Left stick **click** | Sprint |
 | Right stick left/right | Snap turn |
-| Right stick **up (hold)** | Shift layer: left stick becomes the d-pad:<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad down (hold)** — Drop weapon |
+| Hand **near your head** | Right stick becomes the d-pad (turning and crouch pause until you lower the hand):<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad left** — Equipment<br>**D-pad down (hold)** — Drop weapon |
+| Right stick **up (hold)** | The same d-pad, on the left stick instead |
 | Right stick **down** | Crouch |
-| Right stick **click** | Melee |
+| Right stick **click** | Melee — or just swing your gun hand |
 | Right trigger | Fire |
-| Left trigger | Weapon scope — magnified lens on the gun (`scope`/`scopezoom` to tune) |
-| Left grip | Throw grenade |
+| Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
+| Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
+| Right grip | Reach over your shoulder and squeeze to switch weapons |
 | Right A | Jump |
 | Right Y | Switch weapon |
 | Left X | Equipment / overshield |
@@ -206,8 +223,9 @@ on foot.
 Motion aim, snap turn and the VR-specific button remaps all stand down while you're seated, so
 every other button does exactly what the game's normal gamepad layout does.
 
-The switch is automatic, and it also applies during cutscenes — the mod works it out from the game
-taking your first-person weapon away. If you ever find a seat it misses, please report it; as a
+The switch is automatic, and it also applies during cutscenes — the mod works it out from the game's
+camera leaving first person, so standing on foot with no weapon keeps motion controls. If you ever
+find a seat it misses, please report it; as a
 stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
 `halo_vr_dev.cfg`) to force these controls on, and remove it to go back to automatic.
 
