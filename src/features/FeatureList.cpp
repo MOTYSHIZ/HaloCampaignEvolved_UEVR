@@ -34,6 +34,7 @@
 #include "core/fixes/ReticuleFixes.hpp"
 #include "core/fixes/HostFixes.hpp"
 
+#include <span>
 #include <string>
 
 namespace halo {
@@ -62,7 +63,7 @@ namespace {
 // point keeps the relative order its features had when they were textual fragments of the author's
 // files; a hook point whose original order no list order can satisfy gets separate slots instead.
 //   game_tick_late: forcetube, then wristhud (their calls were in that order in update()).
-const FeatureHooks* const kFeatureList[] = {
+const FeatureHooks* const kFeatureListStorage[] = {
     &kForceTubeHooks,
     &kScopeLensHooks,
     &kHeadBlockHooks,
@@ -79,7 +80,11 @@ const FeatureHooks* const kFeatureList[] = {
     &kAimBoreHooks,
     &kAimReticuleStampHooks,
     &kStabilityFixesHooks,
+    nullptr,   // end marker: keeps the array non-empty in a build with every feature folder removed
 };
+// The tables, without the end marker. A span, so a build with no feature at all still compiles and every
+// dispatcher simply finds nothing to run.
+const std::span<const FeatureHooks* const> kFeatureList{kFeatureListStorage, std::size(kFeatureListStorage) - 1};
 
 } // namespace
 
