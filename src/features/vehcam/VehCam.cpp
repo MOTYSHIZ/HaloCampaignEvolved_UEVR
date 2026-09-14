@@ -2,6 +2,7 @@
 
 #include "BlamDrive.hpp"          // blam_control_record(): the VEHSEAT line's record flag
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Markers.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
@@ -1389,6 +1390,10 @@ void vehcam_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
 
 }  // namespace
 
+namespace {
+bool veh_cam_enabled() { return g_cfg.veh_cam != 0 || g_cfg.vehicle_wheel != 0; }
+}  // namespace
+
 constinit const FeatureHooks kVehCamHooks{
     .key                      = "vehcam",
     .parse_key                = &parse_veh_key,
@@ -1396,6 +1401,8 @@ constinit const FeatureHooks kVehCamHooks{
     .stereo_pre_eye_seat      = &vehcam_stereo_pre_eye_seat,
     .stereo_view_override     = &vehcam_stereo_view_override,
     .stereo_post_eye_rendered = &vehcam_stereo_post_eye_rendered,
+    .enabled                    = &veh_cam_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_SEAT | SVC_MARKER_ANCHOR | SVC_HOST_FIXES,
 };
 
 } // namespace halo

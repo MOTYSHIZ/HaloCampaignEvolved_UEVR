@@ -1,6 +1,7 @@
 #include "Features.hpp"
 
 #include "Config.hpp"
+#include "features/FeatureList.hpp"
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -345,6 +346,7 @@ void features_log_resolved() {
         uevr::API::get()->log_info("[Halo-CampE-UEVR] FEATURE %-17s = %d  [%s]  %s", r.key, r.get(g_cfg),
                              kTierName[tier_index(r.tier)], source_text(i).c_str());
     }
+    features_log_runtime();
 }
 
 } // namespace halo

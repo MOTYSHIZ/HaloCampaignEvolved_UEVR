@@ -5957,6 +5957,7 @@ void update() {
             menu_applied = menu_bridge_tick();
         }
         load_config();
+        features_config_loaded();
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
                                  menu_applied);

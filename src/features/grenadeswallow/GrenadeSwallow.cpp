@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Math.hpp"                    // clampf
 #include "core/host/PluginState.hpp"
 #include "uevr/API.hpp"
@@ -48,10 +49,16 @@ void grenadeswallow_xinput_raw_pad(_XINPUT_STATE* state) {
 
 } // namespace
 
+namespace {
+bool grenade_swallow_enabled() { return g_cfg.grenade_swallow != 0; }
+}  // namespace
+
 constinit const FeatureHooks kGrenadeSwallowHooks{
     .key            = "grenadeswallow",
     .parse_key      = &grenadeswallow_parse_key,
     .xinput_raw_pad = &grenadeswallow_xinput_raw_pad,
+    .enabled                    = &grenade_swallow_enabled,
+    .services                   = SVC_HOST_FIXES,
 };
 
 } // namespace halo

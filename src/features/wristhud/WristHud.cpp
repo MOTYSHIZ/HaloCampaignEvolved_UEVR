@@ -2,6 +2,7 @@
 
 #include "BlamDrive.hpp"          // the unit state the radar scan is handed
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Holster.hpp"
 #include "Markers.hpp"            // holster_marker_place_rot / scale / room_to_world
 #include "core/MarkerFaces.hpp"         // holster_world_to_room
@@ -1730,6 +1731,10 @@ float wristhud_widget_tint_mul() {
 
 } // namespace
 
+namespace {
+bool wrist_hud_enabled() { return g_cfg.wrist_hud; }
+}  // namespace
+
 constinit const FeatureHooks kWristHudHooks{
     .key                        = "wristhud",
     .parse_key                  = &wristhud_parse_key,
@@ -1738,6 +1743,8 @@ constinit const FeatureHooks kWristHudHooks{
     .xinput_after_calib_trigger = &wristhud_xinput_after_calib_trigger,
     .sim_unit_state_radar       = &wristhud_sim_unit_state_radar,
     .widget_tint_mul            = &wristhud_widget_tint_mul,
+    .enabled                    = &wrist_hud_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_HIDDEN_RELOAD | SVC_WIDGET_HOSTS | SVC_RETICULE_FIXES | SVC_HOST_FIXES,
 };
 
 } // namespace halo

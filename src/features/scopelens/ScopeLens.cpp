@@ -8,6 +8,7 @@
 #include "Scope.hpp"
 #include "ScopeOffset.hpp"
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "DevTools.hpp"
 #include "Rig.hpp"
 #include "Reticule.hpp"
@@ -742,6 +743,10 @@ bool scopelens_pane_stands_down() {
 
 } // namespace
 
+namespace {
+bool scope_lens_enabled() { return g_cfg.scope_lens; }
+}  // namespace
+
 constinit const FeatureHooks kScopeLensHooks{
     .key                      = "scopelens",
     .parse_key                = &parse_physscope_key,
@@ -749,6 +754,8 @@ constinit const FeatureHooks kScopeLensHooks{
     .rig_lost                 = &scopelens_rig_lost,
     .scope_trigger_stood_down = &scopelens_trigger_stood_down,
     .scope_pane_stands_down   = &scopelens_pane_stands_down,
+    .enabled                    = &scope_lens_enabled,
+    .services                   = SVC_RETICULE_FIXES | SVC_HOST_FIXES,
 };
 
 } // namespace halo

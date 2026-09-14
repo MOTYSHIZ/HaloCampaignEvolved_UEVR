@@ -7,6 +7,7 @@
 #include "BlamDrive.hpp"               // g_unit_mounted
 #include "core/UnitState.hpp"
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Markers.hpp"                 // g_view_base_yaw
 #include "Math.hpp"
 #include "MotionAimControl.hpp"        // read_control_rotation, g_stick_mode_active
@@ -515,6 +516,10 @@ void roomscale_sim_unit_state_end(uintptr_t obj) {
 
 } // namespace
 
+namespace {
+bool roomscale_enabled() { return g_cfg.roomscale; }
+}  // namespace
+
 constinit const FeatureHooks kRoomscaleHooks{
     .key                    = "roomscale",
     .parse_key              = &roomscale_parse_key,
@@ -523,6 +528,8 @@ constinit const FeatureHooks kRoomscaleHooks{
     .leash_lateral          = &roomscale_leash_lateral,
     .xinput_before_brake    = &roomscale_xinput_before_brake,
     .sim_unit_state_end     = &roomscale_sim_unit_state_end,
+    .enabled                    = &roomscale_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_LEASH_GATE | SVC_HOST_FIXES,
 };
 
 } // namespace halo

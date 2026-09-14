@@ -1,4 +1,5 @@
 #include "features/FeatureHooks.hpp"
+#include "features/FeatureList.hpp"
 #include "features/hooks/BlamAimHooks.hpp"
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
@@ -11,6 +12,8 @@
 #include "features/hooks/UnitStateHooks.hpp"
 
 #include "Config.hpp"
+#include "core/Services.hpp"
+#include "uevr/API.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
@@ -34,6 +37,11 @@ extern const FeatureHooks kWristHudHooks;
 extern const FeatureHooks kVehCamHooks;
 extern const FeatureHooks kMeleeLeftHooks;
 extern const FeatureHooks kHolsterPollThrowHooks;
+extern const FeatureHooks kReloadVrHooks;
+extern const FeatureHooks kSlideVrHooks;
+extern const FeatureHooks kPaletteWpnHooks;
+extern const FeatureHooks kAimBoreHooks;
+extern const FeatureHooks kAimReticuleStampHooks;
 
 namespace {
 
@@ -52,6 +60,11 @@ const FeatureHooks* const kFeatureList[] = {
     &kVehCamHooks,
     &kMeleeLeftHooks,
     &kHolsterPollThrowHooks,
+    &kReloadVrHooks,
+    &kSlideVrHooks,
+    &kPaletteWpnHooks,
+    &kAimBoreHooks,
+    &kAimReticuleStampHooks,
 };
 
 } // namespace
@@ -317,6 +330,103 @@ uintptr_t features_blam_create_after(uintptr_t params, uintptr_t cret) {
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
     return room_to_world_anchored(room, hmd_room, out);
+}
+
+
+// ================================================================================================
+// RUNTIME STATE: services, the resolve log, and the release on a master key's off edge.
+// ================================================================================================
+
+namespace {
+
+bool feature_on(const FeatureHooks* f) { return f->enabled != nullptr && f->enabled(); }
+
+constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
+    { SVC_UNIT_STATE,        "unitstate" },
+    { SVC_SEAT,              "seat" },
+    { SVC_FIRE_INPUT,        "fireinput" },
+    { SVC_EYE_TRACE,         "eyetrace" },
+    { SVC_LEASH_GATE,        "leashgate" },
+    { SVC_MARKER_ANCHOR,     "markeranchor" },
+    { SVC_MELEE_INSTRUMENTS, "meleeinstruments" },
+    { SVC_CAMERA_BOB,        "camerabob" },
+    { SVC_HIDDEN_RELOAD,     "hiddenreload" },
+    { SVC_RETICULE_FIXES,    "reticulefixes" },
+    { SVC_WIDGET_HOSTS,      "widgethosts" },
+    { SVC_HOST_FIXES,        "hostfixes" },
+};
+
+uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed
+
+uint32_t enabled_mask() {
+    uint32_t m = 0;
+    int i = 0;
+    for (const FeatureHooks* f : kFeatureList) {
+        if (feature_on(f)) m |= (1u << i);
+        ++i;
+    }
+    return m;
+}
+
+void log_state(const char* why) {
+    std::string feats;
+    for (const FeatureHooks* f : kFeatureList) {
+        if (!feats.empty()) feats += ' ';
+        feats += f->key;
+        feats += feature_on(f) ? "=on" : "=off";
+    }
+    uevr::API::get()->log_info("[Halo-CampE-UEVR] FEATURESTATE (%s): %s", why, feats.c_str());
+    for (const auto& sn : kServiceNames) {
+        const std::string who = service_enablers(sn.bit);
+        uevr::API::get()->log_info("[Halo-CampE-UEVR] SERVICE %-16s %s%s%s%s", sn.name,
+                                   who.empty() ? "inactive" : "active",
+                                   who.empty() ? "" : " (enabled by ", who.c_str(), who.empty() ? "" : ")");
+    }
+}
+
+}  // namespace
+
+bool service_active(uint32_t service) {
+    for (const FeatureHooks* f : kFeatureList)
+        if ((f->services & service) != 0 && feature_on(f)) return true;
+    return false;
+}
+
+const char* service_name(uint32_t service) {
+    for (const auto& sn : kServiceNames)
+        if (sn.bit == service) return sn.name;
+    return "?";
+}
+
+std::string service_enablers(uint32_t service) {
+    std::string out;
+    for (const FeatureHooks* f : kFeatureList) {
+        if ((f->services & service) == 0 || !feature_on(f)) continue;
+        if (!out.empty()) out += ',';
+        out += f->key;
+    }
+    return out;
+}
+
+void features_log_runtime() {
+    s_logged_mask = enabled_mask();
+    log_state("startup");
+}
+
+void features_config_loaded() {
+    const uint32_t now = enabled_mask();
+    if (now == s_logged_mask) return;
+    const uint32_t went_off = (s_logged_mask == 0xFFFFFFFFu) ? 0u : (s_logged_mask & ~now);
+    int i = 0;
+    for (const FeatureHooks* f : kFeatureList) {
+        if ((went_off & (1u << i)) != 0 && f->released != nullptr) {
+            uevr::API::get()->log_info("[Halo-CampE-UEVR] FEATURESTATE: %s switched off -- releasing", f->key);
+            f->released();
+        }
+        ++i;
+    }
+    s_logged_mask = now;
+    log_state("config reload");
 }
 
 } // namespace halo

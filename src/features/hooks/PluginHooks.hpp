@@ -25,6 +25,10 @@ void features_xinput_note_buttons(unsigned short buttons);
 // update() (game thread), right after blam_aim_tick() and before aim_watch_tick().
 void features_game_tick_after_blam_aim();
 
+// update() (game thread), right after the periodic load_config(): features whose master key went off
+// in this reload release what they hold, and a changed feature state is logged.
+void features_config_loaded();
+
 // on_xinput_get_state (the XInput hook's thread), right after the calibration menu's trigger eat and
 // before the control remapping.
 void features_xinput_after_calib_trigger(_XINPUT_STATE* state);

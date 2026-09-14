@@ -1,6 +1,7 @@
 #include "features/meleeleft/MeleeLeft.hpp"
 
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Gesture.hpp"            // g_melee_hold_until, ReloadState
 #include "Holster.hpp"            // holster_offhand_busy
 #include "Math.hpp"               // ema_alpha, wrap180, RAD2DEG, clampf
@@ -210,10 +211,16 @@ bool meleeleft_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
+namespace {
+bool melee_left_enabled() { return g_cfg.melee_left; }
+}  // namespace
+
 constinit const FeatureHooks kMeleeLeftHooks{
     .key                   = "meleeleft",
     .parse_key             = &meleeleft_parse_key,
     .gesture_melee_offhand = &offhand_melee_update,
+    .enabled                    = &melee_left_enabled,
+    .services                   = SVC_FIRE_INPUT | SVC_MELEE_INSTRUMENTS | SVC_HOST_FIXES,
 };
 
 } // namespace halo

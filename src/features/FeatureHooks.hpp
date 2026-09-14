@@ -157,6 +157,16 @@ struct FeatureHooks {
     // features_blam_create_after: the dev create_projectile hook, after the original call, with its
     // return value.
     void (*blam_create_after)(uintptr_t params, uintptr_t cret);
+
+    // ---- RUNTIME STATE (every table fills these).
+    // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
+    bool (*enabled)();
+    // The core services the feature consumes (core/Services.hpp). A service runs while any enabled
+    // feature declares it.
+    uint32_t services;
+    // Game thread, once, right after a config reload turned the feature off: release everything it
+    // holds (overrides, markers, latches) so the author's code runs as if it had never been on.
+    void (*released)();
 };
 
 } // namespace halo

@@ -3,6 +3,7 @@
 #include "BlamDrive.hpp"               // g_unit_mounted: the trace stands down while mounted
 #include "core/UnitState.hpp"
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores
 #include "core/EyeTrace.hpp"
@@ -230,11 +231,17 @@ void headblock_game_tick_after_leash() {
 
 }  // namespace
 
+namespace {
+bool head_block_enabled() { return g_cfg.head_block != 0; }
+}  // namespace
+
 constinit const FeatureHooks kHeadBlockHooks{
     .key                   = "headblock",
     .parse_key             = &headblock_parse_key,
     .game_tick_after_leash = &headblock_game_tick_after_leash,
     .head_clamp            = &kHeadBlockClamp,
+    .enabled                    = &head_block_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE | SVC_HOST_FIXES,
 };
 
 }  // namespace halo

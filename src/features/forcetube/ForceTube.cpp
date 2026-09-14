@@ -3,6 +3,7 @@
 #include "BlamDrive.hpp"      // unit position (the player filter) + sim_tls layout doctrine
 #include "core/UnitState.hpp"
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Math.hpp"           // clampf
 #include "core/FireInput.hpp" // g_ft_fire_at: the player's own fire input
 #include "core/fixes/TickStage.hpp"
@@ -205,10 +206,16 @@ void forcetube_game_tick_late() {
 
 } // namespace
 
+namespace {
+bool force_tube_enabled() { return g_cfg.force_tube; }
+}  // namespace
+
 constinit const FeatureHooks kForceTubeHooks{
     .key            = "forcetube",
     .parse_key      = &forcetube_parse_key,
     .game_tick_late = &forcetube_game_tick_late,
+    .enabled                    = &force_tube_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_FIRE_INPUT | SVC_HOST_FIXES,
 };
 
 } // namespace halo

@@ -2,6 +2,7 @@
 
 #include "BlamDrive.hpp"          // the author's grenade atomics
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Holster.hpp"            // HolsterSlot, g_holster_throw_until, holster_throw_press_active
 #include "Markers.hpp"            // holster_room_to_world
 #include "Math.hpp"               // Vec3, wrap180, RAD2DEG, clampf
@@ -633,6 +634,10 @@ bool holsterpollthrow_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
+namespace {
+bool holster_poll_throw_enabled() { return g_cfg.holster_poll_throw; }
+}  // namespace
+
 constinit const FeatureHooks kHolsterPollThrowHooks{
     .key                        = "holsterpollthrow",
     .parse_key                  = &holsterpollthrow_parse_key,
@@ -648,6 +653,8 @@ constinit const FeatureHooks kHolsterPollThrowHooks{
     .blam_create_before         = &holsterpollthrow_blam_create_before,
     .blam_create_after          = &holsterpollthrow_blam_create_after,
 #endif
+    .enabled                    = &holster_poll_throw_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_HOST_FIXES,
 };
 
 } // namespace halo

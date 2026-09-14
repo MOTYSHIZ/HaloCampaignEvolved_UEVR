@@ -3,6 +3,7 @@
 #include "BlamDrive.hpp"
 #include "core/UnitState.hpp"
 #include "Config.hpp"
+#include "core/Services.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the floor trace ignores
 #include "core/EyeTrace.hpp"
@@ -916,6 +917,10 @@ std::string heightcal_menu_status_line() {
 
 }  // namespace
 
+namespace {
+bool height_cal_enabled() { return g_cfg.height_cal != 0; }
+}  // namespace
+
 constinit const FeatureHooks kHeightCalHooks{
     .key                = "heightcal",
     .parse_key          = &heightcal_parse_key,
@@ -923,6 +928,8 @@ constinit const FeatureHooks kHeightCalHooks{
     .leash_vertical     = &heightcal_leash_vertical,
     .menu_command       = &heightcal_menu_command,
     .menu_status_line   = &heightcal_menu_status_line,
+    .enabled                    = &height_cal_enabled,
+    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE | SVC_LEASH_GATE | SVC_HOST_FIXES,
 };
 
 }  // namespace halo
