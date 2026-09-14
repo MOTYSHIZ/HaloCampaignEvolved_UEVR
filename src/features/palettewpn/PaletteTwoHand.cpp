@@ -6,7 +6,7 @@
 #include <chrono>
 // The pad-button mirror lives HERE (published by the XInput hook in Plugin.cpp): the two-hand
 // latch is its consumer. Gesture features added later share this same mirror.
-#include "PaletteTwoHand.hpp"
+#include "features/palettewpn/PaletteTwoHand.hpp"
 #include "Holster.hpp"            // g_pad_buttons -- the raw pad, before our own remapping
 #include "MotionAimControl.hpp"   // get_pose
 #include "uevr/API.hpp"

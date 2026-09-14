@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 
+#include "Math.hpp"       // Vec3
 #include "UeObject.hpp"   // TrackedObject
 
 namespace halo::host {
@@ -53,6 +54,11 @@ struct PluginState {
     std::atomic<float>* eye_pos_z;          // g_eye_pos_z
     std::atomic<bool>*  have_eye_pos;       // g_have_eye_pos
     std::atomic<float>* render_view_yaw;    // g_render_view_yaw
+    std::atomic<bool>*  have_view_pos;      // g_have_view_pos
+    Vec3 (*layer_anchor)(int slot, const Vec3& world);   // layer_anchor()
+    // onfoot_reticule_tick(): the on-foot reticule (the author's block, wrapped so the palette weapon can run it
+    // with the rig driver off; see the report)
+    void (*onfoot_reticule_tick)(uevr::API::UObject* rig, const Vec3& comp_world, double aim_yaw, double aim_pitch, uint32_t tick);
 };
 
 extern const PluginState g_plugin_state;
@@ -91,4 +97,7 @@ extern const PluginState g_plugin_state;
         &g_eye_pos_z,                                                      \
         &g_have_eye_pos,                                                   \
         &g_render_view_yaw,                                                \
+        &g_have_view_pos,                                                  \
+        &layer_anchor,                                                     \
+        &onfoot_reticule_tick,                                             \
     };

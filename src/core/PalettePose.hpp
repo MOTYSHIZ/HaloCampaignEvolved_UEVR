@@ -16,6 +16,7 @@ struct PalettePoseProvider {
     bool (*stamp_available)();                                   // the hand intent is stamped per snapshot (the pose latch runs)
     bool (*stamped_intent)(bool two_back, float* yaw, float* pitch);   // the intent one or two snapshots back
     void (*mark)(int point, float yaw, float e0, float e1, float e2);  // the provider's STOMPLOG ring
+    float (*roll_trim_deg)();                                    // the roll trim between grip rotation and weapon trim
 };
 
 bool palette_pose_owns_aim();
@@ -25,5 +26,6 @@ bool palette_pose_barrel_axis(Vec3* out);
 bool palette_pose_stamp_available();
 bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch);
 void palette_pose_mark(int point, float yaw, float e0, float e1, float e2);
+float palette_pose_roll_trim_deg();   // 0 with no provider
 
 } // namespace halo

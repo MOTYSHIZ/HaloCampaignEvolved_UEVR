@@ -48,7 +48,7 @@ bool aim_bore_forward(const Quat& q_src, Vec3* fwd_out) {
             const Quat gx = qn(Quat{gq4[1], gq4[2], -gq4[0], -gq4[3]});
             const Quat wx = qn(Quat{wq4[1], wq4[2], -wq4[0], -wq4[3]});
             // The roll trim sits between the grip rotation and the weapon trim, as in the pullback.
-            const float rh = g_cfg.palette_roll_trim * 0.5f * DEG2RAD;
+            const float rh = palette_pose_roll_trim_deg() * 0.5f * DEG2RAD;
             const Quat rx = qn(Quat{0.0f, 0.0f, -std::sin(rh), -std::cos(rh)});
             // Barrel axis in the trimmed pose frame, UE convention, then mapped to this frame
             // (x = ue.y, y = ue.z, z = -ue.x). Mode 1 is the pose forward (+X).

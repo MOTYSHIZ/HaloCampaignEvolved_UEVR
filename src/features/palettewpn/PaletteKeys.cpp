@@ -77,7 +77,6 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettewpnoffz") == 0) { g_cfg.palette_weapon_off_z = clampf((float)v,-200.0f,200.0f); return true; }
     if (_stricmp(key, "palettewpnscale")== 0) { g_cfg.palette_weapon_scale = clampf((float)v, 0.05f, 20.0f); return true; }
     if (_stricmp(key, "palettecalibkey")== 0) { g_cfg.palette_calib_key = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
     if (_stricmp(key, "judderlog")      == 0) { g_cfg.judder_log           = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
     if (_stricmp(key, "palettelerp")    == 0) { g_cfg.palette_lerp         = (v != 0.0); return true; }
     if (_stricmp(key, "palettebank")    == 0) { g_cfg.palette_bank         = (int)clampf((float)v, -1.0f, 3.0f); return true; }

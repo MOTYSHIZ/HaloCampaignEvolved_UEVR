@@ -255,6 +255,11 @@ struct FeatureHooks {
     // the reticle at render rate in that mode, and the tick publish stands down. While enabled.
     int (*reticule_render_publish_mode)();
 
+    // features_game_tick_after_rig_driver: update(), right after the rig driver block. While enabled.
+    void (*game_tick_after_rig_driver)(double aim_yaw, double aim_pitch, uint32_t tick);
+    // features_stereo_post_eye_publish: the stereo post-callback, before the late instruments. While enabled.
+    void (*stereo_post_eye_publish)(int index);
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

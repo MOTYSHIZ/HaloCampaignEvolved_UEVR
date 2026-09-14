@@ -141,6 +141,10 @@ bool features_rig_resolve_wanted();
 // the on-foot reticule's compositor publish and the stereo post-callback: > 0 = a feature publishes the reticle
 // at render rate in that mode (the tick publish stands down).
 int features_reticule_render_publish_mode();
+// update(), right after the rig driver block.
+void features_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, uint32_t tick);
+// the stereo post-callback, after the eye publish and before the late instruments.
+void features_stereo_post_eye_publish(int index);
 // update(), right after the shipping Blam aim write.
 void features_game_tick_after_blam_drive();
 // update(), after the per-weapon delta stage marker, before the vehicle hook.

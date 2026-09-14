@@ -1,12 +1,12 @@
 #include "features/palettewpn/PaletteFrame.hpp"
 
 #include "Arms.hpp"
-#include "BlamPalette.hpp"
+#include "features/palettewpn/BlamPalette.hpp"
 #include "Config.hpp"
 #include "Markers.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
-#include "PaletteTwoHand.hpp"
+#include "features/palettewpn/PaletteTwoHand.hpp"
 #include "Reticule.hpp"
 #include "Rig.hpp"
 #include "TwoHandAim.hpp"
@@ -1057,6 +1057,31 @@ void palette_wpn_aim_law_sampled(double ay, double ap) {
             halo::blam_palette_sync_capture(saq.x, saq.y, saq.z, saq.w, sap.x, sap.y, sap.z,
                                             sgq.x, sgq.y, sgq.z, sgq.w, sgp.x, sgp.y, sgp.z,
                                             (float)ap, (float)ay);
+        }
+    }
+}
+
+void palette_wpn_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, uint32_t tick) {
+    const auto& ps = host::g_plugin_state;
+    const std::atomic<bool>& g_stick_mode = *ps.stick_mode;
+    const auto onfoot_reticule_tick = ps.onfoot_reticule_tick;
+    // ON-FOOT RETICULE WITHOUT THE RIG DRIVER.
+    //
+    // The block above is the rig DRIVER and only runs with rig=1, but the on-foot reticule (the aim
+    // point, the hosted crosshair widget, the compositor publish) lives inside it. With the palette
+    // weapon placing the gun and rig=0, none of it ran: no aim point, no widget, and the compositor
+    // layer reported NO TARGET PUBLISHED. The rig component and its parent are still resolved for
+    // the palette (see the resolve gate), so the reticule runs here from those, with no rig writes.
+    // rig=1 never reaches this; its call inside the driver is unchanged. g_stick_mode is written
+    // once per tick above both, so this and the seated publish below cannot both run.
+    if (!g_cfg.rig_enabled && palette_weapon_mode() && !g_stick_mode.load()
+        && (g_cfg.aim_reticule || g_aim_marker.active)) {
+        auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
+        Vec3 comp_world{};
+        if (rig != nullptr && call_ret_vec3(rig, L"K2_GetComponentLocation", &comp_world)) {
+            g_tick_stage = "onfoot_reticule";
+            onfoot_reticule_tick(rig, comp_world, aim_yaw, aim_pitch, tick);
+            g_tick_stage = "after onfoot_reticule";
         }
     }
 }

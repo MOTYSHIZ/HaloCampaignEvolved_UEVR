@@ -1,4 +1,4 @@
-#include "Features.hpp"
+#include "core/registry/Features.hpp"
 
 #include "Config.hpp"
 #include "features/FeatureList.hpp"

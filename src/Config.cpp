@@ -1,5 +1,5 @@
 #include "Config.hpp"
-#include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
+#include "core/registry/Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
 #include "features/hooks/ConfigHooks.hpp"
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.

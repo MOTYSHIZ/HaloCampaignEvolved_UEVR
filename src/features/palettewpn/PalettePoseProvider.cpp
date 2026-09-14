@@ -1,7 +1,7 @@
 #include "features/palettewpn/PalettePoseProvider.hpp"
 
-#include "BlamPalette.hpp"      // palette_trim_rotations
-#include "PaletteTwoHand.hpp"   // palette_two_hand_blend
+#include "features/palettewpn/BlamPalette.hpp"      // palette_trim_rotations
+#include "features/palettewpn/PaletteTwoHand.hpp"   // palette_two_hand_blend
 #include "Config.hpp"
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
 #include "features/palettewpn/PaletteFrame.hpp"      // stomp_mark
@@ -38,6 +38,7 @@ bool stamped_intent(bool two_back, float* yaw, float* pitch) {
     *pitch = two_back ? g_intent_prev2_p.load(std::memory_order_relaxed) : g_intent_prev_p.load(std::memory_order_relaxed);
     return true;
 }
+float roll_trim_deg() { return g_cfg.palette_roll_trim; }
 } // namespace
 
 constinit const PalettePoseProvider kPalettePoseProvider{
@@ -48,6 +49,7 @@ constinit const PalettePoseProvider kPalettePoseProvider{
     &stamp_available,
     &stamped_intent,
     &stomp_mark,
+    &roll_trim_deg,
 };
 
 } // namespace halo

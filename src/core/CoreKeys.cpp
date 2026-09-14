@@ -32,6 +32,8 @@ bool core_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "markertint")         == 0) { g_cfg.marker_tint_on = (v != 0.0); return true; }
     if (_stricmp(key, "stealextra")     == 0) { g_cfg.steal_extra_mask = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "slidehook")      == 0) { g_cfg.slide_hook = (v != 0.0); return true; }
+    // The palette weapon's diagnostic log switch, also read by the wrist HUD's one-shot widget log.
+    if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
     // The reload engine's keys (core/reload).
     if (reload_engine_parse_key(key, val, v)) return true;
     return false;

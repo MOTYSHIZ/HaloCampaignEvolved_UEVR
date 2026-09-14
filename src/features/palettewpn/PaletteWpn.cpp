@@ -2,7 +2,7 @@
 
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode(), the arbiter and arm hide slots
 #include "Config.hpp"
-#include "PaletteTwoHand.hpp"   // palette_two_hand_reset()
+#include "features/palettewpn/PaletteTwoHand.hpp"   // palette_two_hand_reset()
 #include "features/palettewpn/PaletteReadbacks.hpp"
 #include "features/palettewpn/PalettePoseProvider.hpp"
 #include "features/palettewpn/PoseLatch.hpp"
@@ -84,6 +84,7 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .teardown                   = &palette_wpn_teardown,
     .aim_law_sampling           = &palette_wpn_aim_law_sampling,
     .aim_law_sampled            = &palette_wpn_aim_law_sampled,
+    .game_tick_after_rig_driver = &palette_wpn_game_tick_after_rig_driver,
     .enabled  = &palette_wpn_enabled,
     .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_WEAPON_OBJECT,
     .released = &palette_wpn_arm_hide_released,

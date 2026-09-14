@@ -24,7 +24,7 @@
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
-#include "CutsceneDump.hpp"
+#include "core/dev/CutsceneDump.hpp"
 #include "core/PalettePose.hpp"
 #include "core/UnitState.hpp"
 #include "core/WeaponObject.hpp"
@@ -523,6 +523,18 @@ bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch) {
 void palette_pose_mark(int point, float yaw, float e0, float e1, float e2) {
     const auto* p = palette_pose_provider();
     if (p != nullptr && p->mark != nullptr) p->mark(point, yaw, e0, e1, e2);
+}
+void features_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, uint32_t tick) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_rig_driver != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_rig_driver(aim_yaw, aim_pitch, tick);
+}
+void features_stereo_post_eye_publish(int index) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_post_eye_publish != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_publish(index);
+}
+float palette_pose_roll_trim_deg() {
+    const auto* p = palette_pose_provider();
+    return (p != nullptr && p->roll_trim_deg != nullptr) ? p->roll_trim_deg() : 0.0f;
 }
 int features_reticule_render_publish_mode() {
     for (const FeatureHooks* f : kFeatureList)

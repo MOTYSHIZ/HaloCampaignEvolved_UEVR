@@ -1,6 +1,6 @@
 // CutsceneDump -- see the header. Dev builds only.
 
-#include "CutsceneDump.hpp"
+#include "core/dev/CutsceneDump.hpp"
 #include "DevTools.hpp"
 
 #if HALO_VR_DEV

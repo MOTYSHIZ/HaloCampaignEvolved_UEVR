@@ -36,5 +36,6 @@ void palette_wpn_stereo_post_eye_late(int index);
 void palette_wpn_teardown();
 void palette_wpn_aim_law_sampling();
 void palette_wpn_aim_law_sampled(double ay, double ap);
+void palette_wpn_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, uint32_t tick);
 
 } // namespace halo

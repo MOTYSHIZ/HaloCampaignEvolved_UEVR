@@ -1,9 +1,9 @@
 #include "features/palettewpn/PaletteArmDriver.hpp"
 
 #include "Arms.hpp"
-#include "BlamPalette.hpp"
+#include "features/palettewpn/BlamPalette.hpp"
 #include "Config.hpp"
-#include "PaletteTwoHand.hpp"
+#include "features/palettewpn/PaletteTwoHand.hpp"
 #include "Rig.hpp"
 #include "TwoHandAim.hpp"
 #include "core/host/ArmsState.hpp"
