@@ -3,6 +3,7 @@
 // HOOK POINTS IN Plugin.cpp. Each is called from exactly one place, named here with its thread.
 // Definitions: src/features/FeatureList.cpp.
 
+#include "Math.hpp"                    // Vec3
 #include "core/fixes/TickStage.hpp"
 #include "core/host/PluginState.hpp"   // HALO_PLUGIN_STATE_BRIDGE
 #include "uevr/API.h"                  // UEVR_Vector3f
@@ -16,6 +17,10 @@ namespace halo {
 // is noted first (core/FireInput), then the features' slots run and may modify the pad.
 void features_xinput_raw_pad(_XINPUT_STATE* state);
 
+// on_xinput_get_state (the XInput hook's thread), right before the vehicle hard brake's pad-side
+// delivery, after the movement rotation and the d-pad shift.
+void features_xinput_before_brake(_XINPUT_STATE* state);
+
 // update() (game thread), right after scope_frame_end(tick).
 void features_game_tick_late();
 
@@ -26,6 +31,19 @@ void features_game_tick_after_offsets(float dt);
 
 // update() (game thread), in the stale rig guard, right after it drops the rig and its parent.
 void features_rig_lost();
+
+// update() (game thread), right after the stale rig guard, before the HMD translation leash block.
+void features_game_tick_before_leash();
+
+// THE HMD TRANSLATION LEASH BLOCK in update() (game thread).
+//   features_leash_block_wanted: in the block's gate, after `g_cfg.hmd_leash ||`.
+//   features_hmd_pose_plausible: in the pose condition, after get_pose succeeded (core fix).
+//   features_leash_lateral: the statement right before the author's lateral leash; true = skip his.
+//   features_leash_vertical: the statement right before the author's vertical leash; true = skip his.
+bool features_leash_block_wanted();
+bool features_hmd_pose_plausible(const Vec3& hp);
+bool features_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved);
+bool features_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny, bool& moved);
 
 // update() (game thread), right after the HMD translation leash block, before the calibrate key.
 void features_game_tick_after_leash();

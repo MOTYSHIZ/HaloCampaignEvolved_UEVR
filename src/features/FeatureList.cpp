@@ -1,10 +1,15 @@
 #include "features/FeatureHooks.hpp"
+#include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
 
+#include "Config.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
+#include "core/fixes/HmdPoseGate.hpp"
+
+#include <string>
 
 namespace halo {
 
@@ -13,6 +18,8 @@ extern const FeatureHooks kForceTubeHooks;
 extern const FeatureHooks kScopeLensHooks;
 extern const FeatureHooks kHeadBlockHooks;
 extern const FeatureHooks kGrenadeSwallowHooks;
+extern const FeatureHooks kRoomscaleHooks;
+extern const FeatureHooks kHeightCalHooks;
 
 namespace {
 
@@ -24,6 +31,8 @@ const FeatureHooks* const kFeatureList[] = {
     &kScopeLensHooks,
     &kHeadBlockHooks,
     &kGrenadeSwallowHooks,
+    &kRoomscaleHooks,
+    &kHeightCalHooks,
 };
 
 } // namespace
@@ -81,6 +90,62 @@ void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double
     for (const FeatureHooks* f : kFeatureList)
         if (f->head_clamp != nullptr) { clamp = f->head_clamp; break; }
     eye_note_post_view(index, position, is_double, clamp);
+}
+
+void features_game_tick_before_leash() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_before_leash != nullptr) f->game_tick_before_leash();
+}
+
+bool features_leash_block_wanted() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->leash_block_wanted != nullptr && f->leash_block_wanted()) return true;
+    return false;
+}
+
+bool features_hmd_pose_plausible(const Vec3& hp) {
+    return hmd_pose_plausible(hp);
+}
+
+// Every slot runs (their bookkeeping runs whenever the block does). With the block entered only for
+// a feature (hmdleash off), the author's leash must not run either.
+bool features_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved) {
+    bool owned = false;
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->leash_lateral != nullptr && f->leash_lateral(hp, nx, ny, nz, moved)) owned = true;
+    return owned || !g_cfg.hmd_leash;
+}
+
+bool features_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny, bool& moved) {
+    bool owned = false;
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->leash_vertical != nullptr && f->leash_vertical(hp, so, ny, moved)) owned = true;
+    return owned || !g_cfg.hmd_leash;
+}
+
+void features_xinput_before_brake(_XINPUT_STATE* state) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->xinput_before_brake != nullptr) f->xinput_before_brake(state);
+}
+
+void features_sim_unit_state_end(uintptr_t obj) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->sim_unit_state_end != nullptr) f->sim_unit_state_end(obj);
+}
+
+bool features_menu_command(const std::string& line) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->menu_command != nullptr && f->menu_command(line)) return true;
+    return false;
+}
+
+std::string features_menu_status_line() {
+    for (const FeatureHooks* f : kFeatureList) {
+        if (f->menu_status_line == nullptr) continue;
+        std::string s = f->menu_status_line();
+        if (!s.empty()) return s;
+    }
+    return std::string();
 }
 
 } // namespace halo

@@ -2,7 +2,10 @@
 
 #include "BlamDrive.hpp"
 #include "Config.hpp"
+#include "Math.hpp"                    // clampf
+#include "Rig.hpp"                     // g_rig_component: the weapon the floor trace ignores
 #include "core/EyeTrace.hpp"
+#include "core/host/PluginState.hpp"
 #include "XrLayerBridge.hpp"
 #include "thirdparty/openvr.h"
 #include "uevr/API.hpp"
@@ -819,5 +822,106 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     }
     return own;
 }
+
+namespace {
+
+// heightmode takes a word (absolute, seated, eyes) or its number.
+static int parse_height_mode(const char* val, double v) {
+    while (*val == ' ' || *val == '\t') ++val;
+    if (_strnicmp(val, "absolute", 8) == 0) return 0;
+    if (_strnicmp(val, "seated", 6) == 0)   return 1;
+    if (_strnicmp(val, "eyes", 4) == 0)     return 2;
+    return (int)clampf((float)v, 0.0f, 2.0f);
+}
+
+}  // namespace
+
+bool heightcal_parse_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "heightmode")       == 0) { g_cfg.height_mode     = parse_height_mode(val, v); return true; }
+    if (_stricmp(key, "heightscale")      == 0) { g_cfg.height_scale    = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heighteye")        == 0) { g_cfg.height_eye      = (int)clampf((float)v, 1.0f, 3.0f); return true; }
+    if (_stricmp(key, "heighttracechannel") == 0) { g_cfg.height_trace_channel = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    if (_stricmp(key, "heighttracemax")   == 0) { g_cfg.height_trace_max = clampf((float)v, 50.0f, 2000.0f); return true; }
+    if (_stricmp(key, "heightholdms")     == 0) { g_cfg.height_hold_ms  = clampf((float)v, 0.0f, 5000.0f); return true; }
+    if (_stricmp(key, "heightestep")      == 0) { g_cfg.height_e_step   = clampf((float)v, 0.1f, 50.0f); return true; }
+    if (_stricmp(key, "heightbipedscale") == 0) { g_cfg.height_biped_scale = clampf((float)v, 1.0f, 1000.0f); return true; }
+    if (_stricmp(key, "heightbipedfeet")  == 0) { g_cfg.height_biped_feet  = clampf((float)v, -500.0f, 500.0f); return true; }
+    if (_stricmp(key, "heightpawnfeet")   == 0) { g_cfg.height_pawn_feet   = clampf((float)v, -500.0f, 500.0f); return true; }
+    if (_stricmp(key, "heightseattarget") == 0) { g_cfg.height_seat_target = clampf((float)v, 0.0f, 400.0f); return true; }
+    if (_stricmp(key, "heightautoseat")   == 0) { g_cfg.height_auto_seat   = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heightseatbelow")  == 0) { g_cfg.height_seat_below  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightseatdwell")  == 0) { g_cfg.height_seat_dwell  = clampf((float)v, 0.5f, 60.0f); return true; }
+    if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heightkey")        == 0) {
+        const int k = (int)strtol(val, nullptr, 0);
+        g_cfg.height_key = (k == 0x2D) ? 0 : k;   // Insert opens UEVR's menu: never a height key
+        return true;
+    }
+    if (_stricmp(key, "heightlog")        == 0) { g_cfg.height_log      = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
+    if (_stricmp(key, "heightmin")        == 0) { g_cfg.height_min_abs  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightsample")     == 0) { g_cfg.height_sample   = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "heightslew")       == 0) { g_cfg.height_slew     = clampf((float)v, 0.0f, 500.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightsrc")        == 0) { g_cfg.height_src      = (int)clampf((float)v, 0.0f, 3.0f); return true; }
+    if (_stricmp(key, "heighttrim")       == 0) { g_cfg.height_trim     = clampf((float)v, -50.0f, 50.0f) * 0.01f; return true; }
+    if (_stricmp(key, "heightwindow")     == 0) { g_cfg.height_window_s = clampf((float)v, 1.0f, 60.0f); return true; }
+    return false;
+}
+
+namespace {
+
+bool heightcal_leash_block_wanted() {
+    return g_cfg.height_cal != 0;
+}
+
+// Runs where the author's vertical leash is, exactly where the height tick always ran.
+bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny, bool& moved) {
+    // Plugin.cpp's own state, through the bridge: the same objects under the same names.
+    const auto& g_in_menu       = *host::g_plugin_state.in_menu;
+    const auto& g_cut2d_engaged = *host::g_plugin_state.cut2d_engaged;
+    const auto& g_last_dt       = *host::g_plugin_state.last_dt;
+
+            // AUTO HEIGHT owns the origin's Y. While it is on, the vertical leash never acts: it
+            // would drag Y back onto the head and break the floor-to-floor mapping.
+            float hc_y = 0.0f;
+            bool hc_own = false;
+            if (g_cfg.height_cal != 0) {
+                API::UObject* hc_ignore[2] = {};
+                int hc_n = 0;
+                if (auto* pawn = API::get()->get_local_pawn(0)) hc_ignore[hc_n++] = pawn;
+                if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
+                    if (auto* wep = rigc->get_outer()) hc_ignore[hc_n++] = wep;
+                }
+                const bool hc_active = !g_in_menu.load() && !g_cut2d_engaged.load()
+                                    && !halo::g_unit_mounted.load(std::memory_order_relaxed);
+                hc_own = halo::height_tick(hp, so.y, hc_active, game_window_focused(), g_last_dt.load(),
+                                           hc_ignore, hc_n, &hc_y);
+            }
+            if (hc_own) {
+                if (std::fabs(hc_y - ny) > 0.0005f) { ny = hc_y; moved = true; }
+                return true;
+            }
+            return g_cfg.height_cal != 0;
+}
+
+bool heightcal_menu_command(const std::string& line) {
+            if (line == "calib:height")    { height_request_calibrate(); return true; }
+            return false;
+}
+
+std::string heightcal_menu_status_line() {
+    return height_status_line();
+}
+
+}  // namespace
+
+constinit const FeatureHooks kHeightCalHooks{
+    .key                = "heightcal",
+    .parse_key          = &heightcal_parse_key,
+    .leash_block_wanted = &heightcal_leash_block_wanted,
+    .leash_vertical     = &heightcal_leash_vertical,
+    .menu_command       = &heightcal_menu_command,
+    .menu_status_line   = &heightcal_menu_status_line,
+};
 
 }  // namespace halo

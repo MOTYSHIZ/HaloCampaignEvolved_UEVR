@@ -14,6 +14,12 @@
 // Tables hold function addresses only and are constant-initialised (constinit at the definition),
 // so there is no static-initialisation order between features, the list and the dispatchers.
 
+#include "Math.hpp"       // Vec3
+#include "uevr/API.h"     // UEVR_Vector3f
+
+#include <cstdint>
+#include <string>
+
 struct _XINPUT_STATE;
 
 namespace halo {
@@ -55,6 +61,33 @@ struct FeatureHooks {
     // features_xinput_raw_pad: the raw pad at the top of the XInput hook, after the fire input note.
     // The slot may modify the pad.
     void (*xinput_raw_pad)(_XINPUT_STATE* state);
+
+    // features_game_tick_before_leash: per-tick work right before the HMD translation leash block.
+    void (*game_tick_before_leash)();
+
+    // features_leash_block_wanted: true = the feature needs the leash block to run even with the
+    // author's leash (hmdleash) off.
+    bool (*leash_block_wanted)();
+
+    // features_leash_lateral: runs where the author's lateral leash is, with the plausible HMD pose
+    // and the origin being built. True = the feature applied the lateral leash itself.
+    bool (*leash_lateral)(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved);
+
+    // features_leash_vertical: runs where the author's vertical leash is. True = the feature owns the
+    // origin's Y this tick (whether or not it moved it), so the vertical leash must not run.
+    bool (*leash_vertical)(const Vec3& hp, const UEVR_Vector3f& so, float& ny, bool& moved);
+
+    // features_xinput_before_brake: the pad in the XInput hook, right before the vehicle hard brake.
+    void (*xinput_before_brake)(_XINPUT_STATE* state);
+
+    // features_sim_unit_state_end: the end of the sim-thread unit state publish, with the unit.
+    void (*sim_unit_state_end)(uintptr_t obj);
+
+    // features_menu_command: one line of the settings menu's command file. True = handled.
+    bool (*menu_command)(const std::string& line);
+
+    // features_menu_status_line: the feature's line for the menu status file; empty = none.
+    std::string (*menu_status_line)();
 };
 
 } // namespace halo

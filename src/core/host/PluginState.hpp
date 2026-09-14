@@ -17,9 +17,12 @@
 namespace halo::host {
 
 struct PluginState {
-    std::atomic<bool>*  in_menu;          // g_in_menu
-    std::atomic<bool>*  cut2d_engaged;    // g_cut2d_engaged
-    std::atomic<float>* last_dt;          // g_last_dt
+    std::atomic<bool>*  in_menu;            // g_in_menu
+    std::atomic<bool>*  cut2d_engaged;      // g_cut2d_engaged
+    std::atomic<float>* last_dt;            // g_last_dt
+    std::atomic<bool>*  stick_mode;         // g_stick_mode
+    std::atomic<bool>*  dpad_shift_active;  // g_dpad_shift_active
+    short (*to_raw)(float v);               // to_raw()
 };
 
 extern const PluginState g_plugin_state;
@@ -31,4 +34,7 @@ extern const PluginState g_plugin_state;
         &g_in_menu,                                                        \
         &g_cut2d_engaged,                                                  \
         &g_last_dt,                                                        \
+        &g_stick_mode,                                                     \
+        &g_dpad_shift_active,                                              \
+        &to_raw,                                                           \
     };

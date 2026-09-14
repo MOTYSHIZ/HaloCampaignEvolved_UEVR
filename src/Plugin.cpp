@@ -180,7 +180,6 @@
 // View-consumer fixes: the audio listener drive and the dev exec harness. The navpoint half
 // lives in this file (it shares the reticle widget scan below).
 #include "ViewFix.hpp"
-#include "HeightCal.hpp"
 
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
@@ -193,7 +192,6 @@ using namespace uevr;
 namespace halo {
 
 #include "features/palettewpn/Plugin_publishes.inl"   // fork feature: palettewpn (publishes + STOMPLOG)
-#include "features/roomscale/Plugin_publish.inl"   // fork feature: roomscale (publishes)
 // The camera the projection-scale fix was last applied to (see the FPSCALE block in the
 // tick). Reset when the rig re-resolves so a new camera object is fixed again.
 API::UObject* g_fpscale_camera = nullptr;
@@ -386,7 +384,6 @@ std::atomic<float> g_move_rot_deg{0.0f};
 // Counts frames where the stick was actually rewritten. Distinguishes "the correction is wrong"
 // from "the correction never ran" -- a null result looks identical either way from the headset.
 std::atomic<uint32_t> g_move_applied{0};
-#include "features/roomscale/Plugin_stick.inl"   // fork feature: roomscale (stick injection state)
 
 // The FINAL rendered view yaw, in game space, straight from UEVR's post-stereo callback: the game
 // camera with UEVR's rotation offset and the HMD's own rotation already composed in. This is the
@@ -6389,15 +6386,13 @@ void update() {
         features_rig_lost();
     }
 
-    #include "features/roomscale/Plugin_bob_probe.inl"   // fork feature: roomscale (camera bob + throttle probe)
+    features_game_tick_before_leash();
 
     // ---- HMD TRANSLATION LEASH (doctrine in Config.hpp).
     //
     // Slide the standing origin to absorb any head displacement past the radius. Inside it, nothing
     // happens and roomscale is untouched; outside, the origin follows you, so the divergence between
     // your eye and the game camera is bounded by the radius rather than by your room.
-    // With roomscale on, the player is first walked out of the offset through the game's own
-    // movement, and the origin is credited only with the travel roomscale demonstrably caused.
     //
     // On the GAME THREAD at ~32 Hz rather than per frame: the slide only runs while the player is
     // actively pushing the boundary, and its rate is their own walking speed, so a 32 Hz correction
@@ -6405,62 +6400,29 @@ void update() {
     // value that changes at human speed.
     //
     // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
-    if (g_cfg.hmd_leash || g_cfg.roomscale || g_cfg.height_cal != 0) {
+    if (g_cfg.hmd_leash || features_leash_block_wanted()) {
         Vec3 hp{}; Quat hq{};
         const auto hi = API::VR::get_hmd_index();
-        // HMD POSE PLAUSIBILITY GATE. One dropped tracking frame (measured: hp jumped 5.6 m for
-        // ONE 18 ms tick, then back) went straight into the leash, which yanked the standing
-        // origin 4.6 m to clamp it; the pose recovered and roomscale sprinted the biped a metre
-        // to walk out the phantom offset. A head cannot move faster than ~5 m/s, so a tick that
-        // claims it is a dropout -- skip the leash and roomscale for that tick and do NOT advance
-        // the reference, so the next good pose is judged against the last good one.
-        bool hp_ok = (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false));
-        if (hp_ok) {
-            static Vec3 s_hp_good{}; static bool s_hp_have = false;
-            static std::chrono::steady_clock::time_point s_hp_t{};
-            const auto now_hp = std::chrono::steady_clock::now();
-            const float dth = s_hp_have ? std::chrono::duration<float>(now_hp - s_hp_t).count() : 0.0f;
-            const float jump = s_hp_have ? std::sqrt((hp.x - s_hp_good.x) * (hp.x - s_hp_good.x) + (hp.y - s_hp_good.y) * (hp.y - s_hp_good.y) + (hp.z - s_hp_good.z) * (hp.z - s_hp_good.z)) : 0.0f;
-            // Reject a >5 m/s jump; after 0.5 s without a good pose accept whatever comes (a real
-            // recenter/teleport must be able to win eventually).
-            const bool implausible = s_hp_have && dth > 0.0f && dth < 0.5f && jump > 5.0f * dth && jump > 0.05f;
-            if (implausible) {
-                static uint32_t s_rej = 0;
-                if ((s_rej++ % 16u) == 0u) {
-                    API::get()->log_info("[Halo-CampE-UEVR] HMD pose rejected: %.2f m in %.1f ms (%.1f m/s) -- dropped tracking frame, leash/roomscale skipped",
-                                         jump, dth * 1000.0f, jump / dth);
-                }
-                hp_ok = false;
-            } else { s_hp_good = hp; s_hp_t = now_hp; s_hp_have = true; }
-        }
-        if (hp_ok) {
+        if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false) && features_hmd_pose_plausible(hp)) {
             const auto so = API::VR::get_standing_origin();
             // VR room space: Y is up (the VR->UE conversion elsewhere maps VR y to UE z), so the
             // lateral pair is X/Z and vertical is Y.
             const float dx = hp.x - so.x, dy = hp.y - so.y, dz = hp.z - so.z;
             const float lat = std::sqrt(dx * dx + dz * dz);
-            (void)lat;
 
             float nx = so.x, ny = so.y, nz = so.z;
             bool moved = false;
 
-            #include "features/roomscale/Plugin_walk.inl"   // fork feature: roomscale (the walk)
-
-            // ---- THE LEASH. With roomscale on, the lateral radius is roomscale_leash (the
-            // offset has to be allowed to exist for the walk to happen); otherwise the configured
-            // one.
-            const float leash_lat = g_cfg.roomscale ? g_cfg.roomscale_leash : g_cfg.hmd_leash_lat;
-            if (g_cfg.hmd_leash && rlat > leash_lat && rlat > 1e-4f) {
+            if (!features_leash_lateral(hp, nx, ny, nz, moved))
+            if (lat > g_cfg.hmd_leash_lat && lat > 1e-4f) {
                 // Absorb only the EXCESS, so the player keeps the full radius of free movement
                 // rather than being dragged to the centre.
-                const float kl = (rlat - leash_lat) / rlat;
-                nx += rdx * kl; nz += rdz * kl; moved = true;
+                const float k = (lat - g_cfg.hmd_leash_lat) / lat;
+                nx += dx * k; nz += dz * k; moved = true;
             }
             const float adz = (dy < 0.0f) ? -dy : dy;
-            #include "features/heightcal/Plugin_origin_y.inl"   // fork feature: heightcal (origin Y)
-            if (hc_own) {
-                if (std::fabs(hc_y - ny) > 0.0005f) { ny = hc_y; moved = true; }
-            } else if (g_cfg.height_cal == 0 && g_cfg.hmd_leash && adz > g_cfg.hmd_leash_vert) {
+            if (!features_leash_vertical(hp, so, ny, moved))
+            if (adz > g_cfg.hmd_leash_vert) {
                 ny += dy - ((dy > 0.0f) ? g_cfg.hmd_leash_vert : -g_cfg.hmd_leash_vert);
                 moved = true;
             }
@@ -12726,7 +12688,7 @@ public:
             }
         }
 
-        #include "features/roomscale/Plugin_inject.inl"   // fork feature: roomscale (stick injection)
+        features_xinput_before_brake(state);
 
         // ---- VEHICLE HARD BRAKE, pad-side delivery. Stick mode has already released the left
         // stick to the game (movement rotation and d-pad shift stand down there), so writing it

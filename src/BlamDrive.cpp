@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "BlamPalette.hpp"   // blam_weapon_object_probe_offhook: the reload's weapon object under his arm drivers
 #include "Holster.hpp"        // holster_throw_press_active(): arms the throw windup dump
+#include "features/hooks/BlamDriveHooks.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "AimConverge.hpp"
@@ -26,8 +27,6 @@ namespace halo {
 
 void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring
 extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
-
-#include "features/roomscale/BlamDrive_externs.inl"   // fork feature: roomscale (throttle command)
 
 std::atomic<int>  g_unit_gtype{0}, g_unit_gfrag{0}, g_unit_gplasma{0};
 std::atomic<bool> g_unit_gvalid{false};
@@ -1077,7 +1076,7 @@ void publish_unit_state(uintptr_t rec_base) {
         g_unit_fy.store(fv[1], std::memory_order_relaxed);
     }
 
-    #include "features/roomscale/BlamDrive_throttle.inl"   // fork feature: roomscale (throttle mode 3)
+    features_sim_unit_state_end(obj);
 }
 
 static void drive_angles_impl(bool off_thread) {

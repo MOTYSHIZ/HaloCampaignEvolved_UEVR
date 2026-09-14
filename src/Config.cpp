@@ -1,7 +1,6 @@
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
 #include "features/hooks/ConfigHooks.hpp"
-#include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
 #include "WeaponCalib.hpp"
@@ -588,7 +587,7 @@ int menu_bridge_tick() {
             if (line == "calib:scopebase")   { scope_base_arm(true);   ++applied; continue; }
             if (line == "calib:scopebaseoff"){ scope_base_arm(false);  ++applied; continue; }
             if (line == "calib:off")       { g_menu_calib_mode.store(0, std::memory_order_relaxed); ++applied; continue; }
-            if (line == "calib:height")    { height_request_calibrate(); ++applied; continue; }
+            if (features_menu_command(line)) { ++applied; continue; }
             if (line == "calibreset:all")  { DeleteFileA(g_calib_path); ++applied; continue; }
             if (line == "calibreset:pose") { strip_calib_keys(POSE_CALIB_KEYS, _countof(POSE_CALIB_KEYS)); ++applied; continue; }
             if (line == "calibreset:aim")  { strip_calib_keys(AIM_CALIB_KEYS,  _countof(AIM_CALIB_KEYS));  ++applied; continue; }
@@ -770,7 +769,7 @@ int menu_bridge_tick() {
     // Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
     // heightcal is off, so the author's status file is unchanged by default.
     static std::string s_last_height;
-    const std::string height_line = height_status_line();
+    const std::string height_line = features_menu_status_line();
     if (mode != s_last_status || barmed != s_last_bind || hready != s_last_hand ||
         scopearm != s_last_scopearm || scopebase != s_last_scopebase ||
         griparm != s_last_griparm || height_line != s_last_height ||
@@ -872,17 +871,13 @@ static void copy_trim(char* dst, size_t cap, const char* val) {
 // note above. See the matching Config.hpp section for what each one means.
 // EXPERIMENTAL, PORTED FROM THE FORK: the palette weapon stack's tuning keys, auto height and head
 // block, and the manual reload's frame keys. Hoisted like the other families (C1061).
-#include "features/heightcal/Config_parse_mode.inl"   // fork feature: heightcal (heightmode words)
-
 static bool parse_fork_port_key(const char* key, const char* val, double v) {
     (void)val;
-    #include "features/heightcal/Config_parse_a.inl"   // fork feature: heightcal (keys, first run)
     if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
     if (_stricmp(key, "aimreticulefresh") == 0) { g_cfg.aim_reticule_fresh = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "aimreticulestamp") == 0) { g_cfg.aim_reticule_stamp = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     #include "features/palettewpn/Config_parse_a.inl"   // fork feature: palettewpn (keys, first run)
-    #include "features/heightcal/Config_parse_b.inl"   // fork feature: heightcal (keys, second run)
     if (_stricmp(key, "liftyaw") == 0) {
         int m = (int)v; if (m < 0) m = 0; if (m > 2) m = 2;
         g_cfg.lift_yaw = m; return true;
@@ -1643,8 +1638,6 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     return false;
 }
 
-#include "features/roomscale/Config_parse.inl"   // fork feature: roomscale (key family)
-
 #include "features/vehcam/Config_parse.inl"   // fork feature: vehcam (key family)
 
 // ---- GESTURE RELOAD / RACK-SLIDE / PALETTE WEAPON / COOP keys. Hoisted, early-return, same
@@ -1872,7 +1865,6 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_holster_key(key, val, v)) return;
         if (features_parse_key(key, val, v)) return;
         if (parse_veh_key(key, val, v)) return;
-        if (parse_roomscale_key(key, val, v)) return;
         if (parse_weaponvr_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);

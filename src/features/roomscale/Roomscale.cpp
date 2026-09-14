@@ -1,5 +1,165 @@
-// roomscale (fork feature, Experimental): the walk out of the head offset through the game's own movement.
-// Textual fragment, included by Plugin.cpp inside update(), in the HMD translation leash block, before the leash itself. Moved verbatim; not compiled on its own.
+#include "Roomscale.hpp"
+
+#include <Windows.h>
+#include <Xinput.h>
+#include <string_view>
+
+#include "BlamDrive.hpp"               // g_unit_mounted
+#include "Config.hpp"
+#include "Markers.hpp"                 // g_view_base_yaw
+#include "Math.hpp"
+#include "MotionAimControl.hpp"        // read_control_rotation, g_stick_mode_active
+#include "Rig.hpp"                     // g_rig_parent, call_ret_vec3
+#include "core/CameraBob.hpp"
+#include "core/host/PluginState.hpp"
+#include "uevr/API.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+
+using namespace uevr;
+
+namespace halo {
+namespace {
+
+// ROOMSCALE THROTTLE (Config::roomscale_throttle): the movement command the game tick wants
+// written into the unit object, in the AIM frame (forward, right), 0..1. Consumed on the SIM
+// THREAD by the unit-state slot below; g_rs_thr_written counts writes so the tick can tell "the
+// command reached the unit" from "nothing drove" when crediting eye travel.
+std::atomic<float>    g_rs_thr_fwd{0.0f}, g_rs_thr_right{0.0f};
+std::atomic<bool>     g_rs_thr_active{false};
+std::atomic<uint32_t> g_rs_thr_written{0};
+// The player's raw stick magnitude this poll, for the sim-side yield check: a deliberate push
+// is locomotion, the throttle write waits.
+std::atomic<float> g_pad_user_mag{0.0f};
+// Candidate body-facing vectors for the throttle-frame probe log (see roomscale_thr_probe).
+std::atomic<float> g_dbg_face[6]{};
+
+// ROOMSCALE (Config::roomscale): the left-stick vector the game tick wants injected, already in
+// the game's movement frame (aim yaw), and whether a command is standing this tick. Consumed in
+// the XInput hook when the player's own stick is idle.
+std::atomic<float> g_rs_lx{0.0f}, g_rs_ly{0.0f};
+std::atomic<bool>  g_rs_active{false};
+std::atomic<uint32_t> g_rs_injected{0};
+std::atomic<float> g_rs_user_stick{0.0f};
+
+} // namespace
+
+// ---- ROOMSCALE + BOB CANCEL keys.
+bool roomscale_parse_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "roomscale")      == 0) { g_cfg.roomscale       = (v != 0.0); return true; }
+    if (_stricmp(key, "roomscalegain")  == 0) { g_cfg.roomscale_gain  = clampf((float)v, 0.1f, 50.0f); return true; }
+    if (_stricmp(key, "roomscaledead")  == 0) { g_cfg.roomscale_dead  = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "roomscaleleash") == 0) { g_cfg.roomscale_leash = clampf((float)v, 0.1f, 5.0f); return true; }
+    if (_stricmp(key, "roomscalestick") == 0) { g_cfg.roomscale_stick = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "roomscalelog")   == 0) { g_cfg.roomscale_log   = (v != 0.0); return true; }
+    if (_stricmp(key, "roomscalemin")   == 0) { g_cfg.roomscale_min   = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "roomscalespeed") == 0) { g_cfg.roomscale_speed = clampf((float)v, 0.1f, 20.0f); return true; }
+    if (_stricmp(key, "roomscalelat")   == 0) { g_cfg.roomscale_lat   = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "roomscaledz")    == 0) { g_cfg.roomscale_dz    = clampf((float)v, 0.0f, 0.9f); return true; }
+    if (_stricmp(key, "roomscalepulse") == 0) { g_cfg.roomscale_pulse = (int)clampf((float)v, 1.0f, 30.0f); return true; }
+    if (_stricmp(key, "roomscaleff")    == 0) { g_cfg.roomscale_ff    = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "roomscalemaxspeed")  == 0) { g_cfg.roomscale_max_speed = (float)v; return true; }
+    if (_stricmp(key, "roomscalestanddown") == 0) { g_cfg.roomscale_standdown = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "roomscalethrottle")  == 0) { g_cfg.roomscale_throttle = (int)v; return true; }
+    if (_stricmp(key, "roomscalethrspeed")  == 0) { g_cfg.roomscale_thr_speed = clampf((float)v, 0.5f, 30.0f); return true; }
+    if (_stricmp(key, "roomscalethrprobe")  == 0) { g_cfg.roomscale_thr_probe = (int)v; return true; }
+    if (_stricmp(key, "blamunitthrottleoff")  == 0) { g_cfg.blam_unit_throttle_off  = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "blamunitthrottleoff2") == 0) { g_cfg.blam_unit_throttle_off2 = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "blamthrottleysign")    == 0) { g_cfg.blam_throttle_ysign = (v < 0.0) ? -1 : 1; return true; }
+    if (_stricmp(key, "bobcancel") == 0) { g_cfg.bob_cancel = (v != 0.0); return true; }
+    if (_stricmp(key, "bobtau")    == 0) { g_cfg.bob_tau    = clampf((float)v, 0.02f, 5.0f); return true; }
+    if (_stricmp(key, "boblog")    == 0) { g_cfg.bob_log    = (v != 0.0); return true; }
+    return false;
+}
+
+namespace {
+
+void roomscale_game_tick_before_leash() {
+    // Plugin.cpp's own state, through the bridge: the same object under the same name.
+    const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
+
+    // ---- CAMERA BOB: measure the camera component against the pawn root in the aim-yaw frame,
+    // low-pass the slow part (eye height, crouch), publish the fast remainder as the bob.
+    {
+        const bool want_bob = g_cfg.bob_cancel || g_cfg.bob_log;
+        Vec3 bob{0.0f, 0.0f, 0.0f};
+        if (want_bob && g_rig_parent != nullptr && !g_stick_mode.load()) {
+            auto* pawn_b = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
+            Vec3 root{}, camb{}; double cpb = 0.0, cyb = 0.0;
+            if (pawn_b != nullptr && call_ret_vec3(pawn_b, L"K2_GetActorLocation", &root)
+                && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &camb)
+                && read_control_rotation(&cpb, &cyb, nullptr)) {
+                static Vec3 s_lp{}; static bool s_have = false;
+                static std::chrono::steady_clock::time_point s_t{};
+                const auto nowb = std::chrono::steady_clock::now();
+                const float dtb = s_have ? std::chrono::duration<float>(nowb - s_t).count() : 0.0f;
+                s_t = nowb;
+                const float ayb = (float)cyb * DEG2RAD, cb = std::cos(ayb), snb = std::sin(ayb);
+                const Vec3 dw{camb.x - root.x, camb.y - root.y, camb.z - root.z};
+                const Vec3 dl{ dw.x * cb + dw.y * snb, -dw.x * snb + dw.y * cb, dw.z};   // aim-yaw frame
+                const float taub = (g_cfg.bob_tau > 0.02f) ? g_cfg.bob_tau : 0.4f;
+                if (!s_have || dtb <= 0.0f || dtb > 0.5f) { s_lp = dl; s_have = true; }
+                else { const float ab = clampf(dtb / taub, 0.0f, 1.0f); s_lp.x += (dl.x - s_lp.x) * ab; s_lp.y += (dl.y - s_lp.y) * ab; s_lp.z += (dl.z - s_lp.z) * ab; }
+                const Vec3 bl{dl.x - s_lp.x, dl.y - s_lp.y, dl.z - s_lp.z};
+                bob = Vec3{bl.x * cb - bl.y * snb, bl.x * snb + bl.y * cb, bl.z};        // back to world
+                if (g_cfg.bob_log) {
+                    static uint32_t nlog = 0;
+                    if ((nlog++ % 2u) == 0u) {
+                        API::get()->log_info("[Halo-CampE-UEVR] BOB dt=%.1fms d_local=(%.2f %.2f %.2f) lp=(%.2f %.2f %.2f) bob=(%.2f %.2f %.2f)cm aim=%.1f",
+                                             dtb * 1000.0f, dl.x, dl.y, dl.z, s_lp.x, s_lp.y, s_lp.z, bl.x, bl.y, bl.z, (float)cyb);
+                    }
+                }
+            }
+        }
+        if (!g_cfg.bob_cancel) bob = Vec3{0.0f, 0.0f, 0.0f};
+        halo::g_bob_x.store(bob.x, std::memory_order_relaxed);
+        halo::g_bob_y.store(bob.y, std::memory_order_relaxed);
+        halo::g_bob_z.store(bob.z, std::memory_order_relaxed);
+    }
+
+    // ---- THROTTLE-FRAME PROBE LOG (Config::roomscale_thr_probe). BlamDrive is writing a constant
+    // forward throttle into the biped; here we log the world direction the eye actually moves
+    // beside the aim yaw and the view yaw, so the frame is fit from a KNOWN command, not a lean.
+    if (g_cfg.roomscale_thr_probe != 0 && g_rig_parent != nullptr && !g_stick_mode.load()) {
+        Vec3 eyep{}; double cpp2 = 0.0, cyp = 0.0;
+        if (call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &eyep)
+            && read_control_rotation(&cpp2, &cyp, nullptr)) {
+            static Vec3 s_pe{}; static bool s_h = false;
+            if (s_h) {
+                const float dxp = eyep.x - s_pe.x, dyp = eyep.y - s_pe.y;
+                const float dmp = std::sqrt(dxp * dxp + dyp * dyp);
+                if (dmp > 0.2f) {   // cm; only while actually moving
+                    const float wdir = std::atan2(dyp, dxp) * RAD2DEG;   // world direction of travel
+                    const float f1 = std::atan2(halo::g_dbg_face[1].load(), halo::g_dbg_face[0].load()) * RAD2DEG;
+                    const float f2 = std::atan2(halo::g_dbg_face[3].load(), halo::g_dbg_face[2].load()) * RAD2DEG;
+                    const float fb = std::atan2(halo::g_dbg_face[5].load(), halo::g_dbg_face[4].load()) * RAD2DEG;
+                    API::get()->log_info("[Halo-CampE-UEVR] ROOMSCALE-PROBE move_world=%.1fdeg |%.2fcm| aim=%.1f view=%.1f  (world-aim=%.1f world-view=%.1f) f1D4=%.1f f1E0=%.1f body=%.1f  [target 0: err=%.1f]",
+                                         wdir, dmp, (float)cyp, halo::g_view_base_yaw.load(),
+                                         wrap180(wdir - (float)cyp), wrap180(wdir - halo::g_view_base_yaw.load()),
+                                         f1, f2, fb, wrap180(wdir));
+                }
+            }
+            s_pe = eyep; s_h = true;
+        }
+    }
+}
+
+bool roomscale_leash_block_wanted() {
+    return g_cfg.roomscale;
+}
+
+// The walk runs whenever the leash block runs, exactly as it always did; the leash at roomscale's
+// radius replaces the author's lateral leash only while roomscale is on.
+bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved) {
+    // Plugin.cpp's own state, through the bridge: the same objects under the same names.
+    const auto& g_in_menu    = *host::g_plugin_state.in_menu;
+    const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
+
             // ---- ROOMSCALE: walk the player out of the head offset before the leash absorbs it.
             //
             // Measured with roomscalelog: full stick moves the eye at 3.0-4.7 m/s and the loop
@@ -252,3 +412,116 @@
                                          nx, ny, nz, g_rs_user_stick.load(), inj_now, hp.x, hp.z, s_vh_x, s_vh_z);
                 }
             }
+
+            // With roomscale off the walk above left nx/nz untouched, so the offset below would be
+            // exactly the author's: his lateral leash runs instead, as written.
+            if (!g_cfg.roomscale) return false;
+
+            // ---- THE LEASH. With roomscale on, the lateral radius is roomscale_leash (the
+            // offset has to be allowed to exist for the walk to happen); otherwise the configured
+            // one.
+            const float leash_lat = g_cfg.roomscale ? g_cfg.roomscale_leash : g_cfg.hmd_leash_lat;
+            if (g_cfg.hmd_leash && rlat > leash_lat && rlat > 1e-4f) {
+                // Absorb only the EXCESS, so the player keeps the full radius of free movement
+                // rather than being dragged to the centre.
+                const float kl = (rlat - leash_lat) / rlat;
+                nx += rdx * kl; nz += rdz * kl; moved = true;
+            }
+            return true;
+}
+
+void roomscale_xinput_before_brake(_XINPUT_STATE* state) {
+    // Plugin.cpp's own state, through the bridge: the same objects under the same names.
+    const auto& g_dpad_shift_active = *host::g_plugin_state.dpad_shift_active;
+    const auto& g_in_menu           = *host::g_plugin_state.in_menu;
+    const auto& g_stick_mode        = *host::g_plugin_state.stick_mode;
+    const auto  to_raw              = host::g_plugin_state.to_raw;
+
+        // ---- ROOMSCALE INJECTION (Config::roomscale). The game tick published a left-stick
+        // vector in the movement frame; deliver it whenever the player's own stick is idle.
+        // Never in stick mode, menus or d-pad shift -- the same gates as the movement rotation
+        // above -- and never over a pushed stick: a deliberate push is locomotion, the head
+        // offset waits.
+        {
+            const float ulx = (float)state->Gamepad.sThumbLX / 32767.0f;
+            const float uly = (float)state->Gamepad.sThumbLY / 32767.0f;
+            const float um = std::sqrt(ulx * ulx + uly * uly);
+            g_rs_user_stick.store(um, std::memory_order_relaxed);
+            halo::g_pad_user_mag.store(um, std::memory_order_relaxed);
+        }
+        if (g_cfg.roomscale && g_rs_active.load(std::memory_order_relaxed)
+            && !g_dpad_shift_active.load() && !g_in_menu.load() && !g_stick_mode.load()) {
+            const float ulx = (float)state->Gamepad.sThumbLX / 32767.0f;
+            const float uly = (float)state->Gamepad.sThumbLY / 32767.0f;
+            if (std::sqrt(ulx * ulx + uly * uly) < g_cfg.roomscale_stick) {
+                const float rlx = g_rs_lx.load(std::memory_order_relaxed);
+                const float rly = g_rs_ly.load(std::memory_order_relaxed);
+                state->Gamepad.sThumbLX = to_raw(clampf(rlx, -1.0f, 1.0f));
+                state->Gamepad.sThumbLY = to_raw(clampf(rly, -1.0f, 1.0f));
+                state->dwPacketNumber++;
+                g_rs_injected.fetch_add(1);
+            }
+        }
+}
+
+void roomscale_sim_unit_state_end(uintptr_t obj) {
+    // ROOMSCALE THROTTLE, MODE 3: write the UNIT's own throttle vectors (found by BLAMUNIT-DUMP:
+    // +0x250 fwd/+0x254 left, second copy at +0x25C/+0x260) from this sim-side path, so the
+    // value sits there whenever the biped reads it. THE ONE THAT MOVES THE BIPED: eye speed =
+    // 6.65 m/s x throttle, linear from 0.02 up, no floor -- modes that wrote the control record
+    // survived but moved nothing (consumed before the write landed). Yields to the player's own
+    // stick and to stick mode, same gates as the pad path.
+    const bool thr_probe = (g_cfg.roomscale_thr_probe != 0)
+                        && !g_stick_mode_active.load(std::memory_order_relaxed)
+                        && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick;
+    if ((g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)
+         && !g_stick_mode_active.load(std::memory_order_relaxed)
+         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick) || thr_probe) {
+        const uintptr_t o1 = (uintptr_t)g_cfg.blam_unit_throttle_off;
+        const uintptr_t o2 = (uintptr_t)g_cfg.blam_unit_throttle_off2;
+        if (o1 != 0 && !IsBadWritePtr((void*)(obj + o1), 8)) {
+            // Candidate BODY-FACING vectors, published for the probe log (game thread): the flat
+            // direction pairs the unit dump showed. Whichever angle tracks move_world exactly is
+            // the frame the throttle is consumed in.
+            if (!IsBadReadPtr((const void*)(obj + 0x1D4), 8)) {
+                g_dbg_face[0].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
+                g_dbg_face[1].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
+                g_dbg_face[4].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
+                g_dbg_face[5].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
+            }
+            if (!IsBadReadPtr((const void*)(obj + 0x1E0), 8)) {
+                g_dbg_face[2].store(*(const float*)(obj + 0x1E0), std::memory_order_relaxed);
+                g_dbg_face[3].store(*(const float*)(obj + 0x1E4), std::memory_order_relaxed);
+            }
+            // AIM-FRAME command, kept as FINAL after two measured attempts to do better both
+            // lost: a body-forward (+0x50) basis was off by the torso twist and flipped 180 in
+            // the biped's turn state; the game's own +0x1D4 basis fed back -- the biped rotates
+            // that vector while moving, the re-projection chased it, and the probe walked in
+            // curves. g_rs_thr_fwd/right are (fwd, right) in the AIM frame.
+            float f, l;
+            if (thr_probe) { f = (float)g_cfg.roomscale_thr_probe / 100.0f; l = 0.0f; }
+            else {
+                f = g_rs_thr_fwd.load(std::memory_order_relaxed);
+                const float r = g_rs_thr_right.load(std::memory_order_relaxed);
+                l = (g_cfg.blam_throttle_ysign < 0) ? -r : r;
+            }
+            *(float*)(obj + o1) = f; *(float*)(obj + o1 + 4) = l;
+            if (o2 != 0 && !IsBadWritePtr((void*)(obj + o2), 8)) { *(float*)(obj + o2) = f; *(float*)(obj + o2 + 4) = l; }
+            g_rs_thr_written.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+} // namespace
+
+constinit const FeatureHooks kRoomscaleHooks{
+    .key                    = "roomscale",
+    .parse_key              = &roomscale_parse_key,
+    .game_tick_before_leash = &roomscale_game_tick_before_leash,
+    .leash_block_wanted     = &roomscale_leash_block_wanted,
+    .leash_lateral          = &roomscale_leash_lateral,
+    .xinput_before_brake    = &roomscale_xinput_before_brake,
+    .sim_unit_state_end     = &roomscale_sim_unit_state_end,
+};
+
+} // namespace halo

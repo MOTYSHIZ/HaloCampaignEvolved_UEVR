@@ -22,9 +22,17 @@
 // THE FLOOR comes from heightsrc: 0 auto, 1 OpenXR STAGE (own spaces on UEVR's session through the
 // HALOVR API layer), 2 OpenVR standing universe, 3 UEVR pose only (floor unknown on OpenXR).
 
+//
+// FEATURE heightcal (Experimental). Hook slots: parse_key (height*), leash_block_wanted,
+// leash_vertical (the origin's Y, where the author's vertical leash is), menu_command (calib:height)
+// and menu_status_line. Table: kHeightCalHooks.
+
 #pragma once
 
+#include <string_view>
+
 #include "Math.hpp"
+#include "features/FeatureHooks.hpp"
 #include "uevr/API.hpp"
 
 #include <atomic>
@@ -32,6 +40,11 @@
 #include <string>
 
 namespace halo {
+
+extern const FeatureHooks kHeightCalHooks;
+
+// The auto height keys (height*).
+bool heightcal_parse_key(const char* key, const char* val, double v);
 
 // The last XrFrameEndInfo::displayTime seen on the submit path (XrLayer.cpp). 0 = none yet.
 extern std::atomic<int64_t> g_xr_last_display_time;
