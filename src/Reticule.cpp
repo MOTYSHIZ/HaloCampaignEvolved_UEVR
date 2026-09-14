@@ -1713,8 +1713,13 @@ void apply_widget_tint_scaled(API::UObject* comp, float mul, bool force) {
                                                          : g_cfg.aim_widget_gain * mul;
     const float rgb   = gain * g_cfg.aim_widget_tint;
     // HIDE BY ALPHA, NOT BY VISIBILITY -- see reticule_widget_set_scene_hidden.
+    // ONLY for the reticule widget itself. Every other host shares this function for its gain (the
+    // wrist HUD panels do, per tick), and applying the hide to all of them made the whole wrist HUD
+    // transparent the moment the layer went live -- and kept it so after the reticule was switched
+    // off, because the hidden state cannot clear without a bound reticule widget.
     const bool hide_alpha = g_ws_scene_hidden.load(std::memory_order_relaxed) &&
-                            g_cfg.xr_layer_hide_ws == 1;
+                            g_cfg.xr_layer_hide_ws == 1 &&
+                            comp == g_ret_widget_comp.get();
     const float alpha = hide_alpha ? 0.0f : g_cfg.aim_widget_alpha;
 
     // VERIFY AGAINST THE COMPONENT, never against a cache of what we last wrote.
