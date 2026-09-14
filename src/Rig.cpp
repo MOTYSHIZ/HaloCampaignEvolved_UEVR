@@ -10,6 +10,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace uevr;
 
@@ -780,6 +781,13 @@ constexpr const wchar_t* kMuzzleMarker = L"fx_muzzleflash";   // primary / displ
 static constexpr const wchar_t* kMuzzleMarkers[] = {
     L"fx_muzzleflash", L"fx_muzzleflash_01", L"fx_muzzle", L"fx_fire",
     L"Muzzle", L"MuzzleFlash", L"muzzle", L"b_muzzle",
+    // Meteorite FP-weapon skeleton BONE (dumped from BP_FP_FlakCannon_WeaponActor_C, 2026-09-13):
+    // the flak/fuel-rod cannon has no fx_muzzleflash SOCKET but does have this barrel bone.
+    // GetSocketLocation resolves bones, so this identifies the skeletal weapon mesh; the bore is
+    // then that component's forward, same as any socket-identified weapon (its FWD axis reads level
+    // while UP reads ~vertical, confirming FWD is the barrel). Tried last so a real fx_muzzleflash
+    // socket always wins on weapons that have one.
+    L"Barrel_M",
 };
 
 // GetSocketLocation returns the component's OWN origin for a socket/bone it does NOT have (the None
@@ -988,47 +996,61 @@ void shotpoint_dev_readout(unsigned tick) {
             wc.c_str(), matched ? matched : kMuzzleMarker, class_name_of(comp).c_str(), p.x, p.y, p.z,
             fy, fp, uy, up, ry, rp, (int)hf, (int)hu, (int)hr);
     } else {
-        // DISCOVERY: no name in kMuzzleMarkers matched. Probe a BROAD candidate set (sockets AND
-        // bones -- GetSocketLocation resolves both) and log every name that resolves, so an unknown
-        // weapon's muzzle can be identified and promoted into kMuzzleMarkers. Dev-only + throttled
-        // (this whole function runs at shot_aim_log cadence), so the wide probe never runs in a
-        // player build or per frame.
-        static constexpr const wchar_t* kMuzzleCandidatesDbg[] = {
-            L"fx_muzzleflash", L"fx_muzzleflash_01", L"fx_muzzleflash_02", L"fx_muzzleflash_1",
-            L"fx_muzzleflash_L", L"fx_muzzleflash_R", L"fx_muzzleflashl", L"fx_muzzle",
-            L"fx_muzzle_01", L"fx_fire", L"fx_barrel", L"fx_flash", L"fx_projectile", L"fx_launch",
-            L"Muzzle", L"muzzle", L"MuzzleFlash", L"muzzleflash", L"Muzzle_01", L"MuzzleSocket",
-            L"Muzzle_Socket", L"MuzzlePoint", L"FirePoint", L"WeaponMuzzle", L"BarrelEnd",
-            L"barrel", L"b_muzzle", L"s_muzzle", L"jnt_muzzle", L"bip_muzzle", L"Bip01_Muzzle",
-        };
+        // DISCOVERY (dev-only): no known muzzle name matched. Dump the weapon's attach vocabulary
+        // ONCE per class so the real muzzle is IDENTIFIED, not guessed:
+        //   (1) each mesh comp's FWD/UP/RIGHT axes as game angles -- aim at a distant reference and
+        //       whichever axis matches where you point IS the bore (the scope pane's was UP, not
+        //       FWD). A matching comp axis enables a socket-free capture straight off that comp.
+        //   (2) the skeleton's bone names via GetNumBones/GetBoneName (proven on this build, see
+        //       Arms.cpp), in case the muzzle is a named bone we can add to kMuzzleMarkers.
+        // Once-per-class (a one-shot burst the first time a weapon is held) + behind this dev +
+        // throttled logger, so nothing here runs in a player build or per frame.
         API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT: weapon '%ls' has NO known muzzle marker -> "
-                             "baked AR default in use; scanning candidates", wc.c_str());
-        int hits = 0;
-        for (const wchar_t* arrp : { L"BlueprintCreatedComponents", L"InstanceComponents" }) {
-            auto* arr = wpn->get_property_data<FRawArrayRO>(arrp);
-            if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) continue;
-            if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) continue;
-            auto** elems = reinterpret_cast<API::UObject**>(arr->data);
-            if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) continue;
-            for (int32_t i = 0; i < arr->num; ++i) {
-                auto* c = elems[i];
-                if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
-                if (class_name_of(c).find(L"Mesh") == std::wstring::npos) continue;
-                API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-SCAN: '%ls' mesh comp '%ls'",
-                                     wc.c_str(), class_name_of(c).c_str());
-                for (const wchar_t* cand : kMuzzleCandidatesDbg) {
-                    Vec3 at{};
-                    if (first_socket_on_component(c, &cand, 1, &at) != nullptr) {
-                        ++hits;
-                        API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-SCAN:   -> socket/bone '%ls' at (%.1f,%.1f,%.1f)",
-                                             cand, at.x, at.y, at.z);
+                             "baked AR default in use", wc.c_str());
+        static std::unordered_set<std::wstring> s_dumped;
+        if (s_dumped.insert(wc).second) {
+            auto ang = [](const Vec3& v, float* y, float* pt) {
+                *y  = std::atan2(v.y, v.x) * RAD2DEG;
+                *pt = std::asin(clampf(v.z, -1.0f, 1.0f)) * RAD2DEG;
+            };
+            for (const wchar_t* arrp : { L"BlueprintCreatedComponents", L"InstanceComponents" }) {
+                auto* arr = wpn->get_property_data<FRawArrayRO>(arrp);
+                if (arr == nullptr || IsBadReadPtr(arr, sizeof(FRawArrayRO))) continue;
+                if (arr->data == nullptr || arr->num <= 0 || arr->num > 4096) continue;
+                auto** elems = reinterpret_cast<API::UObject**>(arr->data);
+                if (IsBadReadPtr(elems, sizeof(void*) * (size_t)arr->num)) continue;
+                for (int32_t i = 0; i < arr->num; ++i) {
+                    auto* c = elems[i];
+                    if (c == nullptr || IsBadReadPtr(c, sizeof(void*))) continue;
+                    const std::wstring cc = class_name_of(c);
+                    if (cc.find(L"Mesh") == std::wstring::npos) continue;
+                    Vec3 vf{}, vu{}, vr{};
+                    const bool hf = call_ret_vec3(c, L"GetForwardVector", &vf);
+                    const bool hu = call_ret_vec3(c, L"GetUpVector",      &vu);
+                    const bool hr = call_ret_vec3(c, L"GetRightVector",   &vr);
+                    float fy=0,fp=0,uy=0,up=0,ry=0,rp=0;
+                    if (hf) ang(vf,&fy,&fp);  if (hu) ang(vu,&uy,&up);  if (hr) ang(vr,&ry,&rp);
+                    API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-DUMP: '%ls' comp '%ls' | "
+                                         "FWD y%.1f p%.1f | UP y%.1f p%.1f | RIGHT y%.1f p%.1f | have f%d u%d r%d",
+                                         wc.c_str(), cc.c_str(), fy,fp,uy,up,ry,rp,(int)hf,(int)hu,(int)hr);
+                    // Bones live only on skeletal meshes; gate on the class so GetNumBones is never
+                    // issued at a component that has no such function.
+                    if (cc.find(L"Skeletal") == std::wstring::npos) continue;
+                    alignas(16) uint8_t pn[RIG_PARAM_BUF] = {0};
+                    c->call_function(L"GetNumBones", pn);
+                    const int32_t nb = *reinterpret_cast<int32_t*>(pn);
+                    if (nb <= 0 || nb > 512) continue;
+                    API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-DUMP:   '%ls' has %d bones:", cc.c_str(), nb);
+                    for (int32_t b = 0; b < nb; ++b) {
+                        alignas(16) uint8_t pb[RIG_PARAM_BUF] = {0};
+                        *reinterpret_cast<int32_t*>(pb) = b;   // GetBoneName(int32 in@0) -> FName@4
+                        c->call_function(L"GetBoneName", pb);
+                        const std::wstring bn = reinterpret_cast<API::FName*>(pb + 4)->to_string();
+                        if (!bn.empty())
+                            API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-DUMP:     bone[%d] '%ls'", b, bn.c_str());
                     }
                 }
             }
-        }
-        if (hits == 0) {
-            API::get()->log_info("[Halo-CampE-UEVR] SHOTPOINT-SCAN: '%ls' -- NONE of the candidates resolved "
-                                 "on any mesh comp (muzzle name is exotic, or not a socket/bone)", wc.c_str());
         }
     }
 #else
