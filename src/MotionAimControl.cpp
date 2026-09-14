@@ -32,14 +32,9 @@
 #include "MotionAimControl.hpp"
 #include "TwoHandAim.hpp"
 #include "Config.hpp"
-#include "PaletteTwoHand.hpp"
-#include "ArmDriver.hpp"   // palette_weapon_mode(): which aim chain owns the derivation
-#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
-#include "BlamPalette.hpp"   // palette_trim_rotations (aimbore)
-
-#include <chrono>
 #include "Math.hpp"
 #include "UeObject.hpp"
+#include "features/hooks/MotionAimHooks.hpp"
 #include "AimTrace.hpp"
 #include "GameSettings.hpp"
 #include "AimDirect.hpp"
@@ -80,12 +75,9 @@ bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
 // adding the calibrated controller offset on top: ~9 deg yaw / ~18 deg pitch off the barrel with
 // the shipped fit, and a jump on every swap to or from it. Found by the v0.4.5 pre-release audit.
 static bool shotpoint_aim_active() {
-    // Stands down while the palette weapon (armdriver mode 3) owns placement and aim.
-    return !palette_weapon_mode() && g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 &&
+    return !features_aim_owned_by_feature() && g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 &&
            (shotpoint_bore_local(nullptr) || shotpoint_dir(nullptr));
 }
-void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring (FRAMEAUDIT)
-extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
 
 // ---- aim reference ---------------------------------------------------------------------------
 std::atomic<float> g_ref_ctrl_yaw{0.0f}, g_ref_aim_yaw{0.0f};
@@ -381,10 +373,6 @@ Quat apply_aim_fix(const Quat& q_src) {
     return quat_mul(q_src, f);
 }
 
-// The palette's measured barrel axis in the trimmed pose frame (Plugin.cpp BARRELAXIS), for aimbore=3.
-extern std::atomic<float> g_barrel_axis_x, g_barrel_axis_y, g_barrel_axis_z;
-extern std::atomic<bool>  g_barrel_axis_valid;
-
 bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
                         bool allow_two_hand) {
     const int32_t ridx = (ridx_override >= 0) ? ridx_override : g_aim_law_ridx.load();
@@ -397,8 +385,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // pose BEFORE the forward is taken, so it rolls with the wrist like the rendered gun does; the
     // weapon publisher and the direct-write path route through the same call, so ray and barrel
     // agree by construction. See apply_aim_fix's definition above for why it is a right-multiply.
-    Quat q_src = apply_aim_fix(cq);
-    Vec3 fwd = quat_forward(q_src);
+    Vec3 fwd = quat_forward(features_aim_source(apply_aim_fix(cq)));
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -433,14 +420,13 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            q_src = apply_aim_fix(gq);
-            fwd = quat_forward(q_src);
+            fwd = quat_forward(features_aim_source(apply_aim_fix(gq)));
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }
     }
 
-    if (!palette_weapon_mode()) {
+    if (!features_aim_forward(&fwd)) {
     // ---- SHOT-POINT DIRECTION (shotaim=1 + shotaimdir=1): aim along the weapon MESH bore ---------
     //
     // Aim from the rendered weapon's barrel (the fx_muzzleflash marker's forward) instead of the
@@ -488,24 +474,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // it is differenced against, and cancels. Blending the ANGLES after that term would break the
     // cancellation and bring back the v0.2 snap-turn bug, which is a discharged public promise.
     // Blend the VECTOR, always.
-    //
-    // Every consumer of aim -- the control law, the direct drive, the reticle, the rendered
-    // weapon pose -- takes its direction from this one derivation, so blending at this point
-    // keeps them agreeing by construction. The palette applies the SAME rotation to the weapon
-    // pose (two_hand_delta, built on two_hand_blend); blending only one of the pair was
-    // field-observed as the gun turning two-handed while the shots kept following the single
-    // hand. two_hand_blend is therefore tried first; the swing-based bend (two_hand_bend_forward,
-    // the arm rig's hold) only takes the ray when the blend declines it, so the two never stack.
     if (allow_two_hand) two_hand_bend_forward(&fwd);
-    } else {
-    // ---- THE TWO-HANDED HOLD, here and deliberately: after the source pose is chosen, before
-    // the sightline. Every consumer of aim -- the control law, the direct drive, the reticle,
-    // the rendered weapon pose -- takes its direction from this one derivation, so blending at
-    // this point keeps them agreeing by construction. The palette applies the SAME rotation to
-    // the weapon pose (two_hand_delta); blending only one of the pair was field-observed as the
-    // gun turning two-handed while the shots kept following the single hand.
-    #include "features/aimbore/MotionAimControl_bore.inl"   // fork feature: aimbore (aim along the barrel)
-    if (!bore_done) palette_two_hand_blend(&fwd);
     }
 
     Vec3 origin{};
@@ -582,9 +551,6 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     return true;
 }
 
-
-
-
 // The aim setpoint, sampled now. See the header for why a consumer would want this instead of
 // g_desired_yaw. The body is deliberately identical to the setpoint arithmetic in
 // aim_control_law() below -- the hand's rotation since calibration, added to the aim captured at
@@ -593,7 +559,6 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
 // Defined below, next to the atomics it reads. Forward-declared because desired_aim_now() needs
 // the same hold and sits above that definition.
 static void apply_melee_aim_hold(float* cy, float* cp);
-static void aim_writer_compare_direct(float yaw_deg, float pitch_deg);   // AIMWRITERS, defined at get_pose
 
 bool desired_aim_now(float* out_yaw, float* out_pitch) {
     const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
@@ -946,15 +911,9 @@ void aim_control_law(AimLawState& st, float ctrl_yaw, float ctrl_pitch,
 
         const double want_yaw   = (double)wy;
         const double want_pitch = g_cfg.drive_pitch ? (double)wp : aim_pitch;
-        aim_writer_compare_direct(wy, wp);
-        // AIMDIRECTWRITE (Config.hpp aim_direct_write). 0 = keep the direct branch (stick held at
-        // zero, so the loop cannot become a third writer) but skip the UE write, leaving the Blam
-        // record as the ONLY aim writer. The honest single-writer test: blamangles=0 instead left
-        // nothing moving the aim at all (hand vs ControlRotation corr +0.21/-0.34/-0.09).
-        if (g_cfg.aim_direct_write ? aim_direct_set(want_pitch, want_yaw) : true) {
-            // Point 22: the UE direct write, stamped with the snapshot this thread's hand came from.
-            if (g_cfg.stomp_log != 0) stomp_mark(22, (float)want_yaw, (float)want_pitch, (float)pose_latch_last_gen(),
-                       (float)g_tick_id.load(std::memory_order_relaxed));
+        features_aim_direct_writing(wy, wp);
+        if (features_aim_direct_write_skipped() || aim_direct_set(want_pitch, want_yaw)) {
+            features_aim_direct_written((float)want_yaw, (float)want_pitch);
             *out_rx = 0.0f;
             *out_ry = 0.0f;
             // Traced from INSIDE the direct path. The old code returned above the sample call, so a
@@ -1109,13 +1068,9 @@ bool aim_sightline_origin(Vec3* out) {
     return false;
 }
 
-#include "features/palettewpn/MotionAimControl_poselatch.inl"   // fork feature: palettewpn (pose latch)
-
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
-    API::VR::Pose pose{};
-    if (!pose_latch_lookup(idx, use_aim, &pose)) {
-        pose = use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx);
-    }
+    API::VR::Pose latched{};
+    const auto pose = features_pose_latched(idx, use_aim, &latched) ? latched : (use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx));
     const auto& q = pose.rotation;
     const float m2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
     // UEVR withholds real poses until it has observed controller INPUT, returning a non-unit

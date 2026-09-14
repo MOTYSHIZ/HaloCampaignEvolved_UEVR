@@ -1,7 +1,7 @@
 #include "features/palettewpn/PaletteReadbacks.hpp"
 
 #include "Config.hpp"
-#include "MotionAimControl.hpp"   // pose_latch_last_gen, aim_writer_note_blam
+#include "features/palettewpn/PoseLatch.hpp"   // pose_latch_last_gen, aim_writer_note_blam
 #include "Rig.hpp"                // call_socket_location
 #include "UeObject.hpp"           // RIG_PARAM_BUF, make_fname
 #include "core/host/BlamDriveState.hpp"   // g_ctl_rec

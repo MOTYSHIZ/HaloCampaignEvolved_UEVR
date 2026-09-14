@@ -10,6 +10,7 @@
 #include "features/hooks/ReticuleHooks.hpp"
 #include "features/hooks/ArmDriverHooks.hpp"
 #include "features/hooks/ArmsHooks.hpp"
+#include "features/hooks/MotionAimHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
 #include "features/hooks/TwoHandHooks.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
@@ -23,6 +24,7 @@
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
+#include "core/PalettePose.hpp"
 #include "core/UnitState.hpp"
 #include "core/WeaponObject.hpp"
 #include "core/reload/ReloadEngine.hpp"
@@ -472,6 +474,69 @@ bool features_arm_hide_held_off() {
 bool features_arm_hide_needs_rig() {
     for (const FeatureHooks* f : kFeatureList)
         if (f->arm_hide_needs_rig != nullptr && f->enabled != nullptr && f->enabled() && f->arm_hide_needs_rig()) return true;
+    return false;
+}
+
+// ---- THE AIM DERIVATION AND THE PALETTE POSE INTERFACE
+namespace {
+const PalettePoseProvider* palette_pose_provider() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->palette_pose != nullptr) return f->palette_pose;
+    return nullptr;
+}
+// The aim-fixed source rotation derive_ctrl_angles last took its forward from, on this thread.
+thread_local Quat t_aim_source{0.0f, 0.0f, 0.0f, 1.0f};
+} // namespace
+
+bool palette_pose_owns_aim() {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->owns_aim != nullptr && p->owns_aim();
+}
+bool palette_pose_trim_rotations(float grip_q[4], float weapon_q[4]) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->trim_rotations != nullptr && p->trim_rotations(grip_q, weapon_q);
+}
+bool palette_pose_two_hand_blend(Vec3* fwd) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->two_hand_blend != nullptr && p->two_hand_blend(fwd);
+}
+bool palette_pose_barrel_axis(Vec3* out) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->barrel_axis != nullptr && p->barrel_axis(out);
+}
+
+bool features_aim_owned_by_feature() { return palette_pose_owns_aim(); }
+Quat features_aim_source(const Quat& q_src) { t_aim_source = q_src; return q_src; }
+bool features_aim_forward(Vec3* fwd) {
+    if (!palette_pose_owns_aim()) return false;
+    // ---- THE TWO-HANDED HOLD, here and deliberately: after the source pose is chosen, before
+    // the sightline. Every consumer of aim -- the control law, the direct drive, the reticle,
+    // the rendered weapon pose -- takes its direction from this one derivation, so blending at
+    // this point keeps them agreeing by construction. The palette applies the SAME rotation to
+    // the weapon pose (two_hand_delta); blending only one of the pair was field-observed as the
+    // gun turning two-handed while the shots kept following the single hand.
+    bool bore_done = false;
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_bore_forward != nullptr && f->enabled != nullptr && f->enabled() && f->aim_bore_forward(t_aim_source, fwd)) { bore_done = true; break; }
+    if (!bore_done) palette_pose_two_hand_blend(fwd);
+    return true;
+}
+void features_aim_direct_writing(float wy, float wp) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_direct_writing != nullptr && f->enabled != nullptr && f->enabled()) f->aim_direct_writing(wy, wp);
+}
+bool features_aim_direct_write_skipped() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_direct_write_skipped != nullptr && f->enabled != nullptr && f->enabled() && f->aim_direct_write_skipped()) return true;
+    return false;
+}
+void features_aim_direct_written(float yaw, float pitch) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_direct_written != nullptr && f->enabled != nullptr && f->enabled()) f->aim_direct_written(yaw, pitch);
+}
+bool features_pose_latched(UEVR_TrackedDeviceIndex idx, bool use_aim, uevr::API::VR::Pose* out) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->pose_latched != nullptr && f->enabled != nullptr && f->enabled() && f->pose_latched(idx, use_aim, out)) return true;
     return false;
 }
 

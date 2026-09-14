@@ -11,6 +11,7 @@
 #include "palettearm/PaletteHook.hpp" // palettehook_installed(): never hook the builder while the palettearm route holds it       // two_hand_delta: the hold rotates the WEAPON pose, not only the shot
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
+#include "features/palettewpn/PoseLatch.hpp"   // the latched intents, the frame audit
 #include "Markers.hpp"        // g_cam_x/y/z: the rendered camera, for the WPNERR speed column
 #include "Rig.hpp"   // g_turnq_* : the player's accumulated snap/smooth turn
 #include "WeaponCalib.hpp"   // weapon_key / wpnfix: the per-weapon rigid delta

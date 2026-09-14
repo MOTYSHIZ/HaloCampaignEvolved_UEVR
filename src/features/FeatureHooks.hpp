@@ -26,6 +26,7 @@ struct _XINPUT_STATE;
 namespace halo {
 
 struct HeadClamp;   // core/EyeTrace.hpp
+struct PalettePoseProvider;   // core/PalettePose.hpp
 enum class HolsterSlot : int;   // Holster.hpp
 
 struct FeatureHooks {
@@ -193,6 +194,21 @@ struct FeatureHooks {
     // features_arm_hide_held_off / features_arm_hide_needs_rig: arms_hide_update, while enabled.
     bool (*arm_hide_held_off)();
     bool (*arm_hide_needs_rig)();
+
+    // palette_pose: the provider of core/PalettePose.hpp (the first non-null in list order).
+    const PalettePoseProvider* palette_pose;
+
+    // features_aim_forward: the aim derivation's palette branch, with the aim source rotation. True = the
+    // forward was set (the drawn barrel); the palette's two-handed blend is then skipped. While enabled.
+    bool (*aim_bore_forward)(const Quat& q_src, Vec3* fwd);
+
+    // features_aim_direct_writing / _write_skipped / _written: the aim law's direct write. While enabled.
+    void (*aim_direct_writing)(float wy, float wp);
+    bool (*aim_direct_write_skipped)();
+    void (*aim_direct_written)(float yaw, float pitch);
+
+    // features_pose_latched: get_pose's read. True = served from a latched snapshot. While enabled.
+    bool (*pose_latched)(UEVR_TrackedDeviceIndex idx, bool use_aim, uevr::API::VR::Pose* out);
 
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.

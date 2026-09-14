@@ -4,6 +4,8 @@
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"   // palette_two_hand_reset()
 #include "features/palettewpn/PaletteReadbacks.hpp"
+#include "features/palettewpn/PalettePoseProvider.hpp"
+#include "features/palettewpn/PoseLatch.hpp"
 #include "core/Services.hpp"
 
 namespace halo {
@@ -31,6 +33,11 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .arm_hide_component          = &palette_wpn_arm_hide_component,
     .arm_hide_held_off           = &palette_wpn_arm_hide_held_off,
     .arm_hide_needs_rig          = &palette_wpn_arm_hide_needs_rig,
+    .palette_pose                = &kPalettePoseProvider,
+    .aim_direct_writing          = &aim_writer_compare_direct,
+    .aim_direct_write_skipped    = &palette_wpn_aim_direct_write_skipped,
+    .aim_direct_written          = &palette_wpn_aim_direct_written,
+    .pose_latched                = &pose_latch_lookup,
     .enabled  = &palette_wpn_enabled,
     .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_WEAPON_OBJECT,
     .released = &palette_wpn_arm_hide_released,

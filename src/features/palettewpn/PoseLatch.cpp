@@ -1,5 +1,21 @@
-// palettewpn (fork feature, Experimental): the pose latch, the frame audit and the aim writer agreement line.
-// Textual fragment, included by MotionAimControl.cpp at namespace halo scope, before get_pose(). Moved verbatim; not compiled on its own.
+#include "features/palettewpn/PoseLatch.hpp"
+
+#include "Config.hpp"
+#include "Math.hpp"
+#include "MotionAimControl.hpp"   // desired_aim_now
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
+#include "uevr/API.hpp"
+
+#include <Windows.h>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+
+using uevr::API;
+
+namespace halo {
+
 // ---- POSELATCH (2026-09-12). ONE HAND SAMPLE PER FRAME FOR EVERY READER.
 //
 // Every consumer of the controller reads it through this function, at its own moment, on its own
@@ -122,7 +138,6 @@ void pose_latch_refresh(int site) {
     }
 }
 
-namespace {
 // The latched pose for idx, or false when the live read must be used.
 bool pose_latch_lookup(UEVR_TrackedDeviceIndex idx, bool use_aim, API::VR::Pose* out) {
     const int mode = palette_weapon_mode() ? g_cfg.pose_latch : 0;
@@ -154,7 +169,6 @@ bool pose_latch_lookup(UEVR_TrackedDeviceIndex idx, bool use_aim, API::VR::Pose*
     }
     return hit;
 }
-}
 
 // ---- WRITER AGREEMENT. The Blam writer notes the angle it wrote; the UE writer compares its own
 // against it when both belong to the same frame. With one hand sample per frame the difference is
@@ -169,7 +183,7 @@ void aim_writer_note_blam(float yaw_deg, float pitch_deg) {
     g_wa_blam_p.store(pitch_deg, std::memory_order_relaxed);
     g_wa_blam_ms.store(snap_now_ms(), std::memory_order_relaxed);
 }
-static void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
+void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
     if (g_cfg.palette_weapon_log == 0) return;     // diagnostic only; no work in play
     static double s_sum = 0.0, s_max = 0.0;
     static uint32_t s_n = 0, s_skip = 0;
@@ -192,3 +206,17 @@ static void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
         s_sum = s_max = 0.0; s_n = s_skip = 0; s_last = now;
     }
 }
+
+// AIMDIRECTWRITE (Config.hpp aim_direct_write). 0 = keep the direct branch (stick held at
+// zero, so the loop cannot become a third writer) but skip the UE write, leaving the Blam
+// record as the ONLY aim writer. The honest single-writer test: blamangles=0 instead left
+// nothing moving the aim at all (hand vs ControlRotation corr +0.21/-0.34/-0.09).
+bool palette_wpn_aim_direct_write_skipped() { return g_cfg.aim_direct_write == 0; }
+
+void palette_wpn_aim_direct_written(float yaw, float pitch) {
+    // Point 22: the UE direct write, stamped with the snapshot this thread's hand came from.
+    if (g_cfg.stomp_log != 0) stomp_mark(22, yaw, pitch, (float)pose_latch_last_gen(),
+               (float)g_tick_id.load(std::memory_order_relaxed));
+}
+
+} // namespace halo
