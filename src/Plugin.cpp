@@ -7047,7 +7047,7 @@ void update() {
                 static bool  s_warned    = false;
                 if (tick > 300 && ((tick % 64) == 5 || s_dist_sent < 0.0f)) {
                     float       want_m = g_cfg.cutscene_dist * 0.01f;
-                    const char* from   = "cutscenedist override";
+                    const char* from   = "cutscenedist";
                     if (want_m <= 0.0f) {
                         char cur[32]{};
                         API::get()->param()->vr->get_mod_value("UI_Distance", cur, sizeof(cur));

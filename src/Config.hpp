@@ -3267,16 +3267,18 @@ struct Config {
     // THE SCREEN'S TWO KNOBS, deliberately separate (user, 2026-09-08 21:30: "I don't think we
     // should hinge convergence on the distance of the cutscene pane").
     //
-    // CONVERGENCE is not a comfort choice, and there is no way round it: eyes converge on ONE
-    // depth, and anything at another depth is seen double -- hold a finger up and look past it.
-    // UEVR's UI quad (subtitles, pause menu) sits at UI_Distance (2.43 m shipped); the first
-    // mode-5 run put the picture at infinity, the movie fused, and everything at 2.43 m carried
-    // ~1.5 deg of disparity and doubled. So the picture converges exactly where the UI is, read
-    // live from UEVR (a player who moves the UI keeps the match). cutscenedist, cm, is the DEV
-    // override for experiments only: 0 = match UI_Distance (shipped and the only sane value).
-    // The layer turns it into a uniform per-eye fov shift of (ipd/2)/D, IPD from the submitted
-    // eye poses.
-    float cutscene_dist   = 0.0f;
+    // CONVERGENCE was the mode-5 concern: mode 5 re-centres the projection so both eyes fuse the
+    // movie, and a flat picture at any depth but the UI quad's (subtitles/menu at UI_Distance,
+    // 2.43 m shipped) leaves that quad ~1.5 deg doubled -- so mode 5 matched UI_Distance exactly.
+    // MODE 6 (the shipped cutscenemono) instead draws the movie as its own head-locked QUAD, which
+    // converges at its own real depth with no doubling. There the failure is different: an opaque
+    // movie quad AT the UI quad's depth is COPLANAR with the subtitle quad and the two FIGHT under
+    // reprojection (reported in-headset 2026-09-13). So the shipped default sits the movie a little
+    // BEHIND the UI quad -- 290 cm (2.9 m), ~0.5 m back of the 2.43 m subtitles -- confirmed
+    // in-headset to clear the flicker with the subtitles clearly in front. cutscenedist is in cm;
+    // 0 = match UI_Distance exactly (read live from UEVR -- the mode-5 behaviour, and what a player
+    // who wants the movie ON the UI depth sets). Clamp 0..10000 cm.
+    float cutscene_dist   = 290.0f;
     // FRAMING is the comfort choice, and for a flat picture it is entirely SIZE: 1.0 = as the
     // game draws it (edge to edge, ~96 deg wide), 0.75 reads as a comfortable cinema screen a bit
     // further off, focus unchanged. Scales the declared tangent extents, which is exactly how a
