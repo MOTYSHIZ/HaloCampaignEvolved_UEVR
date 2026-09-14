@@ -360,28 +360,17 @@ re-downloaded.
   one-line fix.
 - **No pause binding when playing over Steam Link.** Press **`Esc`** on your keyboard to pause. A
   controller binding is coming.
-- **Cutscenes display doubled.** They're pre-rendered movies composited outside the game's 3D
-  render, so they don't resolve in stereo; closing one eye makes them watchable. A proper in-VR
-  cinema screen for them is being worked on — an experimental flat-screen mode exists in the
-  internals (`cutscene2d` in `halo_vr_dev.cfg`) but is hidden from the settings until it's been
-  verified in a headset.
 - **Your hands are invisible until you pick up your first weapon.** Motion aim and turning work
   normally while you're unarmed — but you won't see arms. The game T-poses the empty first-person
   arms, because on a flat screen holding nothing means there's simply no viewmodel to draw; in VR
   they'd be right in front of you, following your hand, T-pose and all. They stay hidden until
   there are proper VR hands to show instead.
-- **UI waypoints and objective markers are misplaced**, and drift with your right-hand aim rather
-  than staying pinned to the world. They're positioned against the game's flat view, which the mod
-  now steers with your controller — so the marker follows your hand instead of the objective.
-  Navigate by the world rather than the markers for now.
-- **Directional sound doesn't follow your head.** Positional audio is spatialised against the game's
-  own view, not against where you're actually looking, so turning your head leaves the sound field
-  behind: a firefight to your left keeps sounding like it's to your left even after you turn to face
-  it. Turning with the stick *does* realign it, because that rotates the game's view as well — so
-  sound stays correct relative to your body and drifts only by however far your head is turned off
-  it. Worst when you rely on audio to locate something off-screen. No workaround beyond stick-turning
-  toward what you're listening for; a proper fix means moving the game's audio listener onto the
-  headset pose, which the mod doesn't currently touch.
+- **The scope view can be too bright**, and its lighting often doesn't match the scene around it.
+  Work in progress.
+- **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
+  weapons, then toggle the scope off and on again. Also work in progress.
+- **The Sentinel Beam is held like an ordinary rifle.** Some weapons want the support hand
+  somewhere else; a per-weapon offset for the off hand in two-handed aiming is planned.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
