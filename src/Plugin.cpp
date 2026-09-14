@@ -6065,19 +6065,7 @@ void nav_world_tick_guarded(bool engaged, uint32_t tick) {
 // reticules placed on it, and the compositor publish. Moved out of the rig driver unchanged so the
 // palette-weapon path (rig=0) can run it without any rig writes. `rig` is the resolved FP rig
 // component (actor owner for the reticule components), `comp_world` its world location.
-// RETSTAMP: the latest on-foot trace depth (cm) and when it was taken, for the render publish.
-static std::atomic<float>     g_ret_last_d{0.0f};
-static std::atomic<long long> g_ret_last_d_ms{0};
-// RETSTAMP render placement (aimreticulestamp 1/2) draws the STAMPED hand intent, and that stamp is
-// only taken while the pose latch runs in palette weapon mode: poselatch 0 never stores it, and
-// poselatch 3 stores it from the XInput-rate law (aimrate=1) only. Without it the render publish never
-// fires and the compositor reticle goes dark with no message, so the tick publish takes over instead.
-static bool reticule_stamp_render_active() {
-    if (!palette_weapon_mode() || g_cfg.aim_reticule_stamp == 0) return false;
-    if (g_cfg.pose_latch == 0) return false;
-    if (g_cfg.pose_latch == 3 && !g_cfg.aim_rate_render) return false;
-    return true;
-}
+#include "features/aimreticulestamp/Plugin_stamp_state.inl"   // fork feature: aimreticulestamp (stamp state)
 
 static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, double aim_yaw,
                                  double aim_pitch, uint32_t tick) {
@@ -13361,33 +13349,7 @@ public:
         // where it maps to in stage space, because only here are the eye position, the finished view
         // rotation and the head pose simultaneous. Last in the callback so it sees this frame's view.
         // Roll must be passed: the pose maths rotates by the head orientation, which carries roll.
-        // RETSTAMP render publish (modes 1/2). Same frame as the eye note that follows: this frame's
-        // view position, the stamped intent, the latest trace depth. No smoothing.
-        if (index == 0 && reticule_stamp_render_active() && g_cfg.aim_reticule && g_cfg.xr_layer
-            && !g_stick_mode.load() && g_have_view_pos.load()) {
-            const long long rs_now = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            const long long rs_dms = g_ret_last_d_ms.load(std::memory_order_relaxed);
-            const bool two_back = (g_cfg.aim_reticule_stamp == 1);
-            const bool rs_ok = two_back ? halo::g_intent_prev2_ok.load(std::memory_order_relaxed)
-                                        : halo::g_intent_prev_ok.load(std::memory_order_relaxed);
-            if (rs_ok && rs_dms != 0 && rs_now - rs_dms < 200) {
-                const float ay = two_back ? halo::g_intent_prev2_y.load(std::memory_order_relaxed)
-                                          : halo::g_intent_prev_y.load(std::memory_order_relaxed);
-                const float ap = two_back ? halo::g_intent_prev2_p.load(std::memory_order_relaxed)
-                                          : halo::g_intent_prev_p.load(std::memory_order_relaxed);
-                const float rd = g_ret_last_d.load(std::memory_order_relaxed);
-                const float cpr = std::cos(ap * DEG2RAD);
-                const Vec3 rf{cpr * std::cos(ay * DEG2RAD), cpr * std::sin(ay * DEG2RAD), std::sin(ap * DEG2RAD)};
-                const Vec3 rtarget{g_view_pos_x.load() + rf.x * rd,
-                                   g_view_pos_y.load() + rf.y * rd,
-                                   g_view_pos_z.load() + rf.z * rd};
-                halo::xrlayer_note_publish_gate(0);
-                halo::xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, rtarget),
-                                              g_ret_scale_mul.load());
-                if (g_cfg.stomp_log != 0) halo::stomp_mark(46, ay, ap, rd, (float)g_cfg.aim_reticule_stamp);
-            }
-        }
+        #include "features/aimreticulestamp/Plugin_stamp_publish.inl"   // fork feature: aimreticulestamp (stamp publish)
         // RETPROBE 44: eye position this frame and the view position x published beside it.
         //          45: view position y/z and the finished view yaw, same frame.
         if (index == 0 && g_cfg.stomp_log != 0 && g_have_eye_pos.load()) {
