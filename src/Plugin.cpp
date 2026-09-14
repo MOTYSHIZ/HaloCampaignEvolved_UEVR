@@ -2613,7 +2613,10 @@ void reticle_rescan(uint32_t tick) {
     // before the first bind; after rig-up, ensure stamps every tick and the next 120-tick
     // boundary sweeps fresh -- worst case the bind waits one throttle period, same as today.
     const bool needed = g_cfg.menu_dump                              // discovery: the sweep IS the product
-                     || g_cfg.hud_follow                             // moves/hides the flat reticle
+                     // Moves/hides the flat reticle. HIDING needs the sweep only until the widget is
+                     // found (and again if it dies): the hide re-applies every tick on the handle it
+                     // already holds. Following still needs it throughout, as before.
+                     || (g_cfg.hud_follow && (!g_cfg.hud_hide || g_reticle_count == 0))
                      || (reticle_widget_needs_pick()
                          && tick - g_ret_ensure_seen_tick < 240)     // still choosing, and bindable
                      || reticle_stray_check_due(tick)                // HUD rebuilt a second crosshair
@@ -2733,13 +2736,15 @@ void hud_reticle_follow(float aim_pitch, float aim_yaw, uint32_t tick) {
     // silently undone and reads as "the hide never worked". SetVisibility early-outs when the value
     // already matches, so repeating it is close to free.
     if (g_cfg.hud_hide) {
+        bool dead = false;
         for (int i = 0; i < g_reticle_count; ++i) {
             auto* o = g_reticles[i].obj.get_checked(L"WBP_FirstPersonReticle");
-            if (o == nullptr) continue;
+            if (o == nullptr) { dead = true; continue; }
             alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
             p[0] = 1;   // ESlateVisibility::Collapsed
             o->call_function(L"SetVisibility", p);
         }
+        if (dead) g_reticle_count = 0;   // HUD rebuilt the widget: the gated sweep finds the new one
         return;   // nothing to follow once it is hidden
     }
 
