@@ -23,6 +23,12 @@ struct PluginState {
     std::atomic<bool>*  stick_mode;         // g_stick_mode
     std::atomic<bool>*  dpad_shift_active;  // g_dpad_shift_active
     short (*to_raw)(float v);               // to_raw()
+    std::atomic<float>* view_pos_x;         // g_view_pos_x
+    std::atomic<float>* view_pos_y;         // g_view_pos_y
+    std::atomic<float>* view_pos_z;         // g_view_pos_z
+    std::atomic<float>* dbg_view_in;        // g_dbg_view_in
+    std::atomic<float>* dbg_view_out;       // g_dbg_view_out
+    std::atomic<bool>*  lock_primed;        // g_lock_primed
 };
 
 extern const PluginState g_plugin_state;
@@ -37,4 +43,10 @@ extern const PluginState g_plugin_state;
         &g_stick_mode,                                                     \
         &g_dpad_shift_active,                                              \
         &to_raw,                                                           \
+        &g_view_pos_x,                                                     \
+        &g_view_pos_y,                                                     \
+        &g_view_pos_z,                                                     \
+        &g_dbg_view_in,                                                    \
+        &g_dbg_view_out,                                                   \
+        &g_lock_primed,                                                    \
     };

@@ -102,7 +102,6 @@
 #include "Arms.hpp"
 #include "addrcascade/AddressCascade.hpp"   // scan_signature / module_identity: the tick-fault reporter names its function and build
 #include "Holster.hpp"
-#include "Vehicle.hpp"
 #include "Markers.hpp"
 #include "Gesture.hpp"
 #include "DevTools.hpp"
@@ -204,8 +203,6 @@ namespace {
 // The maths lives in namespace halo; pull it in unqualified so call sites read the same as they
 // did when this was one file.
 using namespace halo;
-
-#include "features/vehcam/Plugin_debug.inl"   // fork feature: vehcam (seat camera evidence)
 
 
 // CONTROL_ROTATION_OFFSET is a constexpr in MotionAimControl.hpp.
@@ -11449,8 +11446,7 @@ public:
             // reconstructing it means agreeing about world scale, rotation offset and which space
             // the standing origin lives in, and any one of those being wrong is silent.
             halo::aim_converge_note_pre(index, px, py, pz);
-
-            #include "features/vehcam/Plugin_seat_camera.inl"   // fork feature: vehcam (seat camera)
+            features_stereo_pre_eye_seat(index, position, rotation, is_double);
         }
 
         // ---- RENDER-RATE RIG RE-APPLY.
@@ -11637,11 +11633,8 @@ public:
             }
         }
 
-        if (rotation == nullptr) return;
-
-        #include "features/vehcam/Plugin_view.inl"   // fork feature: vehcam (in-vehicle view)
-
-        if (!g_cfg.view_lock) return;
+        if (features_stereo_view_override(rotation, is_double)) return;
+        if (rotation == nullptr || !g_cfg.view_lock) return;
 
         // STICK MODE: the game camera must reach the eyes unmodified -- the chase camera turning
         // the rendered view IS the gamepad experience the mode exists to restore. The lock is held
@@ -11795,23 +11788,7 @@ public:
                 ex = position->x; ey = position->y; ez = position->z;
             }
             halo::aim_converge_note_post(index, ex, ey, ez);
-            // WRITE SURVIVAL (vehlog): the rendered eye against the seat we wrote this frame. The
-            // gap is the HMD offset from the standing origin -- under 2 m in any real play space.
-            // More than 3 m means the camera was replaced between our write and the render.
-            if (index == 0 && g_vcd.wrote && g_cfg.veh_log) {
-                const double dx = (double)ex - g_vcd.fc[0], dy = (double)ey - g_vcd.fc[1],
-                             dz = (double)ez - g_vcd.fc[2];
-                const double dev = std::sqrt(dx * dx + dy * dy + dz * dz);
-                ++g_vcd.post_frames;
-                if (dev > g_vcd.post_max) g_vcd.post_max = dev;
-                if (dev > 300.0) {
-                    ++g_vcd.post_bad;
-                    static uint32_t s_said = 0;
-                    if (s_said++ < 5)
-                        API::get()->log_info("[Halo-CampE-UEVR] VEHPOST: rendered eye (%.0f %.0f %.0f) is %.0f cm from the seat we wrote (%.0f %.0f %.0f) -- the camera was replaced after the write",
-                                             (double)ex, (double)ey, (double)ez, dev, g_vcd.fc[0], g_vcd.fc[1], g_vcd.fc[2]);
-                }
-            }
+            features_stereo_post_eye_rendered(index, ex, ey, ez);
             // PUBLISHED FOR WORLD-SPACE MARKERS. This is the RENDERED EYE, which the pre-hook
             // position is not: any marker placed along a ray cast from the game camera appears
             // displaced once the player's head is elsewhere, and the error GROWS the closer the

@@ -103,6 +103,21 @@ struct FeatureHooks {
     // features_widget_tint_mul: the gain multiplier the tint call in progress on this thread asked
     // for. The first non-null slot answers.
     float (*widget_tint_mul)();
+
+    // features_game_tick_vehicle: the per-tick vehicle work, in palettewpn's per-tick block.
+    void (*game_tick_vehicle)();
+
+    // features_stereo_pre_eye_seat: the stereo pre callback per eye, after the aim convergence note,
+    // with the engine's camera position and rotation. The slot may move the camera.
+    void (*stereo_pre_eye_seat)(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double);
+
+    // features_stereo_view_override: the stereo pre callback per eye, before the view lock gate. True =
+    // the slot set the view rotation itself and the callback returns. Handed a null rotation too.
+    bool (*stereo_view_override)(UEVR_Rotatorf* rotation, bool is_double);
+
+    // features_stereo_post_eye_rendered: the stereo post callback per eye, with the rendered eye, after
+    // the aim convergence note.
+    void (*stereo_post_eye_rendered)(int index, float ex, float ey, float ez);
 };
 
 } // namespace halo

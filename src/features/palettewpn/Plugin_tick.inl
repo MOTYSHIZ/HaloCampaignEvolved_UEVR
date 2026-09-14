@@ -19,11 +19,7 @@
     // position up to half a second stale -- the gun swung toward where you USED to point.
     // The two-hand hold: latch, blend ramp, haptics. After the pose publish on purpose -- both
     // read the same grip state, and this one must see it settled for this tick.
-    // Vehicle work: the driver-body hide + hog hull resolve (Arms.cpp), then the wheel gesture
-    // and heading publisher (Vehicle.cpp). Menus drop the hold like the holsters do.
-    g_tick_stage = "vehicle_body";
-    vehicle_body_update();
-    if (g_in_menu.load()) vehicle_reset(); else vehicle_update(g_last_dt.load());
+    features_game_tick_vehicle();
 
     // ---- THE PARENT FRAME, MEASURED RATHER THAN MODELLED -- published for the palette weapon.
     //

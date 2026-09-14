@@ -64,4 +64,21 @@ void features_render_frame();
 // aim_converge_note_post: the head offset, and a feature's clamp of the rendered eye.
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double);
 
+// update() (game thread), inside palettewpn's per-tick block, after the rendered-hand pose publish and
+// before the parent frame measurement: the vehicle body work, the wheel and the heading.
+void features_game_tick_vehicle();
+
+// on_pre_calculate_stereo_view_offset (render thread), inside `position != nullptr`, right after
+// aim_converge_note_pre, last in that block: the seat camera.
+void features_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double);
+
+// on_pre_calculate_stereo_view_offset (render thread), after the render-rate rig re-apply, the
+// statement right before `if (rotation == nullptr || !g_cfg.view_lock) return;`. True = return now
+// (the in-vehicle view set the rotation).
+bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double);
+
+// on_post_calculate_stereo_view_offset (render thread), inside `position != nullptr`, right after
+// aim_converge_note_post and before the eye position publish: the rendered eye.
+void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez);
+
 } // namespace halo

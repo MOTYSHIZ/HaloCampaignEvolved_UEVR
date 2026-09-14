@@ -175,44 +175,6 @@ static void publish_seated_unit_state(uintptr_t rec_base) {
     publish_seat_state(obj);
 }
 
-// vehseatdirect (approach B): the seat without the sim hook. The rider and vehicle objects are
-// pool entries that stay put for the life of the ride, so once the sim publish has named them the
-// fields are plain memory reads from any thread -- no gs:[0x58] walk, no control record, no hook
-// cadence. Only while stick mode holds the normal publish off; on foot the sim publish owns these.
-// The vehicle half is trusted only while the rider's parent datum still names the cached vehicle.
-void seat_direct_refresh() {
-    if (g_cfg.veh_seat_direct == 0) return;
-    if (!g_stick_mode_active.load(std::memory_order_relaxed)) return;
-    const uintptr_t obj = g_seat_obj.load(std::memory_order_relaxed);
-    if (obj == 0 || IsBadReadPtr((const void*)obj, 0x2C)) return;
-    const uint32_t pdat = *(const uint32_t*)(obj + 0x0C);
-    const float* q = (const float*)(obj + 0x20);
-    if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2])) return;
-    g_unit_mounted.store(pdat != 0xFFFFFFFFu, std::memory_order_relaxed);
-    g_unit_px.store(q[0], std::memory_order_relaxed);
-    g_unit_py.store(q[1], std::memory_order_relaxed);
-    g_unit_pz.store(q[2], std::memory_order_relaxed);
-    g_unit_pvalid.store(true, std::memory_order_relaxed);
-    g_seat_pub_seq.fetch_add(1, std::memory_order_relaxed);
-    g_seat_direct_reads.fetch_add(1, std::memory_order_relaxed);
-    const uintptr_t vobj = g_seat_vobj.load(std::memory_order_relaxed);
-    if (g_cfg.veh_facing != 0 && vobj != 0 && pdat != 0xFFFFFFFFu
-        && pdat == g_seat_vdat.load(std::memory_order_relaxed)
-        && !IsBadReadPtr((const void*)vobj, 0x1F4)) {
-        const float* fv = (const float*)(vobj + (uintptr_t)g_cfg.veh_facing_off);
-        const float* vp = (const float*)(vobj + 0x20);
-        if (std::isfinite(fv[0]) && std::isfinite(fv[1])) {
-            g_veh_fx.store(fv[0], std::memory_order_relaxed);
-            g_veh_fy.store(fv[1], std::memory_order_relaxed);
-            g_veh_fvalid.store(true, std::memory_order_relaxed);
-        }
-        if (std::isfinite(vp[0]) && std::isfinite(vp[1]) && std::isfinite(vp[2])) {
-            g_vehpx.store(vp[0], std::memory_order_relaxed);
-            g_vehpy.store(vp[1], std::memory_order_relaxed);
-            g_vehpz.store(vp[2], std::memory_order_relaxed);
-        }
-    }
-}
 
 void publish_unit_state(uintptr_t rec_base) {
     uint32_t datum = 0;

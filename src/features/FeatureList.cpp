@@ -27,6 +27,7 @@ extern const FeatureHooks kGrenadeSwallowHooks;
 extern const FeatureHooks kRoomscaleHooks;
 extern const FeatureHooks kHeightCalHooks;
 extern const FeatureHooks kWristHudHooks;
+extern const FeatureHooks kVehCamHooks;
 
 namespace {
 
@@ -42,6 +43,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kRoomscaleHooks,
     &kHeightCalHooks,
     &kWristHudHooks,
+    &kVehCamHooks,
 };
 
 } // namespace
@@ -208,6 +210,27 @@ bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
 
 void features_reticule_widget_moved() {
     reticule_widget_moved();
+}
+
+void features_game_tick_vehicle() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_vehicle != nullptr) f->game_tick_vehicle();
+}
+
+void features_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_pre_eye_seat != nullptr) f->stereo_pre_eye_seat(index, position, rotation, is_double);
+}
+
+bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_view_override != nullptr && f->stereo_view_override(rotation, is_double)) return true;
+    return false;
+}
+
+void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_post_eye_rendered != nullptr) f->stereo_post_eye_rendered(index, ex, ey, ez);
 }
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {

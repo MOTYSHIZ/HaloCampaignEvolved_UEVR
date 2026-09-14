@@ -1636,8 +1636,6 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     return false;
 }
 
-#include "features/vehcam/Config_parse.inl"   // fork feature: vehcam (key family)
-
 // ---- GESTURE RELOAD / RACK-SLIDE / PALETTE WEAPON / COOP keys. Hoisted, early-return, same
 // C1061 reasoning. The wpn*/arm*/twohand/reloadgrip/calibroll/rollstatic keys that used to open
 // this family are parsed by parse_melee_key and parse_config_file, which own those names.
@@ -1861,7 +1859,6 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_xrlayer_key(key, v)) return;
         if (parse_holster_key(key, val, v)) return;
         if (features_parse_key(key, val, v)) return;
-        if (parse_veh_key(key, val, v)) return;
         if (parse_weaponvr_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);
         else if (_stricmp(key, "gainadapt")   == 0) g_cfg.gain_adapt    = (v != 0.0);

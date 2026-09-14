@@ -26,9 +26,6 @@
 // API.hpp, NOT Plugin.hpp -- see UeObject.hpp.
 #include "uevr/API.hpp"
 
-#include <atomic>    // ADDITION: g_hog_body_* below
-#include <cstdint>
-
 namespace halo {
 
 // Game thread, once per tick. Fires the skeleton dump on the RISING EDGE of bonedump, and applies
@@ -47,25 +44,8 @@ void arms_dump_skeleton(uevr::API::UObject* rig);
 // invisible with nothing left that knows how to bring it back.
 void arms_release_hide();
 
-
-// ---- ADDITIONS: vehicle body work. Defined in the marked section at the tail of Arms.cpp. ----
-
-// The component the mounted vehicle is DRAWN from (the Warthog's ".hull"), resolved on the game
-// thread and published as pointer+slot for the render-side rigid camera (Vehicle.cpp) to
-// re-validate through TrackedObject. 0 / -1 while unmounted or unresolved.
-extern std::atomic<uintptr_t> g_hog_body_ptr;
-extern std::atomic<int32_t>   g_hog_body_idx;
-
-// Game thread, once per tick: hide every mesh part of the player's own biped while mounted
-// (vehhidebody), reconciled every tick, restored on dismount. Resolves the biped by walking the
-// object array, every 2 s and at most ten tries per mount.
-void driver_hide_update();
-
-// Game thread, once per tick: driver_hide_update() plus the hog hull resolve (mount edge,
-// retried ~2 s while unresolved, cleared on dismount). This is the one Plugin.cpp calls.
 // The FP arm hide pass (armhide). Called by arms_update() under the UE arm driver, and by the tick
 // directly while the palette weapon (armdriver mode 3) owns placement.
 void arms_hide_update();
-void vehicle_body_update();
 
 } // namespace halo

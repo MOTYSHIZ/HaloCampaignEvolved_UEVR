@@ -1,19 +1,15 @@
 #include "Arms.hpp"
 
-#include "BlamDrive.hpp"     // ADDITION: unit position/mounted -- the driver hide and hog resolve anchor on them
-#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "DevTools.hpp"
-#include "Markers.hpp"       // ADDITION: g_cam_* -- the rendered eye, for the driver-body enumeration log
 #include "Rig.hpp"
 #include "UeObject.hpp"
+#include "features/hooks/ArmsHooks.hpp"
 #include "BlamPalette.hpp"
 #include "ArmDriver.hpp"     // palette_weapon_mode(): the FP-build hold-off applies to mode 3 only
 
 #include <windows.h>
 
-#include <atomic>
-#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -325,6 +321,8 @@ int sweep_fp_meshes(bool hide) {
 
 } // namespace
 
+HALO_ARMS_STATE_BRIDGE
+
 void arms_release_hide() {
     if (!s_any_hidden) return;
     const int n = sweep_fp_meshes(/*hide=*/false);
@@ -532,7 +530,4 @@ void arms_hide_update() {
         API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE now covering %d FP mesh component(s)", n);
     }
 }
-
-#include "features/vehcam/Arms_vehicle_body.inl"   // fork feature: vehcam (driver body hide + hull resolve)
-
 } // namespace halo

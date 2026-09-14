@@ -41,10 +41,9 @@ extern std::atomic<uint32_t> g_seat_pub_seq, g_seat_pub_calls, g_seat_norec, g_s
                              g_seat_direct_reads;
 // The rider object and its vehicle object as the last sim publish saw them (vehseatdirect).
 extern std::atomic<uintptr_t> g_seat_obj, g_seat_vobj;
-
-// vehseatdirect: refresh the seat atomics from the cached object pointers. Any thread; acts only
-// while stick mode holds the sim publish's normal path off. No-op when the key is 0.
-void seat_direct_refresh();
+// The parent datum the last sim publish resolved g_seat_vobj from (vehseatdirect trusts the
+// vehicle half only while the rider still names it).
+extern std::atomic<uint32_t>  g_seat_vdat;
 
 // The two entry points BlamDrive.cpp's hook calls reach (features/hooks/BlamDriveHooks.hpp).
 // drive_angles_impl's stick-mode hold: the seat publish that must not stop while the aim write holds off.
