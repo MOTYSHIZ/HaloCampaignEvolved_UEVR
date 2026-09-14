@@ -62,12 +62,20 @@ bool shotpoint_bore_local(Vec3* out);
 bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
                           float* out_yaw, float* out_pitch);
 
-// True when absolute weapon-mesh aim is live: feature on, direction mode on, and a bore forward is
-// currently published. When true the setpoint IS the mesh bore -- an absolute game-space direction
+// True when absolute weapon-mesh aim is live: feature on, direction mode on, and derive_ctrl_angles()
+// is returning a BORE -- either the frozen/baked one (shotpoint_bore_local) or the live-marker
+// bootstrap (shotpoint_dir). When true the setpoint IS the bore -- an absolute game-space direction
 // -- so it takes NO controller-relative reference and needs NO aim calibration. When false (no
-// weapon, no marker, or the mode off) the aim uses the calibrated controller reference as always.
+// weapon, or the mode off) the aim uses the calibrated controller reference as always.
+//
+// MUST TEST WHAT derive_ctrl_angles() USES. This used to test the marker alone. But the frozen tier
+// answers for ANY held weapon -- an unmeasured one falls back to the AR's bore -- so a weapon whose
+// marker the probe list cannot find got ABSOLUTE bore angles pushed through the RELATIVE mapping,
+// adding the calibrated controller offset on top: ~9 deg yaw / ~18 deg pitch off the barrel with
+// the shipped fit, and a jump on every swap to or from it. Found by the v0.4.5 pre-release audit.
 static bool shotpoint_aim_active() {
-    return g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 && shotpoint_dir(nullptr);
+    return g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1 &&
+           (shotpoint_bore_local(nullptr) || shotpoint_dir(nullptr));
 }
 
 // ---- aim reference ---------------------------------------------------------------------------
