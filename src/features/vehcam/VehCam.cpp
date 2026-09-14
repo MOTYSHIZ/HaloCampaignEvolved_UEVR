@@ -3,6 +3,7 @@
 #include "BlamDrive.hpp"          // blam_control_record(): the VEHSEAT line's record flag
 #include "Config.hpp"
 #include "core/Services.hpp"
+#include "core/ViewState.hpp"
 #include "Markers.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
@@ -814,13 +815,9 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
     if (_stricmp(key, "vehboomorder")   == 0) { g_cfg.veh_boom_order = (int)v; return true; }
-    if (_stricmp(key, "vehfacing")      == 0) { g_cfg.veh_facing = (int)v; return true; }
-    if (_stricmp(key, "vehfacingoff")   == 0) { g_cfg.veh_facing_off = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "vehfacingbias")  == 0) { g_cfg.veh_facing_bias = (float)v; return true; }
     if (_stricmp(key, "vehview")        == 0) { g_cfg.veh_view = (int)v; return true; }
     if (_stricmp(key, "vehviewflat")    == 0) { g_cfg.veh_view_flat = (int)v; return true; }
-    if (_stricmp(key, "vehlog")         == 0) { g_cfg.veh_log = (int)v; return true; }
-    if (_stricmp(key, "vehseatpub")     == 0) { g_cfg.veh_seat_pub = (int)v; return true; }
     if (_stricmp(key, "vehseatdirect")  == 0) { g_cfg.veh_seat_direct = (int)v; return true; }
     if (_stricmp(key, "vehcamguard")    == 0) { g_cfg.veh_cam_guard = (int)v; return true; }
     if (_stricmp(key, "vehcamguardspeed") == 0) { g_cfg.veh_cam_guard_speed = clampf((float)v, 1.0f, 5000.0f); return true; }
@@ -863,6 +860,9 @@ void vehcam_game_tick_vehicle() {
     const auto& g_in_menu = *host::g_plugin_state.in_menu;
     const auto& g_last_dt = *host::g_plugin_state.last_dt;
 
+    // The seat camera's always mode keeps the rendered eye off the body even unmounted.
+    g_view_seat_always.store(g_cfg.veh_cam == 2, std::memory_order_relaxed);
+
     // Vehicle work: the driver-body hide + hog hull resolve, then the wheel gesture and heading
     // publisher. Menus drop the hold like the holsters do.
     g_tick_stage = "vehicle_body";
@@ -875,6 +875,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
     auto& g_view_pos_x = *host::g_plugin_state.view_pos_x;
     auto& g_view_pos_y = *host::g_plugin_state.view_pos_y;
     auto& g_view_pos_z = *host::g_plugin_state.view_pos_z;
+
+    // Off: the camera is the engine's. The same bookkeeping the ungated path does on eye 0.
+    if (g_cfg.veh_cam == 0) { if (index == 0) g_vcd.wrote = false; return; }
 
             // The ENGINE's camera and view yaw, captured before anything below modifies them. The
             // seat anchor is built from these; see the vehcam section.
@@ -1394,6 +1397,14 @@ namespace {
 bool veh_cam_enabled() { return g_cfg.veh_cam != 0 || g_cfg.vehicle_wheel != 0; }
 }  // namespace
 
+void vehcam_released() {
+    // The tick keeps running and restores the driver body and drops the wheel on its own off path;
+    // this clears what the render side and the shared view flag still hold.
+    g_view_seat_always.store(false, std::memory_order_relaxed);
+    vehicle_reset();
+    g_vcd.wrote = false;
+}
+
 constinit const FeatureHooks kVehCamHooks{
     .key                      = "vehcam",
     .parse_key                = &parse_veh_key,
@@ -1403,6 +1414,7 @@ constinit const FeatureHooks kVehCamHooks{
     .stereo_post_eye_rendered = &vehcam_stereo_post_eye_rendered,
     .enabled                    = &veh_cam_enabled,
     .services                   = SVC_UNIT_STATE | SVC_SEAT | SVC_MARKER_ANCHOR | SVC_HOST_FIXES,
+    .released                   = &vehcam_released,
 };
 
 } // namespace halo

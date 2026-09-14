@@ -3,6 +3,7 @@
 #include "BlamDrive.hpp"          // the author's grenade atomics
 #include "Config.hpp"
 #include "MotionAimControl.hpp"   // g_stick_mode_active
+#include "core/Services.hpp"
 #include "core/host/BlamDriveState.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
 #include "uevr/API.hpp"
@@ -105,7 +106,7 @@ static void publish_seat_state(uintptr_t obj) {
     // The pointer is resolved ONCE PER MOUNT and cached. The first version walked the object
     // table on every publish (~325/sec on the sim thread) and shook the whole picture, on foot
     // included -- that is the bug this cache exists to avoid.
-    if (g_cfg.veh_facing != 0 && !IsBadReadPtr((const void*)(obj + 0x0C), 4)) {
+    if (service_active(SVC_SEAT) && g_cfg.veh_facing != 0 && !IsBadReadPtr((const void*)(obj + 0x0C), 4)) {
         static uintptr_t s_vobj = 0;
         static uint32_t  s_vdat = 0xFFFFFFFFu;
         static uint32_t  s_vretry = 0;

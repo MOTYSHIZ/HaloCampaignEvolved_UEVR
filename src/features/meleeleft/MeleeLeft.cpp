@@ -161,7 +161,7 @@ void offhand_melee_update(float dt) {
     // 2.20 gate, measured) without the hand actually going anywhere. A real punch TRAVELS. So the
     // shot window demands displacement since the swing began -- not a harder swing, which is how
     // controllers meet door frames.
-    if (g_cfg.force_tube && g_cfg.melee_shot_ms > 0 &&
+    if (g_fire_kick_live.load(std::memory_order_relaxed) && g_cfg.melee_shot_ms > 0 &&
         nowt - g_ft_fire_at.load(std::memory_order_relaxed) < ms_to_ticks(g_cfg.melee_shot_ms) &&
         disp < g_cfg.melee_shot_dist) return;
 

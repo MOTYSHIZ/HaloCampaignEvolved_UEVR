@@ -4,6 +4,7 @@
 #include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "core/Services.hpp"
+#include "core/ViewState.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores
 #include "core/EyeTrace.hpp"
@@ -216,7 +217,8 @@ void headblock_game_tick_after_leash() {
     // the engine camera is not the body's eye.
     {
         const bool hb_active = (g_cfg.head_block != 0) && !g_in_menu.load() && !g_cut2d_engaged.load()
-                            && !halo::g_unit_mounted.load(std::memory_order_relaxed) && g_cfg.veh_cam != 2;
+                            && !halo::g_unit_mounted.load(std::memory_order_relaxed)
+                            && !g_view_seat_always.load(std::memory_order_relaxed);
         API::UObject* hb_ignore[2] = {};
         int hb_n = 0;
         if (hb_active && (g_cfg.head_block == 1 || g_cfg.head_block == 2)) {

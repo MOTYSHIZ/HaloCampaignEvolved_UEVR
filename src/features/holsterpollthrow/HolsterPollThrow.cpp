@@ -372,7 +372,7 @@ void holsterpollthrow_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
 
     // Carrier hand in Blam units, for the grenhand spawn-origin experiment. UE world / 304.8 with
     // Y negated -- the same fit that placed the vehicle camera (BlamDrive, unit+0x20 vs camera).
-    if (s_grenade_armed) {
+    if (g_cfg.holster_poll_throw && s_grenade_armed) {
         const Vec3 cpos = s_carry_off ? gpos : pos;
         const Vec3 hw = holster_room_to_world(cpos, hpos);
         g_hand_blam_x.store(hw.x / 304.8f, std::memory_order_relaxed);
@@ -412,7 +412,7 @@ void holsterpollthrow_unit_state_grenades(uintptr_t obj) {
         g_unit_gvalid.store(false, std::memory_order_relaxed);
     }
 
-    if (g_cfg.throw_dump != 0) throw_dump_probe(obj);
+    if (g_cfg.holster_poll_throw && g_cfg.throw_dump != 0) throw_dump_probe(obj);
 }
 
 void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
@@ -421,7 +421,7 @@ void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
     // that sees it change during the press window rewrites it N ticks into the past, once per
     // throw. If the release is timed against it, the game's own release fires immediately -- and
     // if nothing changes, the stamp was bookkeeping, which is an answer too.
-    if (g_cfg.gren_instant == 2 && !IsBadReadPtr((const void*)(obj + 0x38C), 4)) {
+    if (g_cfg.holster_poll_throw && g_cfg.gren_instant == 2 && !IsBadReadPtr((const void*)(obj + 0x38C), 4)) {
         static uint32_t s_stamp_prev = 0;
         static bool s_backdated = false;
         const uint32_t st = *(const uint32_t*)(obj + 0x38C);
@@ -502,7 +502,7 @@ void holsterpollthrow_blam_create_before(uintptr_t params) {
     // ---- GRENHAND (doctrine in Config.hpp): rewrite the spawn ORIGIN to the carrier hand,
     // BEFORE the constructor consumes the params. Gated on the synthetic throw press (the spawn
     // measured ~42 ms into the 120 ms press window), so gunfire and NPC spawns are never touched.
-    if (g_cfg.gren_hand_spawn != 0 && holster_throw_press_active()
+    if (g_cfg.holster_poll_throw && g_cfg.gren_hand_spawn != 0 && holster_throw_press_active()
         && params != 0 && !IsBadReadPtr((void*)(params + P_VEC1), 12)) {
         float hx = 0.0f, hy2 = 0.0f, hz = 0.0f;
         if (holster_hand_blam(&hx, &hy2, &hz)) {
@@ -519,7 +519,7 @@ void holsterpollthrow_blam_create_after(uintptr_t params, uintptr_t cret) {
     // ---- GRENTRACK arm: try the return value as an object datum, on this thread (the resolve
     // walks the sim TLS, which only this thread owns). A failed resolve is logged as itself --
     // it means the return value is not a datum, and the tracker needs a different handle.
-    if ((g_cfg.throw_dump != 0 || g_cfg.gren_instant != 0) && holster_throw_press_active() && cret != 0) {
+    if (g_cfg.holster_poll_throw && (g_cfg.throw_dump != 0 || g_cfg.gren_instant != 0) && holster_throw_press_active() && cret != 0) {
         const long long tnow_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         const uintptr_t gobj = resolve_object_by_datum((uint32_t)cret);
@@ -580,7 +580,7 @@ void blam_spawnlog_tick() {
     auto& hooked_create_projectile = *host::g_blamaim_state.hooked_create_projectile;
 
     if (g_cfg.blam_aim != 0) return;   // blamaim owns both hooks; stand down to it entirely
-    const bool want = g_cfg.throw_dump != 0;
+    const bool want = g_cfg.holster_poll_throw && g_cfg.throw_dump != 0;
     if (!want) {
         if (g_create_hook_id >= 0 && g_hook_id < 0) {   // ours, not blamaim's
             API::get()->param()->functions->unregister_inline_hook(g_create_hook_id);
@@ -638,6 +638,19 @@ namespace {
 bool holster_poll_throw_enabled() { return g_cfg.holster_poll_throw; }
 }  // namespace
 
+namespace {
+void holsterpollthrow_released() {
+    // Disarm the hook-cadence throw and withdraw the live counts, so the author's pouches go back to
+    // their fail-closed "counts unknown" state and nothing the poll path published outlives it.
+    g_pollthrow_mask.store(0, std::memory_order_relaxed);
+    g_pollthrow_fired.store(false, std::memory_order_relaxed);
+    g_pollthrow_hold.store(false, std::memory_order_relaxed);
+    g_hand_blam_valid.store(false, std::memory_order_relaxed);
+    g_throw_blam_valid.store(false, std::memory_order_relaxed);
+    g_unit_gvalid.store(false, std::memory_order_relaxed);
+}
+}  // namespace
+
 constinit const FeatureHooks kHolsterPollThrowHooks{
     .key                        = "holsterpollthrow",
     .parse_key                  = &holsterpollthrow_parse_key,
@@ -655,6 +668,7 @@ constinit const FeatureHooks kHolsterPollThrowHooks{
 #endif
     .enabled                    = &holster_poll_throw_enabled,
     .services                   = SVC_UNIT_STATE | SVC_HOST_FIXES,
+    .released                   = &holsterpollthrow_released,
 };
 
 } // namespace halo

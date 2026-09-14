@@ -11,4 +11,7 @@ namespace halo {
 // magazine is in, so the cradle's number is held at 0 while this is set.
 extern std::atomic<bool> g_wristhud_hide_cradle;
 
+// SVC_HIDDEN_RELOAD went inactive: nothing holds the cradle any more.
+void hidden_reload_reset();
+
 } // namespace halo

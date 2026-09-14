@@ -6,6 +6,7 @@
 #include "MotionAimControl.hpp"   // get_pose: the render pass needs the frame's own head pose
 #include "Rig.hpp"                // RIG_PARAM_BUF
 #include "UeObject.hpp"
+#include "core/Services.hpp"
 #include "core/host/MarkersState.hpp"
 
 #include <Windows.h>
@@ -39,7 +40,7 @@ Vec3 room_to_world_at(const Vec3& room, const Vec3& hmd_room, const Vec3& cam) {
 } // namespace
 
 bool room_to_world_anchored(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
-    if (g_cfg.room_anchor != 1) return false;
+    if (!service_active(SVC_MARKER_ANCHOR) || g_cfg.room_anchor != 1) return false;
     *out = room_to_world_at(room, hmd_room,
                             Vec3{g_cam_x.load(std::memory_order_relaxed),
                                  g_cam_y.load(std::memory_order_relaxed),
@@ -48,7 +49,7 @@ bool room_to_world_anchored(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
 }
 
 void marker_tint(API::UObject* comp, const char* rgb) {
-    if (!g_cfg.marker_tint_on || comp == nullptr || rgb == nullptr || rgb[0] == 0) return;
+    if (!service_active(SVC_MARKER_ANCHOR) || !g_cfg.marker_tint_on || comp == nullptr || rgb == nullptr || rgb[0] == 0) return;
     float r = 1.0f, g = 1.0f, b = 1.0f;
     if (sscanf_s(rgb, "%f,%f,%f", &r, &g, &b) != 3) return;
     API::UObject* mid = nullptr;
@@ -155,7 +156,7 @@ void marker_render_drop(API::UObject* comp) {
         if (r.key.load(std::memory_order_relaxed) == comp) { r.active.store(false, std::memory_order_relaxed); return; }
 }
 void markers_render_place() {
-    if (g_cfg.mag_render == 0 || !(g_cfg.reload_vr || g_cfg.slide_vr)) return;   // fork reload family only
+    if (g_cfg.mag_render == 0 || !service_active(SVC_MARKER_ANCHOR)) return;   // a marker-anchoring feature is on
     Vec3 hp{}; Quat hr{};
     if (!get_pose(API::VR::get_hmd_index(), &hp, &hr, /*use_aim=*/false)) return;
     for (auto& r : s_reg) {

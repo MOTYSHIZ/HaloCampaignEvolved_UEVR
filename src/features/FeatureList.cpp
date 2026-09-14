@@ -14,7 +14,10 @@
 #include "Config.hpp"
 #include "core/Services.hpp"
 #include "uevr/API.hpp"
+#include "core/CameraBob.hpp"
+#include "core/CoreKeys.hpp"
 #include "core/EyeTrace.hpp"
+#include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
 #include "core/UnitState.hpp"
@@ -70,13 +73,14 @@ const FeatureHooks* const kFeatureList[] = {
 } // namespace
 
 bool features_parse_key(const char* key, const char* val, double v) {
+    if (core_parse_key(key, val, v)) return true;
     for (const FeatureHooks* f : kFeatureList)
         if (f->parse_key != nullptr && f->parse_key(key, val, v)) return true;
     return false;
 }
 
 void features_xinput_raw_pad(_XINPUT_STATE* state) {
-    fire_input_note_pad(state);
+    if (service_active(SVC_FIRE_INPUT)) fire_input_note_pad(state);
     for (const FeatureHooks* f : kFeatureList)
         if (f->xinput_raw_pad != nullptr) f->xinput_raw_pad(state);
 }
@@ -119,7 +123,7 @@ void features_game_tick_after_leash() {
 }
 
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
-    eye_note_pre_view(index, position, is_double);
+    if (service_active(SVC_EYE_TRACE)) eye_note_pre_view(index, position, is_double);
 }
 
 void features_render_frame() {
@@ -130,11 +134,12 @@ void features_render_frame() {
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
     const HeadClamp* clamp = nullptr;
     for (const FeatureHooks* f : kFeatureList)
-        if (f->head_clamp != nullptr) { clamp = f->head_clamp; break; }
-    eye_note_post_view(index, position, is_double, clamp);
+        if (f->head_clamp != nullptr && f->enabled != nullptr && f->enabled()) { clamp = f->head_clamp; break; }
+    if (service_active(SVC_EYE_TRACE)) eye_note_post_view(index, position, is_double, clamp);
 }
 
 void features_game_tick_before_leash() {
+    if (service_active(SVC_CAMERA_BOB)) camera_bob_tick();
     for (const FeatureHooks* f : kFeatureList)
         if (f->game_tick_before_leash != nullptr) f->game_tick_before_leash();
 }
@@ -146,7 +151,7 @@ bool features_leash_block_wanted() {
 }
 
 bool features_hmd_pose_plausible(const Vec3& hp) {
-    return hmd_pose_plausible(hp);
+    return !service_active(SVC_LEASH_GATE) || hmd_pose_plausible(hp);
 }
 
 // Every slot runs (their bookkeeping runs whenever the block does). With the block entered only for
@@ -171,11 +176,11 @@ void features_xinput_before_brake(_XINPUT_STATE* state) {
 }
 
 void features_sim_stick_mode_hold(bool off_thread) {
-    unit_state_stick_mode_publish(off_thread);
+    if (service_active(SVC_SEAT)) unit_state_stick_mode_publish(off_thread);
 }
 
 void features_sim_record_ready(uintptr_t rec, bool off_thread) {
-    unit_state_record_ready(rec, off_thread);
+    if (service_active(SVC_UNIT_STATE)) unit_state_record_ready(rec, off_thread);
 }
 
 void features_sim_unit_state_grenades(uintptr_t obj) {
@@ -214,19 +219,20 @@ std::string features_menu_status_line() {
 }
 
 bool features_asset_load_recently_failed(const char* path) {
-    return load_asset_recently_failed(path);
+    return service_active(SVC_RETICULE_FIXES) && load_asset_recently_failed(path);
 }
 
 const char* features_asset_load_suffix(uevr::API::UObject* obj) {
-    return load_asset_log_suffix(obj);
+    return service_active(SVC_RETICULE_FIXES) ? load_asset_log_suffix(obj) : "";
 }
 
 void features_asset_load_done(const char* path, uevr::API::UObject* obj) {
-    load_asset_note_result(path, obj);
+    if (service_active(SVC_RETICULE_FIXES)) load_asset_note_result(path, obj);
 }
 
 bool features_widget_log() {
-    return widget_log_enabled();
+    // Inactive: the author's probe log, every 32nd call, as he shipped it.
+    return !service_active(SVC_WIDGET_HOSTS) || widget_log_enabled();
 }
 
 float features_widget_tint_mul() {
@@ -236,11 +242,11 @@ float features_widget_tint_mul() {
 }
 
 bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
-    return widget_alpha_hide_applies(comp);
+    return !service_active(SVC_WIDGET_HOSTS) || widget_alpha_hide_applies(comp);
 }
 
 void features_reticule_widget_moved() {
-    reticule_widget_moved();
+    if (service_active(SVC_HOST_FIXES)) reticule_widget_moved();
 }
 
 void features_game_tick_vehicle() {
@@ -270,19 +276,19 @@ void features_gesture_melee_offhand(float dt) {
 }
 
 void features_melee_hold_check() {
-    melee_hold_check();
+    if (service_active(SVC_MELEE_INSTRUMENTS)) melee_hold_check();
 }
 
 void features_melee_swing_moving(bool in_swing) {
-    melee_swing_moving(in_swing);
+    if (service_active(SVC_MELEE_INSTRUMENTS)) melee_swing_moving(in_swing);
 }
 
 bool features_melee_vetoed(long long now, float speed, float reach) {
-    return melee_vetoed(now, speed, reach);
+    return service_active(SVC_MELEE_INSTRUMENTS) && melee_vetoed(now, speed, reach);
 }
 
 bool features_melee_fired(long long now, float speed, float reach) {
-    return melee_fired(now, speed, reach);
+    return service_active(SVC_MELEE_INSTRUMENTS) && melee_fired(now, speed, reach);
 }
 
 void features_xinput_note_buttons(unsigned short buttons) {
@@ -329,7 +335,7 @@ uintptr_t features_blam_create_after(uintptr_t params, uintptr_t cret) {
 }
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
-    return room_to_world_anchored(room, hmd_room, out);
+    return room_to_world_anchored(room, hmd_room, out);   // SVC_MARKER_ANCHOR gate inside
 }
 
 
@@ -357,6 +363,14 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed
+uint32_t s_service_mask = 0;             // the services active at that log line
+
+uint32_t active_services() {
+    uint32_t m = 0;
+    for (const auto& sn : kServiceNames)
+        if (service_active(sn.bit)) m |= sn.bit;
+    return m;
+}
 
 uint32_t enabled_mask() {
     uint32_t m = 0;
@@ -410,6 +424,7 @@ std::string service_enablers(uint32_t service) {
 
 void features_log_runtime() {
     s_logged_mask = enabled_mask();
+    s_service_mask = active_services();
     log_state("startup");
 }
 
@@ -425,6 +440,12 @@ void features_config_loaded() {
         }
         ++i;
     }
+    // Core state a service held while it was active, released on the service's own off edge.
+    const uint32_t svc_now = active_services();
+    const uint32_t svc_off = s_service_mask & ~svc_now;
+    if ((svc_off & SVC_CAMERA_BOB) != 0) camera_bob_reset();
+    if ((svc_off & SVC_HIDDEN_RELOAD) != 0) hidden_reload_reset();
+    s_service_mask = svc_now;
     s_logged_mask = now;
     log_state("config reload");
 }

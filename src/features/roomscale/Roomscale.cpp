@@ -12,7 +12,6 @@
 #include "Math.hpp"
 #include "MotionAimControl.hpp"        // read_control_rotation, g_stick_mode_active
 #include "Rig.hpp"                     // g_rig_parent, call_ret_vec3
-#include "core/CameraBob.hpp"
 #include "core/host/PluginState.hpp"
 #include "uevr/API.hpp"
 
@@ -73,9 +72,6 @@ bool roomscale_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "blamunitthrottleoff")  == 0) { g_cfg.blam_unit_throttle_off  = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "blamunitthrottleoff2") == 0) { g_cfg.blam_unit_throttle_off2 = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "blamthrottleysign")    == 0) { g_cfg.blam_throttle_ysign = (v < 0.0) ? -1 : 1; return true; }
-    if (_stricmp(key, "bobcancel") == 0) { g_cfg.bob_cancel = (v != 0.0); return true; }
-    if (_stricmp(key, "bobtau")    == 0) { g_cfg.bob_tau    = clampf((float)v, 0.02f, 5.0f); return true; }
-    if (_stricmp(key, "boblog")    == 0) { g_cfg.bob_log    = (v != 0.0); return true; }
     return false;
 }
 
@@ -85,49 +81,10 @@ void roomscale_game_tick_before_leash() {
     // Plugin.cpp's own state, through the bridge: the same object under the same name.
     const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
 
-    // ---- CAMERA BOB: measure the camera component against the pawn root in the aim-yaw frame,
-    // low-pass the slow part (eye height, crouch), publish the fast remainder as the bob.
-    {
-        const bool want_bob = g_cfg.bob_cancel || g_cfg.bob_log;
-        Vec3 bob{0.0f, 0.0f, 0.0f};
-        if (want_bob && g_rig_parent != nullptr && !g_stick_mode.load()) {
-            auto* pawn_b = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
-            Vec3 root{}, camb{}; double cpb = 0.0, cyb = 0.0;
-            if (pawn_b != nullptr && call_ret_vec3(pawn_b, L"K2_GetActorLocation", &root)
-                && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &camb)
-                && read_control_rotation(&cpb, &cyb, nullptr)) {
-                static Vec3 s_lp{}; static bool s_have = false;
-                static std::chrono::steady_clock::time_point s_t{};
-                const auto nowb = std::chrono::steady_clock::now();
-                const float dtb = s_have ? std::chrono::duration<float>(nowb - s_t).count() : 0.0f;
-                s_t = nowb;
-                const float ayb = (float)cyb * DEG2RAD, cb = std::cos(ayb), snb = std::sin(ayb);
-                const Vec3 dw{camb.x - root.x, camb.y - root.y, camb.z - root.z};
-                const Vec3 dl{ dw.x * cb + dw.y * snb, -dw.x * snb + dw.y * cb, dw.z};   // aim-yaw frame
-                const float taub = (g_cfg.bob_tau > 0.02f) ? g_cfg.bob_tau : 0.4f;
-                if (!s_have || dtb <= 0.0f || dtb > 0.5f) { s_lp = dl; s_have = true; }
-                else { const float ab = clampf(dtb / taub, 0.0f, 1.0f); s_lp.x += (dl.x - s_lp.x) * ab; s_lp.y += (dl.y - s_lp.y) * ab; s_lp.z += (dl.z - s_lp.z) * ab; }
-                const Vec3 bl{dl.x - s_lp.x, dl.y - s_lp.y, dl.z - s_lp.z};
-                bob = Vec3{bl.x * cb - bl.y * snb, bl.x * snb + bl.y * cb, bl.z};        // back to world
-                if (g_cfg.bob_log) {
-                    static uint32_t nlog = 0;
-                    if ((nlog++ % 2u) == 0u) {
-                        API::get()->log_info("[Halo-CampE-UEVR] BOB dt=%.1fms d_local=(%.2f %.2f %.2f) lp=(%.2f %.2f %.2f) bob=(%.2f %.2f %.2f)cm aim=%.1f",
-                                             dtb * 1000.0f, dl.x, dl.y, dl.z, s_lp.x, s_lp.y, s_lp.z, bl.x, bl.y, bl.z, (float)cyb);
-                    }
-                }
-            }
-        }
-        if (!g_cfg.bob_cancel) bob = Vec3{0.0f, 0.0f, 0.0f};
-        halo::g_bob_x.store(bob.x, std::memory_order_relaxed);
-        halo::g_bob_y.store(bob.y, std::memory_order_relaxed);
-        halo::g_bob_z.store(bob.z, std::memory_order_relaxed);
-    }
-
     // ---- THROTTLE-FRAME PROBE LOG (Config::roomscale_thr_probe). BlamDrive is writing a constant
     // forward throttle into the biped; here we log the world direction the eye actually moves
     // beside the aim yaw and the view yaw, so the frame is fit from a KNOWN command, not a lean.
-    if (g_cfg.roomscale_thr_probe != 0 && g_rig_parent != nullptr && !g_stick_mode.load()) {
+    if (g_cfg.roomscale && g_cfg.roomscale_thr_probe != 0 && g_rig_parent != nullptr && !g_stick_mode.load()) {
         Vec3 eyep{}; double cpp2 = 0.0, cyp = 0.0;
         if (call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &eyep)
             && read_control_rotation(&cpp2, &cyp, nullptr)) {
@@ -473,7 +430,7 @@ void roomscale_sim_unit_state_end(uintptr_t obj) {
     // 6.65 m/s x throttle, linear from 0.02 up, no floor -- modes that wrote the control record
     // survived but moved nothing (consumed before the write landed). Yields to the player's own
     // stick and to stick mode, same gates as the pad path.
-    const bool thr_probe = (g_cfg.roomscale_thr_probe != 0)
+    const bool thr_probe = g_cfg.roomscale && (g_cfg.roomscale_thr_probe != 0)
                         && !g_stick_mode_active.load(std::memory_order_relaxed)
                         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick;
     if ((g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)

@@ -943,9 +943,9 @@ void wh_place_on_weapon(API::UObject* comp, const std::wstring& match, const WhW
 // deliberately does NOT live here -- see wristhud_place().
 void wristhud_tick() {
     ++s_tick;
+    if (!g_cfg.wrist_hud) return;
     tracker_dump_probe();
     tracker_mid_probe(s_tick);
-    if (!g_cfg.wrist_hud) return;
     wh_weapon_anchor_tick();   // hudplacement=1: the weapon anchor for the render thread
     parse_slots();
 
@@ -1721,7 +1721,7 @@ void wristhud_xinput_after_calib_trigger(_XINPUT_STATE* state) {
 }
 
 void wristhud_sim_unit_state_radar(uintptr_t obj) {
-    blip_dump_probe(obj);
+    if (g_cfg.wrist_hud) blip_dump_probe(obj);
     if (g_cfg.wrist_hud && g_cfg.wrist_radar) blip_scan(obj);   // the radar exists only with the wrist HUD
 }
 
