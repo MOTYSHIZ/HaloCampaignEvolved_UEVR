@@ -13,6 +13,7 @@
 #include "Markers.hpp"        // g_cam_x/y/z: the rendered camera, for the WPNERR speed column
 #include "Rig.hpp"   // g_turnq_* : the player's accumulated snap/smooth turn
 #include "WeaponCalib.hpp"   // weapon_key / wpnfix: the per-weapon rigid delta
+#include "features/palettewpn/PaletteReadbacks.hpp"   // wpnfix_find, rig_socket_world
 #include "uevr/API.hpp"
 
 #include <Windows.h>

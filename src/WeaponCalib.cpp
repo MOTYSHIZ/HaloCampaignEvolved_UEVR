@@ -61,20 +61,6 @@ std::string weapon_key() {
     return n;
 }
 
-const WeaponFix* wpnfix_find(const std::string& key) {
-    if (key.empty()) return nullptr;
-    // LAST match wins, for the same reason weapon_fix_for() in Config.hpp takes the last one: the
-    // table holds the shipped baseline first and the captured entries after it, and a capture is
-    // meant to outrank the baseline it was taken against.
-    const WeaponFix* hit = nullptr;
-    for (int i = 0; i < g_cfg.wpnfix_count; ++i) {
-        const auto& w = g_cfg.wpnfix[i];
-        if (w.match[0] == 0) continue;
-        if (key.find(w.match) != std::string::npos) hit = &w;
-    }
-    return hit;
-}
-
 void wpnfix_set(const std::string& key, const float q[4], const float t[3]) {
     if (key.empty()) return;
 

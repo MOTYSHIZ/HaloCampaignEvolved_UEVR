@@ -170,6 +170,10 @@ struct FeatureHooks {
     // features_rig_resolve_wanted: the rig resolve gate in update(). True = resolve for this feature.
     bool (*rig_resolve_wanted)();
 
+    // features_sim_record_written: drive_angles_impl (SIM THREAD, ~2600 calls/s), right after the aim
+    // convergence bends the angles about to be written to the Blam control record.
+    void (*sim_record_written)(float yaw, float pitch);
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

@@ -144,8 +144,6 @@ uevr::API::UObject* rig_tracked_component();
 // The FP weapon ACTOR the rig was last reached through, or nullptr. For the reticule trace: the gun
 // is a separate actor, so ignoring the pawn does not cover it.
 uevr::API::UObject* fp_weapon_actor();
-// The weapon actor's RootComponent -- the FP weapon root the scope lens mounts on.
-uevr::API::UObject* fp_weapon_root();
 
 // The weapon's own root component -- the thing to pin when attaching the GUN rather than the arms.
 // Null whenever no weapon is in hand, which the caller must treat as "release, do not fall back".
@@ -210,7 +208,6 @@ bool rig_set_world_rotation(uevr::API::UObject* rig, double pitch, double yaw, d
 bool rig_set_world_location(uevr::API::UObject* rig, double x, double y, double z);
 
 bool call_ret_vec3(uevr::API::UObject* obj, const wchar_t* fn, Vec3* out);
-bool call_socket_location(uevr::API::UObject* comp, const wchar_t* socket, Vec3* out);
 
 // A named SOCKET's world location on a mesh component. Exposed for the scope's space-switch
 // handshake, which must not take its KeepWorld conversion while the bone is mid-animation.
@@ -300,13 +297,5 @@ bool resolve_marker(BorrowedMarker& m, float scale, const Vec3& ref, const char*
 bool marker_alive(BorrowedMarker& m);
 void park_marker(BorrowedMarker& m, const Vec3& p);
 void release_marker(BorrowedMarker& m, const char* label);
-
-// The WORLD position of a socket on the rig, in cm. Where derive_pivot answers "where is the grip
-// relative to the component", this answers "where did the grip actually END UP" -- which is the
-// only honest way to score a palette write, because it is read back from the posed skeleton rather
-// than computed from the values we hoped we wrote. Reflected call: GAME THREAD ONLY.
-bool rig_socket_world(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out);
-// The socket's WORLD rotation (pitch, yaw, roll degrees) from the posed skeleton.
-bool rig_socket_world_rot(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out_pyr);
 
 } // namespace halo

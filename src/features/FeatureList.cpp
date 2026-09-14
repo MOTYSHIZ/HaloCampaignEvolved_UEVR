@@ -190,6 +190,11 @@ void features_sim_record_ready(uintptr_t rec, bool off_thread) {
     if (service_active(SVC_UNIT_STATE)) unit_state_record_ready(rec, off_thread);
 }
 
+void features_sim_record_written(float yaw, float pitch) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->sim_record_written != nullptr && f->enabled != nullptr && f->enabled()) f->sim_record_written(yaw, pitch);
+}
+
 void features_sim_orientation_returned() {
     if (service_active(SVC_WEAPON_OBJECT)) weapon_object_offhook_tick();
 }

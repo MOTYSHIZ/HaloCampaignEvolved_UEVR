@@ -96,6 +96,7 @@
 #include "features/hooks/PluginHooks.hpp"
 #include "core/MarkerFaces.hpp"
 #include "BlamPalette.hpp"
+#include "features/palettewpn/PaletteReadbacks.hpp"   // the palette fragments' socket and record readbacks
 #include "PaletteTwoHand.hpp"        // palette_two_hand_update: the palette weapon mode's two-hand hold
 #include "WeaponCalib.hpp"
 #include "WeaponOffset.hpp"

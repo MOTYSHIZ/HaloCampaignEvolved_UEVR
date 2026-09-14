@@ -21,9 +21,6 @@ using namespace uevr;
 
 namespace halo {
 
-void stomp_mark(int point, float yaw, float e0, float e1, float e2);   // Plugin.cpp, STOMPLOG ring
-extern std::atomic<unsigned> g_tick_id;                                 // Plugin.cpp
-
 namespace {
 
 // The orientation getter, dll+0x5A6AD0. Hooked purely to get onto the sim thread -- its return
@@ -1032,15 +1029,7 @@ static void drive_angles_impl(bool off_thread) {
     // traced range is what makes the two agree. Declines to act while the head is leashed, so this
     // is a no-op in the shipped configuration. See AimConverge.hpp.
     aim_converge_apply(&yaw, &pitch);
-    aim_writer_note_blam(yaw, pitch);
-    if (g_cfg.stomp_log != 0) {   // Point 23: the Blam record write, once per snapshot generation (this runs ~2600/s).
-        static uint32_t s_last_gen = 0xFFFFFFFFu;
-        const uint32_t g = pose_latch_last_gen();
-        if (g != s_last_gen) {
-            s_last_gen = g;
-            stomp_mark(23, yaw, pitch, (float)g, (float)g_tick_id.load(std::memory_order_relaxed));
-        }
-    }
+    features_sim_record_written(yaw, pitch);
 
     // YAW SIGN. desired_aim_now() returns UE-convention degrees, but this record stores BLAM yaw,
     // which is its negation: writing (yaw 1.50, pitch 0.30) produced the aim vector
@@ -1079,22 +1068,6 @@ void drive_control_angles() { drive_angles_impl(/*off_thread=*/false); }
 // hook is never going to fire on this build. Costs a toolhelp snapshot on the frames where the
 // record is not yet resolved, which is why it must never be reachable from the hook.
 void blam_drive_offthread_write() { drive_angles_impl(/*off_thread=*/true); }
-
-// FRAMEAUDIT: the Blam control record's current angles, converted back to the UE-convention
-// degrees desired_aim_now() uses, so they can be matched against the generation table.
-bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg) {
-    const uintptr_t rec = g_ctl_rec.load(std::memory_order_relaxed);
-    if (rec == 0 || IsBadReadPtr((void*)rec, 8)) return false;
-    const float* fp = (const float*)rec;
-    if (!std::isfinite(fp[0]) || !std::isfinite(fp[1])) return false;
-    const float asign = (g_cfg.blam_angles_ysign >= 0) ? 1.0f : -1.0f;
-    float y = asign * fp[0] * RAD2DEG - g_cfg.blam_yaw_off;
-    while (y > 180.0f) y -= 360.0f;
-    while (y < -180.0f) y += 360.0f;
-    *yaw_deg = y;
-    *pitch_deg = fp[1] * RAD2DEG - g_cfg.blam_pitch_off;
-    return true;
-}
 
 void blam_drive_tick() {
     const bool want = (g_cfg.blam_angles != 0);

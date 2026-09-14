@@ -1656,6 +1656,4 @@ void log_pivot_candidates(API::UObject* rig) {
 }
 
 
-#include "features/palettewpn/Rig_socket_world.inl"   // fork feature: palettewpn (socket readbacks)
-
 } // namespace halo

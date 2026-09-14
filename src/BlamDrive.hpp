@@ -47,8 +47,6 @@ namespace halo {
 // Install/remove the sim-thread hook and keep it in step with config. Call once per frame from the
 // game thread. Cheap: a flag compare once the hook is up.
 void blam_drive_tick();
-// FRAMEAUDIT: the control record's angles in UE-convention degrees (false if unresolved).
-bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg);
 
 // The sim's TLS block, published when the control record resolves (gs:[0x58] only means anything
 // ON the sim thread, but the block it yields is ordinary heap memory readable from anywhere).

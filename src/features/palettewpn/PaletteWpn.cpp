@@ -3,6 +3,7 @@
 #include "ArmDriver.hpp"        // palette_weapon_mode()
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"   // palette_two_hand_reset()
+#include "features/palettewpn/PaletteReadbacks.hpp"
 #include "core/Services.hpp"
 
 namespace halo {
@@ -19,6 +20,7 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .key      = "palettewpn",
     .gesture_reset      = &palette_wpn_gesture_reset,
     .rig_resolve_wanted = &palette_wpn_rig_resolve_wanted,
+    .sim_record_written = &palette_wpn_sim_record_written,
     .enabled  = &palette_wpn_enabled,
     .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_WEAPON_OBJECT,
 };

@@ -21,4 +21,8 @@ void features_sim_record_ready(uintptr_t rec, bool off_thread);
 // THREAD. The weapon object resolve off the builder hook (core/WeaponObject), rate limited there.
 void features_sim_orientation_returned();
 
+// drive_angles_impl (SIM THREAD), right after aim_converge_apply, with the UE-convention angles about to be
+// written to the control record: the palette weapon's writer note and STOMPLOG point 23.
+void features_sim_record_written(float yaw, float pitch);
+
 } // namespace halo
