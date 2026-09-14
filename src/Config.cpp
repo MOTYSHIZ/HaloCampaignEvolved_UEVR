@@ -911,12 +911,7 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "fpanimkill")     == 0) { g_cfg.fp_anim_kill = (int)v; return true; }
     if (_stricmp(key, "fpmeshlog")      == 0) { g_cfg.fpmesh_log = (int)v; return true; }
     if (_stricmp(key, "fppin")          == 0) { g_cfg.fp_pin = (int)v; return true; }
-    if (_stricmp(key, "headblock")        == 0) { g_cfg.head_block         = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "headblockchannel") == 0) { g_cfg.head_block_channel = (int)clampf((float)v, 0.0f, 32.0f); return true; }
-    if (_stricmp(key, "headblocklean")    == 0) { g_cfg.head_block_lean    = clampf((float)v, 0.0f, 200.0f); return true; }
-    if (_stricmp(key, "headblocklog")     == 0) { g_cfg.head_block_log     = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
-    if (_stricmp(key, "headblockradius")  == 0) { g_cfg.head_block_radius  = clampf((float)v, 0.0f, 50.0f); return true; }
-    if (_stricmp(key, "headblockrelease") == 0) { g_cfg.head_block_release = clampf((float)v, 1.0f, 2000.0f); return true; }
+    #include "features/headblock/Config_parse.inl"   // fork feature: headblock (key family)
     if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "heightkey")        == 0) {

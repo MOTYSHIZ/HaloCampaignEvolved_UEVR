@@ -7726,22 +7726,7 @@ void update() {
         }
     }
 
-    // ---- HEAD BLOCK (HeadBlock.hpp): trace the body-eye -> head offset the view callbacks
-    // publish and hand back how far the head may extend. Stands down in menus, vehicles and the
-    // 2D cutscene screen, where the engine camera is not the body's eye.
-    {
-        const bool hb_active = (g_cfg.head_block != 0) && !g_in_menu.load() && !g_cut2d_engaged.load()
-                            && !halo::g_unit_mounted.load(std::memory_order_relaxed) && g_cfg.veh_cam != 2;
-        API::UObject* hb_ignore[2] = {};
-        int hb_n = 0;
-        if (hb_active && (g_cfg.head_block == 1 || g_cfg.head_block == 2)) {
-            if (auto* pawn = API::get()->get_local_pawn(0)) hb_ignore[hb_n++] = pawn;
-            if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
-                if (auto* wep = rigc->get_outer()) hb_ignore[hb_n++] = wep;
-            }
-        }
-        halo::headblock_tick(hb_active, hb_ignore, hb_n, g_last_dt.load());
-    }
+    #include "features/headblock/Plugin_tick.inl"   // fork feature: headblock (tick)
 
     // ---- Calibrate key, edge-detected on the GAME THREAD.
     // GetAsyncKeyState reads global key state, so it registers with the headset on and the game
@@ -12769,13 +12754,7 @@ public:
             halo::g_cam_z.store(pz, std::memory_order_relaxed);
             g_view_base_yaw.store(g_dbg_view_out.load(std::memory_order_relaxed), std::memory_order_relaxed);
             g_have_view_pos = true;
-            // The body's eye for the head block, at full precision (LWC world coordinates).
-            if (is_double) {
-                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
-                halo::headblock_note_pre(index, p->x, p->y, p->z);
-            } else {
-                halo::headblock_note_pre(index, position->x, position->y, position->z);
-            }
+            #include "features/headblock/Plugin_note_pre.inl"   // fork feature: headblock (eye note)
 
             // THE SHOT-ORIGIN HALF of the eye offset. This callback runs BEFORE UEVR applies the
             // HMD transform (FFakeStereoRenderingHook.cpp: the pre loop, then the transform, then
@@ -13266,20 +13245,7 @@ public:
                                               bool is_double) override {
         if (g_shutting_down.load(std::memory_order_acquire)) return;
         if (index == 0) stomp_sample(3);
-        // HEAD BLOCK: pull the composed eye back out of geometry BEFORE anything below publishes
-        // it, so markers and the reticule reason from the eye that is actually rendered.
-        if (position != nullptr) {
-            if (is_double) {
-                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
-                double hx = p->x, hy = p->y, hz = p->z;
-                if (halo::headblock_apply_post(index, &hx, &hy, &hz)) { p->x = hx; p->y = hy; p->z = hz; }
-            } else {
-                double hx = position->x, hy = position->y, hz = position->z;
-                if (halo::headblock_apply_post(index, &hx, &hy, &hz)) {
-                    position->x = (float)hx; position->y = (float)hy; position->z = (float)hz;
-                }
-            }
-        }
+        #include "features/headblock/Plugin_apply_post.inl"   // fork feature: headblock (eye pull-back)
         // THE EYE HALF of the eye-to-shot-origin offset. Same callback pair, same eye index, one
         // subtraction apart -- see the pre callback. `position` has been through UEVR's HMD
         // transform by now, so this IS the rendered eye.
