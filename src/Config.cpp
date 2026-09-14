@@ -883,14 +883,7 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
     if (_stricmp(key, "aimreticulefresh") == 0) { g_cfg.aim_reticule_fresh = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "aimreticulestamp") == 0) { g_cfg.aim_reticule_stamp = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "aimdirectwrite") == 0) { g_cfg.aim_direct_write = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "camleadall") == 0) { g_cfg.cam_lead_all = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "compgain") == 0) { g_cfg.comp_gain = clampf((float)v, -2.0f, 2.0f); return true; }
-    if (_stricmp(key, "complatch") == 0) { g_cfg.comp_latch = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "complatchms") == 0) { g_cfg.comp_latch_ms = clampf((float)v, 0.0f, 40.0f); return true; }
-    if (_stricmp(key, "fpanimkill")     == 0) { g_cfg.fp_anim_kill = (int)v; return true; }
-    if (_stricmp(key, "fpmeshlog")      == 0) { g_cfg.fpmesh_log = (int)v; return true; }
-    if (_stricmp(key, "fppin")          == 0) { g_cfg.fp_pin = (int)v; return true; }
+    #include "features/palettewpn/Config_parse_a.inl"   // fork feature: palettewpn (keys, first run)
     #include "features/headblock/Config_parse.inl"   // fork feature: headblock (key family)
     #include "features/heightcal/Config_parse_b.inl"   // fork feature: heightcal (keys, second run)
     if (_stricmp(key, "liftyaw") == 0) {
@@ -898,27 +891,7 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
         g_cfg.lift_yaw = m; return true;
     }
     if (_stricmp(key, "magrender")      == 0) { g_cfg.mag_render = (int)v; return true; }
-    if (_stricmp(key, "palbuildgate")   == 0) { g_cfg.pal_build_gate = (int)v; return true; }
-    if (_stricmp(key, "palettecamlead") == 0) { g_cfg.palette_cam_lead = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "palettecamsmooth") == 0) { g_cfg.palette_cam_smooth_ms = clampf((float)v, 0.0f, 2000.0f); return true; }
-    if (_stricmp(key, "palettefinal")   == 0) { g_cfg.palette_final = (int)v; return true; }
-    if (_stricmp(key, "palettelatch") == 0) { g_cfg.palette_latch = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "palettelatchms") == 0) { g_cfg.palette_latch_ms = clampf((float)v, 0.0f, 40.0f); return true; }
-    if (_stricmp(key, "palettelocal") == 0) { g_cfg.palette_local = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "palettesync") == 0) { g_cfg.palette_sync = (v != 0.0) ? 1 : 0; return true; }
-    if (_stricmp(key, "palpubframe")    == 0) { g_cfg.pal_pub_frame = (int)v; return true; }
-    if (_stricmp(key, "palrender")      == 0) { g_cfg.pal_render = (int)v; return true; }
-    if (_stricmp(key, "palsniff")       == 0) { g_cfg.pal_sniff = (int)v; return true; }
-    if (_stricmp(key, "palstep") == 0) { g_cfg.palette_step = clampf((float)v, -2.0f, 2.0f); return true; }
-    if (_stricmp(key, "palstepctx") == 0) { g_cfg.palette_step_ctx = (int)clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "palstepsrc") == 0) { g_cfg.palette_step_src = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "posefilter")     == 0) { g_cfg.pose_filter = (int)v; return true; }
-    if (_stricmp(key, "posefilterbeta") == 0) { g_cfg.pose_filter_beta = clampf((float)v, 0.0f, 500.0f); return true; }
-    if (_stricmp(key, "posefilterdcut") == 0) { g_cfg.pose_filter_dcut = clampf((float)v, 0.05f, 30.0f); return true; }
-    if (_stricmp(key, "posefiltermin")  == 0) { g_cfg.pose_filter_min = clampf((float)v, 0.05f, 60.0f); return true; }
-    if (_stricmp(key, "posefilterrbeta")== 0) { g_cfg.pose_filter_rbeta = clampf((float)v, 0.0f, 500.0f); return true; }
-    if (_stricmp(key, "posefreeze")     == 0) { g_cfg.pose_freeze = (int)v; return true; }
-    if (_stricmp(key, "poselatch") == 0) { g_cfg.pose_latch = (int)clampf((float)v, 0.0f, 3.0f); return true; }
+    #include "features/palettewpn/Config_parse_b.inl"   // fork feature: palettewpn (keys, second run)
     if (_stricmp(key, "reloadframe")    == 0) { g_cfg.reload_frame = (int)v; return true; }
     if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
     if (_stricmp(key, "stomplog")       == 0) { g_cfg.stomp_log = (int)v; return true; }
