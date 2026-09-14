@@ -11783,6 +11783,11 @@ public:
         halo::g_cam_y.store(g_view_pos_y.load(std::memory_order_relaxed), std::memory_order_relaxed);
         halo::g_cam_z.store(g_view_pos_z.load(std::memory_order_relaxed), std::memory_order_relaxed);
         #include "features/palettewpn/Plugin_render_instruments.inl"   // fork feature: palettewpn (render instruments)
+        // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
+        // frame is drawn from, so the forearm panels land against it instead of against a camera
+        // several milliseconds stale. Once per frame, not per eye.
+        if (index == 0) { halo::wristhud_place(); halo::gesture_render_tick(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
+        #include "features/palettewpn/Plugin_render_meters.inl"   // fork feature: palettewpn (FPMESH meter)
         const float out_now = g_dbg_view_out.load();
         if (g_have_prev_out.load()) {
             const float moved = std::fabs(wrap180(out_now - g_prev_view_out.load()));
