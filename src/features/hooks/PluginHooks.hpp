@@ -17,6 +17,10 @@ namespace halo {
 // is noted first (core/FireInput), then the features' slots run and may modify the pad.
 void features_xinput_raw_pad(_XINPUT_STATE* state);
 
+// on_xinput_get_state (the XInput hook's thread), right after the calibration menu's trigger eat and
+// before the control remapping.
+void features_xinput_after_calib_trigger(_XINPUT_STATE* state);
+
 // on_xinput_get_state (the XInput hook's thread), right before the vehicle hard brake's pad-side
 // delivery, after the movement rotation and the d-pad shift.
 void features_xinput_before_brake(_XINPUT_STATE* state);
@@ -51,6 +55,10 @@ void features_game_tick_after_leash();
 // on_pre_calculate_stereo_view_offset (render thread), inside `position != nullptr`, right after
 // g_have_view_pos is set and before aim_converge_note_pre: the body eye.
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double);
+
+// on_pre_calculate_stereo_view_offset (render thread), in the once-per-frame render pass (index 0),
+// first, before the reload display tick and the marker re-anchor.
+void features_render_frame();
 
 // on_post_calculate_stereo_view_offset (render thread), right after the STOMPLOG sample and before
 // aim_converge_note_post: the head offset, and a feature's clamp of the rendered eye.

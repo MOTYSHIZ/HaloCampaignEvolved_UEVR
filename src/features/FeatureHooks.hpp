@@ -88,6 +88,21 @@ struct FeatureHooks {
 
     // features_menu_status_line: the feature's line for the menu status file; empty = none.
     std::string (*menu_status_line)();
+
+    // features_render_frame: once per rendered frame (stereo pre, eye 0), in the render pass.
+    void (*render_frame)();
+
+    // features_xinput_after_calib_trigger: the pad in the XInput hook, right after the calibration
+    // menu's trigger eat.
+    void (*xinput_after_calib_trigger)(_XINPUT_STATE* state);
+
+    // features_sim_unit_state_radar: the sim-thread unit state publish, right after the throw dump
+    // probe, with the unit.
+    void (*sim_unit_state_radar)(uintptr_t obj);
+
+    // features_widget_tint_mul: the gain multiplier the tint call in progress on this thread asked
+    // for. The first non-null slot answers.
+    float (*widget_tint_mul)();
 };
 
 } // namespace halo

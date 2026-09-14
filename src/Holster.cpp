@@ -10,6 +10,7 @@
 #include "UeObject.hpp"
 #include "Markers.hpp"
 #include "WeaponCalib.hpp"        // weapon_key(): which weapon's magazine to render
+#include "features/hooks/HolsterHooks.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -330,6 +331,8 @@ Vec3 zone_offset(HolsterSlot s) {
 }
 
 } // namespace
+
+HALO_HOLSTER_STATE_BRIDGE
 
 bool holster_swap_press_active()  { const auto u = g_holster_swap_until.load(std::memory_order_relaxed);  return u != 0 && now_ticks() < u; }
 bool holster_throw_press_active() { const auto u = g_holster_throw_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }

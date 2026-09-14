@@ -169,7 +169,6 @@
 // The alternative arm driver. ArmDriver.hpp decides which of the two runs; only one ever does.
 #include "palettearm/PaletteArm.hpp"
 #include "BlamAim.hpp"
-#include "WristHud.hpp"
 #include "BlamDrive.hpp"
 #include "HitTrace.hpp"
 #include "AimWatch.hpp"
@@ -6257,8 +6256,6 @@ void update() {
     scope_frame_end(tick);
 
     features_game_tick_late();
-    g_tick_stage = "wristhud";
-    wristhud_tick();   // wrist HUD: census + hosting + forearm placement
 
     // ---- PER-WEAPON DELTAS: every tick. After the config reload above (a reload restores the
     // calibrated base and would wipe an applied adjustment), before anything below reads
@@ -11733,7 +11730,7 @@ public:
         // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
         // frame is drawn from, so the forearm panels land against it instead of against a camera
         // several milliseconds stale. Once per frame, not per eye.
-        if (index == 0) { halo::wristhud_place(); halo::gesture_render_tick(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
+        if (index == 0) { features_render_frame(); halo::gesture_render_tick(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
         #include "features/palettewpn/Plugin_render_meters.inl"   // fork feature: palettewpn (FPMESH meter)
         const float out_now = g_dbg_view_out.load();
         if (g_have_prev_out.load()) {
@@ -12098,7 +12095,7 @@ public:
             g_menu_calib_rt.store(false, std::memory_order_relaxed);
         }
 
-        #include "features/wristhud/Plugin_glance_gate.inl"   // fork feature: wristhud (glance gate)
+        features_xinput_after_calib_trigger(state);
 
         // ---- CONTROL REMAPPING. Must run BEFORE the aim output overwrites the right stick, and
         // before any early-out below, or the remaps would stop working whenever the driver idles.

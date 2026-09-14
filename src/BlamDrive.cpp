@@ -611,6 +611,8 @@ uintptr_t hooked_get_orientation(uintptr_t handle, Vec3f* outA, Vec3f* outB) {
 
 }  // namespace
 
+HALO_BLAMDRIVE_STATE_BRIDGE
+
 // The sim's TLS block, for the navpoint hunt's off-thread walker (see BlamDrive.hpp).
 std::atomic<uintptr_t> g_sim_tls_block{0};
 
@@ -996,11 +998,7 @@ uintptr_t resolve_object_by_datum(uint32_t datum) {
 // out, which is exactly what a plugin-side belief would lose; reading the object is the truth.
 #include "features/holsterpollthrow/BlamDrive_track.inl"   // fork feature: holsterpollthrow (grenade track handoff)
 
-#include "features/wristhud/BlamDrive_blip_atomics.inl"   // fork feature: wristhud (radar blips)
-
 #include "features/holsterpollthrow/BlamDrive_throw_dump.inl"   // fork feature: holsterpollthrow (throw dump)
-
-#include "features/wristhud/BlamDrive_radar.inl"   // fork feature: wristhud (radar scan)
 
 #include "features/vehcam/BlamDrive_seat.inl"   // fork feature: vehcam (seat publish)
 
@@ -1060,8 +1058,7 @@ void publish_unit_state(uintptr_t rec_base) {
     #include "features/holsterpollthrow/BlamDrive_counts.inl"   // fork feature: holsterpollthrow (grenade counts)
 
     if (g_cfg.throw_dump != 0) throw_dump_probe(obj);
-    blip_dump_probe(obj);
-    if (g_cfg.wrist_hud && g_cfg.wrist_radar) blip_scan(obj);   // the radar exists only with the wrist HUD
+    features_sim_unit_state_radar(obj);
 
     #include "features/holsterpollthrow/BlamDrive_greninstant.inl"   // fork feature: holsterpollthrow (greninstant)
 

@@ -846,11 +846,9 @@ static bool parse_blam_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "aimtargetsmoothms") == 0) { g_cfg.aim_target_smooth_ms = (float)v; return true; }
     // ---- RADAR BLIPS, WRIST HUD / RADAR, GRENADE HAND-SPAWN and the ForceTube gunstock.
     if (_stricmp(key, "throwdump")   == 0) { g_cfg.throw_dump     = (int)v; return true; }
-    #include "features/wristhud/Config_parse_radar.inl"   // fork feature: wristhud (radar keys)
     if (_stricmp(key, "grenhand")    == 0) { g_cfg.gren_hand_spawn = (int)v; return true; }
     if (_stricmp(key, "greninstant") == 0) { g_cfg.gren_instant = (int)v; return true; }
     if (_stricmp(key, "grenbackdate") == 0) { g_cfg.gren_backdate = (int)clampf((float)v, 1.0f, 60.0f); return true; }
-    #include "features/wristhud/Config_parse_hud.inl"   // fork feature: wristhud (HUD keys)
     if (_stricmp(key, "grenspeed")   == 0) { g_cfg.gren_speed = clampf((float)v, 1.0f, 30.0f); return true; }
     return false;
 }
@@ -1688,7 +1686,6 @@ static bool parse_weaponvr_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "coophide")       == 0) { g_cfg.coop_hide = (v != 0.0); return true; }
     if (_stricmp(key, "hidesolo")       == 0) { g_cfg.hide_solo = (v != 0.0); return true; }
     if (_stricmp(key, "coopmaskms")     == 0) { g_cfg.coop_mask_ms = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
-    if (_stricmp(key, "wristhudammotext") == 0) { strncpy_s(g_cfg.wrist_hud_ammo_text, val, _TRUNCATE); return true; }
     if (_stricmp(key, "reloadanimmscoop") == 0) { g_cfg.reload_anim_ms_coop = (int)clampf((float)v, 0.0f, 8000.0f); return true; }
     if (_stricmp(key, "slidephantom")   == 0) { g_cfg.slide_phantom = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "slideundoreload") == 0) { g_cfg.slide_undo_reload = (v != 0.0); return true; }

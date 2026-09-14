@@ -67,8 +67,6 @@ uintptr_t resolve_object_by_datum(uint32_t datum);
 
 #include "features/holsterpollthrow/BlamDrive_decls.inl"   // fork feature: holsterpollthrow (grenade exports)
 
-#include "features/wristhud/BlamDrive_decls.inl"   // fork feature: wristhud (radar blip exports)
-
 // A loaded module's `_tls_index`, read from its own PE TLS directory (IMAGE_TLS_DIRECTORY's
 // AddressOfIndex, which the loader has already relocated). EXACT on any build of any variant of the
 // binary: nothing to record, nothing to re-derive after a patch, no signature to maintain.

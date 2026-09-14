@@ -4,7 +4,7 @@
 
 #include "BlamPalette.hpp"
 #include "PaletteTwoHand.hpp"   // palette_two_hand_reset / g_th_latched: the palette weapon mode hold
-#include "WristHud.hpp"           // g_wristhud_hide_cradle: the hidden reload hides the ammo cradle
+#include "core/HiddenReload.hpp"   // g_wristhud_hide_cradle: the hidden reload hides the ammo cradle
 #include "Config.hpp"
 #include "core/FireInput.hpp"      // g_ft_fire_at: the off hand stands down while the stock kicks
 #include "Markers.hpp"            // the magwell insert marker rides the holster marker machinery

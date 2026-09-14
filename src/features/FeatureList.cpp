@@ -2,12 +2,14 @@
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
+#include "features/hooks/ReticuleHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
 
 #include "Config.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
+#include "core/fixes/ReticuleFixes.hpp"
 
 #include <string>
 
@@ -20,12 +22,14 @@ extern const FeatureHooks kHeadBlockHooks;
 extern const FeatureHooks kGrenadeSwallowHooks;
 extern const FeatureHooks kRoomscaleHooks;
 extern const FeatureHooks kHeightCalHooks;
+extern const FeatureHooks kWristHudHooks;
 
 namespace {
 
 // THE ORDER. At every hook point the features run in this order. It is chosen so that each hook
 // point keeps the relative order its features had when they were textual fragments of the author's
 // files; a hook point whose original order no list order can satisfy gets separate slots instead.
+//   game_tick_late: forcetube, then wristhud (their calls were in that order in update()).
 const FeatureHooks* const kFeatureList[] = {
     &kForceTubeHooks,
     &kScopeLensHooks,
@@ -33,6 +37,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kGrenadeSwallowHooks,
     &kRoomscaleHooks,
     &kHeightCalHooks,
+    &kWristHudHooks,
 };
 
 } // namespace
@@ -47,6 +52,11 @@ void features_xinput_raw_pad(_XINPUT_STATE* state) {
     fire_input_note_pad(state);
     for (const FeatureHooks* f : kFeatureList)
         if (f->xinput_raw_pad != nullptr) f->xinput_raw_pad(state);
+}
+
+void features_xinput_after_calib_trigger(_XINPUT_STATE* state) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->xinput_after_calib_trigger != nullptr) f->xinput_after_calib_trigger(state);
 }
 
 void features_game_tick_late() {
@@ -83,6 +93,11 @@ void features_game_tick_after_leash() {
 
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
     eye_note_pre_view(index, position, is_double);
+}
+
+void features_render_frame() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->render_frame != nullptr) f->render_frame();
 }
 
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
@@ -128,6 +143,11 @@ void features_xinput_before_brake(_XINPUT_STATE* state) {
         if (f->xinput_before_brake != nullptr) f->xinput_before_brake(state);
 }
 
+void features_sim_unit_state_radar(uintptr_t obj) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->sim_unit_state_radar != nullptr) f->sim_unit_state_radar(obj);
+}
+
 void features_sim_unit_state_end(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->sim_unit_state_end != nullptr) f->sim_unit_state_end(obj);
@@ -146,6 +166,36 @@ std::string features_menu_status_line() {
         if (!s.empty()) return s;
     }
     return std::string();
+}
+
+bool features_asset_load_recently_failed(const char* path) {
+    return load_asset_recently_failed(path);
+}
+
+const char* features_asset_load_suffix(uevr::API::UObject* obj) {
+    return load_asset_log_suffix(obj);
+}
+
+void features_asset_load_done(const char* path, uevr::API::UObject* obj) {
+    load_asset_note_result(path, obj);
+}
+
+bool features_widget_log() {
+    return widget_log_enabled();
+}
+
+float features_widget_tint_mul() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->widget_tint_mul != nullptr) return f->widget_tint_mul();
+    return 1.0f;
+}
+
+bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
+    return widget_alpha_hide_applies(comp);
+}
+
+void features_reticule_widget_moved() {
+    reticule_widget_moved();
 }
 
 } // namespace halo
