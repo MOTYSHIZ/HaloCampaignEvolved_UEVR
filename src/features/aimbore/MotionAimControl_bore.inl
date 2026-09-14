@@ -1,0 +1,56 @@
+// aimbore (fork feature, Experimental): the aim along the drawn barrel (grip rotation, roll trim, weapon trim; axis modes 1-3) with the two-handed arc.
+// Textual fragment, included by MotionAimControl.cpp inside derive_ctrl_angles(), in the palette weapon branch. Moved verbatim; not compiled on its own.
+    // ---- AIMBORE (aimbore=1): the aim IS the drawn barrel. The palette renders the weapon as
+    // f(aim-fixed hand) * G * W in UE convention, f(q) = (-q.z, q.x, q.y, -q.w). f is a
+    // homomorphism, so the same pose in this XR frame is hand * f^-1(G) * f^-1(W), with
+    // f^-1(u) = (u.y, u.z, -u.x, -u.w) (checked numerically to 1e-15 over 2000 random poses; the AR
+    // trim alone gives +2.000 deg pitch, the measured barrel-over-aim). The gun is not touched.
+    // The two-handed hold stays ONE rotation for the whole assembly, as on the weapon: the shortest
+    // arc the blend puts on the hand forward is applied to the bore forward.
+    bool bore_done = false;
+    if (g_cfg.aim_bore != 0) {
+        float gq4[4], wq4[4];
+        if (palette_trim_rotations(gq4, wq4)) {
+            auto qn = [](Quat q) {
+                const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+                return (n > 1.0e-6f && std::isfinite(n)) ? Quat{q.x / n, q.y / n, q.z / n, q.w / n}
+                                                         : Quat{0.0f, 0.0f, 0.0f, 1.0f};
+            };
+            const Quat gx = qn(Quat{gq4[1], gq4[2], -gq4[0], -gq4[3]});
+            const Quat wx = qn(Quat{wq4[1], wq4[2], -wq4[0], -wq4[3]});
+            // The roll trim sits between the grip rotation and the weapon trim, as in the pullback.
+            const float rh = g_cfg.palette_roll_trim * 0.5f * DEG2RAD;
+            const Quat rx = qn(Quat{0.0f, 0.0f, -std::sin(rh), -std::cos(rh)});
+            // Barrel axis in the trimmed pose frame, UE convention, then mapped to this frame
+            // (x = ue.y, y = ue.z, z = -ue.x). Mode 1 is the pose forward (+X).
+            Vec3 b_ue{1.0f, 0.0f, 0.0f};
+            const bool live_axis = (g_cfg.aim_bore == 3) && g_barrel_axis_valid.load(std::memory_order_relaxed);
+            if (live_axis) {
+                b_ue = Vec3{g_barrel_axis_x.load(std::memory_order_relaxed), g_barrel_axis_y.load(std::memory_order_relaxed),
+                            g_barrel_axis_z.load(std::memory_order_relaxed)};
+            } else if (g_cfg.aim_bore >= 2) {
+                const float bp = g_cfg.aim_bore_axis[0] * DEG2RAD, byw = g_cfg.aim_bore_axis[1] * DEG2RAD;
+                b_ue = Vec3{std::cos(bp) * std::cos(byw), std::cos(bp) * std::sin(byw), std::sin(bp)};
+            }
+            const Vec3 b_xr{b_ue.y, b_ue.z, -b_ue.x};
+            Vec3 bore = quat_rotate(quat_mul(quat_mul(quat_mul(q_src, gx), rx), wx), b_xr);
+            {
+                const float bl = std::sqrt(bore.x * bore.x + bore.y * bore.y + bore.z * bore.z);
+                if (bl > 1.0e-4f) bore = Vec3{bore.x / bl, bore.y / bl, bore.z / bl};
+            }
+            Vec3 blended = fwd;
+            if (palette_two_hand_blend(&blended)) {
+                const float d = fwd.x * blended.x + fwd.y * blended.y + fwd.z * blended.z;
+                if (d > -0.99f) {
+                    const Quat arc = qn(Quat{fwd.y * blended.z - fwd.z * blended.y,
+                                             fwd.z * blended.x - fwd.x * blended.z,
+                                             fwd.x * blended.y - fwd.y * blended.x, 1.0f + d});
+                    bore = quat_rotate(arc, bore);
+                }
+            }
+            if (std::isfinite(bore.x) && std::isfinite(bore.y) && std::isfinite(bore.z)) {
+                fwd = bore;
+                bore_done = true;
+            }
+        }
+    }
