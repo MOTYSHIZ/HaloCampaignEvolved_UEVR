@@ -8,6 +8,7 @@
 #include "Rig.hpp"              // call_ret_vec3
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
 #include "Reticule.hpp"           // widget_quad_begin/finish -- THE one copy of the quad recipe
+#include "ArmDriver.hpp"          // palette_weapon_mode: hudwpnanchor 3
 #include "UeObject.hpp"
 #include "uevr/API.hpp"
 
@@ -22,6 +23,9 @@ using uevr::API;
 namespace halo {
 
 extern std::atomic<float> g_view_base_yaw;   // Plugin.cpp: the yaw handed to UEVR every frame
+// The palette weapon's world pose as last resolved (published in the palette weapon's Plugin.cpp block),
+// read only by hudwpnanchor 3 while armdriver 3 owns the weapon.
+extern std::atomic<float> g_dbg_pose_w_x, g_dbg_pose_w_y, g_dbg_pose_w_z, g_dbg_pose_w_w;
 
 std::atomic<bool> g_wristhud_lt{false};
 std::atomic<bool> g_wristhud_hide_cradle{false};
@@ -778,6 +782,140 @@ BlipViz s_bv[MAX_BLIPS];
 
 } // namespace
 
+// ================================================================================================
+// HUD PLACEMENT ON THE WEAPON (hudplacement=1). The panels ride the drawn weapon instead of the
+// forearms. The game tick resolves whether a first-person weapon is in hand and which actor it is
+// (class-name checks are tick work, not render work); the render thread reads the anchor transform
+// each frame, right where the wrist placement runs, and places every panel from it.
+//
+// THE ANCHOR, per hudwpnanchor (Config.hpp):
+//   1  RootComponent of the FP weapon actor. Rig.cpp: the weapon actor is attached to the arms rig at
+//      socket PrimaryWeapon, so its root follows that socket under either arm driver.
+//   2  GetSocketLocation / GetSocketRotation("PrimaryWeapon") on the arms rig component: the posed
+//      skeleton, read at the moment of the call. Under armdriver 1 the render-rate rig re-apply has
+//      already written this frame's rig transform earlier in the same callback; under armdriver 3 the
+//      render-output instruments (STOMPLOG point 12, SOCKROT) record this socket as the drawn gun.
+//   3  the palette weapon pose rotation (armdriver 3 only) at the socket position of 2.
+// ================================================================================================
+namespace {
+
+std::atomic<void*> s_wpn_root{nullptr};   // the FP weapon actor's RootComponent, published per tick
+std::atomic<bool>  s_wpn_live{false};     // a first-person weapon is in hand (Rig.cpp route check)
+
+struct WhWpnAnchor { Vec3 pos{}; Quat q{0.0f, 0.0f, 0.0f, 1.0f}; int how = 0; };
+
+// Game tick. Nothing while hudplacement is 0.
+void wh_weapon_anchor_tick() {
+    if (g_cfg.hud_placement != 1) {
+        s_wpn_live.store(false, std::memory_order_relaxed);
+        s_wpn_root.store(nullptr, std::memory_order_relaxed);
+        return;
+    }
+    const bool live = fp_weapon_route_alive();
+    s_wpn_root.store(live ? static_cast<void*>(fp_weapon_root()) : nullptr, std::memory_order_relaxed);
+    s_wpn_live.store(live, std::memory_order_relaxed);
+}
+
+// GetSocketRotation(FName) -> FRotator: FName at offset 0, the three doubles at offset 8.
+bool wh_socket_rot(API::UObject* comp, const wchar_t* socket, Vec3* out_pyr) {
+    if (comp == nullptr || out_pyr == nullptr) return false;
+    alignas(16) uint8_t params[RIG_PARAM_BUF] = {0};
+    API::FName name = make_fname(socket);
+    memcpy(params, &name, sizeof(int32_t) * 2);
+    comp->call_function(L"GetSocketRotation", params);
+    auto* d = reinterpret_cast<double*>(params + 8);
+    if (!std::isfinite(d[0]) || !std::isfinite(d[1]) || !std::isfinite(d[2])) return false;
+    *out_pyr = Vec3{(float)d[0], (float)d[1], (float)d[2]};
+    return true;
+}
+
+// Render thread. The weapon's world transform by the configured anchor; false = no usable anchor.
+bool wh_weapon_anchor(WhWpnAnchor* out) {
+    if (!s_wpn_live.load(std::memory_order_relaxed)) return false;
+    int how = g_cfg.hud_wpn_anchor;
+    if (how == 3 && !palette_weapon_mode()) how = 2;
+    if (how == 1) {
+        auto* root = static_cast<API::UObject*>(s_wpn_root.load(std::memory_order_relaxed));
+        Vec3 p{}, r{};
+        if (root == nullptr || !call_ret_vec3(root, L"K2_GetComponentLocation", &p) ||
+            !call_ret_vec3(root, L"K2_GetComponentRotation", &r)) return false;
+        out->pos = p; out->q = rotator_to_quat(r.x, r.y, r.z); out->how = 1;
+        return true;
+    }
+    auto* rig = static_cast<API::UObject*>(g_rig_component.load());
+    Vec3 p{};
+    if (rig == nullptr || !call_socket_location(rig, L"PrimaryWeapon", &p)) return false;
+    if (how == 3) {
+        const Quat q{g_dbg_pose_w_x.load(std::memory_order_relaxed), g_dbg_pose_w_y.load(std::memory_order_relaxed),
+                     g_dbg_pose_w_z.load(std::memory_order_relaxed), g_dbg_pose_w_w.load(std::memory_order_relaxed)};
+        const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (!(n > 0.5f) || !std::isfinite(n)) return false;
+        out->pos = p; out->q = Quat{q.x / n, q.y / n, q.z / n, q.w / n}; out->how = 3;
+        return true;
+    }
+    Vec3 r{};
+    if (!wh_socket_rot(rig, L"PrimaryWeapon", &r)) return false;
+    out->pos = p; out->q = rotator_to_quat(r.x, r.y, r.z); out->how = 2;
+    return true;
+}
+
+// Render thread. One panel onto its weapon slot. The tracker slot also hands back the ROOM-space
+// frame the radar dots are laid out in, the same frame the wrist path hands them.
+void wh_place_on_weapon(API::UObject* comp, const std::wstring& match, const WhWpnAnchor& a,
+                        const Vec3& hpos, int* other_idx, bool* tr_have, Vec3* tr_at, Vec3* tr_F,
+                        Vec3* tr_U, float* tr_p, float* tr_y, float* tr_r) {
+    float slot[6];
+    const bool tracker = match.find(L"MotionTracker") != std::wstring::npos;
+    const float* src = tracker ? g_cfg.hud_wpn_tracker
+                     : (match.find(L"ShieldHealth") != std::wstring::npos) ? g_cfg.hud_wpn_shield
+                     : (match.find(L"WeaponCradle") != std::wstring::npos) ? g_cfg.hud_wpn_ammo
+                     : g_cfg.hud_wpn_grenade;
+    for (int i = 0; i < 6; ++i) slot[i] = src[i];
+    const bool other = !tracker && match.find(L"ShieldHealth") == std::wstring::npos &&
+                       match.find(L"WeaponCradle") == std::wstring::npos &&
+                       match.find(L"GrenadeCradle") == std::wstring::npos;
+    if (other) slot[2] -= g_cfg.hud_wpn_gap * (float)(++(*other_idx));
+
+    const Quat qs = quat_mul(a.q, rotator_to_quat(slot[3], slot[4], slot[5]));
+    const Vec3 lo = quat_rotate(a.q, Vec3{slot[0], slot[1], slot[2]});
+    const Vec3 w{a.pos.x + lo.x, a.pos.y + lo.y, a.pos.z + lo.z};
+    float p = 0.0f, y = 0.0f, r = 0.0f;
+    quat_to_rotator(qs.x, qs.y, qs.z, qs.w, &p, &y, &r);
+    holster_marker_place_rot(comp, w, p, y, r);
+    holster_marker_scale(comp, (double)g_cfg.hud_wpn_scale);
+
+    if (tracker && !*tr_have) {
+        const Vec3 r0 = holster_world_to_room(w, hpos);
+        auto room_dir = [&](const Vec3& dw) {
+            const Vec3 r1 = holster_world_to_room(Vec3{w.x + dw.x * 10.0f, w.y + dw.y * 10.0f, w.z + dw.z * 10.0f}, hpos);
+            Vec3 o{r1.x - r0.x, r1.y - r0.y, r1.z - r0.z};
+            const float l = std::sqrt(o.x * o.x + o.y * o.y + o.z * o.z);
+            if (l > 1e-6f) { o.x /= l; o.y /= l; o.z /= l; }
+            return o;
+        };
+        *tr_have = true;
+        *tr_at = r0;
+        *tr_F = room_dir(quat_rotate(qs, Vec3{1.0f, 0.0f, 0.0f}));
+        *tr_U = room_dir(quat_rotate(qs, Vec3{0.0f, 0.0f, 1.0f}));
+        *tr_p = p; *tr_y = y; *tr_r = r;
+    }
+
+    if (g_cfg.hud_wpn_log) {
+        static uint32_t s_n = 0;
+        if ((s_n++ % 90u) == 0u) {
+            const Vec3 ax = quat_rotate(a.q, Vec3{1.0f, 0.0f, 0.0f});
+            const Vec3 ay = quat_rotate(a.q, Vec3{0.0f, 1.0f, 0.0f});
+            const Vec3 az = quat_rotate(a.q, Vec3{0.0f, 0.0f, 1.0f});
+            API::get()->log_info("[Halo-CampE-UEVR] HUDWPN anchor=%d pos=(%.1f %.1f %.1f) X=(%.2f %.2f %.2f) "
+                                 "Y=(%.2f %.2f %.2f) Z=(%.2f %.2f %.2f) | %ls at (%.1f %.1f %.1f) rot p%.1f y%.1f r%.1f",
+                                 a.how, a.pos.x, a.pos.y, a.pos.z, ax.x, ax.y, ax.z, ay.x, ay.y, ay.z, az.x, az.y, az.z,
+                                 match.c_str(), w.x, w.y, w.z, p, y, r);
+        }
+    }
+}
+
+} // namespace
+
 // DISCOVERY ONLY, once per game tick: census, hosting, and the per-tick colour chain. Placement
 // deliberately does NOT live here -- see wristhud_place().
 void wristhud_tick() {
@@ -785,6 +923,7 @@ void wristhud_tick() {
     tracker_dump_probe();
     tracker_mid_probe(s_tick);
     if (!g_cfg.wrist_hud) return;
+    wh_weapon_anchor_tick();   // hudplacement=1: the weapon anchor for the render thread
     parse_slots();
 
     auto* owner = API::get()->get_local_pawn(0);
@@ -839,6 +978,15 @@ void wristhud_place() {
         && get_pose(aidx, &apos, &arot, /*use_aim=*/false)
         && !(std::fabs(apos.x) < 1e-6f && std::fabs(apos.y) < 1e-6f && std::fabs(apos.z) < 1e-6f);
 
+    // ON THE WEAPON (hudplacement=1). With it 0, weapon_place and wpn_hide are false and nothing below
+    // changes: every panel takes the wrist path exactly as before.
+    const bool wpn_mode = g_cfg.hud_placement == 1;
+    const bool in_menu = wpn_mode && g_menu_active.load(std::memory_order_relaxed);
+    WhWpnAnchor wpn{};
+    const bool weapon_place = wpn_mode && have_head && !in_menu && wh_weapon_anchor(&wpn);
+    const bool wpn_hide = wpn_mode && !weapon_place && (in_menu || g_cfg.hud_wpn_fallback == 0);
+    int wpn_other = 0;
+
     // Local orientation trims composed as QUATERNIONS on the controller pose -- correct rotation
     // composition, not rotator addition. Each wrist has its own trim set: the two forearms are
     // mirror poses and shared numbers fit neither.
@@ -862,13 +1010,18 @@ void wristhud_place() {
         if (bind_now) bind_widget_slate_ui(comp);
         apply_widget_tint_scaled(comp, s_slots[si].right ? g_cfg.wrist_hud_gain_r : 1.0f, false);
         const bool right = s_slots[si].right;
-        const bool have = right ? have_r : have_l;
+        const bool have = weapon_place ? true : (wpn_hide ? false : (right ? have_r : have_l));
         const int  sidx = right ? idx_r++ : idx_l++;
         if (!have) { holster_marker_show(comp, false); continue; }
         holster_marker_show(comp, true);
         if (s_slots[si].match.find(L"WeaponCradle") != std::wstring::npos) {
             if (g_wristhud_hide_cradle.load(std::memory_order_relaxed)) wh_cradle_write_zero(s_slots[si].widget.get());
             else wh_cradle_restore();
+        }
+        if (weapon_place) {
+            wh_place_on_weapon(comp, s_slots[si].match, wpn, hpos, &wpn_other,
+                               &tr_have, &tr_at, &tr_F, &tr_U, &tr_p, &tr_y, &tr_r);
+            continue;
         }
 
         const Vec3& cpos = right ? apos : gpos;
@@ -947,7 +1100,7 @@ void wristhud_place() {
                          ? (rtest ? 1 : g_blip_count.load(std::memory_order_relaxed)) : 0;
         auto* mf = holster_mesh_frag();
         auto* mp = holster_mesh_plasma();
-        const float half = g_cfg.wrist_hud_draw * g_cfg.wrist_hud_scale / 200.0f;   // panel half-width, room metres
+        const float half = g_cfg.wrist_hud_draw * (weapon_place ? g_cfg.hud_wpn_scale : g_cfg.wrist_hud_scale) / 200.0f;   // panel half-width, room metres
         // Panel-plane axes.
         const Vec3 R{tr_F.y * tr_U.z - tr_F.z * tr_U.y,
                      tr_F.z * tr_U.x - tr_F.x * tr_U.z,
@@ -1100,8 +1253,10 @@ void wristhud_place() {
             // the two visual types scale differently off the same wristradarblip knob.
             static uint32_t s_last_team[MAX_BLIPS] = {0,0,0,0,0,0,0,0,0,0,0,0};
             static float s_last_gain = -1.0f;
-            const double dscale = (double)g_cfg.wrist_radar_blip * 2.5;
-            const double mscale = (double)g_cfg.wrist_radar_blip * 12.5;
+            // On the weapon the dots shrink with the panel; on the wrists the factor is exactly 1.
+            const double wpn_blip = weapon_place ? (double)g_cfg.hud_wpn_scale / (double)std::fmax(g_cfg.wrist_hud_scale, 0.001f) : 1.0;
+            const double dscale = (double)g_cfg.wrist_radar_blip * 2.5 * wpn_blip;
+            const double mscale = (double)g_cfg.wrist_radar_blip * 12.5 * wpn_blip;
             if (m == nullptr) {
                 if (owner == nullptr) continue;
                 API::UObject* mid = nullptr;

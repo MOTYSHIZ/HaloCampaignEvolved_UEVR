@@ -2714,6 +2714,37 @@ struct Config {
     float wrist_hud_off_r[3] = {0.0f, 0.0f, -0.22f};
     float wrist_hud_rot_r[3] = {0.0f, 90.0f, 90.0f};
     float wrist_hud_gap_r = 0.18f;
+    // HUD PLACEMENT (hudplacement, a sub-setting of wristhud): 0 = on the wrists (everything above,
+    // unchanged), 1 = on the sides of the held weapon. On the weapon, every panel rides the drawn weapon
+    // each render frame from one anchor transform; with no weapon in hand, in a menu, a seat or a
+    // cutscene it hides or falls back (hudwpnfallback). All of it lives in WristHud.cpp.
+    int   hud_placement = 0;
+    // The anchor the weapon-mounted panels read (hudwpnanchor):
+    //   1 = the weapon actor's RootComponent world transform (the actor is attached to the arms rig at
+    //       socket PrimaryWeapon, Rig.cpp).
+    //   2 = the PrimaryWeapon socket of the first-person arms skeleton, read from the posed skeleton
+    //       each frame (the socket the project's render-output instruments record as the drawn gun).
+    //   3 = the palette weapon pose rotation at that socket (armdriver 3 only; otherwise the same as 2).
+    int   hud_wpn_anchor = 2;
+    // Per-panel slot in the anchor's local frame: x, y, z (cm), then pitch, yaw, roll (deg) composed on
+    // the anchor rotation. The defaults assume the socket frame the render instruments use (barrel
+    // along -Y, so +X is the weapon's right and +Y points back at the shooter) and turn each panel's
+    // face (+X, the side a widget is read from) back toward the shooter, 35 deg outward and 25 deg up.
+    // Motion tracker on the RIGHT; shield, ammo and grenades stacked down the LEFT.
+    float hud_wpn_tracker[6] = { 9.0f, -4.0f,  3.0f, 25.0f,  55.0f, 0.0f};
+    float hud_wpn_shield[6]  = {-9.0f, -2.0f,  9.0f, 25.0f, 125.0f, 0.0f};
+    float hud_wpn_ammo[6]    = {-9.0f, -2.0f,  2.5f, 25.0f, 125.0f, 0.0f};
+    float hud_wpn_grenade[6] = {-9.0f, -2.0f, -4.0f, 25.0f, 125.0f, 0.0f};
+    // Any other hosted panel goes on the left below the grenade slot, this many cm apart.
+    float hud_wpn_gap = 6.5f;
+    // World scale of each weapon-mounted panel (the wrists use wristhudscale). The radar dots scale
+    // with it.
+    float hud_wpn_scale = 0.015f;
+    // No usable weapon anchor (unarmed, a weapon not yet resolved): 0 = hide the panels, 1 = show them
+    // on the wrists. Menus always hide them while hudplacement is 1.
+    int   hud_wpn_fallback = 1;
+    // About once a second: the anchor used, its world position, rotation and axes, and each panel.
+    bool  hud_wpn_log = false;
 
     // Object handle whose float fields to dump (~0.7 Hz), for finding the sim's own aim field.
     // e.g. blamobj=0x0001. 0 = off.

@@ -12,3 +12,13 @@
     if (_stricmp(key, "wristhudoffr")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.wrist_hud_off_r[0], &g_cfg.wrist_hud_off_r[1], &g_cfg.wrist_hud_off_r[2]); return true; }
     if (_stricmp(key, "wristhudrotr")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.wrist_hud_rot_r[0], &g_cfg.wrist_hud_rot_r[1], &g_cfg.wrist_hud_rot_r[2]); return true; }
     if (_stricmp(key, "wristhudgapr")    == 0) { g_cfg.wrist_hud_gap_r = clampf((float)v, 0.0f, 0.5f); return true; }
+    if (_stricmp(key, "hudplacement")   == 0) { g_cfg.hud_placement = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "hudwpnanchor")   == 0) { g_cfg.hud_wpn_anchor = (int)clampf((float)v, 1.0f, 3.0f); return true; }
+    if (_stricmp(key, "hudwpntracker")  == 0) { float* s = g_cfg.hud_wpn_tracker; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "hudwpnshield")   == 0) { float* s = g_cfg.hud_wpn_shield;  sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "hudwpnammo")     == 0) { float* s = g_cfg.hud_wpn_ammo;    sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "hudwpngrenade")  == 0) { float* s = g_cfg.hud_wpn_grenade; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "hudwpngap")      == 0) { g_cfg.hud_wpn_gap = clampf((float)v, 0.0f, 50.0f); return true; }
+    if (_stricmp(key, "hudwpnscale")    == 0) { g_cfg.hud_wpn_scale = clampf((float)v, 0.002f, 0.2f); return true; }
+    if (_stricmp(key, "hudwpnfallback") == 0) { g_cfg.hud_wpn_fallback = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "hudwpnlog")      == 0) { g_cfg.hud_wpn_log = (v != 0.0); return true; }

@@ -162,6 +162,7 @@ local HINTS = {
     -- Sub-settings of the switchable features (drawn nested under their feature, which greys them
     -- while it is off). `needs` = other settings that must be on for this one to do anything.
     roomscalethrottle = { t = "enum", items = { "through the left stick", "through the Spartan's own movement" }, values = { 0, 3 } },
+    hudplacement   = { t = "enum", items = { "On the wrists", "On the weapon" }, values = { 0, 1 } },
     heightmode     = { t = "choice", items = { "absolute", "seated", "eyes" } },
     heightsrc      = { t = "enum", items = { "automatic", "OpenXR stage", "OpenVR standing", "headset pose only" }, values = { 0, 1, 2, 3 } },
     heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 } },
@@ -217,7 +218,7 @@ local LABELS = {
     akmimic = "Reload step sounds", coophide = "Keep the gun empty until you reload (co-op)",
     hidesolo = "The same when playing alone", meleeleft = "Punch with your other hand too",
     meleespeed = "Swing speed needed", holstermarkers = "Holster markers", holsterradius = "Holster reach",
-    wristradar = "Radar dots on the motion tracker", forcetubekick = "Kick strength",
+    wristradar = "Radar dots on the motion tracker", hudplacement = "HUD placement", forcetubekick = "Kick strength",
     vehview = "View turns with the vehicle", vehhidebody = "Hide your body while seated",
     vehcamguard = "Hold the seat while the vehicle moves", vehcamhullcheck = "Check the vehicle body",
     roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",

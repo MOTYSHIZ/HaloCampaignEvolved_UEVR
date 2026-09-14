@@ -309,6 +309,8 @@
 #meleeleft=1
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
 #wristradar=1
+# Wrist HUD: where the panels sit (0 on the wrists, 1 on the sides of the weapon).
+#hudplacement=0
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
 # Vehicle seat camera: the view turns with the vehicle and stays level.
