@@ -201,6 +201,16 @@ typedef struct HaloVrLayerApi {
     // same struct_size discipline: call through XrLayerBridge.cpp: xrbridge_set_mono_screen.
     // Returns 1 when accepted, 0 when the layer is gated off.
     int (XRAPI_PTR *set_mono_screen)(float meters, float size);
+    // THE MODE-6 QUAD PLACEMENT. Mode 6 draws the movie as a head-locked quad centred on the
+    // forward gaze; these bias where it sits. `up_m` shifts it along the head's local UP axis in
+    // metres (negative LOWERS it -- the panel reads a little high by default because it is centred
+    // on eye-forward). `pitch_rad` tilts it about its local RIGHT axis in radians (negative pitches
+    // the top toward the viewer, to face a slightly downward gaze). BOTH DEFAULT 0 -> the shipped
+    // placement is unchanged, so a layer that never receives this call behaves exactly as before.
+    // Used only in mode 6; a no-op in mode 5 (which has no quad). Third append after ABI 1, same
+    // struct_size discipline -- call through XrLayerBridge.cpp: xrbridge_set_mono_place.
+    // Returns 1 when accepted, 0 when the layer is gated off.
+    int (XRAPI_PTR *set_mono_place)(float up_m, float pitch_rad);
 } HaloVrLayerApi;
 
 // THE SIZE ABI 1 SHIPPED WITH -- every field above the append line. A layer reporting at least

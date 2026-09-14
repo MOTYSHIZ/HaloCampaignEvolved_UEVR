@@ -146,6 +146,11 @@
 # like a screen further away. Default 0.75 is a comfortable cinema frame. Your eyes always focus
 # on it at the same distance as the subtitles and menus, whatever the size, so nothing doubles.
 #cutscenesize=0.75
+# Where that screen sits, if it rests a little high or low for you. cutsceneup shifts it up/down in
+# centimetres (negative = lower it); cutscenepitch tilts it in degrees (negative tips the top toward
+# you, to face a slightly downward gaze). Both 0 = centred straight ahead. Take effect live.
+#cutsceneup=0
+#cutscenepitch=0
 
 # ==================================== RETICULE (world-space) ====================================
 # The mod draws the game's own crosshair out in the world, exactly where your shots will land
