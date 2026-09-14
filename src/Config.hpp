@@ -635,6 +635,13 @@ struct Config {
     // while orientation kept flipping. This is the other half.
     // SHIPS ON (2026-08-23), together with rig_socket below -- they are two halves of one fix and
     // splitting them was an error on our side, not his design.
+    //
+    // RIG MODE 2 ONLY. Direct drive (rigmode=3, the default) never cancelled the socket's rotation
+    // and should not: it drives the MESH and keeps that rotation on the weapon, which is also where
+    // the stock per-weapon hold, recoil and sway arrive (measured ~17 deg on 2026-09-13, not the few
+    // degrees above). The END solve must therefore fit mode 3 against the mesh, and until 2026-09-13
+    // it did not -- every mode-3 calibration snapped the weapon's rotation by the socket's at
+    // release. See the release solve in Plugin.cpp.
     bool  rig_sock_rot = true;
     // Cancel the MEASURED weapon-to-component separation instead of the pinned piv_* constant.
     // The weapon is socketed onto the rig mesh, so that separation is the only term standing
