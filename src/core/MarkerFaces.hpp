@@ -39,6 +39,9 @@ void marker_render_anchor(uevr::API::UObject* comp, const Vec3& room);
 void marker_render_anchor_rot(uevr::API::UObject* comp, const Vec3& room, float pitch, float yaw, float roll);
 void marker_render_drop(uevr::API::UObject* comp);   // hidden or retired: stop re-placing it
 void markers_render_place();                          // the render pass (stereo callback, once per frame)
+// The rendered camera position (g_cam_*), from the stereo pre-callback's view position, for the render pass and
+// every room->world placed against the frame (SVC_MARKER_ANCHOR).
+void marker_camera_publish();
 
 // The richer faces the vehicle wheel uses: name-list spawn with per-axis scale (a squashed
 // sphere reads as a disc), placement with orientation, and the hull-frame transforms that make

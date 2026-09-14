@@ -24,6 +24,7 @@
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
+#include "CutsceneDump.hpp"
 #include "core/PalettePose.hpp"
 #include "core/UnitState.hpp"
 #include "core/WeaponObject.hpp"
@@ -143,6 +144,8 @@ void features_render_frame() {
 }
 
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_post_eye_sample != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_sample(index);
     const HeadClamp* clamp = nullptr;
     for (const FeatureHooks* f : kFeatureList)
         if (f->head_clamp != nullptr && f->enabled != nullptr && f->enabled()) { clamp = f->head_clamp; break; }
@@ -371,7 +374,11 @@ void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
 bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
 void features_turn_snap_note(float step) { stability_turn_snap_note(step); }
-void features_teardown_early() { stability_teardown_early(); }
+void features_teardown_early() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->teardown != nullptr) f->teardown();
+    stability_teardown_early();
+}
 void features_teardown_restore() { stability_teardown_restore(); }
 
 void features_holster_pouch_offhand(bool ghand_ok, const Vec3& ghand, const Vec3& pouch) {
@@ -538,6 +545,84 @@ bool features_pose_latched(UEVR_TrackedDeviceIndex idx, bool use_aim, uevr::API:
     for (const FeatureHooks* f : kFeatureList)
         if (f->pose_latched != nullptr && f->enabled != nullptr && f->enabled() && f->pose_latched(idx, use_aim, out)) return true;
     return false;
+}
+
+// ---- THE AUTHOR'S PLUGIN CALLBACKS
+void features_game_tick_after_blam_drive() {
+    blam_capture_hook_tick();   // core: the object capture pre-hook follows rack availability every tick
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_blam_drive != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_blam_drive();
+}
+void features_game_tick_before_vehicle() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_before_vehicle != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_before_vehicle();
+}
+void features_game_tick_after_vehicle(uint32_t tick) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_vehicle != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_vehicle(tick);
+}
+void features_game_tick_after_gestures(float dt) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_gestures != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_gestures(dt);
+}
+void features_engine_tick_start() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->engine_tick_start != nullptr && f->enabled != nullptr && f->enabled()) f->engine_tick_start();
+}
+void features_engine_tick_end() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->engine_tick_end != nullptr && f->enabled != nullptr && f->enabled()) f->engine_tick_end();
+}
+void features_post_engine_tick() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->post_engine_tick != nullptr && f->enabled != nullptr && f->enabled()) f->post_engine_tick();
+}
+bool features_fp_weapon_live() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->fp_weapon_live != nullptr && f->enabled != nullptr && f->enabled() && f->fp_weapon_live()) return true;
+    return false;
+}
+void features_rig_parent_dropped() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->rig_parent_dropped != nullptr) f->rig_parent_dropped();
+}
+bool features_rig_driver_stood_down() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->rig_driver_stood_down != nullptr && f->rig_driver_stood_down()) return true;
+    return false;
+}
+void features_stereo_post_eye_late(int index) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_post_eye_late != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_late(index);
+}
+void features_aim_law_sampling() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_law_sampling != nullptr && f->enabled != nullptr && f->enabled()) f->aim_law_sampling();
+}
+void features_aim_law_sampled(double ay, double ap) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_law_sampled != nullptr && f->enabled != nullptr && f->enabled()) f->aim_law_sampled(ay, ap);
+}
+void features_stereo_pre_eye_rendered(int index) {
+    // The rendered camera position, for the marker layer's room->world (Markers.cpp).
+    if (service_active(SVC_MARKER_ANCHOR)) marker_camera_publish();
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_pre_eye_instruments != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_pre_eye_instruments(index);
+    // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
+    // frame is drawn from, so the forearm panels land against it instead of against a camera
+    // several milliseconds stale. Once per frame, not per eye.
+    if (index == 0) {
+        features_render_frame();
+        markers_render_place();
+        for (const FeatureHooks* f : kFeatureList)
+            if (f->render_refresh != nullptr && f->enabled != nullptr && f->enabled()) f->render_refresh();
+    }
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->stereo_pre_eye_meters != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_pre_eye_meters(index);
+}
+void features_render_callbacks_register() {
+    // Dev-only eye dump (a no-op stub in player builds): a render callback, so registered here.
+    cutscene_dump_register();
 }
 
 void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }

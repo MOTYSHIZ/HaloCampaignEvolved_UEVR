@@ -1,5 +1,237 @@
-// palettewpn (fork feature, Experimental): the per-tick palette weapon work: arm hide, rendered-hand poses, parent frame, projection scale, judder and barrel instruments, mesh constants, axis probe.
-// Textual fragment, included by Plugin.cpp inside update(), after the per-weapon deltas. Moved verbatim; not compiled on its own.
+#include "features/palettewpn/PaletteFrame.hpp"
+
+#include "Arms.hpp"
+#include "BlamPalette.hpp"
+#include "Config.hpp"
+#include "Markers.hpp"
+#include "Math.hpp"
+#include "MotionAimControl.hpp"
+#include "PaletteTwoHand.hpp"
+#include "Reticule.hpp"
+#include "Rig.hpp"
+#include "TwoHandAim.hpp"
+#include "UeObject.hpp"
+#include "WeaponCalib.hpp"
+#include "WeaponOffset.hpp"
+#include "core/fixes/TickStage.hpp"   // g_tick_stage
+#include "core/host/ArmsState.hpp"   // arms_hide_update
+#include "core/host/PluginState.hpp"
+#include "features/palettewpn/PaletteArmDriver.hpp"
+#include "features/palettewpn/PaletteReadbacks.hpp"
+#include "features/palettewpn/PoseLatch.hpp"
+#include "uevr/API.hpp"
+
+#include <Windows.h>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+
+using namespace uevr;
+
+namespace halo {
+
+// ---- CROSS-MODULE PUBLISHES (namespace halo: BlamPalette/WeaponCalib extern these).
+// The rendered-view pitch, published beside the yaw for the palette's frame math.
+std::atomic<float> g_dbg_view_in_pitch{0.0f};
+
+// The yaw the stereo callback actually OUTPUT this frame -- the rendered base the palette's lock
+// correction divides against. Stored on every path through the callback (passthrough when the
+// lock is off or unprimed, the assigned value when it holds), so the palette maths reads what was
+// really rendered instead of rebuilding locked+turn from parts. In namespace halo for
+// BlamPalette.cpp; written from the render thread, read on the game tick -- one frame of
+// staleness during a snap turn, invisible next to the turn itself.
+
+// ---- THE MESH-VS-CAMERA CONSTANTS, for the palette's world-space pullback.
+//
+// The sweep proved the palette's camera error is a TRANSLATION: the FP mesh hangs off the
+// rotating camera on a lever, so aim swings sweep the whole bone frame through the world --
+// metre-scale, unfixable by any rotation of the bones. The fix is to aim the bones at a WORLD
+// target (the same one rigmode's proven math produces) and pull it back through the mesh's
+// actual world transform. That transform decomposes as
+//     comp_rot = cam * M                where M  = conj(cam) * comp_rot     (rotation constant)
+//     comp_pos = parent_pos + cam * v0  where v0 = conj(cam) * (comp - parent)  (lever constant)
+// with cam = the aim rotator -- the ONE volatile term, which the sim-side hook can read FRESH at
+// build time. M and v0 are constants of the rig (mesh-authoring yaw, camera-to-mesh lever),
+// measured here on the game thread where reflected reads are possible, published for the hook.
+// If they are NOT constant the model is wrong, so their drift is measured and printed too -- a
+// drifting "constant" is a theory failing loudly, which is the only acceptable way left.
+std::atomic<float> g_meshM_x{0.0f}, g_meshM_y{0.0f}, g_meshM_z{0.0f}, g_meshM_w{1.0f};
+std::atomic<float> g_meshV0_x{0.0f}, g_meshV0_y{0.0f}, g_meshV0_z{0.0f};
+// The GAME THREAD's camera, published each tick from the mesh-constant block below -- the same
+// read, same thread, same moment as the transform the FP mesh is built from. The palette build
+// consumes THIS (palettecam=6) instead of reading ControlRotation from the sim thread at a
+// different moment: the right-hand-only flicks were the gap between those two moments.
+std::atomic<float> g_tick_cam_p{0.0f}, g_tick_cam_y{0.0f};
+std::atomic<long long> g_tick_cam_ms{0};
+// The mesh's OWN rotation at the same game-thread instant (palettecam=8's source): the one
+// epoch-consistent sample of the transform the tick will render, no render-thread K2 read.
+std::atomic<float> g_tick_mrot_x{0.0f}, g_tick_mrot_y{0.0f}, g_tick_mrot_z{0.0f}, g_tick_mrot_w{1.0f};
+// MESHCONST instrument (Config.hpp mesh_const): how far the camera moved BETWEEN the two
+// ControlRotation reads that bracket the reflected mesh read, in degrees. This is the
+// contamination in M, measured directly, per tick. g_meshM_age_ms says how old the M currently
+// in use is, so a held-but-clean M cannot be mistaken for a fresh one.
+// The tick publishes THREE things that only mean anything together, cam_tick, M and the mesh
+// rotation Q_tick, and until now they were three unsynchronised relaxed stores. A reader that
+// straddles a tick gets cam from tick N with M from tick N-1, and since M = conj(cam) x Q the
+// product then misses by exactly one tick of camera motion, which is the same magnitude as the
+// judder. Odd seq means a write is in progress. Same doctrine as g_p_seq.
+std::atomic<unsigned> g_tick_seq{0};
+std::atomic<float> g_meshM_brk_deg{0.0f};
+std::atomic<long long> g_meshM_acc_ms{0};
+std::atomic<unsigned> g_meshM_acc{0}, g_meshM_rej{0};
+// The engine tick counter, bumped at tick start -- palbuildgate=4 keys "first build this tick"
+// on it, and it costs one relaxed add whether or not anything reads it.
+std::atomic<unsigned> g_tick_id{0};
+
+// ---- STOMPLOG (Config.hpp stomp_log). Points: 0 = engine-tick start, 1 = stereo pre eye 0,
+// 2 = stereo pre eye 1, 3 = stereo post eye 0. Single ring; concurrent writers use an atomic
+// index; a torn row is one bad sample in a hunt instrument.
+namespace stomplog {
+struct Row { double t_ms; int point; float yaw; float e0; float e1; float e2; };
+// CIRCULAR since 2026-09-11: the ring holds the LAST ~100 s instead of the first, so the key
+// can stay ON all session and a flush (key to 0, or teardown) dumps the freshest window --
+// "all of the logging is on" as a standing state, not a 60-second appointment.
+constexpr int kCap = 60000;
+Row g_rows[kCap];
+std::atomic<int> g_n{0};
+std::atomic<bool> g_was_on{false};
+int g_seq = 0;
+double now_ms() {
+    return std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace stomplog
+void stomp_flush() {
+    if (stomplog::g_was_on.load(std::memory_order_relaxed)) {
+        {
+            const int n = stomplog::g_n.exchange(0, std::memory_order_relaxed);
+            stomplog::g_was_on.store(false, std::memory_order_relaxed);
+            if (n > 0 && g_cfg_path[0] != '\0') {
+                char path[MAX_PATH]; strncpy_s(path, sizeof(path), g_cfg_path, _TRUNCATE);
+                char* slash = strrchr(path, '\\');
+                if (slash != nullptr) {
+                    char leaf[64]; sprintf_s(leaf, "halo_vr_stomp_%03d.csv", stomplog::g_seq++);
+                    slash[1] = '\0'; strncat_s(path, sizeof(path), leaf, _TRUNCATE);
+                    FILE* f = nullptr;
+                    if (fopen_s(&f, path, "wb") == 0 && f != nullptr) {
+                        fprintf(f, "t_ms,point,yaw,e0,e1,e2\r\n");
+                        const int m = n < stomplog::kCap ? n : stomplog::kCap;
+                        const int start = (n > stomplog::kCap) ? (n % stomplog::kCap) : 0;
+                        for (int i = 0; i < m; ++i) {
+                            const stomplog::Row& rw = stomplog::g_rows[(start + i) % stomplog::kCap];
+                            fprintf(f, "%.3f,%d,%.4f,%.4f,%.4f,%.4f\r\n", rw.t_ms, rw.point, rw.yaw, rw.e0, rw.e1, rw.e2);
+                        }
+                        fclose(f);
+                        API::get()->log_info("[Halo-CampE-UEVR] STOMPLOG: %d samples -> %hs", m, leaf);
+                    }
+                }
+            }
+        }
+    }
+}
+// The periodic variant: the mode-6 test was lost when the rolling ring overwrote it during
+// typing time -- evidence must land on disk BEFORE it can age out. Ring snapshot on the game
+// thread (~1.5 MB copy, sub-millisecond), CSV written by a detached thread. Torn rows from
+// writers racing the copy are a few bad samples in a hunt instrument.
+static void stomp_flush_async() {
+    const int n = stomplog::g_n.exchange(0, std::memory_order_relaxed);
+    if (n <= 0 || g_cfg_path[0] == '\0') return;
+    const int m = n < stomplog::kCap ? n : stomplog::kCap;
+    const int start = (n > stomplog::kCap) ? (n % stomplog::kCap) : 0;
+    auto* buf = new stomplog::Row[m];
+    for (int i = 0; i < m; ++i) buf[i] = stomplog::g_rows[(start + i) % stomplog::kCap];
+    char path[MAX_PATH]; strncpy_s(path, sizeof(path), g_cfg_path, _TRUNCATE);
+    char* slash = strrchr(path, '\\');
+    if (slash == nullptr) { delete[] buf; return; }
+    char leaf[64]; sprintf_s(leaf, "halo_vr_stomp_%03d.csv", stomplog::g_seq++);
+    slash[1] = '\0'; strncat_s(path, sizeof(path), leaf, _TRUNCATE);
+    std::string spath(path);
+    std::thread([buf, m, spath]() {
+        FILE* f = nullptr;
+        if (fopen_s(&f, spath.c_str(), "wb") == 0 && f != nullptr) {
+            fprintf(f, "t_ms,point,yaw,e0,e1,e2\r\n");
+            for (int i = 0; i < m; ++i)
+                fprintf(f, "%.3f,%d,%.4f,%.4f,%.4f,%.4f\r\n", buf[i].t_ms, buf[i].point, buf[i].yaw, buf[i].e0, buf[i].e1, buf[i].e2);
+            fclose(f);
+            API::get()->log_info("[Halo-CampE-UEVR] STOMPLOG auto-flush: %d samples -> %hs", m, spath.c_str());
+        } else { }
+        delete[] buf;
+    }).detach();
+}
+static void stomp_sample(int point) {
+    if (g_cfg.stomp_log == 0) { stomp_flush(); return; }
+    if (point == 0 && stomplog::g_n.load(std::memory_order_relaxed) >= (stomplog::kCap * 4) / 5)
+        stomp_flush_async();
+    stomplog::g_was_on.store(true, std::memory_order_relaxed);
+    auto* comp = rig_tracked_component();
+    if (comp == nullptr) return;
+    Vec3 crot{};
+    if (!call_ret_vec3(comp, L"K2_GetComponentRotation", &crot)) return;
+    const Quat M{halo::g_meshM_x.load(std::memory_order_relaxed), halo::g_meshM_y.load(std::memory_order_relaxed),
+                       halo::g_meshM_z.load(std::memory_order_relaxed), halo::g_meshM_w.load(std::memory_order_relaxed)};
+    const Quat cam = quat_mul(rotator_to_quat(crot.x, crot.y, crot.z), quat_conj(M));
+    float p = 0.0f, y = 0.0f, r = 0.0f;
+    quat_to_rotator(cam.x, cam.y, cam.z, cam.w, &p, &y, &r);
+    // Beside the mesh camera: the tick id and ControlRotation AT THIS SAME INSTANT, so the CSV
+    // shows when the game updates each of the three within the tick, not just the mesh.
+    double scp = 0.0, scy = 0.0;
+    if (!read_control_rotation_hook(&scp, &scy)) { scp = 0.0; scy = 0.0; }
+    const int i = stomplog::g_n.fetch_add(1, std::memory_order_relaxed);
+    stomplog::g_rows[i % stomplog::kCap] = stomplog::Row{stomplog::now_ms(), point, y,
+        (float)g_tick_id.load(std::memory_order_relaxed), (float)scy, (float)scp};
+}
+// The SIM-THREAD entry into the same ring (hooked_pose stamps its builds here). No UObject
+// reads -- the caller supplies the values -- so it is safe from any thread; the atomic index
+// makes ring order a true arrival order across threads. Points 4..7 = build calls,
+// 4 + weapon_slot*2 + (capture ? 0 : 1). Flushing stays with stomp_sample on the tick.
+void stomp_mark(int point, float yaw, float e0, float e1, float e2) {
+    if (g_cfg.stomp_log == 0) return;
+    const int i = stomplog::g_n.fetch_add(1, std::memory_order_relaxed);
+    stomplog::g_rows[i % stomplog::kCap] = stomplog::Row{stomplog::now_ms(), point, yaw, e0, e1, e2};
+}
+std::atomic<bool>  g_mesh_const_valid{false};
+// Where the hook last WROTE node 8 (palette units), published so the game thread's TRACE-NODE8
+// can put it beside the socket read back from the posed skeleton, in the same frame.
+std::atomic<float> g_dbg_node8_x{0.0f}, g_dbg_node8_y{0.0f}, g_dbg_node8_z{0.0f};
+// The palette's WORLD pose as last resolved (view-lifted, grip fix included, before the camera
+// divide), published so TRACE-BARREL can solve the barrel->aim correction in the pose's own frame.
+std::atomic<float> g_dbg_pose_w_x{0.0f}, g_dbg_pose_w_y{0.0f}, g_dbg_pose_w_z{0.0f}, g_dbg_pose_w_w{1.0f};
+// The barrel axis IN THE PALETTE POSE'S FRAME: conj(pose_w) * (socket -Y in world), measured on the
+// game thread from the posed skeleton and averaged over still rows. A constant of the mesh, not
+// of the player. Consumed by the pullback's barrel lock (see Config::palette_barrel_lock).
+std::atomic<float> g_barrel_axis_x{0.0f}, g_barrel_axis_y{0.0f}, g_barrel_axis_z{0.0f};
+std::atomic<bool>  g_barrel_axis_valid{false};
+// The camera the projection-scale fix was last applied to (see the FPSCALE block in the
+// tick). Reset when the rig re-resolves so a new camera object is fixed again.
+API::UObject* g_fpscale_camera = nullptr;
+
+// Called by the arm driver arbiter when the aim owner changes (the author's rig and shotpoint aim
+// versus the palette weapon, armdriver mode 3). Dropping the reference makes the next tick
+// re-capture it against where the game is aiming now, so the view does not jump by the old owner's
+// offset. The rig neutral is dropped with it. No calibration file is touched.
+void aim_reanchor_request(const char* why) {
+    std::atomic<bool>& g_have_ref = *host::g_plugin_state.have_ref;
+    g_have_ref = false;
+    g_rig_neutral_valid = false;
+    API::get()->log_info("[Halo-CampE-UEVR] AIM: reference dropped (%s) -- re-captures next tick",
+                         why != nullptr ? why : "?");
+}
+
+// ================================================================ THE PLUGIN HOOKS
+
+// Separate address, separate hook, so no ownership handshake with the aim write is needed.
+void palette_wpn_game_tick_after_blam_drive() { blam_palette_hook_tick(); }
+
+void palette_wpn_game_tick_before_vehicle() {
+    // ---- PER-WEAPON DELTAS: every tick. After the config reload above (a reload restores the
+    // calibrated base and would wipe an applied adjustment), before anything below reads
+    // grip/off. Re-captures its base only when g_cfg_load_gen changes, so per-tick is safe.
+    weapon_offset_update();
+
     // ---- PALETTE WEAPON MODE (armdriver 3, experimental). The fork's per-tick placement work, at
     // the fork's position in the tick: the FP arm hide (arms_update, which normally calls it, only
     // runs under UeRig), then the rendered-hand poses the sim-thread palette hook composes from.
@@ -19,7 +251,10 @@
     // position up to half a second stale -- the gun swung toward where you USED to point.
     // The two-hand hold: latch, blend ramp, haptics. After the pose publish on purpose -- both
     // read the same grip state, and this one must see it settled for this tick.
-    features_game_tick_vehicle();
+}
+
+void palette_wpn_game_tick_after_vehicle(uint32_t tick) {
+    std::atomic<float>& g_locked_view_yaw = *host::g_plugin_state.locked_view_yaw;
 
     // ---- THE PARENT FRAME, MEASURED RATHER THAN MODELLED -- published for the palette weapon.
     //
@@ -565,3 +800,265 @@
             s_prev_phase = phase;
         }
     }
+}
+
+void palette_wpn_game_tick_after_gestures(float delta) {
+    // PALETTE WEAPON MODE: the fork's two-hand hold, after the gestures (its latch must
+    // see the reload/rack state they settled) and before the holsters, as the fork ran it.
+    if (palette_weapon_mode()) halo::palette_two_hand_update(delta);
+}
+
+void palette_wpn_engine_tick_start() {
+    // The game thread's id and the tick phase, for the sim hook's phase instrument (see
+    // BlamPalette.hpp): the palette hook tells 'inside the engine tick' from 'from the sim
+    // thread' by these two.
+    g_game_tid.store((uint32_t)GetCurrentThreadId(), std::memory_order_relaxed);
+    halo::g_tick_id.fetch_add(1, std::memory_order_relaxed);
+    stomp_sample(0);
+    {   // Point 24: the Blam control record at tick start, before this tick's writes.
+        float ry = 0.0f, rp = 0.0f;
+        if (g_cfg.stomp_log != 0 && halo::blam_ctl_read_ue_deg(&ry, &rp))
+            halo::stomp_mark(24, ry, rp, (float)halo::g_tick_id.load(std::memory_order_relaxed),
+                             (float)halo::g_latch_gen.load(std::memory_order_relaxed));
+    }
+    // POSELATCH sites 1/2 (palette weapon mode): the frame's one hand sample, taken before
+    // anything this frame reads it and before update() publishes the palette poses.
+    halo::pose_latch_refresh(1);
+}
+
+// The engine tick's phase, for the sim hook's phase instrument (see BlamPalette.hpp).
+void palette_wpn_engine_tick_end() { g_engine_phase.store(1, std::memory_order_relaxed); }
+void palette_wpn_post_engine_tick() { g_engine_phase.store(0, std::memory_order_relaxed); }
+
+bool palette_wpn_fp_weapon_live() {
+    // The palette build is POSITIVE proof of a rendered first-person weapon -- available
+    // even with the rig driver off (rig=0, the palette-weapon configuration), where the
+    // rig/route signals read absent and would otherwise park the aim stack in stick mode
+    // while standing armed on foot.
+    return palette_weapon_mode() && blam_palette_fp_live();
+}
+
+void palette_wpn_rig_parent_dropped() {
+    g_fpscale_camera = nullptr;   // new parent => the projection-scale fix re-applies
+}
+
+bool palette_wpn_rig_driver_stood_down() {
+    // Everything below is the RIG DRIVER, and only rigmode wants it. With the palette weapon
+    // owning placement, running both would be two systems fighting over one skeleton.
+    // palette_weapon_mode() stands the rig driver down even with rig=1: armdriver mode 3 owns placement.
+    return palette_weapon_mode();
+}
+
+void palette_wpn_stereo_pre_eye_instruments(int index) {
+    const auto& ps = host::g_plugin_state;
+    const std::atomic<float>& g_dbg_view_out = *ps.dbg_view_out;
+    const std::atomic<bool>&  g_stick_mode = *ps.stick_mode;
+    // The RENDERED base yaw, published for the palette's frame math (see the declaration).
+    halo::g_view_base_yaw.store(g_dbg_view_out.load(), std::memory_order_relaxed);
+
+    // READBACK: the last point before the draw. Does the palette still hold our bytes?
+    if (index == 0) halo::blam_palette_readback_probe();
+    // ---- SOCKROT (2026-09-12). THE DRAWN WEAPON'S ROTATION, never once measured.
+    //
+    // Everything upstream is proven clean. READBACK says the palette holds our exact bytes at
+    // draw time (0.000 cm, 0.02 deg of float noise). RELSTOCK says the stock node relations
+    // are dead constants (per-frame change 0.0000). The publisher is transparent (gain 1.01 in
+    // every band). The camera is not the carrier -- palettelocal removed it entirely and the
+    // judder survived. So the palette contains precisely what we intend.
+    //
+    // And yet point 12, the only drawn-result recorder in this project, logs the socket's
+    // POSITION only. The complaint is rotational, and a socket sitting on the wrist barely
+    // moves in position while its ROTATION swings the muzzle 60 cm away. So the one quantity
+    // that corresponds to the symptom has never been recorded. rig_socket_world_rot has
+    // existed the whole time and was never called from here.
+    if (index == 0 && g_cfg.palette_weapon_log && palette_weapon_mode()) {
+        auto* srcomp = rig_tracked_component();
+        Vec3 srot{};
+        if (srcomp != nullptr && rig_socket_world_rot(srcomp, L"PrimaryWeapon", &srot)) {
+            const Quat sq = rotator_to_quat(srot.x, srot.y, srot.z);
+            halo::blam_palette_sockrot_probe(sq.x, sq.y, sq.z, sq.w);
+            // SAMEINST: component rotation and aim read right beside the socket, same callback,
+            // same thread, so nothing published by another thread enters the comparison.
+            Vec3 crot2{};
+            if (call_ret_vec3(srcomp, L"K2_GetComponentRotation", &crot2)) {
+                const Quat cq2 = rotator_to_quat(crot2.x, crot2.y, crot2.z);
+                double ap = 0.0, ay = 0.0;
+                const bool aok = read_control_rotation_hook(&ap, &ay);
+                halo::blam_palette_sameinst_probe(sq.x, sq.y, sq.z, sq.w, cq2.x, cq2.y, cq2.z, cq2.w,
+                                                  (float)ap, (float)ay, aok);
+            }
+        }
+    }
+    stomp_sample(index == 0 ? 1 : 2);
+    if (index == 0) halo::blam_palette_stamp_bank();
+    // Point 12: the RENDERED gun, the chain's final output. PrimaryWeapon socket of the
+    // posed skeleton, world cm, once per frame. Judder that survives every upstream zero
+    // must appear here as a back-and-forth world path -- and if this path is smooth while
+    // the headset still shows judder, the defect is beyond the skeleton (view/reprojection).
+    if (index == 0 && g_cfg.stomp_log != 0) {
+        auto* s12 = rig_tracked_component();
+        Vec3 s12p{};
+        if (s12 != nullptr && rig_socket_world(s12, L"PrimaryWeapon", &s12p))
+            halo::stomp_mark(12, s12p.x, s12p.y, s12p.z,
+                             halo::g_view_base_yaw.load(std::memory_order_relaxed));
+    }
+    // ---- RAYGUN (2026-09-12). From the headset: "check that the aim ray moves / rotates the exact same
+    // way as the weapon positioning." Every render frame, same callback, same instant:
+    //   point 20  yaw = aim ray yaw (ControlRotation), e0 = aim ray pitch,
+    //             e1 = hand intent yaw (desired_aim_now, what both writers are given), e2 = intent pitch
+    //   point 21  yaw = drawn barrel yaw (socket -Y), e0 = barrel pitch,
+    //             e1 = angle barrel to aim ray (deg), e2 = angle barrel to intent (deg)
+    // An overshoot-and-snap-back shows as the barrel (or the aim) running past the intent for
+    // one frame and returning, which the per-frame series makes a number instead of a feeling.
+    if (index == 0 && g_cfg.stomp_log != 0) {
+        double rcp = 0.0, rcy = 0.0;
+        float riy = 0.0f, rip = 0.0f;
+        const bool r_aim = read_control_rotation_hook(&rcp, &rcy);
+        const bool r_int = halo::desired_aim_now(&riy, &rip);
+        if (r_aim) halo::stomp_mark(20, (float)rcy, (float)rcp, r_int ? riy : -999.0f, r_int ? rip : -999.0f);
+        {   // Point 27: at render, the generation this thread was served and the Blam record.
+            float bry = -999.0f, brp = -999.0f;
+            halo::blam_ctl_read_ue_deg(&bry, &brp);
+            halo::stomp_mark(27, bry, brp, (float)halo::pose_latch_last_gen(),
+                             (float)halo::g_tick_id.load(std::memory_order_relaxed));
+        }
+        auto* rgc = rig_tracked_component();
+        Vec3 rgrot{};
+        if (rgc != nullptr && rig_socket_world_rot(rgc, L"PrimaryWeapon", &rgrot)) {
+            const Quat rq = rotator_to_quat(rgrot.x, rgrot.y, rgrot.z);
+            const Vec3 ry = quat_rotate(rq, Vec3{0, 1, 0});
+            const Vec3 bd{-ry.x, -ry.y, -ry.z};
+            const float by = std::atan2(bd.y, bd.x) * RAD2DEG;
+            const float bp = std::asin(clampf(bd.z, -1.0f, 1.0f)) * RAD2DEG;
+            auto dir_of = [](float pdeg, float ydeg) {
+                const float pr = pdeg * DEG2RAD, yr = ydeg * DEG2RAD;
+                return Vec3{std::cos(pr) * std::cos(yr), std::cos(pr) * std::sin(yr), std::sin(pr)};
+            };
+            auto ang = [](const Vec3& a, const Vec3& b) {
+                return std::acos(clampf(a.x * b.x + a.y * b.y + a.z * b.z, -1.0f, 1.0f)) * RAD2DEG;
+            };
+            const float to_aim = r_aim ? ang(bd, dir_of((float)rcp, (float)rcy)) : -999.0f;
+            const float to_int = r_int ? ang(bd, dir_of(rip, riy)) : -999.0f;
+            halo::stomp_mark(21, by, bp, to_aim, to_int);
+        }
+    }
+    // ---- FPPIN (Config.hpp fp_pin): the FP mesh is re-anchored on the VIEW frame before
+    // the palette refresh reads it back. Pitch is ControlRotation's (the lock owns yaw
+    // only); yaw is the one this frame renders. Fails closed on any missing ingredient.
+    if (index == 0 && g_cfg.fp_pin != 0 && g_cfg.pal_render == 1 && palette_weapon_mode()
+        && !g_stick_mode.load() && halo::g_mesh_const_valid.load(std::memory_order_acquire)) {
+        auto* pinc = rig_tracked_component();
+        auto* pinp = g_rig_parent;
+        double pcp = 0.0, pcy = 0.0;
+        Vec3 ppos{};
+        if (pinc != nullptr && pinp != nullptr && !IsBadReadPtr(pinp, sizeof(void*))
+            && read_control_rotation_hook(&pcp, &pcy)
+            && call_ret_vec3(pinp, L"K2_GetComponentLocation", &ppos)) {
+            const float vy = halo::g_view_base_yaw.load(std::memory_order_relaxed);
+            const Quat pr = rotator_to_quat((float)pcp, vy, 0.0f);
+            const Quat pM{halo::g_meshM_x.load(std::memory_order_relaxed), halo::g_meshM_y.load(std::memory_order_relaxed),
+                          halo::g_meshM_z.load(std::memory_order_relaxed), halo::g_meshM_w.load(std::memory_order_relaxed)};
+            const Quat mrot = quat_mul(pr, pM);
+            float mp = 0.0f, my = 0.0f, mr = 0.0f;
+            quat_to_rotator(mrot.x, mrot.y, mrot.z, mrot.w, &mp, &my, &mr);
+            const Vec3 v0{halo::g_meshV0_x.load(std::memory_order_relaxed), halo::g_meshV0_y.load(std::memory_order_relaxed), halo::g_meshV0_z.load(std::memory_order_relaxed)};
+            const Vec3 off = quat_rotate(pr, v0);
+            if (std::isfinite(mp) && std::isfinite(my) && std::isfinite(off.x))
+                halo::holster_marker_place_rot(pinc, Vec3{ppos.x + off.x, ppos.y + off.y, ppos.z + off.z}, mp, my, mr);
+        }
+    }
+}
+
+void palette_wpn_render_refresh() {
+    halo::blam_palette_republish_frame();
+    halo::blam_palette_render_refresh();
+    halo::blam_palette_wpnerr_frame();
+}
+
+void palette_wpn_stereo_pre_eye_meters(int index) {
+    const std::atomic<float>& g_dbg_view_out = *host::g_plugin_state.dbg_view_out;
+    // ---- FPMESH METER (Config.hpp fpmesh_log): does the FP mesh's own transform step at
+    // sim rate under the 90 Hz view? Read-only; the embedded camera is recovered through
+    // the measured M constant, exactly the relation the mesh-constant block validates.
+    if (index == 0 && g_cfg.fpmesh_log != 0) {
+        static float s_fm_prev = 0.0f, s_fm_prev_ctl = 0.0f; static bool s_fm_have = false;
+        static int s_fm_fr = 0, s_fm_moved = 0; static float s_fm_sum = 0.0f, s_fm_max = 0.0f, s_fm_csum = 0.0f;
+        static ULONGLONG s_fm_said = 0;
+        auto* fmc = rig_tracked_component();
+        Vec3 fcrot{};
+        double fcp = 0.0, fcy = 0.0;
+        if (fmc != nullptr && call_ret_vec3(fmc, L"K2_GetComponentRotation", &fcrot) &&
+            read_control_rotation_hook(&fcp, &fcy)) {
+            const Quat fM{halo::g_meshM_x.load(std::memory_order_relaxed), halo::g_meshM_y.load(std::memory_order_relaxed),
+                                halo::g_meshM_z.load(std::memory_order_relaxed), halo::g_meshM_w.load(std::memory_order_relaxed)};
+            const Quat fcam = quat_mul(rotator_to_quat(fcrot.x, fcrot.y, fcrot.z), quat_conj(fM));
+            float fep = 0.0f, fey = 0.0f, fer = 0.0f;
+            quat_to_rotator(fcam.x, fcam.y, fcam.z, fcam.w, &fep, &fey, &fer);
+            if (s_fm_have) {
+                const float dmesh = std::fabs(wrap180(fey - s_fm_prev));
+                const float dctl  = std::fabs(wrap180((float)fcy - s_fm_prev_ctl));
+                ++s_fm_fr;
+                if (dmesh > 0.01f) ++s_fm_moved;
+                s_fm_sum += dmesh; if (dmesh > s_fm_max) s_fm_max = dmesh;
+                s_fm_csum += dctl;
+            }
+            s_fm_prev = fey; s_fm_prev_ctl = (float)fcy; s_fm_have = true;
+            const ULONGLONG fnow = GetTickCount64();
+            if (s_fm_said == 0) s_fm_said = fnow;
+            if (fnow - s_fm_said >= 1000 && s_fm_fr > 0) {
+                API::get()->log_info("[Halo-CampE-UEVR] FPMESH frames=%d moved=%d step mean %.3f max %.3f deg | ctl-per-frame mean %.3f | mesh-vs-ctl gap %.2f | mesh-vs-view gap %.2f",
+                                     s_fm_fr, s_fm_moved, s_fm_sum / s_fm_fr, s_fm_max, s_fm_csum / s_fm_fr,
+                                     wrap180((float)fcy - fey), wrap180(g_dbg_view_out.load() - fey));
+                s_fm_fr = s_fm_moved = 0; s_fm_sum = s_fm_max = s_fm_csum = 0.0f; s_fm_said = fnow;
+            }
+        }
+    }
+}
+
+void palette_wpn_stereo_post_eye_sample(int index) {
+    if (index == 0) stomp_sample(3);
+}
+
+void palette_wpn_stereo_post_eye_late(int index) {
+    const auto& ps = host::g_plugin_state;
+    const std::atomic<bool>&  g_have_eye_pos = *ps.have_eye_pos;
+    const std::atomic<float>& g_eye_pos_x = *ps.eye_pos_x;
+    const std::atomic<float>& g_eye_pos_y = *ps.eye_pos_y;
+    const std::atomic<float>& g_eye_pos_z = *ps.eye_pos_z;
+    const std::atomic<float>& g_view_pos_x = *ps.view_pos_x;
+    const std::atomic<float>& g_view_pos_y = *ps.view_pos_y;
+    const std::atomic<float>& g_view_pos_z = *ps.view_pos_z;
+    const std::atomic<float>& g_render_view_yaw = *ps.render_view_yaw;
+    // RETPROBE 44: eye position this frame and the view position x published beside it.
+    //          45: view position y/z and the finished view yaw, same frame.
+    if (index == 0 && g_cfg.stomp_log != 0 && g_have_eye_pos.load()) {
+        halo::stomp_mark(44, g_eye_pos_x.load(), g_eye_pos_y.load(), g_eye_pos_z.load(), g_view_pos_x.load());
+        halo::stomp_mark(45, g_view_pos_y.load(), g_view_pos_z.load(), g_render_view_yaw.load(), 0.0f);
+    }
+}
+
+void palette_wpn_teardown() {
+    stomp_flush();   // a capture must survive the game closing mid-window
+}
+
+void palette_wpn_aim_law_sampling() {
+    // POSELATCH site 3: latch at the instant the aim is sampled.
+    halo::pose_latch_refresh(3);
+}
+
+void palette_wpn_aim_law_sampled(double ay, double ap) {
+    // PALETTESYNC (Config.hpp palette_sync): hand and aim sampled together, here, where the
+    // aim law samples them, and handed to the placement as one pair.
+    if (g_cfg.palette_sync && palette_weapon_mode()) {
+        const int32_t sidx = g_aim_law_ridx.load();
+        Vec3 sap{}, sgp{}; Quat saq{}, sgq{};
+        if (sidx >= 0 && get_pose(sidx, &sap, &saq, /*use_aim=*/true) &&
+            get_pose(sidx, &sgp, &sgq, /*use_aim=*/false)) {
+            halo::blam_palette_sync_capture(saq.x, saq.y, saq.z, saq.w, sap.x, sap.y, sap.z,
+                                            sgq.x, sgq.y, sgq.z, sgq.w, sgp.x, sgp.y, sgp.z,
+                                            (float)ap, (float)ay);
+        }
+    }
+}
+
+} // namespace halo

@@ -8,6 +8,7 @@
 #include "UeObject.hpp"
 #include "core/Services.hpp"
 #include "core/host/MarkersState.hpp"
+#include "core/host/PluginState.hpp"   // the view position
 
 #include <Windows.h>
 
@@ -170,6 +171,13 @@ void markers_render_place() {
         else
             holster_marker_place(m, w);
     }
+}
+
+void marker_camera_publish() {
+    const auto& ps = host::g_plugin_state;
+    g_cam_x.store(ps.view_pos_x->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    g_cam_y.store(ps.view_pos_y->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    g_cam_z.store(ps.view_pos_z->load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 } // namespace halo

@@ -6,6 +6,7 @@
 #include "features/palettewpn/PaletteReadbacks.hpp"
 #include "features/palettewpn/PalettePoseProvider.hpp"
 #include "features/palettewpn/PoseLatch.hpp"
+#include "features/palettewpn/PaletteFrame.hpp"
 #include "core/Services.hpp"
 
 namespace halo {
@@ -38,6 +39,24 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .aim_direct_write_skipped    = &palette_wpn_aim_direct_write_skipped,
     .aim_direct_written          = &palette_wpn_aim_direct_written,
     .pose_latched                = &pose_latch_lookup,
+    .game_tick_after_blam_drive = &palette_wpn_game_tick_after_blam_drive,
+    .game_tick_before_vehicle   = &palette_wpn_game_tick_before_vehicle,
+    .game_tick_after_vehicle    = &palette_wpn_game_tick_after_vehicle,
+    .game_tick_after_gestures   = &palette_wpn_game_tick_after_gestures,
+    .engine_tick_start          = &palette_wpn_engine_tick_start,
+    .engine_tick_end            = &palette_wpn_engine_tick_end,
+    .post_engine_tick           = &palette_wpn_post_engine_tick,
+    .fp_weapon_live             = &palette_wpn_fp_weapon_live,
+    .rig_parent_dropped         = &palette_wpn_rig_parent_dropped,
+    .rig_driver_stood_down      = &palette_wpn_rig_driver_stood_down,
+    .stereo_pre_eye_instruments = &palette_wpn_stereo_pre_eye_instruments,
+    .render_refresh             = &palette_wpn_render_refresh,
+    .stereo_pre_eye_meters      = &palette_wpn_stereo_pre_eye_meters,
+    .stereo_post_eye_sample     = &palette_wpn_stereo_post_eye_sample,
+    .stereo_post_eye_late       = &palette_wpn_stereo_post_eye_late,
+    .teardown                   = &palette_wpn_teardown,
+    .aim_law_sampling           = &palette_wpn_aim_law_sampling,
+    .aim_law_sampled            = &palette_wpn_aim_law_sampled,
     .enabled  = &palette_wpn_enabled,
     .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_WEAPON_OBJECT,
     .released = &palette_wpn_arm_hide_released,

@@ -210,6 +210,44 @@ struct FeatureHooks {
     // features_pose_latched: get_pose's read. True = served from a latched snapshot. While enabled.
     bool (*pose_latched)(UEVR_TrackedDeviceIndex idx, bool use_aim, uevr::API::VR::Pose* out);
 
+    // ---- THE AUTHOR'S PLUGIN CALLBACKS (features/hooks/PluginHooks.hpp)
+    // features_game_tick_after_blam_drive: update(), right after the shipping Blam aim write. While enabled.
+    void (*game_tick_after_blam_drive)();
+    // features_game_tick_before_vehicle: update(), after the per-weapon delta stage marker, before the vehicle hook. While enabled.
+    void (*game_tick_before_vehicle)();
+    // features_game_tick_after_vehicle: update(), right after the vehicle hook. While enabled.
+    void (*game_tick_after_vehicle)(uint32_t tick);
+    // features_game_tick_after_gestures: the engine tick, right after gesture_update. While enabled.
+    void (*game_tick_after_gestures)(float dt);
+    // features_engine_tick_start: the engine tick callback, after the start stage marker. While enabled.
+    void (*engine_tick_start)();
+    // features_engine_tick_end: the engine tick callback, after the hitch report. While enabled.
+    void (*engine_tick_end)();
+    // features_post_engine_tick: the post-engine tick callback. While enabled.
+    void (*post_engine_tick)();
+    // features_fp_weapon_live: the stick-mode detector: true = a first-person weapon is positively rendered. While enabled.
+    bool (*fp_weapon_live)();
+    // features_rig_parent_dropped: the PlayerController change, right after the rig parent is dropped. Always called.
+    void (*rig_parent_dropped)();
+    // features_rig_driver_stood_down: update(), the rig driver gate beside rig_enabled: true = the driver stands down. Always asked.
+    bool (*rig_driver_stood_down)();
+    // features_stereo_pre_eye_instruments: the stereo pre-callback's render pass, first. While enabled.
+    void (*stereo_pre_eye_instruments)(int index);
+    // features_render_refresh: the stereo pre-callback's render pass, eye 0, after the marker render place. While enabled.
+    void (*render_refresh)();
+    // features_stereo_pre_eye_meters: the stereo pre-callback's render pass, last. While enabled.
+    void (*stereo_pre_eye_meters)(int index);
+    // features_stereo_post_eye_sample: the stereo post-callback, before the eye note. While enabled.
+    void (*stereo_post_eye_sample)(int index);
+    // features_stereo_post_eye_late: the stereo post-callback, after the stamp publish. While enabled.
+    void (*stereo_post_eye_late)(int index);
+    // features_teardown: the plugin teardown, first after its log line. Always called.
+    void (*teardown)();
+    // features_aim_law_sampling: the XInput hook's aim law, before derive_ctrl_angles. While enabled.
+    void (*aim_law_sampling)();
+    // features_aim_law_sampled: the XInput hook's aim law, after the aim read. While enabled.
+    void (*aim_law_sampled)(double ay, double ap);
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

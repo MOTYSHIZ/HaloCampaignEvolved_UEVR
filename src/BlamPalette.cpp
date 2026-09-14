@@ -6582,7 +6582,6 @@ void blam_palette_hook_tick() {
     blam_palette_scan();
     blam_palette_watch();
     blam_slide_watch();
-    blam_capture_hook_tick();
     blam_palette_final_hook_tick();
     blam_palette_sniff_tick();
     blam_palette_term_tick();

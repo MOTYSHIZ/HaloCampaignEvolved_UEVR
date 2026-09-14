@@ -138,5 +138,36 @@ void features_teardown_restore();
 // state saves on a weapon swap, seen through this resolve. The resolve only reads; the rig WRITES stay in
 // the rig_enabled block.
 bool features_rig_resolve_wanted();
+// update(), right after the shipping Blam aim write.
+void features_game_tick_after_blam_drive();
+// update(), after the per-weapon delta stage marker, before the vehicle hook.
+void features_game_tick_before_vehicle();
+// update(), right after the vehicle hook.
+void features_game_tick_after_vehicle(uint32_t tick);
+// the engine tick, right after gesture_update.
+void features_game_tick_after_gestures(float dt);
+// the engine tick callback, after the start stage marker.
+void features_engine_tick_start();
+// the engine tick callback, after the hitch report.
+void features_engine_tick_end();
+// the post-engine tick callback.
+void features_post_engine_tick();
+// the stick-mode detector: true = a first-person weapon is positively rendered.
+bool features_fp_weapon_live();
+// the PlayerController change, right after the rig parent is dropped.
+void features_rig_parent_dropped();
+// update(), the rig driver gate beside rig_enabled: true = the driver stands down.
+bool features_rig_driver_stood_down();
+// the stereo post-callback, after the stamp publish.
+void features_stereo_post_eye_late(int index);
+// the XInput hook's aim law, before derive_ctrl_angles.
+void features_aim_law_sampling();
+// the XInput hook's aim law, after the aim read.
+void features_aim_law_sampled(double ay, double ap);
+// the stereo pre-callback, after the view lock's rotation publish: the rendered camera publish (core), the
+// palette instruments, the per-frame render pass (eye 0) and the meters.
+void features_stereo_pre_eye_rendered(int index);
+// on_initialize, beside the scope blit registration: render callbacks the fork's dev tools register.
+void features_render_callbacks_register();
 
 } // namespace halo

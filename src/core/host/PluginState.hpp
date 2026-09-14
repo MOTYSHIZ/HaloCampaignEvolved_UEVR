@@ -46,6 +46,13 @@ struct PluginState {
     std::atomic<bool>*  have_ref;           // g_have_ref
     std::atomic<float>* raw_stick_x;        // g_raw_stick_x
     bool*               fp_control_now;     // g_fp_control_now
+    // ---- the rendered frame (the palette weapon's instruments)
+    std::atomic<float>* locked_view_yaw;    // g_locked_view_yaw
+    std::atomic<float>* eye_pos_x;          // g_eye_pos_x
+    std::atomic<float>* eye_pos_y;          // g_eye_pos_y
+    std::atomic<float>* eye_pos_z;          // g_eye_pos_z
+    std::atomic<bool>*  have_eye_pos;       // g_have_eye_pos
+    std::atomic<float>* render_view_yaw;    // g_render_view_yaw
 };
 
 extern const PluginState g_plugin_state;
@@ -78,4 +85,10 @@ extern const PluginState g_plugin_state;
         &g_have_ref,                                                       \
         &g_raw_stick_x,                                                    \
         &g_fp_control_now,                                                 \
+        &g_locked_view_yaw,                                                \
+        &g_eye_pos_x,                                                      \
+        &g_eye_pos_y,                                                      \
+        &g_eye_pos_z,                                                      \
+        &g_have_eye_pos,                                                   \
+        &g_render_view_yaw,                                                \
     };

@@ -94,15 +94,16 @@
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hook: startup resolved-state log
 #include "features/hooks/PluginHooks.hpp"
+#include "features/hooks/MotionAimHooks.hpp"
 #include "core/MarkerFaces.hpp"
 #include "BlamPalette.hpp"
 #include "features/palettewpn/PaletteReadbacks.hpp"   // the palette fragments' socket and record readbacks
 #include "features/palettewpn/PoseLatch.hpp"   // the palette fragments' pose latch and intents
+#include "features/palettewpn/PaletteFrame.hpp"   // stomp_mark for the on-foot reticule fragment
 #include "PaletteTwoHand.hpp"        // palette_two_hand_update: the palette weapon mode's two-hand hold
 #include "WeaponCalib.hpp"
 #include "WeaponOffset.hpp"
 #include "Arms.hpp"
-#include "core/host/ArmsState.hpp"   // arms_hide_update: the palette weapon's tick
 #include "addrcascade/AddressCascade.hpp"   // scan_signature / module_identity: the tick-fault reporter names its function and build
 #include "Holster.hpp"
 #include "Markers.hpp"
@@ -191,16 +192,6 @@
 #define HALO_VR_VERSION "0.4.5"
 
 using namespace uevr;
-
-// ---- CROSS-MODULE PUBLISHES (namespace halo: BlamPalette/WeaponCalib extern these).
-namespace halo {
-
-#include "features/palettewpn/Plugin_publishes.inl"   // fork feature: palettewpn (publishes + STOMPLOG)
-// The camera the projection-scale fix was last applied to (see the FPSCALE block in the
-// tick). Reset when the rig re-resolves so a new camera object is fixed again.
-API::UObject* g_fpscale_camera = nullptr;
-
-} // namespace halo
 
 namespace {
 
@@ -5968,8 +5959,7 @@ void update() {
         // the dev investigation and does not exist in a release build, while this one is the
         // feature. Ordered first so it owns the address unless the diagnostics explicitly claim it.
         blam_drive_tick();
-        // Separate address, separate hook, so no ownership handshake with the above is needed.
-        blam_palette_hook_tick();
+        features_game_tick_after_blam_drive();
         blam_aim_tick();
         features_game_tick_after_blam_aim();
         aim_watch_tick();
@@ -6133,7 +6123,7 @@ void update() {
     // (which runs far faster, in the XInput hook) reads an atomic instead of doing reflection. Only
     // when the feature is on -- costs nothing on a stock profile. Reflection, so it sits here on the
     // tick with the rest of the rig reads, never in the aim hot path (the two-clocks rule).
-    if (g_cfg.shot_aim && !palette_weapon_mode()) halo::shotpoint_tick();   // mode 3 owns aim
+    if (g_cfg.shot_aim && !features_aim_owned_by_feature()) halo::shotpoint_tick();
 
 #if HALO_VR_DEV
     // SCOPEDEV state line, ~2 s: every input the scope's gates consume, so a dead pane is
@@ -6208,13 +6198,10 @@ void update() {
 
     features_game_tick_late();
 
-    // ---- PER-WEAPON DELTAS: every tick. After the config reload above (a reload restores the
-    // calibrated base and would wipe an applied adjustment), before anything below reads
-    // grip/off. Re-captures its base only when g_cfg_load_gen changes, so per-tick is safe.
     features_tick_stage("weapon_offset");
-    weapon_offset_update();
-
-    #include "features/palettewpn/Plugin_tick.inl"   // fork feature: palettewpn (per-tick palette work)
+    features_game_tick_before_vehicle();
+    features_game_tick_vehicle();
+    features_game_tick_after_vehicle(tick);
 
 
     features_game_tick_after_offsets(g_last_dt.load());
@@ -6534,7 +6521,7 @@ void update() {
         // calibration is held INERT -- it maps the controller reference, which shot-point aim does
         // not use. The auto-capture (dev) covers the common case; this is the deliberate override
         // and the ONLY capture path in release. Edge-triggered so a hold captures once.
-        if (g_cfg.shot_aim && !palette_weapon_mode()) {
+        if (g_cfg.shot_aim && !features_aim_owned_by_feature()) {
             static bool s_shotcap_was = false;
             if (aim_down && !s_shotcap_was) {
                 API::get()->log_info(halo::shotpoint_capture_held()
@@ -6904,12 +6891,7 @@ void update() {
             }
             const bool pawn_match = (pawn != nullptr) && (pawn == base);
 
-            // The palette build is POSITIVE proof of a rendered first-person weapon -- available
-            // even with the rig driver off (rig=0, the palette-weapon configuration), where the
-            // rig/route signals read absent and would otherwise park the aim stack in stick mode
-            // while standing armed on foot.
-            const bool palette_fp = palette_weapon_mode() && blam_palette_fp_live();
-            const bool signal = g_cfg.stick_mode && gameplay && !route_alive && !on_foot && !palette_fp;
+            const bool signal = g_cfg.stick_mode && gameplay && !route_alive && !on_foot && !features_fp_weapon_live();
 
             // Debounce, in ~32 Hz ticks. Enter is slow on purpose: a weapon swap kills the route
             // for up to the resolve cadence (~2 s), and flapping the camera mode mid-fight is
@@ -7623,7 +7605,7 @@ void update() {
         attach_release(old_rig, "PlayerController changed");
         g_rig_component = nullptr;
         g_rig_parent = nullptr;
-        g_fpscale_camera = nullptr;   // new parent => the projection-scale fix re-applies
+        features_rig_parent_dropped();
         // The shell belongs to the pawn being torn down. Dropping it here, alongside the rig, is
         // what keeps the re-acquire honest instead of writing into a recycled slot on the new level.
         forget_shield_shell();
@@ -7755,7 +7737,7 @@ void update() {
     // recalibration could not remove. Mesh forward is WORLD space -> UE-convention angles, and
     // takes NO turn offset (it already reflects the turned world). Cascade: unavailable -> keep the
     // controller angle above (also the unarmed path).
-    if (!palette_weapon_mode() && g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
+    if (!features_aim_owned_by_feature() && g_cfg.shot_aim == 1 && g_cfg.shot_aim_dir == 1) {
         // FROZEN per-weapon bore, reconstructed on the SAME composition the rig renders the weapon
         // with (live pose + live grip trim, snap turn re-added). Feeds ctrl_yaw/pitch so the
         // calibration reference and stick path see the same frame as derive_ctrl_angles' setpoint --
@@ -8282,11 +8264,7 @@ void update() {
             }
         }
     }
-
-    // Everything below is the RIG DRIVER, and only rigmode wants it. With the palette weapon
-    // owning placement, running both would be two systems fighting over one skeleton.
-    // palette_weapon_mode() stands the rig driver down even with rig=1: armdriver mode 3 owns placement.
-    if (g_cfg.rig_enabled && !palette_weapon_mode()) {
+    if (g_cfg.rig_enabled && !features_rig_driver_stood_down()) {
 
         // ---- HIDE THE ARMS WHILE UNARMED (doctrine in Config.hpp).
         //
@@ -10712,8 +10690,7 @@ public:
         // shared_mutex that on_pre_engine_tick's dispatch already holds shared on this thread --
         // a self-deadlock that hung the game twice on 2026-09-08. See ScopeBlit.hpp.
         halo::scope_blit_register();
-        // Dev-only eye dump (a no-op stub in player builds): a render callback, so registered here.
-        halo::cutscene_dump_register();
+        features_render_callbacks_register();
 
         // ALREADY DONE, AT DLL LOAD -- see enable_api_layer_for_this_process. All that is left here
         // is to say what happened, because logging was impossible that early.
@@ -10889,7 +10866,6 @@ public:
         if (done.exchange(true)) return;
         g_shutting_down.store(true, std::memory_order_release);
         API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN (%s): releasing hook, overrides and components", why);
-        stomp_flush();   // a capture must survive the game closing mid-window
 
         features_teardown_early();
 
@@ -11194,7 +11170,7 @@ public:
             if (delta > g_dt_worst.load()) g_dt_worst = delta;
         }
         features_tick_stage("start");
-        #include "features/palettewpn/Plugin_tick_start.inl"   // fork feature: palettewpn (tick start)
+        features_engine_tick_start();
         // The braces are load-bearing: PERF_TICK must CLOSE before perf_hitch_report() reads the
         // total it wrote. Left at function scope, the destructor would run after the report and the
         // hitch line would always see the PREVIOUS tick's number.
@@ -11224,18 +11200,14 @@ public:
                                       && !halo::g_aim_calibrating.load(std::memory_order_relaxed)
                                       && !g_calib_held.load(std::memory_order_relaxed);
                 PerfScope _perf(PERF_2HAND);
-                // Not while the palette weapon (mode 3) owns aim: its own hold runs instead, below.
-                halo::two_hand_update(delta, two_hand_ok && !palette_weapon_mode(),
-                                      g_ticks.load(std::memory_order_relaxed));
+                halo::two_hand_update(delta, two_hand_ok && !features_aim_owned_by_feature(), g_ticks.load(std::memory_order_relaxed));
             }
 
             update();
             // AFTER update(): the config reload and the stick-mode / calibration flags the detector
             // gates on are both refreshed in there, so running first would decide on stale state.
             { PerfScope _perf(PERF_GEST);  gesture_update(delta); }
-            // PALETTE WEAPON MODE: the fork's two-hand hold, after the gestures (its latch must
-            // see the reload/rack state they settled) and before the holsters, as the fork ran it.
-            if (palette_weapon_mode()) { PerfScope _perf(PERF_2HAND); halo::palette_two_hand_update(delta); }
+            features_game_tick_after_gestures(delta);
 
             // AFTER gesture_update(): holster reads reload_state() to know whether to render the
             // magazine, and stands its melee detector down near a holster zone. Reset in menus so a
@@ -11268,13 +11240,13 @@ public:
             }
         }
         perf_hitch_report();
-        g_engine_phase.store(1, std::memory_order_relaxed);
+        features_engine_tick_end();
     }
 
-    // The engine tick's end, for the sim hook's phase instrument (see BlamPalette.hpp).
+    // The engine tick's end: a hook site only (the author's plugin has no post-engine callback).
     void on_post_engine_tick(API::UGameEngine* engine, float delta) override {
         (void)engine; (void)delta;
-        g_engine_phase.store(0, std::memory_order_relaxed);
+        features_post_engine_tick();
     }
 
     // VIEW LOCK -- the enforcement point. This callback owns the rotation that is actually used
@@ -11599,16 +11571,7 @@ public:
 
         // Frame-to-frame movement of the RENDERED yaw, minus any turning we asked for. This is the
         // judder the player actually feels. With a direct assignment it should be 0.00.
-        // The rendered camera position, for the marker layer's room->world (Markers.cpp).
-        halo::g_cam_x.store(g_view_pos_x.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        halo::g_cam_y.store(g_view_pos_y.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        halo::g_cam_z.store(g_view_pos_z.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        #include "features/palettewpn/Plugin_render_instruments.inl"   // fork feature: palettewpn (render instruments)
-        // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
-        // frame is drawn from, so the forearm panels land against it instead of against a camera
-        // several milliseconds stale. Once per frame, not per eye.
-        if (index == 0) { features_render_frame(); halo::markers_render_place(); halo::blam_palette_republish_frame(); halo::blam_palette_render_refresh(); halo::blam_palette_wpnerr_frame(); }
-        #include "features/palettewpn/Plugin_render_meters.inl"   // fork feature: palettewpn (FPMESH meter)
+        features_stereo_pre_eye_rendered(index);
         const float out_now = g_dbg_view_out.load();
         if (g_have_prev_out.load()) {
             const float moved = std::fabs(wrap180(out_now - g_prev_view_out.load()));
@@ -11656,7 +11619,6 @@ public:
                                               UEVR_Vector3f* position, UEVR_Rotatorf* rotation,
                                               bool is_double) override {
         if (g_shutting_down.load(std::memory_order_acquire)) return;
-        if (index == 0) stomp_sample(3);
         features_stereo_post_eye(index, position, is_double);
         // THE EYE HALF of the eye-to-shot-origin offset. Same callback pair, same eye index, one
         // subtraction apart -- see the pre callback. `position` has been through UEVR's HMD
@@ -11773,7 +11735,7 @@ public:
         // rotation and the head pose simultaneous. Last in the callback so it sees this frame's view.
         // Roll must be passed: the pose maths rotates by the head orientation, which carries roll.
         #include "features/aimreticulestamp/Plugin_stamp_publish.inl"   // fork feature: aimreticulestamp (stamp publish)
-        #include "features/palettewpn/Plugin_retprobe.inl"   // fork feature: palettewpn (RETPROBE)
+        features_stereo_post_eye_late(index);
         if (g_have_eye_pos.load()) {
             halo::xrlayer_note_eye(index,
                                    Vec3{g_eye_pos_x.load(), g_eye_pos_y.load(), g_eye_pos_z.load()},
@@ -12677,11 +12639,10 @@ public:
 
             float cy = 0.0f, cp = 0.0f;
             double ay = 0.0, ap = 0.0;
-            // POSELATCH site 3: latch at the instant the aim is sampled.
-            halo::pose_latch_refresh(3);
+            features_aim_law_sampling();
             if (!derive_ctrl_angles(&cy, &cp)) return;
             if (!read_control_rotation_hook(&ap, &ay)) return;
-            #include "features/palettewpn/Plugin_palettesync.inl"   // fork feature: palettewpn (PALETTESYNC)
+            features_aim_law_sampled(ay, ap);
 
             float law_rx = 0.0f, law_ry = 0.0f;
             aim_control_law(hook_law, cy, cp, ay, ap, dt, &law_rx, &law_ry);
@@ -12758,6 +12719,5 @@ public:
     }
 };
 
-#include "features/palettewpn/Plugin_reanchor.inl"   // fork feature: palettewpn (aim re-anchor)
 
 static auto g_plugin = std::make_unique<HaloAimDriverPlugin>();
