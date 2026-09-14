@@ -228,8 +228,7 @@
 #aimmeshcr=0.20
 #aimmeshcg=0.60
 #aimmeshcb=1.0
-# Use your own ring image: path to a PNG (white art on transparency). An example ships as
-# reticle_ring.png in this folder.
+# Use your own ring image: path to a PNG (white art on transparency).
 #aimtexfile=
 
 # ===================================== WEAPON SCOPE (zoom) ======================================

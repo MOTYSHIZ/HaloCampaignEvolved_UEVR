@@ -46,12 +46,13 @@ Copy-Item (Join-Path $repo 'build\XrApiLayer_HALOVR_reticule.dll') (Join-Path $s
 
 # SHIPPING MANIFEST. The copy above takes profile\ wholesale, so a file that exists on the author's
 # disk but was never committed is simply absent in a CI checkout -- the zip builds fine and ships
-# broken. The plugin degrades quietly in exactly that case (a missing cutscene_hint.png just turns
-# the hint off), so nothing downstream would report it either. Assert the payload instead: CI fails
-# here, before a release exists, rather than a user finding out.
+# broken. The plugin degrades quietly when a profile file is missing, so nothing downstream would
+# report it either. Assert the payload instead: CI fails here, before a release exists, rather than
+# a user finding out.
+# (reticle_ring.png and cutscene_hint.png left the payload in v0.4.5: nothing loads either by
+# default -- one was a sample for aimtexfile, the other the retired cutscene2d overlay's art.)
 $required = @('config.txt', 'halo_vr.cfg', 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt',
               'cvars_data.txt', 'user_script.txt',
-              'reticle_ring.png', 'cutscene_hint.png',
               'scripts\halo_vr_settings.lua',
               'plugins\halo_vr.dll',
               # The OpenXR API layer ships as a matched SET, and every member is load-bearing:
