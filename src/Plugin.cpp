@@ -13493,11 +13493,7 @@ public:
         // Poll-rate throw release: must run BEFORE the throw press mask is composed below, so the
         // release and its synthetic press share one poll. See holster_note_buttons.
         holster_note_buttons(state->Gamepad.wButtons);
-        // The player's OWN fire input, sampled here because this is still the RAW pad -- our own
-        // reload/holster suppression and the synthetic presses all happen further down, and the
-        // haptics must follow the finger, not the composed state.
-        forcetube_note_fire(state->Gamepad.bRightTrigger >= 64 ||
-                            (state->Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0);
+        #include "features/forcetube/Plugin_fire_note.inl"   // fork feature: forcetube (fire note)
         // ---- THE GRENADE BUTTON, BY ACTION. UEVR says whether the left hand's A-face button is
         // down; the pad code it produced is stripped so the gesture is the only path to a throw.
         // Not in menus, where that button navigates.
