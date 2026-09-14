@@ -254,6 +254,10 @@ bool shotpoint_bore_local(Vec3* out);
 // atomics + one grip-pose read, safe from the aim hook. ONE definition, called by both aim paths.
 bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
                           float* out_yaw, float* out_pitch);
+// Publish the composed direct grip trim (g_cfg.rig_dir_grip_*) for shotpoint_gun_quat()'s off-thread
+// readers. GAME THREAD ONLY, once per tick, immediately after weapon_offset_update() -- see the
+// snapshot's comment in Rig.cpp for why the hook threads must not read g_cfg for this.
+void shotpoint_publish_trim();
 // Manual override: force-capture the currently held weapon's bore at the current pose (Page Down).
 // Available in ANY build (the AUTO capture is dev-only). Returns false if no weapon/marker or the
 // self-check rejects the transform. Point steady where you want, then trigger.

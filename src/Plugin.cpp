@@ -5944,6 +5944,9 @@ void update() {
     // adjustment for up to that long. weapon_offset_update() re-captures its base only when the
     // config tick changes, so calling it per tick cannot compound.
     { PerfScope _perf(PERF_WPNOFF); weapon_offset_update(); }
+    // Hand the composed trim to the hook threads NOW, after the reload above and the per-weapon delta
+    // are both in -- they read this snapshot rather than g_cfg (Rig.cpp, shotpoint_publish_trim).
+    halo::shotpoint_publish_trim();
     // Immediately after the weapon trims and for the same reason: both read the weapon in hand and
     // write g_cfg, and both must land before anything downstream consumes those values. The scope
     // pane re-anchors itself when scope_dist/right/up change (Scope.cpp), so a weapon swap picks

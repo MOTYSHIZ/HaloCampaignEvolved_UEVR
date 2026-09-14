@@ -1148,6 +1148,54 @@ static std::unordered_map<std::wstring, AssetMeasure> g_asset_cache;
 // the Euler gimbal degeneracy near vertical.)
 //
 // Uses the CONFIGURED AIM HAND (left or right), never a hardcoded controller.
+
+// ---- THE DIRECT GRIP TRIM, AS THE HOOK THREADS SEE IT ---------------------------------------------
+// shotpoint_gun_quat() runs on the Blam sim hook (~2600 calls/s) and in the XInput hook as well as on
+// the game thread, and g_cfg.rig_dir_grip_* is plain game-thread memory that is NOT stable inside a
+// tick. A config reload does `g_cfg = Config{}` and re-parses, so the trim reads the compiled 0/0/0
+// until the calibration lines come back; weapon_offset_update() then rebuilds it as base + this
+// weapon's delta in two steps. A hook read landing in either window reconstructs the bore through the
+// wrong trim -- up to ~120 deg off for one to a few sim ticks, after any settings change or Page Down
+// capture (both trigger a reload). Found by the v0.4.5 pre-release audit.
+//
+// So the game thread PUBLISHES the composed trim once per tick, right after weapon_offset_update(),
+// and this is what shotpoint_gun_quat() reads. Single writer, so the odd/even seqlock TwoHandAim uses
+// for the swing is enough. Every value ever published is a fully composed trim.
+namespace {
+struct GripTrim { float deg = 0.0f, yaw = 0.0f, roll = 0.0f; };
+std::atomic<uint32_t> s_trim_seq{0};
+std::atomic<bool>     s_trim_published{false};
+GripTrim              s_trim{};
+
+GripTrim read_published_trim() {
+    // Before the first publish (the first ticks after injection) there is no snapshot: read g_cfg,
+    // exactly as this code did before the snapshot existed.
+    if (!s_trim_published.load(std::memory_order_acquire)) {
+        return GripTrim{g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll};
+    }
+    // The writer holds the odd state for three float copies, so one retry is normally plenty. Bounded
+    // so a hook thread can never spin here.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const uint32_t before = s_trim_seq.load(std::memory_order_acquire);
+        if ((before & 1u) != 0u) continue;
+        const GripTrim t = s_trim;
+        if (s_trim_seq.load(std::memory_order_acquire) == before) return t;
+    }
+    // Eight misses means the game thread was descheduled mid-publish. Every published value is a
+    // composed trim, so even this unverified read can only mix two consecutive good trims -- never
+    // the reload's zeros, which is the fault this snapshot exists to remove.
+    return s_trim;
+}
+}  // namespace
+
+void shotpoint_publish_trim() {
+    const GripTrim t{g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll};
+    s_trim_seq.fetch_add(1, std::memory_order_release);   // odd: write in progress
+    s_trim = t;
+    s_trim_seq.fetch_add(1, std::memory_order_release);   // even again: readable
+    s_trim_published.store(true, std::memory_order_release);
+}
+
 static Quat shotpoint_gun_quat(const Quat& cq, const Quat& gq, bool have_grip,
                                const Quat& q_ro, bool two_hand) {
     Quat bcq = cq, bgq = gq;
@@ -1159,9 +1207,9 @@ static Quat shotpoint_gun_quat(const Quat& cq, const Quat& gq, bool have_grip,
     // pose. rotation_offset is composed in VR space, before the conversion -- matching the rig.
     const Quat pose = have_grip ? quat_mul(q_ro, bgq) : bcq;
     const Quat ue{ -pose.z, pose.x, pose.y, -pose.w };   // VR -> UE, WITH handedness (the -w term)
-    const Quat q_grip_dir = rotator_to_quat(g_cfg.rig_dir_grip_deg,
-                                            g_cfg.rig_dir_grip_yaw,
-                                            g_cfg.rig_dir_grip_roll);
+    // The PUBLISHED trim, never g_cfg directly -- this runs on the hook threads (see above).
+    const GripTrim trim = read_published_trim();
+    const Quat q_grip_dir = rotator_to_quat(trim.deg, trim.yaw, trim.roll);
     return quat_mul(ue, q_grip_dir);
 }
 // Samples the grip pose + rotation offset for `ridx` and composes the gun quat. `cq` is the aim pose
