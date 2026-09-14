@@ -148,8 +148,9 @@
 #cutscenesize=0.75
 # Where that screen sits, if it rests a little high or low for you. cutsceneup shifts it up/down in
 # centimetres (negative = lower it); cutscenepitch tilts it in degrees (negative tips the top toward
-# you, to face a slightly downward gaze). Both 0 = centred straight ahead. Take effect live.
-#cutsceneup=0
+# you, to face a slightly downward gaze). The screen ships 15 cm below straight ahead; 0 for both =
+# centred on your forward gaze. Take effect live.
+#cutsceneup=-15
 #cutscenepitch=0
 
 # ==================================== RETICULE (world-space) ====================================

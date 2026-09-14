@@ -3388,14 +3388,15 @@ struct Config {
     // edge at 1.0 is a lot of screen this close; 0.75 is the comfortable frame.
     float cutscene_size   = 0.75f;
     // PLACEMENT of the head-locked movie panel (mode 6 = the shipped cutscenemono). Both are
-    // comfort tuning like cutscenesize, live (~2 s), and default 0 = the panel centred on the
-    // forward gaze exactly as before.
+    // comfort tuning like cutscenesize, live (~2 s).
     //   cutsceneup    -- vertical shift in CENTIMETRES (every distance key here is cm, per Unreal).
     //                    NEGATIVE lowers the panel; the movie sits a touch high at 0 because it is
     //                    centred at eye-forward. Range +-100 cm (the layer clamps to +-1 m).
+    //                    CANON -15 (2026-09-14, user's headset call for v0.4.5): 0 read as high.
     //   cutscenepitch -- tilt in DEGREES about the panel's horizontal axis. NEGATIVE tips the top
     //                    toward you, so a lowered panel can face a slightly downward gaze. +-34 deg.
-    float cutscene_up     = 0.0f;
+    //                    Default 0.
+    float cutscene_up     = -15.0f;
     float cutscene_pitch  = 0.0f;
     // ---- EYE DUMP (cutscenedump, DEV ONLY, one-shot) ------------------------------------------
     // Set to 1 during a cutscene: on the next render callback the plugin reads back the whole
