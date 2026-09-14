@@ -131,7 +131,6 @@ void reload_engine_tick_begin(float dt, bool active) {
     // is idle-cheap on its own, but several resolve the weapon actor by reflection, so with both
     // masters off none of them runs and this function is the author's again. The two restore
     // windows (anim rate, state hold) stay outside: a window armed before a switch-off must close.
-    const bool fork_reload = g_cfg.reload_vr || g_cfg.slide_vr;
     reload_anim_rate_tick();
     reload_state_hold_tick();
     if (!active) return;
