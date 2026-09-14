@@ -129,6 +129,8 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "cutscenemono") == 0) g_cfg.cutscene_mono   = (int)clampf((float)v, 0.0f, 6.0f);
     else if (_stricmp(key, "cutscenedist") == 0) g_cfg.cutscene_dist   = clampf((float)v, 0.0f, 10000.0f);
     else if (_stricmp(key, "cutscenesize") == 0) g_cfg.cutscene_size   = clampf((float)v, 0.25f, 1.5f);
+    else if (_stricmp(key, "cutsceneup")   == 0) g_cfg.cutscene_up     = clampf((float)v, -100.0f, 100.0f);
+    else if (_stricmp(key, "cutscenepitch")== 0) g_cfg.cutscene_pitch  = clampf((float)v, -34.0f, 34.0f);
     else if (_stricmp(key, "cutscenedump") == 0) g_cfg.cutscene_dump   = (int)v;
     else if (_stricmp(key, "cutsceneblitfill") == 0) g_cfg.cutscene_blit_fill = clampf((float)v, 0.2f, 1.0f);
     else if (_stricmp(key, "scopeblitmag") == 0) g_cfg.scope_blit_mag  = clampf((float)v, 1.05f, 32.0f);

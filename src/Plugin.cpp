@@ -7071,6 +7071,27 @@ void update() {
                 }
             }
 
+            // CUTSCENE PANEL PLACEMENT (mode 6) -> the layer, ON CHANGE: vertical shift + pitch.
+            // cm -> m, deg -> rad; both default 0 so set_mono_place(0,0) leaves the shipped
+            // placement. Same ~2 s cadence and skew-tolerant bridge as the screen send above; an
+            // older layer without set_mono_place just keeps the panel where it was (bridge returns
+            // false, the screen send already reports layer-absent, so no second warning here).
+            {
+                static float s_up_sent = 1e9f, s_pitch_sent = 1e9f;   // sentinel forces one send
+                if (tick > 300 && ((tick % 64) == 5 || s_up_sent > 1e8f)) {
+                    const float up_m  = g_cfg.cutscene_up    * 0.01f;
+                    const float pitch = g_cfg.cutscene_pitch * 0.0174532925f;
+                    if (fabsf(up_m - s_up_sent) > 1e-4f || fabsf(pitch - s_pitch_sent) > 1e-4f) {
+                        if (halo::xrbridge_set_mono_place(up_m, pitch)) {
+                            s_up_sent = up_m; s_pitch_sent = pitch;
+                            API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE MONO place -> up %.1f cm, "
+                                                 "pitch %.1f deg -- applied by the API layer",
+                                                 g_cfg.cutscene_up, g_cfg.cutscene_pitch);
+                        }
+                    }
+                }
+            }
+
             // Comfort backstop, independent of the logic above: a VR-VISIBLE ACTUATOR MUST NEVER
             // BE ALLOWED TO OSCILLATE, whatever the upstream signal does. Engage is rate-limited
             // after any transition (release never is -- being stuck flat is far better than

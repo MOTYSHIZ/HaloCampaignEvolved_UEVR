@@ -117,6 +117,8 @@ std::atomic<uint64_t> g_layers_appended{0};
 std::atomic<int>      g_projection_mono{0};
 std::atomic<float>    g_mono_distance{0.f};    // mode 5: convergence depth, metres; 0 = infinity
 std::atomic<float>    g_mono_size{1.f};        // mode 5: picture scale; 1 = as rendered
+std::atomic<float>    g_mono_up{0.f};          // mode 6: quad shift along head-local UP, metres (- lowers)
+std::atomic<float>    g_mono_pitch{0.f};       // mode 6: quad tilt about local RIGHT, radians (- top toward viewer)
 std::atomic<uint64_t> g_mono_patched{0};
 std::atomic<uint64_t> g_batch_refused{0};   // callback returned more than it was offered
 std::atomic<uint64_t> g_runtime_rejects{0}; // runtime refused the frame WITH our layers in it
@@ -384,14 +386,33 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_xrEndFrame(XrSession session, const XrFrame
                             const float fwdy = -2.f * (q.y * q.z - q.w * q.x);
                             const float fwdz = -(1.f - 2.f * (q.x * q.x + q.y * q.y));
                             const float hx = 0.5f * (a.x + b.x), hy = 0.5f * (a.y + b.y), hz = 0.5f * (a.z + b.z);
+                            // PLACEMENT (set_mono_place). up_m shifts the quad along the head's
+                            // LOCAL up (rotated +Y of q); pitch tilts it about the local RIGHT axis.
+                            // Both 0 by default -> orientation stays q and position stays the plain
+                            // head+forward*D, i.e. shipped behaviour is untouched. Local up so the
+                            // shift tracks head roll, matching the head-locked quad it moves.
+                            const float up_m  = g_mono_up.load(std::memory_order_relaxed);
+                            const float pitch = g_mono_pitch.load(std::memory_order_relaxed);
+                            const float upx = 2.f * (q.x * q.y - q.w * q.z);
+                            const float upy = 1.f - 2.f * (q.x * q.x + q.z * q.z);
+                            const float upz = 2.f * (q.y * q.z + q.w * q.x);
+                            // Tilt: q (x) local-X rotation by pitch. pitch=0 -> p=(1,0,0,0) -> qo=q.
+                            const float ph = 0.5f * pitch, pw = cosf(ph), pxr = sinf(ph);
+                            XrQuaternionf qo;
+                            qo.w = q.w * pw - q.x * pxr;
+                            qo.x = q.w * pxr + q.x * pw;
+                            qo.y = q.y * pw + q.z * pxr;
+                            qo.z = q.z * pw - q.y * pxr;
                             movie_quad.type          = XR_TYPE_COMPOSITION_LAYER_QUAD;
                             movie_quad.next          = nullptr;
                             movie_quad.layerFlags    = 0;   // opaque: the movie's black surround is the screen's border
                             movie_quad.space         = src->space;
                             movie_quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                             movie_quad.subImage      = v0.subImage;
-                            movie_quad.pose.orientation = q;
-                            movie_quad.pose.position    = XrVector3f{ hx + fwdx * D, hy + fwdy * D, hz + fwdz * D };
+                            movie_quad.pose.orientation = qo;
+                            movie_quad.pose.position    = XrVector3f{ hx + fwdx * D + upx * up_m,
+                                                                     hy + fwdy * D + upy * up_m,
+                                                                     hz + fwdz * D + upz * up_m };
                             movie_quad.size          = XrExtent2Df{ 2.f * D * half_h * size, 2.f * D * half_v * size };
                             // Placed AT the projection's slot (first), so the subtitle/menu quads
                             // that come after it in the list draw ON TOP -- never occluded by the
@@ -902,6 +923,17 @@ XRAPI_ATTR int XRAPI_CALL api_set_mono_screen(float meters, float size) {
     return 1;
 }
 
+XRAPI_ATTR int XRAPI_CALL api_set_mono_place(float up_m, float pitch_rad) {
+    if (g_enabled.load(std::memory_order_acquire) != 1) return 0;
+    // Sane bounds: +-1 m of vertical shift is already off-screen, +-0.6 rad (~34 deg) of tilt is
+    // well past useful. NaN -> 0 (no shift / no tilt), so a garbage caller cannot fling the screen.
+    const float u = (up_m == up_m) ? ((up_m < -1.f) ? -1.f : (up_m > 1.f ? 1.f : up_m)) : 0.f;
+    const float p = (pitch_rad == pitch_rad) ? ((pitch_rad < -0.6f) ? -0.6f : (pitch_rad > 0.6f ? 0.6f : pitch_rad)) : 0.f;
+    g_mono_up.store(u, std::memory_order_relaxed);
+    g_mono_pitch.store(p, std::memory_order_relaxed);
+    return 1;
+}
+
 const HaloVrLayerApi g_api = {
     (uint32_t)sizeof(HaloVrLayerApi),
     HALOVR_LAYER_ABI_VERSION,
@@ -915,6 +947,7 @@ const HaloVrLayerApi g_api = {
     api_status,
     api_set_projection_mono,   // appended after ABI 1; callers size-check before use
     api_set_mono_screen,       // second append; same discipline
+    api_set_mono_place,        // third append; same discipline
 };
 
 }   // namespace

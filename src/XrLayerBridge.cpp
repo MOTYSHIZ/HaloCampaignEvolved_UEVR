@@ -168,6 +168,17 @@ bool xrbridge_set_mono_screen(float meters, float size) {
     return api->set_mono_screen(meters, size) == 1;
 }
 
+bool xrbridge_set_mono_place(float up_m, float pitch_rad) {
+    const HaloVrLayerApi* api = xrbridge_api();
+    if (api == nullptr) return false;
+    // Third append; a layer built before it ENDS at set_mono_screen. Same size check, same
+    // meaning -- absent is "cannot" (older layer: the quad keeps its default placement), not error.
+    constexpr size_t kNeed = offsetof(HaloVrLayerApi, set_mono_place)
+                           + sizeof(((HaloVrLayerApi*)nullptr)->set_mono_place);
+    if (api->struct_size < kNeed || api->set_mono_place == nullptr) return false;
+    return api->set_mono_place(up_m, pitch_rad) == 1;
+}
+
 const char* xrbridge_status() {
     if (g_state.load(std::memory_order_acquire) < 0) return "not probed";
     if (g_api != nullptr && g_api->status != nullptr) {

@@ -76,6 +76,9 @@ bool xrbridge_set_projection_mono(int mode);
 // The mode-5 screen: convergence depth in metres (0 = infinity) and picture scale (1 = as
 // rendered). Same append-and-size-check story.
 bool xrbridge_set_mono_screen(float meters, float size);
+// The mode-6 quad placement: vertical shift (metres, head-local up; - lowers) and pitch (radians,
+// local right; - top toward viewer). Both 0 = shipped placement. Same append-and-size-check story.
+bool xrbridge_set_mono_place(float up_m, float pitch_rad);
 
 // One line for the log: whether the layer was found, which build, and what its own status says.
 // Never null, always safe to print.
