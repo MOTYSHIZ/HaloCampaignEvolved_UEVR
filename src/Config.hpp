@@ -2079,6 +2079,12 @@ struct Config {
     float dpad_head_cm    = 18.0f;   // hand-to-head distance that ARMS the shift
     float dpad_head_hyst_cm = 8.0f;  // extra distance before it releases, so it cannot chatter
     int   dpad_head_dwell_ms = 120;  // how long the hand must stay there before it commits
+    // PAUSE BY HEAD-TAP: Y (left controller) while a controller is within the dpad_head radius opens
+    // the pause menu by injecting the pad START button -- which the game reads even when UNFOCUSED,
+    // unlike its native Escape. Shares the dpad_head_cm/hyst radius (one notion of "near the head");
+    // no dwell, because the Y press is itself the deliberate trigger. Y is otherwise weapon-swap, so
+    // a pausing press is eaten (it does not also switch weapons).
+    bool  pause_head      = true;
     int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it
     float map_dpad_dz     = 0.50f;    // left-stick deflection needed to count as a d-pad direction

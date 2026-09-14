@@ -1232,6 +1232,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "dpadheadcm")    == 0) { g_cfg.dpad_head_cm      = clampf((float)v, 5.0f, 80.0f); return true; }
     if (_stricmp(key, "dpadheadhyst")  == 0) { g_cfg.dpad_head_hyst_cm = clampf((float)v, 0.0f, 40.0f); return true; }
     if (_stricmp(key, "dpadheaddwell") == 0) { g_cfg.dpad_head_dwell_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "pausehead")     == 0) { g_cfg.pause_head         = (v != 0.0); return true; }
     // THE BUTTON-REMAP FAMILY, moved off parse_config_key_2's else-if chain (2026-09-05) when
     // adding the rgrip* pair tripped C1061 for the third time. The whole family moved rather than
     // just the two new keys, so the next control binding is an edit and not another refactor --

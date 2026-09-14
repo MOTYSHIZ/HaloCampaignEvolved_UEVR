@@ -52,6 +52,11 @@
 # How long the hand must STAY there before it counts, milliseconds. This is what stops a melee
 # swing or a magazine grab from triggering it in passing.
 #dpadheaddwell=120
+# PAUSE BY HEAD-TAP. With a controller near your head (the same radius as the d-pad shift above),
+# pressing Y opens the pause menu. It works by sending the gamepad START button, which the game
+# reads even when its window is not focused -- unlike its normal Escape key. The Y press that pauses
+# does not also switch your weapon. Set to 0 to turn it off.
+#pausehead=1
 # How far the left stick must move to count as a d-pad press.
 #mapdpaddz=0.50
 # How far the right stick must move for its gestures (high, so turning never triggers them).
