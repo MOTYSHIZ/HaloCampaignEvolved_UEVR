@@ -16,6 +16,7 @@
 
 #include "Math.hpp"       // Vec3
 #include "uevr/API.h"     // UEVR_Vector3f
+#include "uevr/API.hpp"   // uevr::API::UObject
 
 #include <cstdint>
 #include <string>
@@ -173,6 +174,25 @@ struct FeatureHooks {
     // features_sim_record_written: drive_angles_impl (SIM THREAD, ~2600 calls/s), right after the aim
     // convergence bends the angles about to be written to the Blam control record.
     void (*sim_record_written)(float yaw, float pitch);
+
+    // features_arm_driver_*: the author's arm driver arbiter (ArmDriver.cpp). A feature that adds an arm driver
+    // mode names it, asks for it, reports it unavailable, tracks its own retry key, keeps it in step, notes the
+    // active mode and releases with the arbiter. Called whether or not the feature is enabled: the arbiter
+    // must be able to release a mode whose feature just switched off.
+    const char* (*arm_driver_name)(int mode);
+    int  (*arm_driver_mode_wanted)();
+    bool (*arm_driver_mode_unavailable)(int wanted);
+    bool (*arm_driver_key_changed)();
+    void (*arm_driver_steady)(int active);
+    void (*arm_driver_active)(int mode, bool switched);
+    void (*arm_driver_release_all)(const char* why);
+
+    // features_arm_hide_component: sweep_fp_meshes, per component; `enabled` is the feature's state (a hide the
+    // feature applied is released even after it switched off). True = handled.
+    bool (*arm_hide_component)(uevr::API::UObject* comp, bool hide, int mode, bool enabled);
+    // features_arm_hide_held_off / features_arm_hide_needs_rig: arms_hide_update, while enabled.
+    bool (*arm_hide_held_off)();
+    bool (*arm_hide_needs_rig)();
 
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.

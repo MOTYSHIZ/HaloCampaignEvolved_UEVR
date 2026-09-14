@@ -34,6 +34,7 @@
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"
 #include "ArmDriver.hpp"   // palette_weapon_mode(): which aim chain owns the derivation
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
 #include "BlamPalette.hpp"   // palette_trim_rotations (aimbore)
 
 #include <chrono>

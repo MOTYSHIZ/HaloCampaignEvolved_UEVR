@@ -5,8 +5,6 @@
 #include "Rig.hpp"
 #include "UeObject.hpp"
 #include "features/hooks/ArmsHooks.hpp"
-#include "BlamPalette.hpp"
-#include "ArmDriver.hpp"     // palette_weapon_mode(): the FP-build hold-off applies to mode 3 only
 
 #include <windows.h>
 
@@ -248,30 +246,9 @@ int sweep_fp_meshes(bool hide) {
     auto* pawn = API::get()->get_local_pawn(0);
     if (pawn == nullptr) return 0;
 
-    // COMMA-SEPARATED bone list (fork addition). A single name behaves exactly as before; the palette
-    // weapon presentation passes "Shoulder_L,Shoulder_R" so both arms hide by bone while the weapon
-    // branch stays drawn. Everything at or below space is trimmed: a CRLF file leaves '' on the last
-    // token, and FName Add-mode would CREATE that bogus name and hide nothing.
-    std::wstring bones[8];
-    int nbones = 0;
-    {
-        const char* s2 = g_cfg.arm_hide_bone;
-        while (*s2 != 0 && nbones < 8) {
-            const char* e = s2;
-            while (*e != 0 && *e != ',') ++e;
-            std::string one(s2, e);
-            while (!one.empty() && (unsigned char)one.back() <= ' ') one.pop_back();
-            while (!one.empty() && (unsigned char)one.front() <= ' ') one.erase(one.begin());
-            if (!one.empty()) bones[nbones++] = std::wstring(one.begin(), one.end());
-            s2 = (*e == ',') ? e + 1 : e;
-        }
-    }
-    // Mode 3 (weapon-only, fork addition, only when armhidemode=3): the FP pawn is MODULAR -- armour
-    // pieces are separate skeletal-mesh components of the same classes, and an arm bone name is a
-    // silent no-op on them. So whole-hide every swept component EXCEPT the one the rig tracks (it
-    // carries the weapon bones), and bone-hide the arm list on that one.
+    const std::string b{g_cfg.arm_hide_bone};
+    const std::wstring wb(b.begin(), b.end());
     const int mode = hide ? g_cfg.arm_hide_mode : s_hidden_mode;
-    API::UObject* keep = (mode == 3) ? rig_tracked_component() : nullptr;
     int n = 0;
 
     for (const wchar_t* prop : {L"BlueprintCreatedComponents", L"InstanceComponents"}) {
@@ -294,24 +271,12 @@ int sweep_fp_meshes(bool hide) {
             if (hide && g_cfg.arm_keep_pose && cn.find(L"SkeletalMesh") != std::wstring::npos) {
                 rig_set_always_tick_pose(comp);
             }
+            if (features_arm_hide_component(comp, hide, mode)) { ++n; continue; }
             switch (mode) {
                 case 1:  call_set_visibility(comp, !hide);          break;
                 case 2:  call_set_hidden(comp, hide);               break;
-                case 3:  if (comp == keep) {
-                             for (int bi = 0; bi < nbones; ++bi) {
-                                 if (hide) call_hide_bone(comp, bones[bi].c_str());
-                                 else      call_unhide_bone(comp, bones[bi].c_str());
-                             }
-                             if (!hide) call_set_hidden(comp, false);
-                         } else {
-                             call_set_hidden(comp, hide);
-                         }
-                         break;
-                default: for (int bi = 0; bi < nbones; ++bi) {
-                             if (hide) call_hide_bone(comp, bones[bi].c_str());
-                             else      call_unhide_bone(comp, bones[bi].c_str());
-                         }
-                         break;
+                default: if (hide) call_hide_bone(comp, wb.c_str());
+                         else      call_unhide_bone(comp, wb.c_str()); break;
             }
             ++n;
         }
@@ -468,42 +433,13 @@ void arms_hide_update() {
         arms_release_hide();
     }
 
-    // ADDITION -- HOLD OFF WHILE THE FP BUILD IS DARK, AND FOR TWO SECONDS AFTER IT RETURNS.
-    // Bisected 2026-08-26: with the sweep running, every respawn froze the palette-driven
-    // PrimaryWeapon socket at the stock pose ~1 s in -- the hide lands on the freshly rebuilt
-    // components mid-initialization and the FP palette sync never binds, so the weapon actor
-    // rides the camera-parented mesh at its stock socket ("attached to the rig"). The same death
-    // with armhide=0 tracks perfectly, and the pre-death sweep on settled components never hurt
-    // anything.
-    //
-    // A pawn-identity watch was the first cut and it MISSED: this build reuses the pawn object
-    // across a death and rebuilds only its COMPONENTS (the respawn logged a new rig component
-    // and no pawn change). The one signal that reliably goes dark at every rebuild window is
-    // the FP palette build itself -- it stops within a frame on death, seats and cutscenes,
-    // which are exactly the moments components get torn down. So the sweep runs only once the
-    // build has been back for ~2 s, and a dark spell forgets the hide state (the components it
-    // covered are being torn down; releasing would sweep whatever replaced them).
-    {
-        static uint32_t s_hold = 0;
-        // Only while the palette weapon (armdriver mode 3) owns placement: under the author's arm
-        // drivers the palette build stamp never runs, and this gate would hold the hide off forever.
-        if (palette_weapon_mode() && !blam_palette_fp_live()) {
-            if (s_hold == 0 && s_any_hidden) {
-                API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE: FP build went dark -- holding "
-                                     "the sweep until it is back ~2 s");
-            }
-            s_hold = 64;   // ~2 s at the ~32 Hz tick, restarted while dark
-            s_any_hidden = false;
-            return;
-        }
-        if (s_hold != 0) { --s_hold; return; }
-    }
+    if (features_arm_hide_held_off()) return;
 
     // Only per-bone hiding needs the rig, and only to target the component the plugin provably
     // drives. Modes 1 and 2 sweep by class and never needed it -- applying the gate to them is
     // what stopped the re-assert after a weapon swap, since Rig.hpp records that a swap kills the
     // route.
-    if ((g_cfg.arm_hide_mode == 0 || g_cfg.arm_hide_mode == 3) && rig_tracked_component() == nullptr) return;
+    if ((g_cfg.arm_hide_mode == 0 || features_arm_hide_needs_rig()) && rig_tracked_component() == nullptr) return;
 
     // Roughly 8 Hz. Fast enough that a checkpoint or respawn shows the meshes for ~125 ms rather
     // than the ~500 ms a half-second cadence gave, slow enough that the calls stay off the

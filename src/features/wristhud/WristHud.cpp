@@ -11,6 +11,7 @@
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
 #include "Reticule.hpp"           // widget_quad_begin/finish -- THE one copy of the quad recipe
 #include "ArmDriver.hpp"          // palette_weapon_mode: hudwpnanchor 3
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
 #include "UeObject.hpp"
 #include "core/Clock.hpp"               // clock::now_ms: the radar's wall-clock cadences
 #include "core/HiddenReload.hpp"        // g_wristhud_hide_cradle

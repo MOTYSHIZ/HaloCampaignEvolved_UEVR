@@ -29,18 +29,7 @@ enum class ArmDriverMode {
     Off     = 0,   // no arm driver; the game's stock first-person rig, untouched
     UeRig   = 1,   // Rig.cpp / Arms.cpp / Hands.cpp        (the shipped route)
     Palette = 2,   // src\palettearm\                        (the ported route)
-    // EXPERIMENTAL (fork port, default off). BlamPalette.cpp places the WEAPON on the Blam node
-    // palette and the aim follows the drawn barrel (pose latch, DRAWAIM, stamped reticle, aimbore,
-    // the fork's two-hand hold). Hooks the same builder as Palette, so the two are exclusive by
-    // construction: only the owning mode may have its builder hook installed. Selected by
-    // armdriver=3, or by the fork's palettewpn=1 (an alias the arbiter reads, so it switches through
-    // the same release-then-install path and never behind the arbiter's back).
-    PaletteWeapon = 3,
 };
-
-// True while PaletteWeapon owns the arms and the aim. ANY THREAD (an atomic mirror of the arbiter's
-// decision): the sim-thread palette hook and the XInput aim derivation both ask it.
-bool palette_weapon_mode();
 
 // The mode that was ASKED FOR, clamped. Reads g_cfg.arm_driver, so it follows the ~2 s live config
 // reload like every other tunable.

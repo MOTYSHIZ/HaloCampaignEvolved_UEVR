@@ -44,8 +44,4 @@ void arms_dump_skeleton(uevr::API::UObject* rig);
 // invisible with nothing left that knows how to bring it back.
 void arms_release_hide();
 
-// The FP arm hide pass (armhide). Called by arms_update() under the UE arm driver, and by the tick
-// directly while the palette weapon (armdriver mode 3) owns placement.
-void arms_hide_update();
-
 } // namespace halo

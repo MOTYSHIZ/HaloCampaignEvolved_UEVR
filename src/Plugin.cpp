@@ -101,6 +101,7 @@
 #include "WeaponCalib.hpp"
 #include "WeaponOffset.hpp"
 #include "Arms.hpp"
+#include "core/host/ArmsState.hpp"   // arms_hide_update: the palette weapon's tick
 #include "addrcascade/AddressCascade.hpp"   // scan_signature / module_identity: the tick-fault reporter names its function and build
 #include "Holster.hpp"
 #include "Markers.hpp"
@@ -154,6 +155,7 @@
 
 // Two independent arms: recon for now (skeleton dump + bone-function probe).
 #include "ArmDriver.hpp"
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
 #include "TwoHandAim.hpp"
 #include "InteractLine.hpp"
 #include "Arms.hpp"

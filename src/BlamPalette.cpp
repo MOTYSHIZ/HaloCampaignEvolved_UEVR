@@ -7,6 +7,7 @@
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"
 #include "ArmDriver.hpp"            // palette_weapon_mode(): this file acts only while armdriver mode 3 owns
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode()
 #include "palettearm/PaletteHook.hpp" // palettehook_installed(): never hook the builder while the palettearm route holds it       // two_hand_delta: the hold rotates the WEAPON pose, not only the shot
 #include "Math.hpp"
 #include "MotionAimControl.hpp"

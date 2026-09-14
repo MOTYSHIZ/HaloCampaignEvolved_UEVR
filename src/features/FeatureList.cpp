@@ -8,6 +8,8 @@
 #include "features/hooks/MarkersHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
+#include "features/hooks/ArmDriverHooks.hpp"
+#include "features/hooks/ArmsHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
 #include "features/hooks/TwoHandHooks.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
@@ -420,6 +422,57 @@ bool features_rig_resolve_wanted() {
     for (const FeatureHooks* f : kFeatureList)
         if (f->rig_resolve_wanted != nullptr && f->rig_resolve_wanted()) return true;
     return reload_engine_active();
+}
+
+// ---- THE AUTHOR'S ARM DRIVER ARBITER AND ARM HIDE
+const char* features_arm_driver_name(int mode) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_name != nullptr) if (const char* n = f->arm_driver_name(mode)) return n;
+    return nullptr;
+}
+int features_arm_driver_mode_wanted() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_mode_wanted != nullptr) if (const int m = f->arm_driver_mode_wanted(); m > 0) return m;
+    return 0;
+}
+bool features_arm_driver_mode_unavailable(int wanted) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_mode_unavailable != nullptr && f->arm_driver_mode_unavailable(wanted)) return true;
+    return false;
+}
+bool features_arm_driver_key_changed() {
+    bool any = false;
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_key_changed != nullptr && f->arm_driver_key_changed()) any = true;
+    return any;
+}
+void features_arm_driver_steady(int active) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_steady != nullptr) f->arm_driver_steady(active);
+}
+void features_arm_driver_active(int mode, bool switched) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_active != nullptr) f->arm_driver_active(mode, switched);
+}
+void features_arm_driver_release_all(const char* why) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_driver_release_all != nullptr) f->arm_driver_release_all(why);
+}
+bool features_arm_hide_component(uevr::API::UObject* comp, bool hide, int mode) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_hide_component != nullptr
+            && f->arm_hide_component(comp, hide, mode, f->enabled != nullptr && f->enabled())) return true;
+    return false;
+}
+bool features_arm_hide_held_off() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_hide_held_off != nullptr && f->enabled != nullptr && f->enabled() && f->arm_hide_held_off()) return true;
+    return false;
+}
+bool features_arm_hide_needs_rig() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->arm_hide_needs_rig != nullptr && f->enabled != nullptr && f->enabled() && f->arm_hide_needs_rig()) return true;
+    return false;
 }
 
 void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }
