@@ -1,6 +1,7 @@
 #include "HeightCal.hpp"
 
 #include "BlamDrive.hpp"
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the floor trace ignores

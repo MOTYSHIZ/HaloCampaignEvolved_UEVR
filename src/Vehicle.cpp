@@ -2,6 +2,7 @@
 
 #include "Arms.hpp"
 #include "BlamDrive.hpp"
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Markers.hpp"
 #include "core/MarkerFaces.hpp"

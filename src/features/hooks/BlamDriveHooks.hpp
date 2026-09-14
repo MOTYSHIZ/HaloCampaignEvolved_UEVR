@@ -8,12 +8,13 @@
 
 namespace halo {
 
-// publish_unit_state (the sim thread, inside the orientation getter hook), right after the throw dump
-// probe, before the instant-release experiments. obj is the player's resolved unit object.
-void features_sim_unit_state_radar(uintptr_t obj);
+// drive_angles_impl (the sim thread from the orientation getter hook, or the game thread's off-thread
+// write), in the stick-mode hold, as the statement the hold returns. The unit publish that must not
+// stop while the aim write holds off (core/UnitState).
+void features_sim_stick_mode_hold(bool off_thread);
 
-// publish_unit_state (the sim thread, inside the orientation getter hook), at its end, right after
-// the unit facing publish. obj is the player's resolved unit object.
-void features_sim_unit_state_end(uintptr_t obj);
+// drive_angles_impl, once the control record is resolved and writable, before the record is read or
+// written. rec points at the record's yaw field. The unit state publish (core/UnitState).
+void features_sim_record_ready(uintptr_t rec, bool off_thread);
 
 } // namespace halo

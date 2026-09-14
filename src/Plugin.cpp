@@ -171,6 +171,7 @@
 #include "palettearm/PaletteArm.hpp"
 #include "BlamAim.hpp"
 #include "BlamDrive.hpp"
+#include "core/UnitState.hpp"
 #include "HitTrace.hpp"
 #include "AimWatch.hpp"
 #include "AimDirect.hpp"

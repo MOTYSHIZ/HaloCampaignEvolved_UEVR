@@ -1,5 +1,5 @@
 // holsterpollthrow (fork feature, Experimental): the instant-release experiments (greninstant 2: backdated stamp; 3: hold the release).
-// Textual fragment, included by BlamDrive.cpp inside publish_unit_state(), after the radar scan. Moved verbatim; not compiled on its own.
+// Textual fragment, included by core/UnitState.cpp inside publish_unit_state(), after the radar scan. Moved verbatim; not compiled on its own.
     // ---- GRENINSTANT mode 2: backdate the throw-start stamp (doctrine in Config.hpp). The
     // stamp at unit+0x38C is written by the game within ~1 ms of the press; the first probe call
     // that sees it change during the press window rewrites it N ticks into the past, once per

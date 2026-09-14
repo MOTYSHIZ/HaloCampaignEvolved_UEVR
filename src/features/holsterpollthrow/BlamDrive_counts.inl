@@ -1,5 +1,5 @@
 // holsterpollthrow (fork feature, Experimental): the live grenade type and pouch counts read from the unit object.
-// Textual fragment, included by BlamDrive.cpp inside publish_unit_state(), after the unit-state evidence line. Moved verbatim; not compiled on its own.
+// Textual fragment, included by core/UnitState.cpp inside publish_unit_state(), after the unit-state evidence line. Moved verbatim; not compiled on its own.
     // Grenade type and counts from raw unit offsets: only for the fork's grenade-gesture variant
     // (holsterpollthrow, experimental). Off, g_unit_gvalid stays false and the author's pouches keep
     // their fail-closed "counts unknown" behaviour exactly as he shipped it.

@@ -1,6 +1,7 @@
 #include "HeadBlock.hpp"
 
 #include "BlamDrive.hpp"               // g_unit_mounted: the trace stands down while mounted
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores

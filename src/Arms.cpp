@@ -1,6 +1,7 @@
 #include "Arms.hpp"
 
 #include "BlamDrive.hpp"     // ADDITION: unit position/mounted -- the driver hide and hog resolve anchor on them
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "DevTools.hpp"
 #include "Markers.hpp"       // ADDITION: g_cam_* -- the rendered eye, for the driver-body enumeration log

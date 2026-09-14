@@ -1,6 +1,7 @@
 #include "BlamPalette.hpp"
 
 #include "BlamDrive.hpp"     // resolve_object_by_datum: the weapon object through the sim's table
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "PaletteTwoHand.hpp"
 #include "ArmDriver.hpp"            // palette_weapon_mode(): this file acts only while armdriver mode 3 owns

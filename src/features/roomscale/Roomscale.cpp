@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "BlamDrive.hpp"               // g_unit_mounted
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Markers.hpp"                 // g_view_base_yaw
 #include "Math.hpp"

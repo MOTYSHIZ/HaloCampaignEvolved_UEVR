@@ -1,6 +1,7 @@
 #include "ForceTube.hpp"
 
 #include "BlamDrive.hpp"      // unit position (the player filter) + sim_tls layout doctrine
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Math.hpp"           // clampf
 #include "core/FireInput.hpp" // g_ft_fire_at: the player's own fire input

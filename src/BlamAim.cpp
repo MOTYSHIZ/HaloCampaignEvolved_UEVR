@@ -3,6 +3,7 @@
 #if HALO_VR_DEV
 
 #include "BlamDrive.hpp"
+#include "core/UnitState.hpp"
 #include "Config.hpp"
 #include "Holster.hpp"      // throw-press gate + hand position for the grenhand experiment
 #include "MotionAimControl.hpp"

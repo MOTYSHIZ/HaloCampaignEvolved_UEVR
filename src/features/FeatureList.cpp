@@ -5,11 +5,13 @@
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
+#include "features/hooks/UnitStateHooks.hpp"
 
 #include "Config.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
+#include "core/UnitState.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
 
@@ -143,6 +145,14 @@ bool features_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny,
 void features_xinput_before_brake(_XINPUT_STATE* state) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->xinput_before_brake != nullptr) f->xinput_before_brake(state);
+}
+
+void features_sim_stick_mode_hold(bool off_thread) {
+    unit_state_stick_mode_publish(off_thread);
+}
+
+void features_sim_record_ready(uintptr_t rec, bool off_thread) {
+    unit_state_record_ready(rec, off_thread);
 }
 
 void features_sim_unit_state_radar(uintptr_t obj) {

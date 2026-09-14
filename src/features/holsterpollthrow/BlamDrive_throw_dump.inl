@@ -1,5 +1,5 @@
 // holsterpollthrow (fork feature, Experimental): the throw windup dump (throwdump, dev), sim thread.
-// Textual fragment, included by BlamDrive.cpp at namespace halo scope, before the radar scan. Moved verbatim; not compiled on its own.
+// Textual fragment, included by core/UnitState.cpp at namespace halo scope, before the radar scan. Moved verbatim; not compiled on its own.
 void throw_dump_probe(uintptr_t obj) {
     constexpr uintptr_t SPAN = 0x600;
     constexpr int       NDW  = (int)(SPAN / 4);

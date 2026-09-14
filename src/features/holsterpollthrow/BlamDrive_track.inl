@@ -1,5 +1,5 @@
 // holsterpollthrow (fork feature, Experimental): the throw dump header, now_ms() (also used by the wrist radar scan later in this file) and the grenade-track handoff.
-// Textual fragment, included by BlamDrive.cpp at namespace halo scope, after the unit-state comment. Moved verbatim; not compiled on its own.
+// Textual fragment, included by core/UnitState.cpp at namespace halo scope, after the unit-state comment. Moved verbatim; not compiled on its own.
 // ---- THROW WINDUP DUMP (throwdump, doctrine in Config.hpp). SIM THREAD. Statics only, no
 // allocation; the cost while idle is one memcmp-sized pass over 0x600 bytes per sim call, and the
 // log lines are capped per window. The mask is learned, not assumed: anything that churns while

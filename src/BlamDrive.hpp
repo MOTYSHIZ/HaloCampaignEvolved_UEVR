@@ -62,9 +62,6 @@ extern std::atomic<uintptr_t> g_sim_tls_block;
 // thread, i.e. neither the getter hook nor tier 2's TEB walk would be load-bearing for FINDING it.
 uintptr_t blam_control_record();
 
-// Resolve ANY object datum through the sim's object table. SIM THREAD ONLY (walks gs:[0x58]).
-uintptr_t resolve_object_by_datum(uint32_t datum);
-
 #include "features/holsterpollthrow/BlamDrive_decls.inl"   // fork feature: holsterpollthrow (grenade exports)
 
 // A loaded module's `_tls_index`, read from its own PE TLS directory (IMAGE_TLS_DIRECTORY's
@@ -114,27 +111,18 @@ void blam_drive_offthread_write();
 // blam_drive_tick() must run BEFORE blam_aim_tick() so that on a 0->non-zero transition this file
 // removes its hook in the same frame the diagnostics install theirs.
 
-// Unit state read from the player's unit object on the sim thread (see publish_unit_state):
-// grenade type (0 frag / 1 plasma), pouch counts, whether the read is live, and whether the unit
-// has a parent object (vehicle seat / turret). Consumed by the holsters.
+
+// ---- GRENADE STATE FROM THE BLAM UNIT OBJECT -- DECLARED, NOT POPULATED IN THIS TREE.
+//
+// Holster.cpp reads these to draw the chest pouches and gate a grab. In blindcowboy24's PR they
+// are filled from raw offsets into the unit object (u8[0x380/0x382/0x383]) -- hardcoded struct
+// offsets with no ADDR-HYGIENE marker and no addrcascade guard, which is the class of constant
+// this project requires a paper trail for. That plumbing is deliberately NOT part of this
+// extraction: we took the WEAPON SWITCHING, not the grenades.
+//
+// g_unit_gvalid stays FALSE for ever here, which is the fail-closed answer -- Holster.cpp treats
+// it as "counts unknown" and the pouches stay empty rather than inventing a grenade. If the
+// grenade feature is ported later, populate these and the pouches light up with no other change.
 extern std::atomic<int>  g_unit_gtype, g_unit_gfrag, g_unit_gplasma;
 extern std::atomic<bool> g_unit_gvalid;
-extern std::atomic<bool> g_unit_mounted;
-// The unit's WORLD POSITION (+0x20, Blam world units) and FACING (+0x50, unit vector, Blam
-// frame), published beside the grenade state for the seat camera and the in-vehicle view.
-// Measured: over 972 samples the large-motion delta ratios against the camera are +308/-306/+332,
-// i.e. the 304.8 cm world unit with Blam's Y negation, constant residual = the eye height.
-extern std::atomic<float> g_unit_px, g_unit_py, g_unit_pz;
-extern std::atomic<bool>  g_unit_pvalid;
-extern std::atomic<float> g_unit_fx, g_unit_fy;
-// The MOUNTED VEHICLE's facing (+0x1D4 pair -- swept 3226 deg as a unit vector in the spin test
-// while every +0x50 field stayed constant) and its own position (+0x20, same layout as the
-// biped's). Resolved once per mount from the biped's parent datum and cached; retried ~1 s while
-// mounted-unresolved, because a mount-edge failure used to latch a backwards camera all ride.
-extern std::atomic<float> g_veh_fx, g_veh_fy;
-extern std::atomic<bool>  g_veh_fvalid;
-extern std::atomic<float> g_vehpx, g_vehpy, g_vehpz;
-
-#include "features/vehcam/BlamDrive_decls.inl"   // fork feature: vehcam (seat publish declarations)
-
 } // namespace halo
