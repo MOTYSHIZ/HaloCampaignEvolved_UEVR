@@ -17,4 +17,8 @@ void features_sim_stick_mode_hold(bool off_thread);
 // written. rec points at the record's yaw field. The unit state publish (core/UnitState).
 void features_sim_record_ready(uintptr_t rec, bool off_thread);
 
+// The orientation getter hook, right after the original getter returns and before the aim write. SIM
+// THREAD. The weapon object resolve off the builder hook (core/WeaponObject), rate limited there.
+void features_sim_orientation_returned();
+
 } // namespace halo

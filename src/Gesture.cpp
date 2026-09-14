@@ -9,6 +9,7 @@
 #include "core/FireInput.hpp"      // g_ft_fire_at: the reload family's fire timing
 #include "Markers.hpp"            // the magwell insert marker rides the holster marker machinery
 #include "core/MarkerFaces.hpp"
+#include "core/WeaponObject.hpp"   // the held weapon's object and the slide node
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "features/hooks/GestureHooks.hpp"

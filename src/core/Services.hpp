@@ -31,9 +31,14 @@ enum Service : uint32_t {
     SVC_WIDGET_HOSTS      = 1u << 10,  // core/fixes/ReticuleFixes: the alpha hide limited to the reticule widget
     SVC_STABILITY         = 1u << 11,  // core/fixes/HostFixes: robustness fixes to the author's code (stabilityfixes)
     SVC_RIG_GUARD         = 1u << 12,  // core/fixes/HostFixes: fault recovery rig drop, stale rig guard
+    SVC_WEAPON_OBJECT     = 1u << 13,  // core/WeaponObject: the held weapon's object resolve and node scan
+    // AVAILABILITY. Not machinery: a feature publishes that it provides a capability, and the shared
+    // core code reads the bit instead of any feature's master key.
+    SVC_RACK_AVAILABLE    = 1u << 14,  // the rack is available (slide node publish, capture pre-hook)
+    SVC_MANUAL_RELOAD_AVAILABLE = 1u << 15,  // the manual magazine reload is available
 };
 
-constexpr int kServiceCount = 13;
+constexpr int kServiceCount = 16;
 
 // True while at least one enabled feature declares the service.
 bool service_active(uint32_t service);

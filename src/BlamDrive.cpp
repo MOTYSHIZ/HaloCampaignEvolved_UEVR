@@ -1,7 +1,6 @@
 ﻿#include "BlamDrive.hpp"
 
 #include "Config.hpp"
-#include "BlamPalette.hpp"   // blam_weapon_object_probe_offhook: the reload's weapon object under his arm drivers
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
@@ -583,13 +582,7 @@ uintptr_t hooked_get_orientation(uintptr_t handle, Vec3f* outA, Vec3f* outB) {
     }
 
     const uintptr_t ret = g_original ? g_original(handle, outA, outB) : 0;
-    // Manual reload under the author's arm drivers: the held weapon's Blam object is resolved here, on
-    // the sim thread, because the builder hook that normally does it exists only in armdriver mode 3.
-    // Rate-limited: this hook runs thousands of times a second.
-    if (g_cfg.reload_vr || g_cfg.slide_vr) {
-        static uint32_t s_wo = 0;
-        if ((++s_wo & 0x3Fu) == 0u) blam_weapon_object_probe_offhook();
-    }
+    features_sim_orientation_returned();
     drive_control_angles();
     return ret;
 }

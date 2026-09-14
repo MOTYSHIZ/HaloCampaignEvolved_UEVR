@@ -12,7 +12,7 @@ bool reload_vr_enabled() { return g_cfg.reload_vr; }
 constinit const FeatureHooks kReloadVrHooks{
     .key      = "reloadvr",
     .enabled  = &reload_vr_enabled,
-    .services = SVC_FIRE_INPUT | SVC_MARKER_ANCHOR | SVC_HIDDEN_RELOAD,
+    .services = SVC_FIRE_INPUT | SVC_MARKER_ANCHOR | SVC_HIDDEN_RELOAD | SVC_WEAPON_OBJECT | SVC_MANUAL_RELOAD_AVAILABLE,
 };
 
 } // namespace halo

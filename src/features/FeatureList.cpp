@@ -21,6 +21,7 @@
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
 #include "core/UnitState.hpp"
+#include "core/WeaponObject.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
@@ -184,6 +185,10 @@ void features_sim_stick_mode_hold(bool off_thread) {
 
 void features_sim_record_ready(uintptr_t rec, bool off_thread) {
     if (service_active(SVC_UNIT_STATE)) unit_state_record_ready(rec, off_thread);
+}
+
+void features_sim_orientation_returned() {
+    if (service_active(SVC_WEAPON_OBJECT)) weapon_object_offhook_tick();
 }
 
 void features_sim_unit_state_grenades(uintptr_t obj) {
@@ -398,6 +403,9 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
     { SVC_WIDGET_HOSTS,      "widgethosts" },
     { SVC_STABILITY,         "stability" },
     { SVC_RIG_GUARD,         "rigguard" },
+    { SVC_WEAPON_OBJECT,     "weaponobject" },
+    { SVC_RACK_AVAILABLE,    "rackavailable" },
+    { SVC_MANUAL_RELOAD_AVAILABLE, "manualreloadavailable" },
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed
@@ -483,6 +491,8 @@ void features_config_loaded() {
     const uint32_t svc_off = s_service_mask & ~svc_now;
     if ((svc_off & SVC_CAMERA_BOB) != 0) camera_bob_reset();
     if ((svc_off & SVC_HIDDEN_RELOAD) != 0) hidden_reload_reset();
+    if ((svc_off & SVC_RACK_AVAILABLE) != 0) weapon_object_rack_reset();
+    if ((svc_off & SVC_WEAPON_OBJECT) != 0) weapon_object_reset();
     s_service_mask = svc_now;
     s_logged_mask = now;
     log_state("config reload");
