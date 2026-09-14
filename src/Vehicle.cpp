@@ -4,6 +4,7 @@
 #include "BlamDrive.hpp"
 #include "Config.hpp"
 #include "Markers.hpp"
+#include "core/MarkerFaces.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "Rig.hpp"

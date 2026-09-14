@@ -11,6 +11,7 @@
 #include "Markers.hpp"
 #include "WeaponCalib.hpp"        // weapon_key(): which weapon's magazine to render
 #include "features/hooks/HolsterHooks.hpp"
+#include "core/MarkerFaces.hpp"
 
 #include <chrono>
 #include <cmath>

@@ -1,6 +1,7 @@
 #include "features/FeatureHooks.hpp"
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
+#include "features/hooks/MarkersHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
@@ -8,6 +9,7 @@
 #include "Config.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
+#include "core/MarkerFaces.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
 
@@ -196,6 +198,10 @@ bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
 
 void features_reticule_widget_moved() {
     reticule_widget_moved();
+}
+
+bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
+    return room_to_world_anchored(room, hmd_room, out);
 }
 
 } // namespace halo

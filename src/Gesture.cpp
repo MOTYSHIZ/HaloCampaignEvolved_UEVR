@@ -8,6 +8,7 @@
 #include "Config.hpp"
 #include "core/FireInput.hpp"      // g_ft_fire_at: the off hand stands down while the stock kicks
 #include "Markers.hpp"            // the magwell insert marker rides the holster marker machinery
+#include "core/MarkerFaces.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
 #include "Rig.hpp"                // fp_weapon_actor -- the mag hide walks its components

@@ -94,6 +94,7 @@
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hook: startup resolved-state log
 #include "features/hooks/PluginHooks.hpp"
+#include "core/MarkerFaces.hpp"
 #include "BlamPalette.hpp"
 #include "PaletteTwoHand.hpp"        // palette_two_hand_update: the palette weapon mode's two-hand hold
 #include "WeaponCalib.hpp"

@@ -1,5 +1,6 @@
 #include "Config.hpp"
 #include "Markers.hpp"            // the grab-zone marker rides the holster marker machinery
+#include "core/MarkerFaces.hpp"
 #include "UeObject.hpp"           // TrackedObject for that marker
 
 #include <chrono>

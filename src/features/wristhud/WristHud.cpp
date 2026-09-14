@@ -4,6 +4,7 @@
 #include "Config.hpp"
 #include "Holster.hpp"
 #include "Markers.hpp"            // holster_marker_place_rot / scale / room_to_world
+#include "core/MarkerFaces.hpp"         // holster_world_to_room
 #include "Math.hpp"
 #include "Rig.hpp"              // call_ret_vec3
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
