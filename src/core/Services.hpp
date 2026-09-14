@@ -29,10 +29,11 @@ enum Service : uint32_t {
     SVC_HIDDEN_RELOAD     = 1u << 8,   // core/HiddenReload: the hidden-reload ammo cradle flag
     SVC_RETICULE_FIXES    = 1u << 9,   // core/fixes/ReticuleFixes: asset-load memo, widget re-assert
     SVC_WIDGET_HOSTS      = 1u << 10,  // core/fixes/ReticuleFixes: the alpha hide limited to the reticule widget
-    SVC_HOST_FIXES        = 1u << 11,  // core/fixes: robustness fixes to the author's code (rig guard, nav lane, ...)
+    SVC_STABILITY         = 1u << 11,  // core/fixes/HostFixes: robustness fixes to the author's code (stabilityfixes)
+    SVC_RIG_GUARD         = 1u << 12,  // core/fixes/HostFixes: fault recovery rig drop, stale rig guard
 };
 
-constexpr int kServiceCount = 12;
+constexpr int kServiceCount = 13;
 
 // True while at least one enabled feature declares the service.
 bool service_active(uint32_t service);

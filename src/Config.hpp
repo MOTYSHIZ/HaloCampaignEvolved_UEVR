@@ -6472,6 +6472,10 @@ struct Config {
     // a clean sample needs the camera essentially parked; this is deliberately tight.
     float mesh_const_gate = 0.05f;
 
+    // STABILITY FIXES (stabilityfixes, Experimental): robustness fixes to the base mod's own code paths
+    // that belong to no feature (features/stabilityfixes/StabilityFixes.hpp lists them). Off = as released.
+    bool  stability_fixes = false;
+
 };
 
 extern Config g_cfg;

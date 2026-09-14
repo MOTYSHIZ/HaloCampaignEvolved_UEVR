@@ -58,7 +58,7 @@ constinit const FeatureHooks kGrenadeSwallowHooks{
     .parse_key      = &grenadeswallow_parse_key,
     .xinput_raw_pad = &grenadeswallow_xinput_raw_pad,
     .enabled                    = &grenade_swallow_enabled,
-    .services                   = SVC_HOST_FIXES,
+    .services                   = 0,
 };
 
 } // namespace halo

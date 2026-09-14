@@ -243,7 +243,7 @@ constinit const FeatureHooks kHeadBlockHooks{
     .game_tick_after_leash = &headblock_game_tick_after_leash,
     .head_clamp            = &kHeadBlockClamp,
     .enabled                    = &head_block_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE | SVC_HOST_FIXES,
+    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE,
 };
 
 }  // namespace halo

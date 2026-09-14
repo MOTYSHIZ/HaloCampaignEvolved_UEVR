@@ -145,6 +145,9 @@ const FeatureRow kFeatures[] = {
     { "headblock",    1, Tier::Experimental, "Roomscale", "Head block",
       "Keeps your head out of walls when you lean into them.",
       "headblockradius", "", FEATURE_INT(head_block) },
+    { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
+      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, holster marker tint and minimum throw speed.",
+      "turnlog,widgetlog,markertint,holstermarkercolor,grenminthrow", "", FEATURE_BOOL(stability_fixes) },
 };
 
 #undef FEATURE_BOOL

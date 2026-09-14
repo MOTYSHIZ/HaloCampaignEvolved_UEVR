@@ -158,6 +158,12 @@ struct FeatureHooks {
     // return value.
     void (*blam_create_after)(uintptr_t params, uintptr_t cret);
 
+    // features_holster_pouch_offhand: the holster tick's pouch loop, the off hand against one pouch.
+    void (*holster_pouch_offhand)(bool ghand_ok, const Vec3& ghand, const Vec3& pouch);
+
+    // features_holster_pouches_measured: the holster tick, right after the pouch loop.
+    void (*holster_pouches_measured)();
+
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.
     bool (*enabled)();

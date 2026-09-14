@@ -12,7 +12,7 @@ bool aim_bore_enabled() { return g_cfg.aim_bore != 0; }
 constinit const FeatureHooks kAimBoreHooks{
     .key      = "aimbore",
     .enabled  = &aim_bore_enabled,
-    .services = SVC_HOST_FIXES,
+    .services = 0,
 };
 
 } // namespace halo

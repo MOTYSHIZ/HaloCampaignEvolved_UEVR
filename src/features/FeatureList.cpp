@@ -24,6 +24,7 @@
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
+#include "core/fixes/HostFixes.hpp"
 
 #include <string>
 
@@ -45,6 +46,7 @@ extern const FeatureHooks kSlideVrHooks;
 extern const FeatureHooks kPaletteWpnHooks;
 extern const FeatureHooks kAimBoreHooks;
 extern const FeatureHooks kAimReticuleStampHooks;
+extern const FeatureHooks kStabilityFixesHooks;
 
 namespace {
 
@@ -68,6 +70,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kPaletteWpnHooks,
     &kAimBoreHooks,
     &kAimReticuleStampHooks,
+    &kStabilityFixesHooks,
 };
 
 } // namespace
@@ -232,7 +235,7 @@ void features_asset_load_done(const char* path, uevr::API::UObject* obj) {
 
 bool features_widget_log() {
     // Inactive: the author's probe log, every 32nd call, as he shipped it.
-    return !service_active(SVC_WIDGET_HOSTS) || widget_log_enabled();
+    return !service_active(SVC_STABILITY) || widget_log_enabled();
 }
 
 float features_widget_tint_mul() {
@@ -246,7 +249,7 @@ bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
 }
 
 void features_reticule_widget_moved() {
-    if (service_active(SVC_HOST_FIXES)) reticule_widget_moved();
+    if (service_active(SVC_STABILITY)) reticule_widget_moved();
 }
 
 void features_game_tick_vehicle() {
@@ -334,6 +337,40 @@ uintptr_t features_blam_create_after(uintptr_t params, uintptr_t cret) {
     return cret;
 }
 
+void features_tick_begin() { stability_tick_begin(); }
+void features_tick_faulted() { stability_tick_faulted(); }
+void features_rig_parent_resolved() { stability_rig_parent_resolved(); }
+void features_stale_rig_guard() { stability_stale_rig_guard(); }
+void features_tick_stage(const char* stage) { stability_tick_stage(stage); }
+const char* features_tick_fault_stage() { return stability_fault_stage_suffix(); }
+bool features_nav_world_guarded(bool engaged, uint32_t tick) { return stability_nav_world_guarded(engaged, tick); }
+bool features_ui_manager_miss_throttled() { return stability_ui_manager_miss_throttled(); }
+bool features_reticle_rescan_follow(bool hud_hide, int reticle_count) { return stability_reticle_rescan_follow(hud_hide, reticle_count); }
+void features_reticle_hide_begin() { stability_reticle_hide_begin(); }
+void features_reticle_hide_dead() { stability_reticle_hide_dead(); }
+bool features_reticle_hide_end() { return stability_reticle_hide_end(); }
+void features_xrlayer_early(uint32_t tick) { stability_xrlayer_early(tick); }
+void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
+bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
+void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
+void features_turn_snap_note(float step) { stability_turn_snap_note(step); }
+void features_teardown_early() { stability_teardown_early(); }
+void features_teardown_restore() { stability_teardown_restore(); }
+
+void features_holster_pouch_offhand(bool ghand_ok, const Vec3& ghand, const Vec3& pouch) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_pouch_offhand != nullptr) f->holster_pouch_offhand(ghand_ok, ghand, pouch);
+}
+
+void features_holster_pouches_measured() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_pouches_measured != nullptr) f->holster_pouches_measured();
+}
+
+void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }
+bool features_holster_throw_too_slow(float peak_speed) { return stability_throw_too_slow(peak_speed); }
+const char* features_holster_putback_text(const char* his_text, bool in_pouch) { return stability_putback_text(his_text, in_pouch); }
+
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
     return room_to_world_anchored(room, hmd_room, out);   // SVC_MARKER_ANCHOR gate inside
 }
@@ -359,7 +396,8 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
     { SVC_HIDDEN_RELOAD,     "hiddenreload" },
     { SVC_RETICULE_FIXES,    "reticulefixes" },
     { SVC_WIDGET_HOSTS,      "widgethosts" },
-    { SVC_HOST_FIXES,        "hostfixes" },
+    { SVC_STABILITY,         "stability" },
+    { SVC_RIG_GUARD,         "rigguard" },
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed

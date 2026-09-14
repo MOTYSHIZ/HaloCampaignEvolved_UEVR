@@ -216,7 +216,7 @@ constinit const FeatureHooks kForceTubeHooks{
     .parse_key      = &forcetube_parse_key,
     .game_tick_late = &forcetube_game_tick_late,
     .enabled                    = &force_tube_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_FIRE_INPUT | SVC_HOST_FIXES,
+    .services                   = SVC_UNIT_STATE | SVC_FIRE_INPUT,
 };
 
 } // namespace halo

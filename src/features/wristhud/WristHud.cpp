@@ -1744,7 +1744,7 @@ constinit const FeatureHooks kWristHudHooks{
     .sim_unit_state_radar       = &wristhud_sim_unit_state_radar,
     .widget_tint_mul            = &wristhud_widget_tint_mul,
     .enabled                    = &wrist_hud_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_HIDDEN_RELOAD | SVC_WIDGET_HOSTS | SVC_RETICULE_FIXES | SVC_HOST_FIXES,
+    .services                   = SVC_UNIT_STATE | SVC_HIDDEN_RELOAD | SVC_WIDGET_HOSTS,
 };
 
 } // namespace halo

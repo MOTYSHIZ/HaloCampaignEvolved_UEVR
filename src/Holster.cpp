@@ -70,7 +70,6 @@ bool  s_have_raw = false;
 long long s_last_swap = 0;                           // debounce: one swap per grip press, min gap
 long long s_last_action = 0;                         // any holster action (melee veto window)
 bool  s_near_zone = false;                           // hand within radius+margin of any zone
-bool  s_gnear_zone = false;                          // OFF hand within gradius+margin of a pouch
 float s_nearest_dist = 1e9f;                         // ...and how far the nearest one actually is
 // Grenade type: READ from the unit object (BlamDrive publishes unit+0x380/+0x382/+0x383), with a
 // belief fallback only while that read is not live. The game auto-switches when a type runs out,
@@ -559,7 +558,6 @@ void holster_update(float dt) {
     // not stand the right hand's punches down.
     HolsterSlot zone_p = HolsterSlot::None; float pbest = 1e9f;   // AIM hand in a pouch
     HolsterSlot zone_g = HolsterSlot::None; float gbest = 1e9f;   // OFF hand in a pouch
-    float gnearest = 1e9f;   // OFF hand's nearest pouch, for ITS OWN melee veto (see below)
     const HolsterSlot pouches[2] = {HolsterSlot::LeftChest, HolsterSlot::RightChest};
     for (HolsterSlot sl : pouches) {
         const Vec3 o = zone_offset(sl);
@@ -572,15 +570,11 @@ void holster_update(float dt) {
             const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
             if (d < g_cfg.holster_gradius && d < gbest) { gbest = d; zone_g = sl; }
         }
-        // The OFF hand's own melee veto reads its pouch proximity whether or not it may grab.
-        if (ghand_ok) {
-            const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
-            if (d < gnearest) gnearest = d;
-        }
+        features_holster_pouch_offhand(ghand_ok, ghand, o);
     }
     s_nearest_dist = nearest;
     s_near_zone = (nearest < g_cfg.holster_radius + g_cfg.holster_melee_margin);
-    s_gnear_zone = (gnearest < g_cfg.holster_gradius + g_cfg.holster_melee_margin);
+    features_holster_pouches_measured();
 
     // ---- GRENADE VISUALS. Spawned lazily (paced), placed every tick, scale re-applied every
     // tick -- the wheel-disc lesson: anything a live cfg value controls must be re-applied on the
@@ -610,9 +604,9 @@ void holster_update(float dt) {
         if (auto* owner = API::get()->get_local_pawn(0)) {
             if (want_gren_marks && mf != nullptr) {
                 const double ms = (double)g_cfg.holster_marker_scale * 12.5;
-                if (s_pouch_l.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_pouch_l.set(m); } }
-                if (s_pouch_r.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mp, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_pouch_r.set(m); } }
-                if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { marker_tint(m, g_cfg.holster_marker_color); s_hand_g.set(m); } }
+                if (s_pouch_l.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { features_holster_marker_spawned(m); s_pouch_l.set(m); } }
+                if (s_pouch_r.get() == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mp, ms)) { features_holster_marker_spawned(m); s_pouch_r.set(m); } }
+                if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { features_holster_marker_spawned(m); s_hand_g.set(m); } }
             }
             if (want_mag_mark && s_mag_marker.get() == nullptr) {
                 auto* mm = s_mesh_mag.get();
@@ -966,14 +960,7 @@ void holster_update(float dt) {
         // at release is not a proxy -- it is the intent. The zone test is the same 13 cm sphere a
         // grab uses, so putting back happens exactly where taking out does.
         const bool in_pouch = (czone != HolsterSlot::None);
-        // MIN THROW SPEED (grenminthrow, 0 = off). a tester's ask for the shipped default: new
-        // players do not know a pouch release is the cancel, so a release that never swung
-        // (peak below the threshold) is treated as a put-back wherever the hand is. Judged on
-        // the PEAK, the same number the retired gate read: every measured throw peaked at 2.04
-        // or above and the deliberate put-back at 0.16, so 1.2 sits in a 13x gap. the player's own
-        // doctrine (positional-only, "however soft") is the 0 default -- his cfg keeps it off.
-        const bool too_slow = g_cfg.gren_min_throw > 0.0f && cpeak_spd < g_cfg.gren_min_throw;
-        const bool threw = !in_pouch && !too_slow;
+        const bool threw = !in_pouch && !features_holster_throw_too_slow(cpeak_spd);
         const bool cright = coff ? off_is_right() : aim_is_right();
         if (!threw) haptic_on(cright, 0.06f, 0.4f);   // the pouch accepted it back
         if (threw) {
@@ -1013,8 +1000,7 @@ void holster_update(float dt) {
             // Both numbers stay in the log so the next session can confirm the peak really is
             // the one that decided it, rather than taking this fit on trust.
             API::get()->log_info("[Halo-CampE-UEVR] HOLSTER %s (%s hand): release fwd %.2f |v| %.2f | PEAK fwd %.2f |v| %.2f (%.0f ms ago) | gate %.2f | held %.0f ms | stale %d/%d",
-                                 threw ? "THROW" : (in_pouch ? "put back (in pouch)" : "put back (below grenminthrow)"),
-                                 coff ? "off" : "aim",
+                                 threw ? "THROW" : features_holster_putback_text("put back (in pouch)", in_pouch), coff ? "off" : "aim",
                                  fwd_speed, speed, cpeak_fwd, cpeak_spd, peak_ms,
                                  g_cfg.holster_throw_speed, hold_ms, cstale, ctotal);
         }

@@ -12,7 +12,7 @@ bool palette_wpn_enabled() { return g_cfg.palette_weapon || g_cfg.arm_driver == 
 constinit const FeatureHooks kPaletteWpnHooks{
     .key      = "palettewpn",
     .enabled  = &palette_wpn_enabled,
-    .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_HOST_FIXES,
+    .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB,
 };
 
 } // namespace halo

@@ -1,4 +1,4 @@
-// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
+﻿// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
 //
 // Ships as halo_vr.dll, reading halo_vr.cfg from the profile root. Motion-controller aim is the
 // centrepiece, but the scope is the whole VR feel of the game, not just aim.
@@ -516,8 +516,6 @@ uint32_t g_rig_fast_until = 0;
 // first-person control, and gating turning on the route alone was half of why the campaign's
 // opening felt broken. The detector below is where the two are told apart. Game thread only.
 bool g_fp_control_now = true;
-volatile bool g_tick_fault_pending = false;
-TrackedObject g_rig_parent_track;   // the rig's attach parent by array slot (checked every tick)
 
 // This tick's "on foot, in first person, holding nothing" verdict -- the stick-mode exception's own
 // state, published because the rig block hides the arms on exactly the same condition. Deliberately
@@ -1911,9 +1909,7 @@ API::UObject* find_ui_manager() {
         return cached;
     }
 
-    // A miss means a full object-array sweep; retried every 128th call, not three times a second.
-    static uint32_t miss_calls = 0;
-    if ((miss_calls++ & 127) != 0) return nullptr;
+    if (features_ui_manager_miss_throttled()) return nullptr;
 
     auto* arr = API::get()->get_uobject_array();
     if (arr == nullptr) return nullptr;
@@ -2392,10 +2388,7 @@ void reticle_rescan(uint32_t tick) {
     // before the first bind; after rig-up, ensure stamps every tick and the next 120-tick
     // boundary sweeps fresh -- worst case the bind waits one throttle period, same as today.
     const bool needed = g_cfg.menu_dump                              // discovery: the sweep IS the product
-                     // Moves/hides the flat reticle. HIDING needs the sweep only until the widget is
-                     // found (and again if it dies): the hide re-applies every tick on the handle it
-                     // already holds. Following still needs it throughout, as before.
-                     || (g_cfg.hud_follow && (!g_cfg.hud_hide || g_reticle_count == 0))
+                     || (g_cfg.hud_follow && features_reticle_rescan_follow(g_cfg.hud_hide, g_reticle_count))
                      || (reticle_widget_needs_pick()
                          && tick - g_ret_ensure_seen_tick < 240)     // still choosing, and bindable
                      || reticle_stray_check_due(tick)                // HUD rebuilt a second crosshair
@@ -2515,15 +2508,15 @@ void hud_reticle_follow(float aim_pitch, float aim_yaw, uint32_t tick) {
     // silently undone and reads as "the hide never worked". SetVisibility early-outs when the value
     // already matches, so repeating it is close to free.
     if (g_cfg.hud_hide) {
-        bool dead = false;
+        features_reticle_hide_begin();
         for (int i = 0; i < g_reticle_count; ++i) {
             auto* o = g_reticles[i].obj.get_checked(L"WBP_FirstPersonReticle");
-            if (o == nullptr) { dead = true; continue; }
+            if (o == nullptr) { features_reticle_hide_dead(); continue; }
             alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
             p[0] = 1;   // ESlateVisibility::Collapsed
             o->call_function(L"SetVisibility", p);
         }
-        if (dead) g_reticle_count = 0;   // HUD rebuilt the widget: the gated sweep finds the new one
+        if (features_reticle_hide_end()) g_reticle_count = 0;
         return;   // nothing to follow once it is hidden
     }
 
@@ -5844,44 +5837,6 @@ static void reticule_ray_angles(double aim_yaw, double aim_pitch, float* out_yaw
     *out_pitch = sm_pitch;
 }
 
-// ---- THE NAV LANE IS QUARANTINED. 2026-09-02, measured: a null dereference inside engine code,
-// reached from this lane on the ticks after a marker re-host, took the whole tick down with it --
-// update() never reached the aim law, which therefore never re-armed, so the sim-thread write
-// kept pushing a STALE setpoint and the field symptom was "I can't turn" (11,084 exceptions in
-// one session, err=50 deg on the control record while snap turns logged fine). A lane that draws
-// waypoints must not be able to stop the player turning. SEH in a function with nothing to
-// unwind; on a fault the marker pool is dropped (slots re-create on the next foot segment) and
-// the lane sleeps ~10 s before trying again, so a persistent fault costs one line every 10 s
-// instead of every frame.
-uint32_t g_navw_sleep_until = 0;
-void navw_drop_all() {
-    for (int i = 0; i < 8; ++i) {
-        g_navw_pool[i] = TrackedObject{};
-        g_navw_mid_ok[i] = false;
-        g_navw_slot_class[i] = nullptr;
-    }
-    g_navw_placed_n = 0;
-}
-void nav_world_tick_guarded(bool engaged, uint32_t tick) {
-    if (tick < g_navw_sleep_until) return;
-    __try {
-        nav_world_tick(engaged, tick);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        static uint32_t s_n = 0;
-        const char* mark = g_navw_mark.load(std::memory_order_relaxed);
-        // Attributed to the lane the way report_tick_fault would have been, so the perf window's
-        // fault column and lane_cooling() see it even though it never escaped the guard.
-        g_lane_faults[PERF_NAVWORLD].fetch_add(1, std::memory_order_relaxed);
-        if (++s_n <= 10)
-            API::get()->log_info("[Halo-CampE-UEVR] NAVWORLD: exception #%u inside the nav lane (step '%s') -- "
-                                 "marker pool dropped, lane sleeping 10 s, rest of the tick continues",
-                                 s_n, (mark != nullptr) ? mark : "-");
-        NAVW_MARK(nullptr);
-        navw_drop_all();
-        g_navw_sleep_until = tick + 320;
-    }
-}
-
 // ON-FOOT RETICULE: the aim point on the ControlRotation ray from the rig parent, the in-scene
 // reticules placed on it, and the compositor publish. Moved out of the rig driver unchanged so the
 // palette-weapon path (rig=0) can run it without any rig writes. `rig` is the resolved FP rig
@@ -5891,15 +5846,7 @@ void nav_world_tick_guarded(bool engaged, uint32_t tick) {
 #include "features/palettewpn/Plugin_onfoot_reticule.inl"   // fork feature: palettewpn (on-foot reticule)
 
 void update() {
-    // AFTER A FAULT: whatever pointer the game rejected, the rig and its parent are the two the
-    // tick trusts blindly; drop them and resolve again rather than fault on the same one next tick.
-    if (g_tick_fault_pending) {
-        g_tick_fault_pending = false;
-        g_rig_component = nullptr;
-        g_rig_parent = nullptr;
-        g_rig_parent_track = TrackedObject{};
-        g_rig_resolve_tick = 0;
-    }
+    features_tick_begin();
     g_aim_law_armed = false;
     const uint32_t tick = g_ticks.fetch_add(1);
     g_tick_now.store(tick, std::memory_order_relaxed);
@@ -6260,7 +6207,7 @@ void update() {
     // ---- PER-WEAPON DELTAS: every tick. After the config reload above (a reload restores the
     // calibrated base and would wipe an applied adjustment), before anything below reads
     // grip/off. Re-captures its base only when g_cfg_load_gen changes, so per-tick is safe.
-    g_tick_stage = "weapon_offset";
+    features_tick_stage("weapon_offset");
     weapon_offset_update();
 
     #include "features/palettewpn/Plugin_tick.inl"   // fork feature: palettewpn (per-tick palette work)
@@ -6364,24 +6311,7 @@ void update() {
         }
     }
 
-    // ---- STALE RIG GUARD. g_rig_parent is a RAW pointer taken off the tracked rig component; on
-    // a level transition that keeps the same PlayerController (mission -> next mission, checkpoint
-    // reload) the pawn is torn down but nothing nulls it, and the first per-tick caller to
-    // dereference it -- the roomscale eye read -- threw inside on_pre_engine_tick EVERY tick
-    // (measured: 10k exceptions, arms and roomscale dead until a toggle let the rig re-resolve).
-    // Ask the tracker instead of trusting the pointer, and drop both pointers the moment the
-    // component's array slot is gone, so every user below sees null and the resolve runs promptly.
-    // THE PARENT DIES ON ITS OWN (2026-09-09): a mission spawn replaced the camera component
-    // while the FP mesh lived on, the parent pointer dangled, and every tick faulted in the game
-    // on it for three minutes -- the resolver that would have refreshed it sits after the fault.
-    // The parent is tracked by array slot and checked here every tick, like the rig itself.
-    if (g_rig_parent != nullptr && (!rig_component_alive() || g_rig_parent_track.get() != g_rig_parent)) {
-        API::get()->log_info("[Halo-CampE-UEVR] rig: tracked %s gone (level transition?) -- dropping rig + parent, re-resolving", rig_component_alive() ? "PARENT" : "component");
-        g_rig_component = nullptr;
-        g_rig_parent = nullptr;
-        g_rig_resolve_tick = 0;
-        features_rig_lost();
-    }
+    features_stale_rig_guard();
 
     features_game_tick_before_leash();
 
@@ -6789,54 +6719,20 @@ void update() {
         // A COOLDOWN, NOT A KILL. The escalation (96*n ticks, capped at 1024) parks a genuinely
         // broken lane without ever needing a "disable forever" rule, and lets a lane that faulted
         // once on a transition come back on its own. Markers are cosmetic; the hands are not.
-        g_tick_stage = "nav_world";
+        features_tick_stage("nav_world");
         if (!lane_cooling(PERF_NAVWORLD, tick)) {
             PerfScope _perf(PERF_NAVWORLD);
-            // THROUGH THE LANE'S OWN SEH GUARD (nav_world_tick_guarded): a fault inside it drops
-            // the marker pool and sleeps the lane instead of taking the rest of the tick down. The
-            // guard attributes the fault to this lane the same way report_tick_fault would, so the
-            // back-off above still sees it.
-            nav_world_tick_guarded(fixes_ok, tick);
+            if (!features_nav_world_guarded(fixes_ok, tick)) nav_world_tick(fixes_ok, tick);
         }
         // CLEAR THE STEP MARKER ON THE WAY OUT. Without this a fault anywhere later in the tick
         // would report navworld's last engine call and read as damning evidence about a lane it
         // had already left -- which is precisely the trap PerfScope's missing restore set for the
         // two previous rounds of this investigation.
         NAVW_MARK(nullptr);
-        g_tick_stage = "after nav_world";
+        features_tick_stage("after nav_world");
     }
 
-    // THE COMPOSITOR RETICULE's game-thread half, above every early-out so its config mirror,
-    // bring-up and liveness watchdog keep running on the ticks the aim stack parks on. With
-    // xrlayer=0 it stores the config mirror and returns (and tears down on the 1 -> 0 edge).
-    g_tick_stage = "xrlayer";
-    xrlayer_tick();
-    {
-        // LATCH ON FIRST LIVENESS, THEN STAY HIDDEN. xrlayer_live() is "a quad reached the runtime
-        // this window", so a quiet window would otherwise hand the world reticule back and show two
-        // crosshairs. Never live -> the world reticule stays, so a layer that never works can never
-        // leave the player with none.
-        static bool s_layer_ever_live = false;
-        if (!g_cfg.xr_layer) s_layer_ever_live = false;
-        else if (xrlayer_live()) s_layer_ever_live = true;
-        reticule_widget_set_scene_hidden(g_cfg.xr_layer && g_cfg.xr_layer_hide_ws != 0 && s_layer_ever_live);
-    }
-    reticule_mode3_reassert();
-    {
-        // Resolves the hosted crosshair widget's render target to an ID3D12Resource and copies it
-        // into the layer's atlas. GATED ON xrlayer: with xrlayersrc=1 (the default) it walks the
-        // widget chain every tick even while the layer is off, which would be new work in a build
-        // that has the feature disabled.
-        static bool s_src_was_on = false;
-        if (g_cfg.xr_layer) {
-            xrsource_tick(tick);
-            s_src_was_on = true;
-        } else if (s_src_was_on) {
-            s_src_was_on = false;
-            xrsource_reset();
-        }
-    }
-    g_tick_stage = "after xrlayer";
+    features_xrlayer_early(tick);
 
     if (!g_cfg.enabled) { g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return; }
 
@@ -7044,24 +6940,7 @@ void update() {
             if      (!g_cfg.stick_mode || g_cfg.stick_force == 2) want = false;
             else if (g_cfg.stick_force == 1)                      want = true;
 
-            // WHY stick mode engaged decides what the EXIT does. A vehicle ride's net rotation
-            // must FOLD into the turn offset (you exit facing where the ride faced). A DEATH is
-            // different: the respawn camera jump is not a rotation the player performed, and
-            // folding it rotates the whole room frame -- measured on a respawn as turn -90.0 ->
-            // -76.2 with a 13.8 deg visible snap, and everything afterwards consistently
-            // "facing left". RAW byte 2 is the death/third-person camera; remember it while stuck.
-            //
-            // The RAW byte, not fp_presentation_state(): that function NORMALIZES to
-            // {-1 unknown, 0 not-FP, 1 FP} and can never return 2, so comparing its result
-            // against the enum value left this branch unreachable -- measured 2026-08-26: a
-            // death logged raw persp=2 at stick enter, no death mark, and the exit folded the
-            // 76 deg respawn jump into the turn offset (the exact failure this branch exists
-            // to stop). Only the raw byte still carries the death value.
-            static bool s_entered_dead = false;
-            if (want && g_dbg_persp.load(std::memory_order_relaxed) == 2 && !s_entered_dead) {
-                s_entered_dead = true;
-                API::get()->log_info("[Halo-CampE-UEVR] STICK: death camera noted (raw persp=2) -- exit will re-anchor");
-            }
+            features_stick_mode_want(want);
 
             const bool was = g_stick_mode.exchange(want);
             // Published every tick, not just on the edge: the blamangles write reads it from a
@@ -7077,18 +6956,7 @@ void update() {
                     g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false;
                     g_have_ref = false;
                     g_rigw_valid = false;
-                } else if (s_entered_dead) {
-                    // EXIT AFTER A DEATH: full first-prime. The base adopts the respawn camera
-                    // outright and the accumulated turn is cleared -- physical forward becomes
-                    // the respawn's forward, which is what a fresh spawn means. The fold below
-                    // stays for rides, where the net rotation is genuinely the player's.
-                    s_entered_dead = false;
-                    g_turn_offset = 0.0f;
-                    g_lock_ever = false;
-                    g_lock_primed = false;
-                    g_have_ref = false;
-                    g_rig_neutral_valid = false;
-                    API::get()->log_info("[Halo-CampE-UEVR] STICK EXIT after death -- full re-anchor (turn cleared)");
+                } else if (features_stick_exit_after_death()) {
                 } else {
                     // EXIT: re-anchor against wherever the game camera is now. The view lock was
                     // held unprimed throughout, so the next stereo frame adopts the current camera
@@ -8257,9 +8125,9 @@ void update() {
         }
     }
 
-    g_tick_stage = "reticle_follow";
+    features_tick_stage("reticle_follow");
     hud_reticle_follow((float)aim_pitch, (float)aim_yaw, tick);
-    g_tick_stage = "after reticle_follow";
+    features_tick_stage("after reticle_follow");
 
     // ------------------------------------------------------------------ WEAPON RIG
     // Drives the FP rig from the same controller pose the aim loop uses, so the gun visually
@@ -8296,7 +8164,7 @@ void update() {
                                      narrow(class_name_of(found)).c_str(), nm.c_str());
 
                 g_rig_parent = follow_object(found, L"AttachParent");
-                g_rig_parent_track.set(g_rig_parent);
+                features_rig_parent_resolved();
                 API::get()->log_info("[Halo-CampE-UEVR]   attach parent: %s",
                                      g_rig_parent != nullptr
                                         ? narrow(class_name_of(g_rig_parent)).c_str()
@@ -8508,7 +8376,7 @@ void update() {
             if (rig_v != nullptr && (want_hidden != we_hid || due)) {
                 if (want_hidden != we_hid) {
                     API::get()->log_info("[Halo-CampE-UEVR] FP arms %s (unarmed=%d hidearms=%d showarms=%d)",
-                                         want_hidden ? (g_cfg.show_arms ? "HIDDEN -- unarmed"
+                                         want_hidden ? (g_cfg.show_arms ? "HIDDEN -- unarmed, no arm IK yet"
                                                                         : "HIDDEN -- showarms=0")
                                                      : "restored -- our hide released",
                                          (int)g_on_foot_unarmed, (int)g_cfg.hide_arms, (int)g_cfg.show_arms);
@@ -10545,7 +10413,7 @@ void update() {
         }
     }
 
-    g_tick_stage = "turning";
+    features_tick_stage("turning");
     // ------------------------------------------------------------------ TURNING
     // Consumes the player's raw right-stick X (sampled in the XInput hook before the aim value
     // replaced it). Adjusts the locked view yaw, so the world turns while aim stays on the gun.
@@ -10554,24 +10422,7 @@ void update() {
     // control is lost (g_fp_control_now) -- boarding a vehicle otherwise banks accidental snaps
     // during the enter debounce, because the player is already using the stick as a vehicle camera.
     // Standing unarmed keeps turning: it is still the player's own camera to turn.
-    //
-    // WHY-NOT INSTRUMENT (turnlog): "sometimes turning works and sometimes it doesnt" cannot be
-    // diagnosed from transition logs alone -- the flick that went nowhere is the evidence, and
-    // only this spot knows why. Logs ONE line per deadzone crossing while any gate blocks, naming
-    // every gate's state, and one line per snap that lands, so the two interleave in time.
-    if (g_cfg.turn_log) {
-        static bool s_tl_past = false;
-        const float sxl = g_raw_stick_x.load();
-        const bool  past = std::fabs(sxl) > g_cfg.turn_dz;
-        const bool  blocked = g_cfg.turn_mode == 0 || g_stick_mode.load() || !g_fp_control_now;
-        if (past && !s_tl_past && blocked) {
-            API::get()->log_info("[Halo-CampE-UEVR] TURN blocked: sx=%.2f mode=%d stickmode=%d "
-                                 "fpcontrol=%d persp=%d",
-                                 sxl, g_cfg.turn_mode, (int)g_stick_mode.load(),
-                                 (int)g_fp_control_now, g_dbg_persp.load());
-        }
-        s_tl_past = past;
-    }
+    features_turn_gate_note(g_fp_control_now);
     if (g_cfg.turn_mode != 0 && !g_stick_mode.load() && g_fp_control_now) {
         const float sx = g_raw_stick_x.load();
         const bool past_dz = std::fabs(sx) > g_cfg.turn_dz;
@@ -10585,10 +10436,7 @@ void update() {
                 // not inherits a wildly out-of-range angle, and the rendered yaw is written raw.
                 g_turn_offset = wrap180(g_turn_offset.load() + ((sx > 0.0f) ? g_cfg.snap_deg : -g_cfg.snap_deg));
                 g_snap_latched = true;
-                if (g_cfg.turn_log)
-                    API::get()->log_info("[Halo-CampE-UEVR] TURN snap %+.0f -> turn=%.1f",
-                                         (sx > 0.0f) ? g_cfg.snap_deg : -g_cfg.snap_deg,
-                                         g_turn_offset.load());
+                features_turn_snap_note((sx > 0.0f) ? g_cfg.snap_deg : -g_cfg.snap_deg);
             } else if (!past_dz) {
                 g_snap_latched = false;
             }
@@ -10737,7 +10585,62 @@ SHORT to_raw(float v) {
 
 HALO_PLUGIN_STATE_BRIDGE
 
-// =====================================================================================
+// ============================================================================================
+// ENABLE OUR OPENXR API LAYER FOR THIS PROCESS ONLY -- no registry, no PDB, no user step.
+// ============================================================================================
+//
+// THE PROBLEM THIS SOLVES. The compositor needs xrEndFrame. Two routes existed and both are bad:
+//
+//   PDB rung   -- resolve the symbol out of UEVRBackend.pdb and hook it. MEASURED 2026-09-05 on
+//                 BOTH the pinned nightly-01138 and a locally-built backend: the symbol resolves,
+//                 the hook installs, and it is NEVER CALLED. The watchdog fires every session.
+//                 It also depends on a 149 MB PDB happening to be a release asset.
+//   Registry   -- register the layer as an IMPLICIT layer under HKCU. That works, but it loads our
+//                 layer into EVERY OpenXR application on the machine (relying on a process gate to
+//                 stay inert), it persists until unregistered, and it is an install step the user
+//                 reasonably calls suspicious.
+//
+// THE THIRD ROUTE, which is what this is. The OpenXR loader discovers EXPLICIT layers from
+// XR_API_LAYER_PATH and enables them by name from XR_ENABLE_API_LAYERS, both read when the
+// application calls xrCreateInstance. We are loaded long before that -- measured 700 ms of margin
+// (plugin at 11:03:33.509, "Creating OpenXR instance" at 11:03:34.219) -- so setting them here is
+// enough, and it is the same per-process discovery trick this project already uses for the Meta XR
+// Simulator's XR_RUNTIME_JSON.
+//
+// WHY IT IS THE LEAST INVASIVE OF THE THREE: SetEnvironmentVariable writes to OUR OWN process
+// environment block. Nothing on disk, nothing in the registry, nothing another process can see,
+// gone when the game exits, nothing to uninstall. Scope is one process instead of every OpenXR
+// application on the machine.
+//
+// APPENDS, NEVER CLOBBERS. Another tool may already be using these -- a developer, a different
+// layer, a capture tool. Overwriting them would silently disable someone else's layer, which is
+// exactly the class of "touches things outside its own folder" behaviour this route exists to
+// avoid.
+//
+// HONOURS HALOVR_LAYER_DISABLE. That escape hatch is a PUBLIC PROMISE in the README, and
+// disable_environment in the manifest only works for IMPLICIT layers -- so on this route we have to
+// honour it ourselves or the promise quietly stops being true.
+// RUNS AT DLL LOAD, NOT AT on_initialize -- and that is the whole point.
+//
+// MEASURED 2026-09-06 from this game's own startup log:
+//     +0.002s  [PluginLoader] Loaded <our dll>   <- a static constructor runs about here
+//     +0.659s  [VR] Creating OpenXR instance     <- the loader reads the layer env vars HERE
+//     +3.117s  on_initialize()                   <- where this used to be called: 2.458s LATE
+//
+// The OpenXR loader reads XR_API_LAYER_PATH / XR_ENABLE_API_LAYERS exactly once, inside
+// xrCreateInstance. Setting them afterwards is not merely unreliable, it can NEVER work -- and it
+// did not: the log showed the vars being set, the layer never loading, and the attachment silently
+// falling back to the DEV-ONLY PDB rung. That fallback is why the compositor overlay worked on a
+// developer machine and would not have worked for a single player.
+//
+// NO LOGGING IN HERE. UEVR's API does not exist yet at static-init time; API::get() would be a null
+// dereference during DLL_PROCESS_ATTACH -- a crash before the game has drawn a frame. The outcome
+// is recorded into a buffer and printed from on_initialize instead.
+//
+// LOADER-LOCK DISCIPLINE: this runs under the loader lock, so it makes kernel32 calls and nothing
+// else -- no LoadLibrary, no COM, no threads, no engine calls. GetFileAttributes is the heaviest
+// thing here, and it is what keeps us from naming a layer that is not on disk (which makes
+// xrCreateInstance FAIL on some runtimes -- turning "no overlay" into "no VR at all").
 char     g_apilayer_note[600] = {0};
 uint64_t g_apilayer_tick_ms   = 0;
 
@@ -10856,11 +10759,6 @@ public:
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_dev.cfg", appdata);
             sprintf_s(g_calib_path, MAX_PATH,
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_calib.cfg", appdata);
-            // Per-weapon captures (halo_vr_weapons.cfg). This assignment was lost in the port, which
-            // left the path empty: wpn_calib_load() returned at once, every wpnfix trim silently read
-            // as none, and a capture wrote nowhere.
-            sprintf_s(g_wpn_calib_path, MAX_PATH,
-                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_weapons.cfg", appdata);
             sprintf_s(g_data_dir, MAX_PATH,
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\data", appdata);
             // Per-weapon captures get their own machine-owned file, for the reason Config.cpp
@@ -11000,13 +10898,7 @@ public:
         API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN (%s): releasing hook, overrides and components", why);
         stomp_flush();   // a capture must survive the game closing mid-window
 
-        // 0. THE OPENXR LAYER BEFORE ANYTHING ELSE. It owns an XR swapchain and D3D12 resources
-        //    parented to the session UEVR is about to destroy, and its end-frame path runs on the
-        //    submit thread. Left up, the game hangs on exit inside UEVR's own teardown.
-        //    Idempotent, and safe when it was never brought up.
-        API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN stage: xrlayer_shutdown");
-        xrlayer_shutdown();
-        API::get()->log_info("[Halo-CampE-UEVR] TEARDOWN stage: xrlayer_shutdown RETURNED");
+        features_teardown_early();
 
         // EVERY STAGE ANNOUNCES ITSELF BEFORE IT RUNS. A teardown that hangs returns no value,
         // throws nothing and leaves no stack: the last line printed IS the diagnosis. A teardown
@@ -11052,9 +10944,7 @@ public:
         audio_comp_tick(false, 0, 0, 0, 0, 0, 0);
         stage("game_settings_restore");
         game_settings_restore();
-        //    And the API layer's projection rewrite, in case the exit lands mid-cutscene: an
-        //    atomic store in the layer, harmless when the layer is absent or already gone.
-        halo::xrbridge_set_projection_mono(0);
+        features_teardown_restore();
 
         // 3. Our own components: hand the game's crosshair back, detach the hands from UEVR's
         //    motion-controller components, and park the markers. hands_release() was in the same
@@ -11112,9 +11002,7 @@ public:
         // Set BEFORE anything can unwind -- see g_tick_aborted. This is the abort signal;
         // g_tick_finished is not, and never could be.
         g_tick_aborted.store(true, std::memory_order_relaxed);
-        // ...and hand the recovery to the next tick: update() drops the rig and its parent and
-        // re-resolves them, so a pointer the game rejected is not dereferenced again next tick.
-        g_tick_fault_pending = true;
+        features_tick_faulted();
         const int flt_lane = g_tick_lane.load(std::memory_order_relaxed);
         if (flt_lane >= 0 && flt_lane < (int)PERF_COUNT) {
             const uint32_t n  = g_lane_faults[flt_lane].fetch_add(1, std::memory_order_relaxed) + 1;
@@ -11209,14 +11097,14 @@ public:
         const char* mark = g_navw_mark.load(std::memory_order_relaxed);
         API::get()->log_info(
             "[Halo-CampE-UEVR] TICK FAULT #%u: code 0x%08X at %p in %s (base %p, +0x%llX)%s%s%s | "
-            "lane '%s' step '%s' stage '%s' | called from %s. Observed only -- the exception is passed on "
+            "lane '%s' step '%s'%s | called from %s. Observed only -- the exception is passed on "
             "untouched, so this tick's remaining lanes (rig, arms, hands, two-hand, gestures) did "
             "NOT run.",
             (unsigned)nth, (unsigned)er->ExceptionCode, addr, leaf, modbase,
             (unsigned long long)((uintptr_t)addr - (uintptr_t)modbase), extra, fn, build,
             (lane >= 0 && lane < PERF_COUNT) ? kPerfName[lane] : "(none)",
             (mark != nullptr) ? mark : "-",
-            g_tick_stage,
+            features_tick_fault_stage(),
             chain[0] ? chain : "(no chain)");
     }
 
@@ -11312,7 +11200,7 @@ public:
             // instantaneous dt and invisible in a mean; it only shows up as a peak.
             if (delta > g_dt_worst.load()) g_dt_worst = delta;
         }
-        g_tick_stage = "start";
+        features_tick_stage("start");
         #include "features/palettewpn/Plugin_tick_start.inl"   // fork feature: palettewpn (tick start)
         // The braces are load-bearing: PERF_TICK must CLOSE before perf_hitch_report() reads the
         // total it wrote. Left at function scope, the destructor would run after the report and the

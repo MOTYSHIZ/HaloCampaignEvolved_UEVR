@@ -12,7 +12,7 @@ bool aim_reticule_stamp_enabled() { return g_cfg.aim_reticule_stamp != 0; }
 constinit const FeatureHooks kAimReticuleStampHooks{
     .key      = "aimreticulestamp",
     .enabled  = &aim_reticule_stamp_enabled,
-    .services = SVC_HOST_FIXES,
+    .services = 0,
 };
 
 } // namespace halo

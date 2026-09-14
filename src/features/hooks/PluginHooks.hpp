@@ -93,4 +93,42 @@ bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double);
 // aim_converge_note_post and before the eye position publish: the rendered eye.
 void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez);
 
+// ---- STABILITY FIXES (core/fixes/HostFixes; each a no-op while its service is inactive)
+// update() (game thread), its first statement.
+void features_tick_begin();
+// The engine tick's exception filter, where the fault is counted.
+void features_tick_faulted();
+// update() (game thread), in the rig resolve, right after the attach parent is taken.
+void features_rig_parent_resolved();
+// update() (game thread), right before features_game_tick_before_leash.
+void features_stale_rig_guard();
+// A tick stage marker, at the author's stage boundaries (game thread).
+void features_tick_stage(const char* stage);
+// report_tick_fault: the " stage 'x'" part of the fault line ("" while inactive).
+const char* features_tick_fault_stage();
+// update() (game thread), the nav lane call: true = the lane ran under the fault quarantine.
+bool features_nav_world_guarded(bool engaged, uint32_t tick);
+// find_ui_manager (game thread), right after the cached hit: true = skip this miss's sweep.
+bool features_ui_manager_miss_throttled();
+// reticle_rescan (game thread), hud_follow's term of the sweep need (true while inactive).
+bool features_reticle_rescan_follow(bool hud_hide, int reticle_count);
+// hud_reticle_follow (game thread): the hide pass, a dead hosted crosshair, and the pass end
+// (true = forget the crosshairs so the sweep finds the rebuilt one).
+void features_reticle_hide_begin();
+void features_reticle_hide_dead();
+bool features_reticle_hide_end();
+// update() (game thread), right after the nav lane block, before the enabled early-out.
+void features_xrlayer_early(uint32_t tick);
+// update() (game thread), the stick-mode detector, right after the force overrides decide `want`.
+void features_stick_mode_want(bool want);
+// update() (game thread), the stick-mode exit: true = re-anchored after a death (skips the fold).
+bool features_stick_exit_after_death();
+// update() (game thread), the turning block: a flick a gate swallowed, and a snap that landed.
+void features_turn_gate_note(bool fp_control_now);
+void features_turn_snap_note(float step);
+// Teardown (the thread UEVR tears down on): right after the teardown line, and after the game
+// settings restore.
+void features_teardown_early();
+void features_teardown_restore();
+
 } // namespace halo

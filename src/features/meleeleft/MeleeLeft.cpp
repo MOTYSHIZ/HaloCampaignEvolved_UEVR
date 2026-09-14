@@ -20,6 +20,12 @@ using uevr::API;
 
 namespace halo {
 
+namespace {
+// The OFF hand within gradius+margin of a pouch, measured by the holster tick for this veto.
+bool  s_gnear_zone = false;
+float s_gnearest = 1e9f;
+}  // namespace
+
 // The OFF hand's own veto. holster_melee_veto() (Holster.cpp) tests the AIM hand's zone proximity --
 // correct for the aim-hand detector it was built for, and exactly wrong for a left punch: the
 // right hand holding a rifle at chest height parks inside the pouch space and stood every left
@@ -28,7 +34,6 @@ namespace halo {
 // case is holster_offhand_busy(), which the caller already checks.
 bool holster_offhand_melee_veto() {
     // Holster.cpp's own state and clock, through the bridge.
-    const bool& s_gnear_zone = *host::g_holster_state.gnear_zone;
     const long long& s_last_action = *host::g_holster_state.last_action;
     const auto now_ticks = host::g_holster_state.now_ticks;
     const auto ms_to_ticks = host::g_holster_state.ms_to_ticks;
@@ -215,12 +220,28 @@ namespace {
 bool melee_left_enabled() { return g_cfg.melee_left; }
 }  // namespace
 
+namespace {
+void meleeleft_pouch_offhand(bool ghand_ok, const Vec3& ghand, const Vec3& o) {
+        // The OFF hand's own melee veto reads its pouch proximity whether or not it may grab.
+        if (ghand_ok) {
+            const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
+            if (d < s_gnearest) s_gnearest = d;
+        }
+}
+void meleeleft_pouches_measured() {
+    s_gnear_zone = (s_gnearest < g_cfg.holster_gradius + g_cfg.holster_melee_margin);
+    s_gnearest = 1e9f;
+}
+}  // namespace
+
 constinit const FeatureHooks kMeleeLeftHooks{
     .key                   = "meleeleft",
     .parse_key             = &meleeleft_parse_key,
     .gesture_melee_offhand = &offhand_melee_update,
+    .holster_pouch_offhand      = &meleeleft_pouch_offhand,
+    .holster_pouches_measured   = &meleeleft_pouches_measured,
     .enabled                    = &melee_left_enabled,
-    .services                   = SVC_FIRE_INPUT | SVC_MELEE_INSTRUMENTS | SVC_HOST_FIXES,
+    .services                   = SVC_FIRE_INPUT,
 };
 
 } // namespace halo

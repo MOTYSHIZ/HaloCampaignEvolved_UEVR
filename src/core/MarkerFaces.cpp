@@ -49,7 +49,7 @@ bool room_to_world_anchored(const Vec3& room, const Vec3& hmd_room, Vec3* out) {
 }
 
 void marker_tint(API::UObject* comp, const char* rgb) {
-    if (!service_active(SVC_MARKER_ANCHOR) || !g_cfg.marker_tint_on || comp == nullptr || rgb == nullptr || rgb[0] == 0) return;
+    if (!g_cfg.marker_tint_on || comp == nullptr || rgb == nullptr || rgb[0] == 0) return;
     float r = 1.0f, g = 1.0f, b = 1.0f;
     if (sscanf_s(rgb, "%f,%f,%f", &r, &g, &b) != 3) return;
     API::UObject* mid = nullptr;

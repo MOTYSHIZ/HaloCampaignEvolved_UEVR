@@ -1,11 +1,11 @@
 #pragma once
 
-// PLUGIN.CPP'S FILE-LOCAL STATE THAT FEATURES READ.
+// PLUGIN.CPP'S FILE-LOCAL STATE THAT CORE AND FEATURES READ.
 //
 // Plugin.cpp keeps its state in an anonymous namespace, which no other translation unit can name.
 // HALO_PLUGIN_STATE_BRIDGE, expanded once in Plugin.cpp right after that namespace closes, defines
 // g_plugin_state as the addresses of the originals, so every read and write lands on exactly the
-// object the code used when it was a textual fragment of Plugin.cpp. A feature binds a reference to
+// object the code used when it was a textual fragment of Plugin.cpp. A user binds a reference to
 // each object it uses under the object's own name, so the code reads the same as it did in place.
 //
 // Pointers, not reference members: MSVC 19.29 refuses constinit on an aggregate of references, and
@@ -13,6 +13,9 @@
 // moment the DLL is loaded, with no initialisation order against any other translation unit.
 
 #include <atomic>
+#include <cstdint>
+
+#include "UeObject.hpp"   // TrackedObject
 
 namespace halo::host {
 
@@ -29,6 +32,20 @@ struct PluginState {
     std::atomic<float>* dbg_view_in;        // g_dbg_view_in
     std::atomic<float>* dbg_view_out;       // g_dbg_view_out
     std::atomic<bool>*  lock_primed;        // g_lock_primed
+    // ---- the nav lane (core/fixes/HostFixes: its fault quarantine)
+    TrackedObject*      navw_pool;          // g_navw_pool[8]
+    bool*               navw_mid_ok;        // g_navw_mid_ok[8]
+    void**              navw_slot_class;    // g_navw_slot_class[8]
+    std::atomic<int>*   navw_placed_n;      // g_navw_placed_n
+    std::atomic<const char*>* navw_mark;    // g_navw_mark
+    std::atomic<uint32_t>*    lane_faults;  // g_lane_faults[PERF_COUNT]
+    int                 perf_navworld;      // PERF_NAVWORLD
+    void (*nav_world_tick)(bool engaged, uint32_t tick);   // nav_world_tick()
+    // ---- the aim reference and turning (the stick-mode exit fix, the turn instrument)
+    std::atomic<bool>*  lock_ever;          // g_lock_ever
+    std::atomic<bool>*  have_ref;           // g_have_ref
+    std::atomic<float>* raw_stick_x;        // g_raw_stick_x
+    bool*               fp_control_now;     // g_fp_control_now
 };
 
 extern const PluginState g_plugin_state;
@@ -49,4 +66,16 @@ extern const PluginState g_plugin_state;
         &g_dbg_view_in,                                                    \
         &g_dbg_view_out,                                                   \
         &g_lock_primed,                                                    \
+        g_navw_pool,                                                       \
+        g_navw_mid_ok,                                                     \
+        g_navw_slot_class,                                                 \
+        &g_navw_placed_n,                                                  \
+        &g_navw_mark,                                                      \
+        g_lane_faults,                                                     \
+        PERF_NAVWORLD,                                                     \
+        &nav_world_tick,                                                   \
+        &g_lock_ever,                                                      \
+        &g_have_ref,                                                       \
+        &g_raw_stick_x,                                                    \
+        &g_fp_control_now,                                                 \
     };

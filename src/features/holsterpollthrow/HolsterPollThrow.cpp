@@ -667,7 +667,7 @@ constinit const FeatureHooks kHolsterPollThrowHooks{
     .blam_create_after          = &holsterpollthrow_blam_create_after,
 #endif
     .enabled                    = &holster_poll_throw_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_HOST_FIXES,
+    .services                   = SVC_UNIT_STATE,
     .released                   = &holsterpollthrow_released,
 };
 

@@ -1413,7 +1413,7 @@ constinit const FeatureHooks kVehCamHooks{
     .stereo_view_override     = &vehcam_stereo_view_override,
     .stereo_post_eye_rendered = &vehcam_stereo_post_eye_rendered,
     .enabled                    = &veh_cam_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_SEAT | SVC_MARKER_ANCHOR | SVC_HOST_FIXES,
+    .services                   = SVC_UNIT_STATE | SVC_SEAT | SVC_MARKER_ANCHOR,
     .released                   = &vehcam_released,
 };
 

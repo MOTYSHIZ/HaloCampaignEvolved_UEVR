@@ -755,7 +755,7 @@ constinit const FeatureHooks kScopeLensHooks{
     .scope_trigger_stood_down = &scopelens_trigger_stood_down,
     .scope_pane_stands_down   = &scopelens_pane_stands_down,
     .enabled                    = &scope_lens_enabled,
-    .services                   = SVC_RETICULE_FIXES | SVC_HOST_FIXES,
+    .services                   = 0,
 };
 
 } // namespace halo

@@ -518,6 +518,7 @@ static const EffectiveKey kEffectiveKeys[] = {
     { "vehview",          [] { return (double)g_cfg.veh_view; } },
     { "vehiclewheel",     [] { return (double)g_cfg.vehicle_wheel; } },
     { "vehhidebody",      [] { return (double)g_cfg.veh_hide_body; } },
+    { "stabilityfixes",   [] { return (double)g_cfg.stability_fixes; } },
 };
 
 static void effective_mirror_path(char* out, size_t cap) {
