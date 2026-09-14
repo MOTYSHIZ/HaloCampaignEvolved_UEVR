@@ -65,17 +65,7 @@ uintptr_t blam_control_record();
 // Resolve ANY object datum through the sim's object table. SIM THREAD ONLY (walks gs:[0x58]).
 uintptr_t resolve_object_by_datum(uint32_t datum);
 
-// GRENTRACK (dev, throwdump): the projectile object the spawn hook just created, and when. The
-// hook (sim thread) writes them; throw_dump_probe samples the object's position for ~1.2 s so the
-// log shows whether the grenade FLIES from spawn or sits held until an animation event.
-extern std::atomic<uintptr_t> g_grentrack_obj;
-extern std::atomic<long long> g_grentrack_at_ms;
-
-// GRENINSTANT (dev, greninstant): the grenade released at spawn, and the velocity to keep
-// re-asserting on it for 400 ms so the animation keyframe's own late release is overwritten.
-extern std::atomic<uintptr_t> g_greninst_obj;
-extern std::atomic<long long> g_greninst_at_ms;
-extern std::atomic<float>     g_greninst_vx, g_greninst_vy, g_greninst_vz;
+#include "features/holsterpollthrow/BlamDrive_decls.inl"   // fork feature: holsterpollthrow (grenade exports)
 
 #include "features/wristhud/BlamDrive_decls.inl"   // fork feature: wristhud (radar blip exports)
 

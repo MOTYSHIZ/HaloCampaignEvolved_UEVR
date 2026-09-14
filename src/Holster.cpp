@@ -245,23 +245,7 @@ bool  s_carry_off = false;                           // which hand holds the arm
 float s_body_yaw = 0.0f;
 bool  s_body_init = false;
 
-// ---- POLL-RATE THROW RELEASE (doctrine in Config.hpp). The tick's standing verdict, consumed by
-// the XInput hook. Mask 0 = disarmed (no grenade, hand in a pouch = put-back territory, feature
-// off). The hold angles are the tick's peak-direction math, republished every tick so the hook
-// only ever copies numbers.
-std::atomic<unsigned short> g_pollthrow_mask{0};
-std::atomic<float> g_pollthrow_hy{0.0f}, g_pollthrow_hp{0.0f};
-std::atomic<bool>  g_pollthrow_hold{false};
-std::atomic<bool>  g_pollthrow_fired{false};
-
-// The carrier hand's position in BLAM units, for the grenade-at-hand spawn-origin experiment
-// (grenhand, doctrine in Config.hpp). Published per tick while a grenade is armed; the last value
-// deliberately survives the release, because the spawn lands ~42 ms after it.
-std::atomic<float> g_hand_blam_x{0.0f}, g_hand_blam_y{0.0f}, g_hand_blam_z{0.0f};
-std::atomic<bool>  g_hand_blam_valid{false};
-// The swing's peak direction in BLAM units (normalized), for the instant-release velocity.
-std::atomic<float> g_throw_blam_x{0.0f}, g_throw_blam_y{1.0f}, g_throw_blam_z{0.0f};
-std::atomic<bool>  g_throw_blam_valid{false};
+#include "features/holsterpollthrow/Holster_pollthrow_atomics.inl"   // fork feature: holsterpollthrow (poll-throw state)
 
 void markers_hide_all() {
     marker_render_drop(s_pouch_l.get());
@@ -373,51 +357,7 @@ bool holster_mag_hand_in() {
     return s_mag_hand_in.load(std::memory_order_relaxed);
 }
 
-// XINPUT HOOK CADENCE -- clocks and atomics only, per the rule on that callback (no poses, no
-// reflection, no logging, no haptics; all of that is the tick's, before or after). Fires the
-// synthetic throw press on the carrier grip's falling edge. Called with the RAW buttons before
-// any remapping, and BEFORE the press mask is composed into the same poll -- so the throw the
-// player just released goes out in the very report that shows the grip open.
-void holster_note_buttons(unsigned short buttons) {
-    static unsigned short s_prev = 0;
-    const unsigned short prev = s_prev;
-    s_prev = buttons;
-    const unsigned short mask = g_pollthrow_mask.load(std::memory_order_relaxed);
-    if (mask == 0) return;
-    if ((prev & mask) == 0 || (buttons & mask) != 0) return;   // fire on held -> released only
-    g_pollthrow_mask.store(0, std::memory_order_relaxed);      // one shot; the tick re-arms
-    g_holster_throw_until.store(now_ticks() + ms_to_ticks(g_cfg.holster_press_ms),
-                                std::memory_order_relaxed);
-    if (g_pollthrow_hold.load(std::memory_order_relaxed) && g_cfg.holster_aim_hold_ms > 0) {
-        g_melee_aim_ctrl_yaw.store(g_pollthrow_hy.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        g_melee_aim_ctrl_pitch.store(g_pollthrow_hp.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        g_melee_aim_hold_until.store(now_ticks() + ms_to_ticks(g_cfg.holster_aim_hold_ms),
-                                     std::memory_order_relaxed);
-    }
-    g_pollthrow_fired.store(true, std::memory_order_relaxed);
-}
-
-// The carrier hand's last published Blam-unit position (grenhand). Safe on any thread.
-bool holster_hand_blam(float* x, float* y, float* z) {
-    if (!g_hand_blam_valid.load(std::memory_order_relaxed)) return false;
-    *x = g_hand_blam_x.load(std::memory_order_relaxed);
-    *y = g_hand_blam_y.load(std::memory_order_relaxed);
-    *z = g_hand_blam_z.load(std::memory_order_relaxed);
-    return true;
-}
-// The resolved grenade meshes, for the wrist radar's blips (frag = human, plasma = covenant --
-// the factions' own ordnance as their marker art). Game thread; may be null until resolved.
-uevr::API::UObject* holster_mesh_frag()   { return s_mesh_frag.get(); }
-uevr::API::UObject* holster_mesh_plasma() { return s_mesh_plasma.get(); }
-
-// The swing's peak direction in Blam units, normalized (greninstant). Safe on any thread.
-bool holster_throw_blam_dir(float* x, float* y, float* z) {
-    if (!g_throw_blam_valid.load(std::memory_order_relaxed)) return false;
-    *x = g_throw_blam_x.load(std::memory_order_relaxed);
-    *y = g_throw_blam_y.load(std::memory_order_relaxed);
-    *z = g_throw_blam_z.load(std::memory_order_relaxed);
-    return true;
-}
+#include "features/holsterpollthrow/Holster_hook_exports.inl"   // fork feature: holsterpollthrow (hook exports)
 bool holster_gswitch_press_active() { const auto u = g_holster_gswitch_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
 bool holster_melee_veto() {
     if (!g_cfg.holster_enabled) return false;
@@ -1005,76 +945,7 @@ void holster_update(float dt) {
     if (s_unarmed || (s_grenade_armed && !s_carry_off)) set_weapon_hidden(true);
     else if (s_unhide_ticks > 0) { --s_unhide_ticks; set_weapon_hidden(false); }
 
-    // ---- POLL-PATH RECONCILIATION. The hook threw between ticks: press and aim hold are already
-    // out the door; this is everything else the release branch does. Runs BEFORE the tick's own
-    // release edge below -- s_grenade_armed drops here, so the same grenade cannot throw twice.
-    if (g_pollthrow_fired.exchange(false, std::memory_order_relaxed)) {
-        if (s_grenade_armed) {
-            const bool coff = s_carry_off;
-            s_grenade_armed = false;
-            s_last_action = now_ticks();
-            if (!coff && !s_unarmed) { set_weapon_hidden(false); s_unhide_ticks = 30; }
-            haptic_on(coff ? off_is_right() : aim_is_right(), 0.10f, 1.0f);
-            if (g_cfg.holster_log)
-                API::get()->log_info("[Halo-CampE-UEVR] HOLSTER THROW (poll-rate release, %s hand)",
-                                     coff ? "off" : "aim");
-        }
-    }
-
-    // ---- POLL-PATH PUBLISH: the standing verdict the hook acts on. Armed grenade, carrier hand
-    // OUTSIDE every pouch (in a pouch, a release is a put-back and stays the tick's call), and the
-    // aim-hold direction from the current peak -- all at most one tick old at fire time.
-    {
-        unsigned short pmask = 0;
-        if (g_cfg.holster_poll_throw && s_grenade_armed) {
-            const bool coff = s_carry_off;
-            const HolsterSlot czone = coff ? zone_g : zone_p;
-            if (czone == HolsterSlot::None) {
-                pmask = (unsigned short)((coff ? off_is_right() : aim_is_right())
-                                         ? g_cfg.grip_mask_r : g_cfg.grip_mask_l);
-                const Vec3& cpeak = coff ? s_gpeak_velw : s_peak_velw;
-                const float vlen = std::sqrt(cpeak.x * cpeak.x + cpeak.y * cpeak.y + cpeak.z * cpeak.z);
-                if (vlen > 0.2f) {
-                    g_pollthrow_hy.store(wrap180(std::atan2(cpeak.x, -cpeak.z) * RAD2DEG
-                                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed)),
-                                         std::memory_order_relaxed);
-                    g_pollthrow_hp.store(std::asin(std::fmax(-1.0f, std::fmin(1.0f, cpeak.y / vlen))) * RAD2DEG,
-                                         std::memory_order_relaxed);
-                    g_pollthrow_hold.store(true, std::memory_order_relaxed);
-                } else {
-                    g_pollthrow_hold.store(false, std::memory_order_relaxed);
-                }
-            }
-        }
-        g_pollthrow_mask.store(pmask, std::memory_order_relaxed);
-    }
-
-    // Carrier hand in Blam units, for the grenhand spawn-origin experiment. UE world / 304.8 with
-    // Y negated -- the same fit that placed the vehicle camera (BlamDrive, unit+0x20 vs camera).
-    if (s_grenade_armed) {
-        const Vec3 cpos = s_carry_off ? gpos : pos;
-        const Vec3 hw = holster_room_to_world(cpos, hpos);
-        g_hand_blam_x.store(hw.x / 304.8f, std::memory_order_relaxed);
-        g_hand_blam_y.store(-hw.y / 304.8f, std::memory_order_relaxed);
-        g_hand_blam_z.store(hw.z / 304.8f, std::memory_order_relaxed);
-        g_hand_blam_valid.store(true, std::memory_order_relaxed);
-        // The peak swing direction, room frame -> Blam frame, by differencing room_to_world at
-        // two points (the translation cancels, leaving exactly the rotation + swizzle + scale
-        // that frame applies -- no second frame-math implementation to drift out of sync).
-        const Vec3& cpk = s_carry_off ? s_gpeak_velw : s_peak_velw;
-        const float pklen = std::sqrt(cpk.x * cpk.x + cpk.y * cpk.y + cpk.z * cpk.z);
-        if (pklen > 0.2f) {
-            const Vec3 pw = holster_room_to_world(Vec3{cpos.x + cpk.x, cpos.y + cpk.y, cpos.z + cpk.z}, hpos);
-            float bx = (pw.x - hw.x), by = -(pw.y - hw.y), bz = (pw.z - hw.z);
-            const float bl = std::sqrt(bx * bx + by * by + bz * bz);
-            if (bl > 1e-4f) {
-                g_throw_blam_x.store(bx / bl, std::memory_order_relaxed);
-                g_throw_blam_y.store(by / bl, std::memory_order_relaxed);
-                g_throw_blam_z.store(bz / bl, std::memory_order_relaxed);
-                g_throw_blam_valid.store(true, std::memory_order_relaxed);
-            }
-        }
-    }
+    #include "features/holsterpollthrow/Holster_poll_path.inl"   // fork feature: holsterpollthrow (poll path)
 
     // Release comes from the CARRIER's grip, and every measured quantity below is the carrier's.
     // (The tick path stays in full: it is the fallback when holsterpollthrow=0, when the grip

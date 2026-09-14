@@ -1172,111 +1172,15 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
                          g_aim_fx.load(), g_aim_fy.load(), g_aim_fz.load(),
                          shot_yaw, shot_pitch, dy, dp, err,
                          g_cfg.blam_yaw_off, (unsigned long long)rva);
-    // ---- GRENHAND (doctrine in Config.hpp): rewrite the spawn ORIGIN to the carrier hand,
-    // BEFORE the constructor consumes the params. Gated on the synthetic throw press (the spawn
-    // measured ~42 ms into the 120 ms press window), so gunfire and NPC spawns are never touched.
-    if (g_cfg.gren_hand_spawn != 0 && holster_throw_press_active()
-        && params != 0 && !IsBadReadPtr((void*)(params + P_VEC1), 12)) {
-        float hx = 0.0f, hy2 = 0.0f, hz = 0.0f;
-        if (holster_hand_blam(&hx, &hy2, &hz)) {
-            float* o = (float*)(params + P_VEC1);
-            API::get()->log_info("[Halo-CampE-UEVR] GRENHAND origin (%.4f,%.4f,%.4f) -> (%.4f,%.4f,%.4f)",
-                                 o[0], o[1], o[2], hx, hy2, hz);
-            o[0] = hx; o[1] = hy2; o[2] = hz;
-        }
-    }
+    #include "features/holsterpollthrow/BlamAim_hand_origin.inl"   // fork feature: holsterpollthrow (hand origin)
     const uintptr_t cret = g_orig_create ? g_orig_create(params) : 0;
-    // ---- GRENTRACK arm: try the return value as an object datum, on this thread (the resolve
-    // walks the sim TLS, which only this thread owns). A failed resolve is logged as itself --
-    // it means the return value is not a datum, and the tracker needs a different handle.
-    if ((g_cfg.throw_dump != 0 || g_cfg.gren_instant != 0) && holster_throw_press_active() && cret != 0) {
-        const long long tnow_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        const uintptr_t gobj = resolve_object_by_datum((uint32_t)cret);
-        if (g_cfg.throw_dump != 0) {
-            g_grentrack_obj.store(gobj, std::memory_order_relaxed);
-            g_grentrack_at_ms.store(tnow_ms, std::memory_order_relaxed);
-            API::get()->log_info("[Halo-CampE-UEVR] GRENTRACK: create ret=0x%llX -> datum 0x%08X obj=0x%llX",
-                                 (unsigned long long)cret, (uint32_t)cret, (unsigned long long)gobj);
-        }
-        // ---- GRENINSTANT (doctrine in Config.hpp): perform the release RIGHT NOW, exactly as
-        // GRENSNAP watched the keyframe do it at ~250 ms -- detach from the throw-hand bone,
-        // set the released state and flag, write velocity along the player's own swing.
-        if (g_cfg.gren_instant == 1 && gobj != 0 && !IsBadReadPtr((void*)gobj, 0x80)) {
-            float dx = 0.0f, dy = 1.0f, dz = 0.0f;
-            const bool have_dir = holster_throw_blam_dir(&dx, &dy, &dz);
-            uint8_t* p8 = (uint8_t*)gobj;
-            *(uint32_t*)(p8 + 0x0C) = 0xFFFFFFFFu;
-            *(uint32_t*)(p8 + 0x14) = 0xFFFFFFFFu;
-            *(uint32_t*)(p8 + 0x18) = 0xFFFF00FFu;
-            *(uint32_t*)(p8 + 0x08) = 0x00000004u;
-            *(uint32_t*)(p8 + 0x04) |= 0x80u;
-            float* vel = (float*)(p8 + 0x68);
-            vel[0] = dx * g_cfg.gren_speed;
-            vel[1] = dy * g_cfg.gren_speed;
-            vel[2] = dz * g_cfg.gren_speed;
-            g_greninst_vx.store(vel[0], std::memory_order_relaxed);
-            g_greninst_vy.store(vel[1], std::memory_order_relaxed);
-            g_greninst_vz.store(vel[2], std::memory_order_relaxed);
-            g_greninst_obj.store(gobj, std::memory_order_relaxed);
-            g_greninst_at_ms.store(tnow_ms, std::memory_order_relaxed);
-            API::get()->log_info("[Halo-CampE-UEVR] GRENINSTANT: released at spawn, vel=(%.2f,%.2f,%.2f) swing_dir=%d",
-                                 vel[0], vel[1], vel[2], (int)have_dir);
-        }
-    }
+    #include "features/holsterpollthrow/BlamAim_track_instant.inl"   // fork feature: holsterpollthrow (track + instant release)
     return cret;
 }
 
 } // namespace
 
-// THE SPAWN HOOK ALONE, for the grenade-windup capture. blamaim=1 proved unusable for this: it
-// takes ownership of the aim-write function, which (a) replaces months of shipping aim with the
-// investigation-era law -- "aim completely off" in the headset -- and (b) stands down BlamDrive's
-// hook, killing publish_unit_state and with it the THROWDUMP probe. One session produced spawn
-// rows with frozen aim and no press marks: worthless twice over. This installs ONLY the
-// create_projectile hook, driven by the same `throwdump` key as the probe, so press timeline and
-// spawn timestamps come from one session with normal aim.
-void blam_spawnlog_tick() {
-    if (g_cfg.blam_aim != 0) return;   // blamaim owns both hooks; stand down to it entirely
-    const bool want = g_cfg.throw_dump != 0;
-    if (!want) {
-        if (g_create_hook_id >= 0 && g_hook_id < 0) {   // ours, not blamaim's
-            API::get()->param()->functions->unregister_inline_hook(g_create_hook_id);
-            g_create_hook_id = -1;
-            g_orig_create = nullptr;
-            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: removed (throwdump off)");
-        }
-        return;
-    }
-    if (g_create_hook_id >= 0) return;
-    HMODULE sim = GetModuleHandleA("HaloSimulation_tag_release.dll");
-    if (sim == nullptr) return;
-    g_sim_base = (uintptr_t)sim;
-    void* ctarget = (void*)(g_sim_base + RVA_CREATE_PROJECTILE);
-    static bool s_refused = false;   // one refusal line, not one per tick
-    if (IsBadReadPtr(ctarget, sizeof(CREATE_PROJECTILE_PROLOGUE)) ||
-        memcmp(ctarget, CREATE_PROJECTILE_PROLOGUE, sizeof(CREATE_PROJECTILE_PROLOGUE)) != 0) {
-        if (!s_refused) {
-            s_refused = true;
-            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: prologue mismatch at dll+0x%llX -- "
-                                 "the game moved; spawn hook stays off",
-                                 (unsigned long long)RVA_CREATE_PROJECTILE);
-        }
-        return;
-    }
-    const int cid = API::get()->param()->functions->register_inline_hook(
-        ctarget, (void*)&hooked_create_projectile, (void**)&g_orig_create);
-    if (cid < 0 || g_orig_create == nullptr) {
-        if (!s_refused) {
-            s_refused = true;
-            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: hook FAILED (id=%d)", cid);
-        }
-        return;
-    }
-    g_create_hook_id = cid;
-    API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: installed standalone on 0x%llX (dll+0x%llX) id=%d",
-                         (unsigned long long)ctarget, (unsigned long long)RVA_CREATE_PROJECTILE, cid);
-}
+#include "features/holsterpollthrow/BlamAim_spawnlog.inl"   // fork feature: holsterpollthrow (spawn log hook)
 
 void blam_aim_tick() {
     const int want = g_cfg.blam_aim;
