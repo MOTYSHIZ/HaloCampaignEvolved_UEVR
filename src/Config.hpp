@@ -293,7 +293,8 @@ struct Config {
     int   aim_src = 0;
 
     // ---- SHOT-POINT AIM (shotaim): derive aim from the WEAPON, not the controller pose ----------
-    // 0 = OFF (ship default). The controller-aim-pose + calibration path is UNCHANGED and remains
+    // 1 = ON, the ship default since 2026-09-13 (canonized from the tuned profile, which ran it as a
+    // dev override). 0 = OFF. The controller-aim-pose + calibration path is UNCHANGED and remains
     // the ONLY path when no weapon is equipped -- unarmed play, and the future third-person /
     // vehicle aim-split features that have no weapon to read from. This is an ADDITIVE, weapon-only
     // source layered on top, never a replacement for that path.
@@ -303,13 +304,14 @@ struct Config {
     // the convergence and the scope all describe a ray leaving the muzzle you see. The selection
     // cascades (logged via shotaimlog): marker resolved -> shot point; weapon but no marker ->
     // grip+offset; no weapon -> the controller path above.
-    int   shot_aim = 0;
+    int   shot_aim = 1;
 
     // Direction source for shot-point aim. 0 = the barrel-lock-derived direction (well-conditioned,
-    // and already proven to align with where shots actually go). 1 = the muzzle marker's OWN
-    // authored orientation -- the game creator's intent, but fx_muzzleflash is an FX marker whose
-    // orientation need not equal the bore, so it is opt-in and A/B-able live.
-    int   shot_aim_dir = 0;
+    // and already proven to align with where shots actually go). 1 = the barrel's OWN direction:
+    // the per-weapon bore frozen by Page Down (or baked, see kBakedBores in Rig.cpp), falling back
+    // to the live muzzle marker. The ship default since 2026-09-13, canonized with shot_aim above;
+    // still A/B-able live.
+    int   shot_aim_dir = 1;
 
     // SHOTPOINT dev readout: log the marker resolution + world position every N ticks, 0 = off.
     // Dev builds only. Confirms the in-plugin socket read live and characterises the marker, so the
@@ -2818,7 +2820,8 @@ struct Config {
                                     // 16 is the canonical in-headset fit for the default lens
                                     // size -- effectiveness scales with the pane, so this sits
                                     // far above Halo's flat-screen 2x/8x on purpose.
-    int   scope_rt_size = 1024;     // render-target edge in px; rebuilt live on change
+    int   scope_rt_size = 512;      // render-target edge in px; rebuilt live on change. 512 since
+                                    // 2026-09-13, canonized from the tuned profile (was 1024)
     int   scope_div     = 1;       // capture every Nth tick (~32 Hz / N) -- the perf valve
     float scope_dist    = 63.57f;   // pane distance along the aim ray, cm (headset-fitted)
     // Where the CAPTURE CAMERA sits along the ray, cm from the origin. It must be FURTHER out

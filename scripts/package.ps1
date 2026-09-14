@@ -127,9 +127,12 @@ foreach ($catalog in 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt') {
 # compiled Config.hpp defaults are not (a struct default cannot express "the assault rifle needs
 # 2 degrees"). wpnfixver is the frame stamp and is as load-bearing as calibver -- shipping the
 # values without it would have every one of them silently ignored.
+# wpngrip joined it 2026-09-13 for the same reason: where a weapon's front handle sits off its
+# barrel is a measurement of that weapon, captured in a headset, not a setting anyone chooses.
 $calibKeys = @('grip','gripyaw','griproll','calibver','offx','offy','offz','aimoffyaw','aimoffpitch',
                'aimcalibver','dirgrip','dirgripyaw','dirgriproll','diroffx','diroffy','diroffz',
-               'pivauto','pivx','pivy','pivz','calibrelative','wpnfix','wpnfixver','wpnscope','wpnoff')
+               'pivauto','pivx','pivy','pivz','calibrelative','wpnfix','wpnfixver','wpnscope','wpnoff',
+               'wpngrip')
 $cfgActive = @(Select-String -Path (Join-Path $stage 'halo_vr.cfg') -Pattern '^([A-Za-z0-9_]+)=' |
     ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() })
 $stray = @($cfgActive | Where-Object { $calibKeys -notcontains $_ })

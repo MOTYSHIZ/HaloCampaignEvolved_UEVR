@@ -232,7 +232,7 @@
 # 2x on the magnum and 2x/8x on the sniper -- a small VR lens wants much more).
 #scopezoom=16
 # Image sharpness, pixels. Higher is sharper and costs more GPU.
-#scoperes=1024
+#scoperes=512
 # Update the lens image every Nth frame. Raise to 2-4 if the scope costs performance.
 #scopediv=1
 # Lens shape: 1 = round, 0 = square (square shows the most image).
