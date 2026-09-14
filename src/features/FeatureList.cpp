@@ -1,7 +1,9 @@
 #include "features/FeatureHooks.hpp"
+#include "features/hooks/BlamAimHooks.hpp"
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
 #include "features/hooks/GestureHooks.hpp"
+#include "features/hooks/HolsterHooks.hpp"
 #include "features/hooks/MarkersHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ReticuleHooks.hpp"
@@ -31,6 +33,7 @@ extern const FeatureHooks kHeightCalHooks;
 extern const FeatureHooks kWristHudHooks;
 extern const FeatureHooks kVehCamHooks;
 extern const FeatureHooks kMeleeLeftHooks;
+extern const FeatureHooks kHolsterPollThrowHooks;
 
 namespace {
 
@@ -48,6 +51,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kWristHudHooks,
     &kVehCamHooks,
     &kMeleeLeftHooks,
+    &kHolsterPollThrowHooks,
 };
 
 } // namespace
@@ -161,6 +165,16 @@ void features_sim_record_ready(uintptr_t rec, bool off_thread) {
     unit_state_record_ready(rec, off_thread);
 }
 
+void features_sim_unit_state_grenades(uintptr_t obj) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->sim_unit_state_grenades != nullptr) f->sim_unit_state_grenades(obj);
+}
+
+void features_sim_unit_state_after_radar(uintptr_t obj) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->sim_unit_state_after_radar != nullptr) f->sim_unit_state_after_radar(obj);
+}
+
 void features_sim_unit_state_radar(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->sim_unit_state_radar != nullptr) f->sim_unit_state_radar(obj);
@@ -256,6 +270,49 @@ bool features_melee_vetoed(long long now, float speed, float reach) {
 
 bool features_melee_fired(long long now, float speed, float reach) {
     return melee_fired(now, speed, reach);
+}
+
+void features_xinput_note_buttons(unsigned short buttons) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->xinput_note_buttons != nullptr) f->xinput_note_buttons(buttons);
+}
+
+void features_game_tick_after_blam_aim() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_blam_aim != nullptr) f->game_tick_after_blam_aim();
+}
+
+void features_holster_reset() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_reset != nullptr) f->holster_reset();
+}
+
+unsigned features_holster_mesh_sweep_period() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_mesh_sweep_period != nullptr) return f->holster_mesh_sweep_period();
+    return 120u;
+}
+
+void features_holster_mesh_swept(const void* mf) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_mesh_swept != nullptr) f->holster_mesh_swept(mf);
+}
+
+void features_holster_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
+                                     const Vec3& pos, const Vec3& gpos, const Vec3& hpos) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->holster_before_release != nullptr) f->holster_before_release(zone_g, zone_p, pos, gpos, hpos);
+}
+
+void features_blam_create_before(uintptr_t params) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->blam_create_before != nullptr) f->blam_create_before(params);
+}
+
+uintptr_t features_blam_create_after(uintptr_t params, uintptr_t cret) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->blam_create_after != nullptr) f->blam_create_after(params, cret);
+    return cret;
 }
 
 bool features_room_to_world(const Vec3& room, const Vec3& hmd_room, Vec3* out) {

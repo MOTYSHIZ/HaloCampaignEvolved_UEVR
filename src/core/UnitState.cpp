@@ -1,8 +1,7 @@
 #include "core/UnitState.hpp"
 
-#include "BlamDrive.hpp"          // the author's grenade atomics, and the holsterpollthrow grenade exports
+#include "BlamDrive.hpp"          // the author's grenade atomics
 #include "Config.hpp"
-#include "Holster.hpp"            // holster_throw_press_active(): arms the throw windup dump
 #include "MotionAimControl.hpp"   // g_stick_mode_active
 #include "core/host/BlamDriveState.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
@@ -10,11 +9,9 @@
 
 #include <Windows.h>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <intrin.h>
 
 using namespace uevr;
@@ -80,10 +77,6 @@ uintptr_t resolve_object_by_datum(uint32_t datum) {
 // gates the holster button steal, which must never eat the buttons a seat needs. Grenades: type
 // at +0x380, frag count +0x382, plasma count +0x383 -- the game auto-switches type when one runs
 // out, which is exactly what a plugin-side belief would lose; reading the object is the truth.
-#include "features/holsterpollthrow/BlamDrive_track.inl"   // fork feature: holsterpollthrow (grenade track handoff)
-
-#include "features/holsterpollthrow/BlamDrive_throw_dump.inl"   // fork feature: holsterpollthrow (throw dump)
-
 // THE SEAT HALF of the unit publish: the rider's world position (+0x20) and, through the parent
 // datum (+0x0C), the vehicle's facing (+0x1D4) and position. Split out of publish_unit_state so it
 // also runs while stick mode holds the aim write off -- a seat IS stick mode, and the seat camera,
@@ -229,12 +222,9 @@ void publish_unit_state(uintptr_t rec_base) {
                                  u8[0x384], u8[0x385], u8[0x386], u8[0x387]);
         }
     }
-    #include "features/holsterpollthrow/BlamDrive_counts.inl"   // fork feature: holsterpollthrow (grenade counts)
-
-    if (g_cfg.throw_dump != 0) throw_dump_probe(obj);
+    features_sim_unit_state_grenades(obj);
     features_sim_unit_state_radar(obj);
-
-    #include "features/holsterpollthrow/BlamDrive_greninstant.inl"   // fork feature: holsterpollthrow (greninstant)
+    features_sim_unit_state_after_radar(obj);
 
     publish_seat_state(obj);
 

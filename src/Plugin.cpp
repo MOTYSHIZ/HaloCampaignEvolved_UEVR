@@ -6019,7 +6019,7 @@ void update() {
         // Separate address, separate hook, so no ownership handshake with the above is needed.
         blam_palette_hook_tick();
         blam_aim_tick();
-        blam_spawnlog_tick();   // spawn hook alone (throwdump) -- no aim ownership change
+        features_game_tick_after_blam_aim();
         aim_watch_tick();
         aim_direct_tick();
         game_settings_tick(g_stick_mode.load());
@@ -11939,9 +11939,7 @@ public:
         // Tap/hold tracking runs at POLL rate, not tick rate: a 250 ms threshold judged at ~32 Hz
         // would quantise to 31 ms steps and feel arbitrary in the hand.
         reload_note_buttons(state->Gamepad.wButtons);
-        // Poll-rate throw release: must run BEFORE the throw press mask is composed below, so the
-        // release and its synthetic press share one poll. See holster_note_buttons.
-        holster_note_buttons(state->Gamepad.wButtons);
+        features_xinput_note_buttons(state->Gamepad.wButtons);
         features_xinput_raw_pad(state);
 
         // ---- GRIP SWALLOW, BEFORE THE REBIND. The position is the whole point.

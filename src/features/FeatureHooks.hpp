@@ -25,6 +25,7 @@ struct _XINPUT_STATE;
 namespace halo {
 
 struct HeadClamp;   // core/EyeTrace.hpp
+enum class HolsterSlot : int;   // Holster.hpp
 
 struct FeatureHooks {
     // The feature's master key in the feature registry (Features.cpp).
@@ -122,6 +123,40 @@ struct FeatureHooks {
     // features_gesture_melee_offhand: the melee half of the gesture tick, before the aim hand's
     // detector, with the tick's dt.
     void (*gesture_melee_offhand)(float dt);
+
+    // features_xinput_note_buttons: the raw pad buttons in the XInput hook, before remapping.
+    void (*xinput_note_buttons)(unsigned short buttons);
+
+    // features_game_tick_after_blam_aim: per-tick work right after the dev aim hook's tick.
+    void (*game_tick_after_blam_aim)();
+
+    // features_holster_reset: the holster reset (level transition, menu, stand-down).
+    void (*holster_reset)();
+
+    // features_holster_mesh_sweep_period: the grenade mesh sweep period in ticks. The first non-null
+    // slot answers.
+    unsigned (*holster_mesh_sweep_period)();
+
+    // features_holster_mesh_swept: a grenade mesh sweep finished; mf = the frag mesh (null = none).
+    void (*holster_mesh_swept)(const void* mf);
+
+    // features_holster_before_release: the holster tick right before its release edge, with the pouch
+    // each hand is in and the hand and head poses.
+    void (*holster_before_release)(HolsterSlot zone_g, HolsterSlot zone_p,
+                                   const Vec3& pos, const Vec3& gpos, const Vec3& hpos);
+
+    // features_sim_unit_state_grenades: the sim-thread unit publish, right after the unit evidence.
+    void (*sim_unit_state_grenades)(uintptr_t obj);
+
+    // features_sim_unit_state_after_radar: the sim-thread unit publish, right after the radar scan.
+    void (*sim_unit_state_after_radar)(uintptr_t obj);
+
+    // features_blam_create_before: the dev create_projectile hook, before the original call.
+    void (*blam_create_before)(uintptr_t params);
+
+    // features_blam_create_after: the dev create_projectile hook, after the original call, with its
+    // return value.
+    void (*blam_create_after)(uintptr_t params, uintptr_t cret);
 };
 
 } // namespace halo

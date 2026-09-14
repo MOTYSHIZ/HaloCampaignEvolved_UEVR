@@ -82,7 +82,6 @@ int   s_gswitch_pending = 0;   // ticks left waiting for the game to flip after 
 // level load recycles the components; a failed spawn retries every ~2 s rather than latching dead.
 TrackedObject s_pouch_l, s_pouch_r, s_hand_g;
 uint32_t s_mk_tick = 0;
-uint32_t s_mk_fails = 0;   // empty surveys in a row: the sweep backs off (120 ticks -> 1200)
 // THE MARKER MESHES ARE THE GAME'S OWN GRENADE MODELS, resolved from the loaded-object list.
 // The engine sphere proved unreliable on foot -- find_uobject cannot load, and this level had no
 // BasicShapes in memory, so three meshless "spheres" rendered as nothing (2026-08-24, in-headset
@@ -247,8 +246,6 @@ bool  s_carry_off = false;                           // which hand holds the arm
 float s_body_yaw = 0.0f;
 bool  s_body_init = false;
 
-#include "features/holsterpollthrow/Holster_pollthrow_atomics.inl"   // fork feature: holsterpollthrow (poll-throw state)
-
 void markers_hide_all() {
     marker_render_drop(s_pouch_l.get());
     marker_render_drop(s_pouch_r.get());
@@ -360,8 +357,6 @@ bool holster_offhand_busy() {
 bool holster_mag_hand_in() {
     return s_mag_hand_in.load(std::memory_order_relaxed);
 }
-
-#include "features/holsterpollthrow/Holster_hook_exports.inl"   // fork feature: holsterpollthrow (hook exports)
 bool holster_gswitch_press_active() { const auto u = g_holster_gswitch_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
 bool holster_melee_veto() {
     if (!g_cfg.holster_enabled) return false;
@@ -402,10 +397,7 @@ void holster_reset() {
     // The torso re-seeds from the head on the next tick: after a vehicle, a cutscene or a death
     // the old body yaw is a fact about a different situation.
     s_body_init = false;
-    // Disarm the poll-rate throw: a stale mask would let a menu or a seat's grip release lob a
-    // grenade the instant play resumes.
-    g_pollthrow_mask.store(0, std::memory_order_relaxed);
-    g_pollthrow_fired.store(false, std::memory_order_relaxed);
+    features_holster_reset();
     markers_hide_all();
 }
 
@@ -609,12 +601,12 @@ void holster_update(float dt) {
     if ((want_gren_marks || want_mag_mark)
         && ((want_gren_marks && (s_pouch_l.get() == nullptr || s_pouch_r.get() == nullptr || s_hand_g.get() == nullptr))
             || (want_mag_mark && s_mag_marker.get() == nullptr))
-        && (++s_mk_tick % ((s_mk_fails < 5 || !g_cfg.holster_poll_throw) ? 120u : 1200u)) == 1u) {
+        && (++s_mk_tick % features_holster_mesh_sweep_period()) == 1u) {
         resolve_grenade_meshes();
         auto* mf = s_mesh_frag.get(); auto* mp = s_mesh_plasma.get();
         if (mf == nullptr) mf = mp;          // stand-ins, never a meshless component
         if (mp == nullptr) mp = mf;
-        if (mf == nullptr) ++s_mk_fails; else s_mk_fails = 0;   // a level with no grenade mesh: one sweep per ~40 s, not per 4 s
+        features_holster_mesh_swept(mf);
         if (auto* owner = API::get()->get_local_pawn(0)) {
             if (want_gren_marks && mf != nullptr) {
                 const double ms = (double)g_cfg.holster_marker_scale * 12.5;
@@ -947,11 +939,9 @@ void holster_update(float dt) {
     if (s_unarmed || (s_grenade_armed && !s_carry_off)) set_weapon_hidden(true);
     else if (s_unhide_ticks > 0) { --s_unhide_ticks; set_weapon_hidden(false); }
 
-    #include "features/holsterpollthrow/Holster_poll_path.inl"   // fork feature: holsterpollthrow (poll path)
+    features_holster_before_release(zone_g, zone_p, pos, gpos, hpos);
 
     // Release comes from the CARRIER's grip, and every measured quantity below is the carrier's.
-    // (The tick path stays in full: it is the fallback when holsterpollthrow=0, when the grip
-    // mask is wrong for a profile, and it is still the sole owner of the put-back.)
     const bool crel = s_carry_off ? greleased : areleased;
     if (crel && s_grenade_armed) {
         const bool coff = s_carry_off;

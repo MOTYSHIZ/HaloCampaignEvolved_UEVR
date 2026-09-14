@@ -844,12 +844,6 @@ static bool parse_blam_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "aimdeadbeat")   == 0) { g_cfg.aim_deadbeat   = (float)v; return true; }
     if (_stricmp(key, "aimstat")       == 0) { g_cfg.aim_stat       = (int)v; return true; }
     if (_stricmp(key, "aimtargetsmoothms") == 0) { g_cfg.aim_target_smooth_ms = (float)v; return true; }
-    // ---- RADAR BLIPS, WRIST HUD / RADAR, GRENADE HAND-SPAWN and the ForceTube gunstock.
-    if (_stricmp(key, "throwdump")   == 0) { g_cfg.throw_dump     = (int)v; return true; }
-    if (_stricmp(key, "grenhand")    == 0) { g_cfg.gren_hand_spawn = (int)v; return true; }
-    if (_stricmp(key, "greninstant") == 0) { g_cfg.gren_instant = (int)v; return true; }
-    if (_stricmp(key, "grenbackdate") == 0) { g_cfg.gren_backdate = (int)clampf((float)v, 1.0f, 60.0f); return true; }
-    if (_stricmp(key, "grenspeed")   == 0) { g_cfg.gren_speed = clampf((float)v, 1.0f, 30.0f); return true; }
     return false;
 }
 
@@ -1395,10 +1389,7 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadmagoff")   == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_off[0], &g_cfg.reload_mag_off[1], &g_cfg.reload_mag_off[2]); return true; }
     if (_stricmp(key, "reloadmagrad")   == 0) { g_cfg.reload_mag_radius = clampf((float)v, 0.05f, 0.5f); return true; }
     if (_stricmp(key, "reloadmagscale") == 0) { g_cfg.reload_mag_scale = clampf((float)v, 0.05f, 20.0f); return true; }
-    // Poll-rate throw release, the per-hand grip bits, and the minimum throw speed.
-    if (_stricmp(key, "holsterpollthrow") == 0) { g_cfg.holster_poll_throw = (v != 0.0); return true; }
-    if (_stricmp(key, "gripmaskl")      == 0) { g_cfg.grip_mask_l = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "gripmaskr")      == 0) { g_cfg.grip_mask_r = (int)strtol(val, nullptr, 0); return true; }
+    // The minimum throw speed.
     if (_stricmp(key, "grenminthrow")   == 0) { g_cfg.gren_min_throw = clampf((float)v, 0.0f, 6.0f); return true; }
         if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
     if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }

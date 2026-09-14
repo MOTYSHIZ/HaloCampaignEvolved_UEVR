@@ -3,13 +3,12 @@
 #if HALO_VR_DEV
 
 #include "BlamDrive.hpp"
-#include "core/UnitState.hpp"
 #include "Config.hpp"
-#include "Holster.hpp"      // throw-press gate + hand position for the grenhand experiment
 #include "MotionAimControl.hpp"
 #include "AimConverge.hpp"
 #include "addrcascade/AddressCascade.hpp"
 #include "uevr/API.hpp"
+#include "features/hooks/BlamAimHooks.hpp"
 
 #include <Windows.h>
 #include <atomic>
@@ -17,7 +16,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <chrono>
 #include <intrin.h>
 
 using namespace uevr;
@@ -1173,15 +1171,13 @@ uintptr_t hooked_create_projectile(uintptr_t params) {
                          g_aim_fx.load(), g_aim_fy.load(), g_aim_fz.load(),
                          shot_yaw, shot_pitch, dy, dp, err,
                          g_cfg.blam_yaw_off, (unsigned long long)rva);
-    #include "features/holsterpollthrow/BlamAim_hand_origin.inl"   // fork feature: holsterpollthrow (hand origin)
-    const uintptr_t cret = g_orig_create ? g_orig_create(params) : 0;
-    #include "features/holsterpollthrow/BlamAim_track_instant.inl"   // fork feature: holsterpollthrow (track + instant release)
-    return cret;
+    features_blam_create_before(params);
+    return features_blam_create_after(params, g_orig_create ? g_orig_create(params) : 0);
 }
 
 } // namespace
 
-#include "features/holsterpollthrow/BlamAim_spawnlog.inl"   // fork feature: holsterpollthrow (spawn log hook)
+HALO_BLAMAIM_STATE_BRIDGE
 
 void blam_aim_tick() {
     const int want = g_cfg.blam_aim;

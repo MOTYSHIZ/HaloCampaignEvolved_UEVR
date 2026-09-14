@@ -79,15 +79,9 @@ namespace halo {
 // run on demand, far too chatty to leave on.
 void blam_aim_tick();
 
-// The create_projectile hook alone, driven by `throwdump` -- spawn timestamps for the grenade
-// windup capture WITHOUT the aim-write ownership change that made blamaim unplayable. See the
-// doctrine at its definition.
-void blam_spawnlog_tick();
-
 #else
 
 inline void blam_aim_tick() {}
-inline void blam_spawnlog_tick() {}
 
 #endif
 
