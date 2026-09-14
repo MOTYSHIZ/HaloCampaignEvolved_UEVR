@@ -885,6 +885,43 @@ static constexpr float kDefBoreX = 0.99999f, kDefBoreY = 0.00250f, kDefBoreZ = 0
 static std::atomic<float> g_def_x{0.0f}, g_def_y{0.0f}, g_def_z{0.0f};
 static std::atomic<bool>  g_def_valid{false};
 
+// BAKED PER-WEAPON BORES -- the factory value for each weapon that has been measured, so a fresh
+// install aims down each barrel instead of down the AR's. Canonized 2026-09-13 from a tuned
+// profile's halo_vr_calib.cfg (shotfixver=3). Compiled rather than shipped in halo_vr.cfg for the
+// same reason as kDefBore*: nothing here is ever written into a player's calib file, so a later
+// re-measure always reaches players who never captured their own. The same frame caveat applies --
+// A SCHEMA BUMP INVALIDATES EVERY ROW. Exact class names, as g_bore_cache keys them.
+struct BakedBore { const wchar_t* cls; float x, y, z; };
+static constexpr BakedBore kBakedBores[] = {
+    { L"BP_FP_Magnum_WeaponActor_C",          1.00000f,  0.00023f,  0.00069f },
+    { L"BP_FP_Needler_WeaponActor_C",         0.95997f, -0.08618f,  0.26651f },
+    { L"BP_FP_AssaultRifle_WeaponActor_C",    0.99999f,  0.00250f,  0.00401f },
+    { L"BP_FP_SMG_WeaponActor_C",             0.99983f, -0.00904f,  0.01619f },
+    { L"BP_FP_BattleRifle_WeaponActor_C",     1.00000f, -0.00024f,  0.00245f },
+    { L"BP_FP_RocketLauncher_WeaponActor_C",  0.99998f, -0.00358f, -0.00513f },
+    { L"BP_FP_SniperRifle_WeaponActor_C",     0.99998f,  0.00041f,  0.00689f },
+    { L"BP_FP_Shotgun_WeaponActor_C",         0.99621f, -0.05271f,  0.06918f },
+    { L"BP_FP_PlasmaRifle_WeaponActor_C",     0.99541f, -0.07277f,  0.06216f },
+    { L"BP_FP_NeedleRifleWeaponActor_C",      0.99969f, -0.02004f,  0.01470f },
+    { L"BP_FP_PlasmaRifle_Red_WeaponActor_C", 0.99590f, -0.06645f,  0.06143f },
+    { L"BP_FP_BeamRifle_WeaponActor_C",       0.99977f, -0.01406f,  0.01647f },
+    { L"BP_FP_FlakCannon_WeaponActor_C",      0.99999f,  0.00370f,  0.00008f },
+};
+// Game thread only (shotpoint_tick). Remembers the last class so the table is scanned once per
+// weapon swap, not once per tick.
+static const BakedBore* baked_bore_for(const std::wstring& cls) {
+    static std::wstring     s_cls;
+    static const BakedBore* s_hit = nullptr;
+    if (cls != s_cls) {
+        s_cls = cls;
+        s_hit = nullptr;
+        for (const auto& b : kBakedBores) {
+            if (cls == b.cls) { s_hit = &b; break; }
+        }
+    }
+    return s_hit;
+}
+
 void shotpoint_tick() {
     Vec3 p{}, f{};
     if (shotpoint_world(&p, &f) && (f.x * f.x + f.y * f.y + f.z * f.z) > 0.5f) {
@@ -894,15 +931,20 @@ void shotpoint_tick() {
         g_sp_fwd_valid.store(false);   // no weapon / no marker -> caller keeps its own direction
     }
 
-    // Publish the stored bore for the held weapon: own capture -> user AR default -> BAKED AR
-    // default. The aim hook reconstructs it against the live rig composition. Captures are MANUAL
-    // (Page Down); an uncaptured weapon always has the baked fallback, so it is never left on the
+    // Publish the stored bore for the held weapon: own capture -> BAKED bore for this weapon -> user
+    // AR default -> BAKED AR default. A weapon's own baked measurement outranks the generic default,
+    // the player's included: it is a measurement of THIS barrel, the default is a stand-in for one.
+    // The aim hook reconstructs it against the live rig composition. Captures are MANUAL (Page
+    // Down); an uncaptured weapon always has a baked fallback, so it is never left on the
     // animation-following live-mesh bootstrap even from a zero-capture install.
     bool have = false;
     if (auto* wpn = fp_weapon_actor()) {
-        auto it = g_bore_cache.find(class_name_of(wpn));
+        const std::wstring cls = class_name_of(wpn);
+        auto it = g_bore_cache.find(cls);
         if (it != g_bore_cache.end()) {
             g_bl_x.store(it->second.x); g_bl_y.store(it->second.y); g_bl_z.store(it->second.z);
+        } else if (const BakedBore* b = baked_bore_for(cls)) {
+            g_bl_x.store(b->x); g_bl_y.store(b->y); g_bl_z.store(b->z);
         } else if (g_def_valid.load()) {
             g_bl_x.store(g_def_x.load()); g_bl_y.store(g_def_y.load()); g_bl_z.store(g_def_z.load());
         } else {

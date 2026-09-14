@@ -879,6 +879,12 @@ static bool parse_scope_offset(const char* val) {
     g_cfg.wpn_scope[g_cfg.scope_count++] = s;
     return true;
 }
+// The wpnfix schema stamp currently in force, and whether the file being parsed is the capture
+// file. Both are PER FILE and reset at the top of parse_config_file() -- see the note there.
+// (Declared ahead of parse_weapon_offset, which reads the capture flag too.)
+static int  s_wpnfix_file_ver     = 0;
+static bool s_wpnfix_from_capture = false;
+
 static bool parse_weapon_offset(const char* val) {
     if (val == nullptr || val[0] == 0) return false;
     if (g_cfg.wpn_count >= kMaxWeaponAdjust) return true;   // full: ignore rather than overflow
@@ -902,6 +908,20 @@ static bool parse_weapon_offset(const char* val) {
         if (tok == nullptr) break;
         *fields[i] = (float)atof(tok);
     }
+    w.captured = s_wpnfix_from_capture;
+
+    // THE v0.4 SHIPPED SHOTGUN TEST LINE. v0.4.0-v0.4.2 shipped `wpnoff=FP_Shotgun,0,0,0,0,200,0` in
+    // halo_vr.cfg: a 200-degree yaw left in from a test. It was inert there -- per-weapon poses never
+    // reached the direct-drive rig until 2026-09-10 -- and the per-weapon writer copied every shipped
+    // entry into the player's own halo_vr_weapons.cfg. So any player who ever captured a weapon pose
+    // on v0.4 carries a copy, and the first build that APPLIES per-weapon rotation would turn their
+    // shotgun around. Nobody sets exactly this by hand, so this exact value is dropped from any file;
+    // the shotgun then falls back to the shipped baseline (all zero).
+    if (_stricmp(w.match, "FP_Shotgun") == 0 && w.d_x == 0.0f && w.d_y == 0.0f && w.d_z == 0.0f &&
+        w.d_grip == 0.0f && w.d_grip_yaw == 200.0f && w.d_grip_roll == 0.0f) {
+        if (g_cfg.wpnoff_dropped < 0x7FFF) ++g_cfg.wpnoff_dropped;
+        return true;
+    }
 
     // REPLACE BY MATCH -- same rule and same reason as parse_scope_offset above. The lookup in
     // WeaponOffset.cpp takes the FIRST match ("hit = &w; break;") and the files load shipped ->
@@ -918,11 +938,6 @@ static bool parse_weapon_offset(const char* val) {
     g_cfg.wpn[g_cfg.wpn_count++] = w;
     return true;
 }
-
-// The wpnfix schema stamp currently in force, and whether the file being parsed is the capture
-// file. Both are PER FILE and reset at the top of parse_config_file() -- see the note there.
-static int  s_wpnfix_file_ver     = 0;
-static bool s_wpnfix_from_capture = false;
 
 // wpnfix=<match>,qx,qy,qz,qw,tx,ty,tz -- the PALETTE path's per-weapon rigid delta.
 //
@@ -1970,6 +1985,14 @@ void load_config() {
             "put the weapon in the wrong place; the shipped per-weapon calibration is being used "
             "instead. Delete or re-capture those lines.",
             g_cfg.wpnfix_dropped, kWeaponFixSchema);
+    }
+    if (g_cfg.wpnoff_dropped > 0) {
+        API::get()->log_info(
+            "[Halo-CampE-UEVR] WPNOFF: ignored %d copy(ies) of the v0.4 shipped shotgun test line "
+            "(wpnoff=FP_Shotgun with a 200 deg yaw). It would turn the shotgun around now that "
+            "per-weapon poses apply; the shipped shotgun baseline is used instead. Recapture the "
+            "shotgun if you want a pose of your own -- the next capture also removes the line.",
+            g_cfg.wpnoff_dropped);
     }
 
     // Only here, past every early return: g_cfg now holds the values that are actually on disk.

@@ -50,8 +50,9 @@ pa::TwoHandTuning s_tuning;   // units_to_metres defaults to 1: OpenXR hands you
 //      two-handed pose on alternate ticks ("two ghost images").
 //
 //   3. THE GATES MEAN SOMETHING. Agreement is measured against the barrel: ~1 with the hand on the
-//      handle, falling as a hand crosses over, at any separation. So the gate closes to a band and
-//      the minimum baseline shrinks to a guard against the hands coinciding. Fading by DISTANCE
+//      handle, falling as a hand crosses over, at any separation. So the gate CAN close to a band
+//      (it ships open -- see s_gun_agree_min) and the minimum baseline shrinks to a guard against
+//      the hands coinciding. Fading by DISTANCE
 //      starved grips that are close by design -- the rocket launcher's sit 13 cm apart, which the
 //      10-20 cm band held to about a fifth of its authority.
 //
@@ -70,8 +71,12 @@ pa::TwoHandTuning s_tuning;   // units_to_metres defaults to 1: OpenXR hands you
 // to the other -- e.g. a player file that opened the ray gate with twohandagreemin=-1 -- would
 // switch the gun gate off without saying so.
 int   s_gun_mode       = 1;
-float s_gun_agree_min  = 0.35f;   // cos 69.5 deg: no authority past this
-float s_gun_agree_full = 0.70f;   // cos 45.6 deg: full authority within this
+// SHIPS OPEN (-1: below any dot product), canonized 2026-09-13 from the tuned profile. Gun mode has
+// no feedback to stop, and the player found the open hold robust on the sentinel beam and rocket
+// launcher, so the band is a tool rather than a default. 0.35 / 0.70 (none past 69.5 deg, full
+// within 45.6) is the band this was first built with, if a hand crossing over should fade out.
+float s_gun_agree_min  = -1.0f;
+float s_gun_agree_full = -1.0f;
 // m: full from 10 cm apart, none at 5 -- the hands coinciding, not the grips being close. In the ray
 // mode the same 5 cm spun the weapon whenever the hands closed (reported: anything under 0.14 spun);
 // that was the feedback loop above, which this mode does not have.
@@ -282,8 +287,8 @@ bool two_hand_parse_key(const char* key, double v) {
 void two_hand_tuning_reset() {
     s_tuning         = pa::TwoHandTuning{};
     s_gun_mode       = 1;
-    s_gun_agree_min  = 0.35f;
-    s_gun_agree_full = 0.70f;
+    s_gun_agree_min  = -1.0f;
+    s_gun_agree_full = -1.0f;
     s_gun_min_base   = 0.05f;
 }
 
