@@ -1,6 +1,9 @@
-// PHYSICAL SCOPE LENS (scopelens, fork feature, Experimental). Moved verbatim from Scope.cpp (the
-// scene-capture lens) and Config.cpp (its key family). The include list is Scope.cpp's, so every
-// call resolves against the same declarations it did there.
+// PHYSICAL SCOPE LENS (scopelens, Experimental): the scene-capture lens and its key family. The
+// include list is the scope's own (Scope.cpp's), so every call resolves against the same
+// declarations the scope code uses.
+
+#include "ScopeLens.hpp"
+#include "core/fixes/TickStage.hpp"
 
 #include "Scope.hpp"
 #include "ScopeOffset.hpp"
@@ -671,6 +674,7 @@ void scope_update(float dt) {
 // second hoisted family beside parse_scope_key above, early-return for the same C1061 reason.
 // `scope`, `scoperes` and `scopelumen` are parsed by parse_scope_key, which owns those names.
 bool parse_physscope_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "scopelens") == 0) { g_cfg.scope_lens = (v != 0.0); return true; }
     if (_stricmp(key, "scopesource")    == 0) { g_cfg.scope_capture_source = (int)v; return true; }
     if (_stricmp(key, "scopetint")      == 0) { g_cfg.scope_tint = clampf((float)v, 0.01f, 20.0f); return true; }
     if (_stricmp(key, "scopertfmt")     == 0) { g_cfg.scope_rt_format = (int)v; return true; }
@@ -709,5 +713,42 @@ bool parse_physscope_key(const char* key, const char* val, double v) {
     }
     return false;
 }
+
+namespace {
+
+// THE SCOPE (the physical-lens system): a second camera down the aim ray rendered onto a lens
+// mounted on the weapon. It resolves its own weapon, attaches its own components, and switches the
+// capture off when no scoped weapon is held; the tick just drives it. It runs above the tick's
+// early-outs so the lens hides on parked ticks (menus, seats).
+void scopelens_game_tick_after_offsets(float dt) {
+    g_tick_stage = "scope";
+    scope_update(dt);
+    g_tick_stage = "after scope";
+}
+
+void scopelens_rig_lost() {
+    scope_reset();
+}
+
+// The physical lens owns the scope; the pane never toggles.
+bool scopelens_trigger_stood_down(bool& s_down) {
+    if (g_cfg.scope_lens) { s_down = false; g_scope_active = false; return true; }
+    return false;
+}
+
+bool scopelens_pane_stands_down() {
+    return g_cfg.scope_lens;
+}
+
+} // namespace
+
+constinit const FeatureHooks kScopeLensHooks{
+    .key                      = "scopelens",
+    .parse_key                = &parse_physscope_key,
+    .game_tick_after_offsets  = &scopelens_game_tick_after_offsets,
+    .rig_lost                 = &scopelens_rig_lost,
+    .scope_trigger_stood_down = &scopelens_trigger_stood_down,
+    .scope_pane_stands_down   = &scopelens_pane_stands_down,
+};
 
 } // namespace halo

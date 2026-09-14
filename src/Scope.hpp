@@ -94,5 +94,3 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, uevr::API::UObject
 void scope_frame_end(uint32_t tick);
 
 } // namespace halo
-
-#include "features/scopelens/ScopeLens.hpp"   // fork feature: scopelens (physical scope lens)

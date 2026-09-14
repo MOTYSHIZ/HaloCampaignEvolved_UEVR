@@ -1,6 +1,7 @@
 #include "features/FeatureHooks.hpp"
 #include "features/hooks/ConfigHooks.hpp"
 #include "features/hooks/PluginHooks.hpp"
+#include "features/hooks/ScopeHooks.hpp"
 
 #include "core/FireInput.hpp"
 
@@ -8,6 +9,7 @@ namespace halo {
 
 // Every feature's hooks table, each defined in its own folder.
 extern const FeatureHooks kForceTubeHooks;
+extern const FeatureHooks kScopeLensHooks;
 
 namespace {
 
@@ -16,6 +18,7 @@ namespace {
 // files; a hook point whose original order no list order can satisfy gets separate slots instead.
 const FeatureHooks* const kFeatureList[] = {
     &kForceTubeHooks,
+    &kScopeLensHooks,
 };
 
 } // namespace
@@ -33,6 +36,28 @@ void features_xinput_raw_pad(_XINPUT_STATE* state) {
 void features_game_tick_late() {
     for (const FeatureHooks* f : kFeatureList)
         if (f->game_tick_late != nullptr) f->game_tick_late();
+}
+
+void features_game_tick_after_offsets(float dt) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_offsets != nullptr) f->game_tick_after_offsets(dt);
+}
+
+void features_rig_lost() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->rig_lost != nullptr) f->rig_lost();
+}
+
+bool features_scope_trigger_stood_down(bool& s_down) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->scope_trigger_stood_down != nullptr && f->scope_trigger_stood_down(s_down)) return true;
+    return false;
+}
+
+bool features_scope_pane_stands_down() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->scope_pane_stands_down != nullptr && f->scope_pane_stands_down()) return true;
+    return false;
 }
 
 } // namespace halo

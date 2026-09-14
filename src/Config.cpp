@@ -2,7 +2,6 @@
 #include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
 #include "features/hooks/ConfigHooks.hpp"
 #include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
-#include "features/scopelens/ScopeLens.hpp"   // fork feature: parse_physscope_key
 #include "Math.hpp"
 // wpn_calib_load(): captured per-weapon deltas are a third source feeding the same table.
 #include "WeaponCalib.hpp"
@@ -878,7 +877,6 @@ static void copy_trim(char* dst, size_t cap, const char* val) {
 static bool parse_fork_port_key(const char* key, const char* val, double v) {
     (void)val;
     #include "features/heightcal/Config_parse_a.inl"   // fork feature: heightcal (keys, first run)
-    if (_stricmp(key, "scopelens") == 0) { g_cfg.scope_lens = (v != 0.0); return true; }
     if (_stricmp(key, "aimbore") == 0) { g_cfg.aim_bore = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "aimboreaxis") == 0) { sscanf_s(val, "%f,%f", &g_cfg.aim_bore_axis[0], &g_cfg.aim_bore_axis[1]); return true; }
     if (_stricmp(key, "aimreticulefresh") == 0) { g_cfg.aim_reticule_fresh = (int)clampf((float)v, 0.0f, 1.0f); return true; }
@@ -1877,7 +1875,6 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_holster_key(key, val, v)) return;
         if (features_parse_key(key, val, v)) return;
         if (parse_veh_key(key, val, v)) return;
-        if (parse_physscope_key(key, val, v)) return;
         if (parse_roomscale_key(key, val, v)) return;
         if (parse_weaponvr_key(key, val, v)) return;
         if (_stricmp(key, "attachpermanent") == 0) g_cfg.attach_permanent = (v != 0.0);

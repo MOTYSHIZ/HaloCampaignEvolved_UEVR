@@ -25,6 +25,21 @@ struct FeatureHooks {
 
     // features_game_tick_late: the late per-tick work.
     void (*game_tick_late)();
+
+    // features_game_tick_after_offsets: per-tick work that follows the per-weapon offsets, with the
+    // tick's dt.
+    void (*game_tick_after_offsets)(float dt);
+
+    // features_rig_lost: the stale rig guard just dropped the rig component and its parent.
+    void (*rig_lost)();
+
+    // features_scope_trigger_stood_down: true = the feature owns the scope, so the pane's left
+    // trigger toggle stands down (the slot clears the edge state it is handed and the pane flag).
+    bool (*scope_trigger_stood_down)(bool& s_down);
+
+    // features_scope_pane_stands_down: true = the feature owns the scope, so the pane's bound
+    // button toggle stands down.
+    bool (*scope_pane_stands_down)();
 };
 
 } // namespace halo

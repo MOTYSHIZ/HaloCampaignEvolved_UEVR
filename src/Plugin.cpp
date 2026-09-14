@@ -6273,13 +6273,7 @@ void update() {
     #include "features/palettewpn/Plugin_tick.inl"   // fork feature: palettewpn (per-tick palette work)
 
 
-    // THE SCOPE (the physical-lens system -- see Scope.hpp): a second camera down the aim ray
-    // rendered onto a lens mounted on the weapon. It resolves its own weapon, attaches its own
-    // components, and switches the capture off when no scoped weapon is held; the tick just
-    // drives it. Above the early-outs so the lens hides on parked ticks (menus, seats).
-    g_tick_stage = "scope";
-    scope_update(g_last_dt.load());
-    g_tick_stage = "after scope";
+    features_game_tick_after_offsets(g_last_dt.load());
 
 #if HALO_VR_DEV
     // One-shot: name the project's collision channels so the reticule trace channel can be chosen
@@ -6393,7 +6387,7 @@ void update() {
         g_rig_component = nullptr;
         g_rig_parent = nullptr;
         g_rig_resolve_tick = 0;
-        scope_reset();
+        features_rig_lost();
     }
 
     #include "features/roomscale/Plugin_bob_probe.inl"   // fork feature: roomscale (camera bob + throttle probe)

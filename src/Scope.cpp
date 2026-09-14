@@ -14,6 +14,7 @@
 // are editing. Every call it makes into the compositor lane is behind one adapter in ScopeLayer.cpp.
 #include "ScopeLayer.hpp"
 #include <d3d12.h>   // ID3D12Resource::GetDesc, for the scene-RT probe only
+#include "features/hooks/ScopeHooks.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -2773,8 +2774,7 @@ bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
         s_down = false;
         return false;   // menus and seats keep the game's own trigger semantics
     }
-    // scopelens (fork, experimental): the physical lens owns the scope; the pane never toggles.
-    if (g_cfg.scope_lens) { s_down = false; g_scope_active = false; return false; }
+    if (features_scope_trigger_stood_down(s_down)) return false;
     const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
     const uint8_t off_t = (uint8_t)(on_t / 2);   // hysteresis: no re-fire on an analog wobble
     if (!s_down && lt_raw >= on_t) {
@@ -2798,7 +2798,7 @@ bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
 // game's own semantics.
 void scope_handle_button(bool down, bool in_menu, bool stick_mode) {
     static bool s_down = false;
-    if (!g_cfg.scope_enabled || g_cfg.scope_lens || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
+    if (!g_cfg.scope_enabled || features_scope_pane_stands_down() || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
         s_down = false;
         return;
     }
