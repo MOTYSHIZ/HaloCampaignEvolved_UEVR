@@ -425,10 +425,11 @@ split by feature to make that easier.
 
 **Special thanks to [elliotttate](https://github.com/elliotttate)** — for hosting the Flat2VR
 community, without which none of this work would have found the people who made it possible, and for
-writing **CutsceneDetectionPlugin**, which ships in this profile's `plugins\` folder and handles
-cutscene comfort (disabling decoupled pitch and camera offsets around cutscene camera cuts). That
-plugin is his work, not ours — and this mod's own cutscene handling (the flattened cutscene view,
-`cutscene2d`) follows the approach his plugin pioneered.
+writing **CutsceneDetectionPlugin**, which this profile bundled up to v0.4.1 to handle cutscene
+comfort (disabling decoupled pitch and camera offsets around cutscene camera cuts). That plugin is
+his work, not ours — and this mod's first cutscene handling (the flattened cutscene view,
+`cutscene2d`) followed the approach his plugin pioneered. Since v0.4.2 the mod presents cutscenes
+itself, so the plugin is no longer bundled.
 
 He is also the reason this mod's crosshair has colour at all. The world-space crosshair rendered
 near-black for a long time, and the diagnosis that fixed it is his: an unlit widget's output is
@@ -508,10 +509,10 @@ just keep the copyright notice. Note that the UEVR plugin SDK this builds agains
 carries its own terms, which is why it is fetched at build time rather than vendored here.
 
 This is an unofficial fan project, not affiliated with or endorsed by Microsoft, Xbox Game Studios,
-or Halo Studios. It distributes **no game assets** — only configuration, original code, original art,
-and elliotttate's community cutscene plugin (`plugins\CutsceneDetectionPlugin.dll`, credited above,
-which is his work rather than ours and so isn't covered by this project's MIT licence). Halo is a
-trademark of Microsoft Corporation.
+or Halo Studios. It distributes **no game assets** — only configuration, original code and original
+art. (Releases up to v0.4.1 also bundled elliotttate's community cutscene plugin,
+`plugins\CutsceneDetectionPlugin.dll`, credited above, which is his work rather than ours and so
+isn't covered by this project's MIT licence.) Halo is a trademark of Microsoft Corporation.
 
 ### AI Usage
 
