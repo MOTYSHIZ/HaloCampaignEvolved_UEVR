@@ -93,6 +93,7 @@
 // Live config + calibration persistence. Defines g_cfg, which nearly everything below reads.
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hook: startup resolved-state log
+#include "features/hooks/PluginHooks.hpp"
 #include "BlamPalette.hpp"
 #include "PaletteTwoHand.hpp"        // palette_two_hand_update: the palette weapon mode's two-hand hold
 #include "WeaponCalib.hpp"
@@ -168,7 +169,6 @@
 // The alternative arm driver. ArmDriver.hpp decides which of the two runs; only one ever does.
 #include "palettearm/PaletteArm.hpp"
 #include "BlamAim.hpp"
-#include "ForceTube.hpp"
 #include "WristHud.hpp"
 #include "BlamDrive.hpp"
 #include "HitTrace.hpp"
@@ -522,10 +522,6 @@ uint32_t g_rig_fast_until = 0;
 // first-person control, and gating turning on the route alone was half of why the campaign's
 // opening felt broken. The detector below is where the two are told apart. Game thread only.
 bool g_fp_control_now = true;
-// The last stage marker update() passed, read by the tick's exception filter. A crash inside a
-// 4000-line tick is unlocatable from "one of the plugins has an error"; this makes the log name
-// the stage. Plain pointer to a literal, written before each major stage, never freed.
-const char* volatile g_tick_stage = "idle";
 volatile bool g_tick_fault_pending = false;
 TrackedObject g_rig_parent_track;   // the rig's attach parent by array slot (checked every tick)
 
@@ -6264,12 +6260,7 @@ void update() {
 #endif
     scope_frame_end(tick);
 
-    // EVERY TICK, not in the poll block above: the kick drain is latency-critical. Its first home
-    // was inside the 2 s config poll, which quantized every kick to the poll edge -- "I shoot, a
-    // second later it kicks" was this call site, not the vendor path (proven by metronome kicks
-    // from a desktop process landing on-beat while VR ran).
-    g_tick_stage = "forcetube";
-    forcetube_tick();
+    features_game_tick_late();
     g_tick_stage = "wristhud";
     wristhud_tick();   // wrist HUD: census + hosting + forearm placement
 
@@ -12019,7 +12010,7 @@ public:
         // Poll-rate throw release: must run BEFORE the throw press mask is composed below, so the
         // release and its synthetic press share one poll. See holster_note_buttons.
         holster_note_buttons(state->Gamepad.wButtons);
-        #include "features/forcetube/Plugin_fire_note.inl"   // fork feature: forcetube (fire note)
+        features_xinput_raw_pad(state);
         #include "features/grenadeswallow/Plugin_grenade_button.inl"   // fork feature: grenadeswallow (grenade button)
 
         // ---- GRIP SWALLOW, BEFORE THE REBIND. The position is the whole point.

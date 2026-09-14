@@ -16,22 +16,25 @@
 // called from the GAME tick exclusively -- their own UE plugin calls it from there, so that is
 // the proven-safe thread.
 
+//
+// The per-shot kick is gated on the player's own fire input (core/FireInput.hpp).
+//
+// FEATURE forcetube (Experimental). Hook slots: parse_key (the forcetube* keys) and game_tick_late
+// (the tick below). Table: kForceTubeHooks.
+
 #pragma once
 
-#include <atomic>
+#include "features/FeatureHooks.hpp"
 
 namespace halo {
 
-// The last moment the player's own FIRE input was down, as a steady_clock tick, published by the
-// XInput hook. The per-shot kick is gated on it: create_projectile is shared by everything that
-// shoots, and a proximity test cannot tell your rifle from a marine's at arm's length ("it kicks
-// when im not firing"). Your finger can.
-extern std::atomic<long long> g_ft_fire_at;
-void forcetube_note_fire(bool firing);
-
+extern const FeatureHooks kForceTubeHooks;
 
 // Game tick: load + init once (cfg force_tube), install the spawn hook, drain pending shots into
 // kicks. Safe to call every tick; does nothing while the feature is off.
 void forcetube_tick();
+
+// The ForceTube keys (forcetube*).
+bool forcetube_parse_key(const char* key, const char* val, double v);
 
 } // namespace halo

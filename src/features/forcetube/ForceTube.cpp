@@ -2,6 +2,9 @@
 
 #include "BlamDrive.hpp"      // unit position (the player filter) + sim_tls layout doctrine
 #include "Config.hpp"
+#include "Math.hpp"           // clampf
+#include "core/FireInput.hpp" // g_ft_fire_at: the player's own fire input
+#include "core/fixes/TickStage.hpp"
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -140,14 +143,6 @@ void install_hook() {
 
 } // namespace
 
-// Exported (halo scope, not the anonymous namespace above): the XInput hook publishes into this.
-std::atomic<long long> g_ft_fire_at{0};
-
-void forcetube_note_fire(bool firing) {
-    if (firing) g_ft_fire_at.store(ft_clock::now().time_since_epoch().count(),
-                                   std::memory_order_relaxed);
-}
-
 void forcetube_tick() {
     if (!g_cfg.force_tube) {
         // Switched off live: take the spawn hook back out, so off leaves no detour on the
@@ -185,5 +180,34 @@ void forcetube_tick() {
     if (shots > 1) power = power + (255u - power) / 2u;
     s_kick((uint8_t)(power > 255u ? 255u : power), g_cfg.force_tube_channel);
 }
+
+bool forcetube_parse_key(const char* key, const char* val, double v) {
+    (void)val;
+    if (_stricmp(key, "forcetube")        == 0) { g_cfg.force_tube = (v != 0.0); return true; }
+    if (_stricmp(key, "forcetubekick")    == 0) { g_cfg.force_tube_kick = (int)clampf((float)v, 0.0f, 255.0f); return true; }
+    if (_stricmp(key, "forcetuberadius")  == 0) { g_cfg.force_tube_radius = clampf((float)v, 0.05f, 5.0f); return true; }
+    if (_stricmp(key, "forcetubefirems")  == 0) { g_cfg.force_tube_fire_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "forcetubechannel") == 0) { g_cfg.force_tube_channel = (int)clampf((float)v, 0.0f, 7.0f); return true; }
+    return false;
+}
+
+namespace {
+
+// EVERY TICK, not in the config poll: the kick drain is latency-critical. Its first home was inside
+// the 2 s config poll, which quantized every kick to the poll edge -- "I shoot, a second later it
+// kicks" was that call site, not the vendor path (proven by metronome kicks from a desktop process
+// landing on-beat while VR ran).
+void forcetube_game_tick_late() {
+    g_tick_stage = "forcetube";
+    forcetube_tick();
+}
+
+} // namespace
+
+constinit const FeatureHooks kForceTubeHooks{
+    .key            = "forcetube",
+    .parse_key      = &forcetube_parse_key,
+    .game_tick_late = &forcetube_game_tick_late,
+};
 
 } // namespace halo

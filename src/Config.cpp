@@ -1,5 +1,6 @@
 #include "Config.hpp"
 #include "Features.hpp"   // FEATURE REGISTRY hooks: key-seen note, tier apply, menu publish
+#include "features/hooks/ConfigHooks.hpp"
 #include "HeightCal.hpp"   // height_request_calibrate / height_status_line: the menu bridge
 #include "features/scopelens/ScopeLens.hpp"   // fork feature: parse_physscope_key
 #include "Math.hpp"
@@ -851,7 +852,6 @@ static bool parse_blam_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "grenhand")    == 0) { g_cfg.gren_hand_spawn = (int)v; return true; }
     if (_stricmp(key, "greninstant") == 0) { g_cfg.gren_instant = (int)v; return true; }
     if (_stricmp(key, "grenbackdate") == 0) { g_cfg.gren_backdate = (int)clampf((float)v, 1.0f, 60.0f); return true; }
-    #include "features/forcetube/Config_parse.inl"   // fork feature: forcetube (key family)
     #include "features/wristhud/Config_parse_hud.inl"   // fork feature: wristhud (HUD keys)
     if (_stricmp(key, "grenspeed")   == 0) { g_cfg.gren_speed = clampf((float)v, 1.0f, 30.0f); return true; }
     return false;
@@ -1875,6 +1875,7 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         if (parse_melee_key(key, val, v)) return;
         if (parse_xrlayer_key(key, v)) return;
         if (parse_holster_key(key, val, v)) return;
+        if (features_parse_key(key, val, v)) return;
         if (parse_veh_key(key, val, v)) return;
         if (parse_physscope_key(key, val, v)) return;
         if (parse_roomscale_key(key, val, v)) return;
