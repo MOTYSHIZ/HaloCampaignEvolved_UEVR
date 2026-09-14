@@ -168,7 +168,8 @@ bool wpnoff_clear_current() {
         g_cfg.wpn[--g_cfg.wpn_count] = WeaponAdjust{};
         wpn_calib_write_file();
         API::get()->log_info("[Halo-CampE-UEVR] WPNCAL: cleared the per-weapon pose for '%s'; it "
-                             "uses the global fit again.", key.c_str());
+                             "uses the shipped pose for this weapon if there is one, otherwise the "
+                             "global fit.", key.c_str());
         return true;
     }
     API::get()->log_info("[Halo-CampE-UEVR] WPNCAL: '%s' had no per-weapon pose to clear.",
@@ -227,7 +228,10 @@ void wpn_calib_write_file() {
                    "# Delete a line to send that weapon back to the plain calibration.\r\n\r\n");
         for (int i = 0; i < g_cfg.wpn_count; ++i) {
             const auto& e = g_cfg.wpn[i];
-            if (e.match[0] == 0) continue;
+            // THE PLAYER'S ENTRIES ONLY, for the reason the wpnfix block below gives. This loop used
+            // to write every entry, shipped baselines included, which is how the v0.4 shotgun test
+            // line reached players' own files -- see parse_weapon_offset().
+            if (e.match[0] == 0 || !e.captured) continue;
             fprintf(f, "wpnoff=%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",
                     e.match, e.d_x, e.d_y, e.d_z, e.d_grip, e.d_grip_yaw, e.d_grip_roll);
         }
@@ -384,6 +388,7 @@ bool wpn_calib_capture() {
     strncpy_s(w.match, sizeof(w.match), key.c_str(), _TRUNCATE);
     w.d_x = dx; w.d_y = dy; w.d_z = dz;
     w.d_grip = dg; w.d_grip_yaw = dgy; w.d_grip_roll = dgr_store;
+    w.captured = true;   // the player's now, even if it replaced a shipped baseline
 
     wpn_calib_write_file();
     API::get()->log_info("[Halo-CampE-UEVR] WPNCAL '%s': d=(%.2f,%.2f,%.2f)cm "

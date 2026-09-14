@@ -237,6 +237,10 @@ void weapon_offset_adopt_solve() {
             g_cfg.wpn[i].d_x = 0.0f; g_cfg.wpn[i].d_y = 0.0f; g_cfg.wpn[i].d_z = 0.0f;
             g_cfg.wpn[i].d_grip = 0.0f; g_cfg.wpn[i].d_grip_yaw = 0.0f;
             g_cfg.wpn[i].d_grip_roll = 0.0f;
+            // PERSIST THE ZERO even when the delta was a shipped baseline: the writer keeps only the
+            // player's entries, and without this the shipped delta would come straight back on the
+            // next reload and the weapon End just made the baseline would move again.
+            g_cfg.wpn[i].captured = true;
             API::get()->log_info("[Halo-CampE-UEVR] END: '%s' is the baseline now, delta cleared",
                                  g_cfg.wpn[i].match);
             break;

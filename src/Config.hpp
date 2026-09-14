@@ -38,6 +38,11 @@ struct WeaponAdjust {
     char  match[64] = "";      // substring of the weapon actor class, e.g. "AssaultRifle"
     float d_x = 0.0f, d_y = 0.0f, d_z = 0.0f;              // centimetres
     float d_grip = 0.0f, d_grip_yaw = 0.0f, d_grip_roll = 0.0f;  // degrees
+    // True when this entry is the PLAYER's -- parsed from the capture file, or produced by a
+    // capture -- rather than a shipped baseline from halo_vr.cfg. Only these are written back, the
+    // same rule WeaponFix::captured already enforces: a copied baseline outlives the value it was
+    // copied from, so a release that improves a shipped pose never reaches the player who has one.
+    bool  captured = false;
 };
 constexpr int kMaxWeaponAdjust = 24;
 
@@ -4165,6 +4170,9 @@ struct Config {
     // once per reload rather than per tick: a silently ignored calibration file is indistinguishable
     // from a feature that does not work, and that is the report nobody can act on.
     int   wpnfix_dropped  = 0;
+    // How many copies of the v0.4 shipped 200-degree shotgun test line were ignored this load. See
+    // parse_weapon_offset(); reported once per reload for the same reason as wpnfix_dropped.
+    int   wpnoff_dropped  = 0;
 
     // ---- VR RELOAD -------------------------------------------------------------------------
     // Two-stage reload: press reload to drop the mag, then physically fetch a fresh one from your
