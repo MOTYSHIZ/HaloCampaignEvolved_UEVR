@@ -181,7 +181,6 @@
 // lives in this file (it shares the reticle widget scan below).
 #include "ViewFix.hpp"
 #include "HeightCal.hpp"
-#include "HeadBlock.hpp"
 
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
@@ -6482,7 +6481,7 @@ void update() {
         }
     }
 
-    #include "features/headblock/Plugin_tick.inl"   // fork feature: headblock (tick)
+    features_game_tick_after_leash();
 
     // ---- Calibrate key, edge-detected on the GAME THREAD.
     // GetAsyncKeyState reads global key state, so it registers with the headset on and the game
@@ -10777,6 +10776,7 @@ SHORT to_raw(float v) {
 
 } // namespace
 
+HALO_PLUGIN_STATE_BRIDGE
 
 // =====================================================================================
 char     g_apilayer_note[600] = {0};
@@ -11478,7 +11478,7 @@ public:
             halo::g_cam_z.store(pz, std::memory_order_relaxed);
             g_view_base_yaw.store(g_dbg_view_out.load(std::memory_order_relaxed), std::memory_order_relaxed);
             g_have_view_pos = true;
-            #include "features/headblock/Plugin_note_pre.inl"   // fork feature: headblock (eye note)
+            features_stereo_pre_eye(index, position, is_double);
 
             // THE SHOT-ORIGIN HALF of the eye offset. This callback runs BEFORE UEVR applies the
             // HMD transform (FFakeStereoRenderingHook.cpp: the pre loop, then the transform, then
@@ -11821,7 +11821,7 @@ public:
                                               bool is_double) override {
         if (g_shutting_down.load(std::memory_order_acquire)) return;
         if (index == 0) stomp_sample(3);
-        #include "features/headblock/Plugin_apply_post.inl"   // fork feature: headblock (eye pull-back)
+        features_stereo_post_eye(index, position, is_double);
         // THE EYE HALF of the eye-to-shot-origin offset. Same callback pair, same eye index, one
         // subtraction apart -- see the pre callback. `position` has been through UEVR's HMD
         // transform by now, so this IS the rendered eye.

@@ -4,6 +4,8 @@
 // Definitions: src/features/FeatureList.cpp.
 
 #include "core/fixes/TickStage.hpp"
+#include "core/host/PluginState.hpp"   // HALO_PLUGIN_STATE_BRIDGE
+#include "uevr/API.h"                  // UEVR_Vector3f
 
 struct _XINPUT_STATE;
 
@@ -23,5 +25,16 @@ void features_game_tick_after_offsets(float dt);
 
 // update() (game thread), in the stale rig guard, right after it drops the rig and its parent.
 void features_rig_lost();
+
+// update() (game thread), right after the HMD translation leash block, before the calibrate key.
+void features_game_tick_after_leash();
+
+// on_pre_calculate_stereo_view_offset (render thread), inside `position != nullptr`, right after
+// g_have_view_pos is set and before aim_converge_note_pre: the body eye.
+void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double);
+
+// on_post_calculate_stereo_view_offset (render thread), right after the STOMPLOG sample and before
+// aim_converge_note_post: the head offset, and a feature's clamp of the rendered eye.
+void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double);
 
 } // namespace halo

@@ -16,6 +16,8 @@
 
 namespace halo {
 
+struct HeadClamp;   // core/EyeTrace.hpp
+
 struct FeatureHooks {
     // The feature's master key in the feature registry (Features.cpp).
     const char* key;
@@ -40,6 +42,13 @@ struct FeatureHooks {
     // features_scope_pane_stands_down: true = the feature owns the scope, so the pane's bound
     // button toggle stands down.
     bool (*scope_pane_stands_down)();
+
+    // features_game_tick_after_leash: per-tick work right after the HMD translation leash block.
+    void (*game_tick_after_leash)();
+
+    // features_stereo_post_eye: a clamp on the rendered eye, handed to the head-offset measurement
+    // (core/EyeTrace.hpp). The first non-null clamp in list order is used.
+    const HeadClamp* head_clamp;
 };
 
 } // namespace halo

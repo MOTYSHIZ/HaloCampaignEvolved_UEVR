@@ -882,7 +882,6 @@ static bool parse_fork_port_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "aimreticulefresh") == 0) { g_cfg.aim_reticule_fresh = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "aimreticulestamp") == 0) { g_cfg.aim_reticule_stamp = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     #include "features/palettewpn/Config_parse_a.inl"   // fork feature: palettewpn (keys, first run)
-    #include "features/headblock/Config_parse.inl"   // fork feature: headblock (key family)
     #include "features/heightcal/Config_parse_b.inl"   // fork feature: heightcal (keys, second run)
     if (_stricmp(key, "liftyaw") == 0) {
         int m = (int)v; if (m < 0) m = 0; if (m > 2) m = 2;

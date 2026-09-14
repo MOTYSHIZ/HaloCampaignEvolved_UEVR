@@ -17,30 +17,28 @@
 // The trace runs on the game tick; the clamp is applied per eye in the stereo view callback with
 // the latest allowed distance, so it follows the head at render rate. Tightening is immediate
 // (nothing may be seen through a wall), loosening is rate-limited (no pop when a hit clears).
+//
+// The body eye, the head offset and the reflected traces are measured in core/EyeTrace.hpp, which
+// heightcal shares.
+//
+// FEATURE headblock (Experimental). Hook slots: parse_key (headblock*), game_tick_after_leash (the
+// trace, with its stand-downs) and head_clamp (the per-eye pull-back). Table: kHeadBlockHooks.
 
 #pragma once
 
-#include "Math.hpp"
+#include <string_view>
+
+#include "features/FeatureHooks.hpp"
 #include "uevr/API.hpp"
 
 namespace halo {
 
-// Stereo view callbacks. `pre` = the engine camera before UEVR's HMD transform (the body eye);
-// `post` = the eye UEVR composed. apply_post returns true when it moved the eye.
-void headblock_note_pre(int index, double x, double y, double z);
-bool headblock_apply_post(int index, double* x, double* y, double* z);
+extern const FeatureHooks kHeadBlockHooks;
 
 // GAME THREAD. `active` = on-foot gameplay; `ignore` = actors the trace must not hit.
 void headblock_tick(bool active, uevr::API::UObject* const* ignore, int n_ignore, float dt);
 
-// Published for other features, measured whether or not the block is on (UE world cm):
-// the engine camera (body eye) of the last frame, and the rendered head centre minus it.
-bool headblock_body_eye(Vec3* out);
-bool headblock_head_offset(Vec3* out);
-
-// A reflected LineTraceSingle on the given ETraceTypeQuery index. GAME THREAD. False on a miss or
-// when the reflection did not resolve.
-bool headblock_line_trace(const Vec3& a, const Vec3& b, uevr::API::UObject* const* ignore, int n_ignore,
-                          int channel, Vec3* out_impact);
+// The head block keys (headblock*).
+bool headblock_parse_key(const char* key, const char* val, double v);
 
 }  // namespace halo

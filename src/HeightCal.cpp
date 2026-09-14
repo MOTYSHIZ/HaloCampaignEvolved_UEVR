@@ -2,7 +2,7 @@
 
 #include "BlamDrive.hpp"
 #include "Config.hpp"
-#include "HeadBlock.hpp"
+#include "core/EyeTrace.hpp"
 #include "XrLayerBridge.hpp"
 #include "thirdparty/openvr.h"
 #include "uevr/API.hpp"
@@ -430,7 +430,7 @@ void measure_e(const Vec3& cam, bool active, API::UObject* const* ignore, int n_
     // 1: downward trace from the camera.
     Vec3 imp{};
     const Vec3 down{cam.x, cam.y, cam.z - g_cfg.height_trace_max};
-    const bool hit = headblock_line_trace(cam, down, ignore, n_ignore, g_cfg.height_trace_channel, &imp);
+    const bool hit = kismet_line_trace(cam, down, ignore, n_ignore, g_cfg.height_trace_channel, &imp);
     if (hit) g_floor_z = imp.z;
     efilt(g_etr, hit, cam.z - imp.z, dt);
 
@@ -620,7 +620,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     const float head_abs = hmd.y + g_floor_off;
 
     Vec3 cam{};
-    const bool have_cam = headblock_body_eye(&cam);
+    const bool have_cam = eye_body_world(&cam);
     if (have_cam) measure_e(cam, active, ignore, n_ignore, dt);
     float E = 0.0f;
     const bool have_E = pick_e(&E);
@@ -794,7 +794,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         const float so_now = own ? g_out : so_y;
         const float V_pred = have_E ? E + S * (hmd.y - so_now) : -1.0f;
         Vec3 c{};
-        const bool have_c = headblock_head_offset(&c);
+        const bool have_c = eye_head_offset(&c);
         const float V_meas = (have_E && have_c) ? E + c.z : -1.0f;
         char st[96];
         if (have_E && eff >= 0) std::snprintf(st, sizeof(st), "height=%s %.2f m", mode_name(eff), (V_meas >= 0.0f ? V_meas : V_pred) * 0.01f);

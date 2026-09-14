@@ -1,4 +1,4 @@
-#include "HeadBlock.hpp"
+#include "core/EyeTrace.hpp"
 
 #include "Config.hpp"
 #include "uevr/API.hpp"
@@ -15,24 +15,13 @@
 using namespace uevr;
 
 namespace halo {
-namespace {
+namespace eyetrace {
 
 // ---- published by the view callbacks, read by the tick (UE world cm)
 std::atomic<float> g_body_x{0.0f}, g_body_y{0.0f}, g_body_z{0.0f};
 std::atomic<bool>  g_have_body{false};
 std::atomic<float> g_head_cx{0.0f}, g_head_cy{0.0f}, g_head_cz{0.0f};
 std::atomic<bool>  g_have_head{false};
-// ---- published by the tick, read by the view callbacks
-std::atomic<float> g_allow{-1.0f};    // how far the head may extend from the body, UE cm; < 0 = unlimited
-std::atomic<int>   g_eff_mode{0};     // the mode actually running (a trace mode falls back when unresolved)
-std::atomic<float> g_pushed{0.0f};    // last applied pull-back, UE cm, for the log
-
-// ---- view-callback side (one thread)
-double g_pre[2][3]{};
-bool   g_have_pre[2]{};
-double g_raw_prev[2][3]{};
-bool   g_have_raw[2]{};
-double g_shift[3]{};
 
 void hblog(const char* fmt, ...) {
     if (g_cfg.head_block_log <= 0 && g_cfg.height_log <= 0) return;
@@ -43,6 +32,16 @@ void hblog(const char* fmt, ...) {
     va_end(ap);
     API::get()->log_info("[Halo-CampE-UEVR] %s", buf);
 }
+
+TraceFn g_line, g_sphere;
+
+namespace {
+
+// ---- view-callback side (one thread)
+double g_pre[2][3]{};
+bool   g_have_pre[2]{};
+double g_raw_prev[2][3]{};
+bool   g_have_raw[2]{};
 
 // ---- reflection-resolved Kismet traces. Every offset comes from the UFunction and the HitResult
 // script struct, never from a written-down layout (the same discipline as HitTrace.cpp).
@@ -65,19 +64,8 @@ int32_t off_of(API::UStruct* s, const wchar_t* want) {
     return (p != nullptr) ? p->get_offset() : -1;
 }
 
-struct TraceFn {
-    const wchar_t*  name = nullptr;
-    API::UFunction* fn = nullptr;
-    int32_t size = 0;
-    int32_t ctx = -1, start = -1, end = -1, radius = -1, channel = -1, ignore = -1, out_hit = -1,
-            self = -1, ret = -1;
-    bool radius_double = false;
-    bool ok = false;
-};
-
 int             g_tstate = -1;   // -1 unresolved, 0 failed, 1 at least one trace usable
 API::UObject*   g_cdo = nullptr;
-TraceFn         g_line, g_sphere;
 int32_t         g_hit_impact = -1, g_hit_location = -1;
 std::vector<uint8_t> g_buf;
 
@@ -115,6 +103,8 @@ bool resolve_fn(API::UClass* cls, const wchar_t* name, TraceFn* t, bool want_rad
           t->channel, t->ignore, t->out_hit, t->self, t->ret, t->ok ? "OK" : "UNUSABLE");
     return t->ok;
 }
+
+}  // namespace
 
 bool traces_ready() {
     if (g_tstate >= 0) return g_tstate == 1;
@@ -180,44 +170,34 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int
     return true;
 }
 
-float dist(const Vec3& a, const Vec3& b) {
-    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
+} // namespace eyetrace
 
-const char* mode_name(int m) {
-    switch (m) {
-    case 1: return "line-trace";
-    case 2: return "sphere-sweep";
-    case 3: return "lean-limit";
-    default: return "off";
-    }
-}
+using namespace eyetrace;
 
-}  // namespace
-
-bool headblock_body_eye(Vec3* out) {
+bool eye_body_world(Vec3* out) {
     if (!g_have_body.load(std::memory_order_relaxed)) return false;
     *out = Vec3{g_body_x.load(std::memory_order_relaxed), g_body_y.load(std::memory_order_relaxed),
                 g_body_z.load(std::memory_order_relaxed)};
     return true;
 }
 
-bool headblock_head_offset(Vec3* out) {
+bool eye_head_offset(Vec3* out) {
     if (!g_have_head.load(std::memory_order_relaxed)) return false;
     *out = Vec3{g_head_cx.load(std::memory_order_relaxed), g_head_cy.load(std::memory_order_relaxed),
                 g_head_cz.load(std::memory_order_relaxed)};
     return true;
 }
 
-bool headblock_line_trace(const Vec3& a, const Vec3& b, API::UObject* const* ignore, int n_ignore,
-                          int channel, Vec3* out_impact) {
+bool kismet_line_trace(const Vec3& a, const Vec3& b, API::UObject* const* ignore, int n_ignore,
+                       int channel, Vec3* out_impact) {
     if (!traces_ready() || !g_line.ok) return false;
     Vec3 loc{};
     return run_trace(g_line, a, b, 0.0f, channel, ignore, n_ignore, &loc, out_impact);
 }
 
-void headblock_note_pre(int index, double x, double y, double z) {
+namespace {
+
+void eye_note_pre(int index, double x, double y, double z) {
     if (index < 0 || index > 1) return;
     g_pre[index][0] = x; g_pre[index][1] = y; g_pre[index][2] = z;
     g_have_pre[index] = true;
@@ -229,10 +209,10 @@ void headblock_note_pre(int index, double x, double y, double z) {
     }
 }
 
-bool headblock_apply_post(int index, double* x, double* y, double* z) {
+bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* clamp) {
     if (index < 0 || index > 1 || !g_have_pre[index]) return false;
     const double raw[3] = {*x, *y, *z};
-    const int mode = g_eff_mode.load(std::memory_order_relaxed);
+    const int mode = (clamp != nullptr) ? clamp->mode() : 0;
     bool moved = false;
 
     // ONE HEAD OFFSET PER FRAME, computed on eye 0 and reused on eye 1, so both eyes move by the same
@@ -253,137 +233,43 @@ bool headblock_apply_post(int index, double* x, double* y, double* z) {
         g_head_cz.store((float)c[2], std::memory_order_relaxed);
         g_have_head.store(true, std::memory_order_relaxed);
 
-        double s[3] = {0.0, 0.0, 0.0};
-        if (mode == 3) {
-            // Horizontal only (UE Z is up): a crouch is not a lean.
-            const double lean = g_cfg.head_block_lean;
-            const double lh = std::sqrt(c[0] * c[0] + c[1] * c[1]);
-            if (lh > lean && lh > 1e-6) {
-                const double k = 1.0 - lean / lh;
-                s[0] = c[0] * k; s[1] = c[1] * k;
-            }
-        } else if (mode == 1 || mode == 2) {
-            const double L = g_allow.load(std::memory_order_relaxed);
-            const double len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
-            if (L >= 0.0 && len > L && len > 1e-6) {
-                const double k = 1.0 - L / len;
-                for (int k2 = 0; k2 < 3; ++k2) s[k2] = c[k2] * k;
-            }
-        }
-        for (int k = 0; k < 3; ++k) g_shift[k] = s[k];
-        g_pushed.store((float)std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]), std::memory_order_relaxed);
+        if (clamp != nullptr) clamp->shift(mode, c);
     }
-    if (mode != 0 && (g_shift[0] != 0.0 || g_shift[1] != 0.0 || g_shift[2] != 0.0)) {
-        *x = raw[0] - g_shift[0];
-        *y = raw[1] - g_shift[1];
-        *z = raw[2] - g_shift[2];
-        moved = true;
-    }
+    if (clamp != nullptr && clamp->apply(mode, raw, x, y, z)) moved = true;
 
     for (int k = 0; k < 3; ++k) g_raw_prev[index][k] = raw[k];
     g_have_raw[index] = true;
     return moved;
 }
 
-void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, float dt) {
-    static int   s_cfg_mode = 0;
-    static int   s_eff = -1;
-    static float s_L = -1.0f;
-    static bool  s_hit_prev = false;
+} // namespace
 
-    const int cfg_mode = (g_cfg.head_block >= 1 && g_cfg.head_block <= 3) ? g_cfg.head_block : 0;
-    if (cfg_mode != s_cfg_mode) {
-        if (g_cfg.head_block_log > 0) hblog("HEADBLOCK: headblock %d -> %d (%s)", s_cfg_mode, cfg_mode, mode_name(cfg_mode));
-        s_cfg_mode = cfg_mode;
-        s_L = -1.0f;
-    }
-
-    int eff = active ? cfg_mode : 0;
-    // Automatic fallback: sphere -> line -> lean limit, when the reflected trace is not usable.
-    if (eff == 1 || eff == 2) {
-        if (!traces_ready()) eff = 3;
-        else if (eff == 2 && !g_sphere.ok) eff = g_line.ok ? 1 : 3;
-        else if (eff == 1 && !g_line.ok) eff = g_sphere.ok ? 2 : 3;
-    }
-    if (eff != s_eff) {
-        if ((s_eff != -1 || eff != 0) && g_cfg.head_block_log > 0) {
-            hblog("HEADBLOCK: running %s (requested %s, %s)", mode_name(eff), mode_name(cfg_mode),
-                  active ? "on foot" : "standing down: menu, vehicle or cutscene");
-        }
-        s_eff = eff;
-        s_L = -1.0f;
-    }
-    g_eff_mode.store(eff, std::memory_order_relaxed);
-    if (eff == 0 || eff == 3) {
-        g_allow.store(-1.0f, std::memory_order_relaxed);
-        if (eff == 3 && g_cfg.head_block_log > 1) {
-            static uint32_t s_n3 = 0;
-            if ((s_n3++ % (uint32_t)g_cfg.head_block_log) == 0u) {
-                hblog("HEADBLOCK lean-limit head=(%.1f %.1f %.1f) limit=%.1f pushed=%.1f cm",
-                      g_head_cx.load(), g_head_cy.load(), g_head_cz.load(), g_cfg.head_block_lean,
-                      g_pushed.load());
+void eye_note_pre_view(int index, UEVR_Vector3f* position, bool is_double) {
+            // The body's eye, at full precision (LWC world coordinates).
+            if (is_double) {
+                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
+                halo::eye_note_pre(index, p->x, p->y, p->z);
+            } else {
+                halo::eye_note_pre(index, position->x, position->y, position->z);
             }
-        }
-        return;
-    }
-    if (!g_have_head.load(std::memory_order_relaxed)) return;
-
-    const Vec3 B{g_body_x.load(), g_body_y.load(), g_body_z.load()};
-    const Vec3 c{g_head_cx.load(), g_head_cy.load(), g_head_cz.load()};
-    const float len = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
-    const float r = g_cfg.head_block_radius;
-    const int ch = g_cfg.head_block_channel;
-
-    float L_raw = -1.0f;
-    bool hit = false;
-    Vec3 loc{}, imp{};
-    if (len > 0.5f) {
-        if (eff == 2) {
-            // The sphere centre where the sweep stopped is the furthest the head centre can go.
-            const Vec3 end{B.x + c.x, B.y + c.y, B.z + c.z};
-            if (run_trace(g_sphere, B, end, r, ch, ignore, n_ignore, &loc, &imp)) {
-                hit = true;
-                L_raw = dist(loc, B);
-            }
-        } else {
-            // A ray to the head plus the radius; stop the head a radius short of the surface.
-            const float k = (len + r) / len;
-            const Vec3 end{B.x + c.x * k, B.y + c.y * k, B.z + c.z * k};
-            if (run_trace(g_line, B, end, 0.0f, ch, ignore, n_ignore, &loc, &imp)) {
-                hit = true;
-                L_raw = (std::max)(0.0f, dist(imp, B) - r);
-            }
-        }
-    }
-
-    // Tighten at once -- geometry must never be seen through. Loosen at headblockrelease cm/s, so
-    // a hit that clears (a corner passed, a grazing edge) eases the head out instead of popping it.
-    const float rel = g_cfg.head_block_release * ((dt > 0.0f && dt < 0.5f) ? dt : 0.0f);
-    if (L_raw >= 0.0f && (s_L < 0.0f || L_raw < s_L)) {
-        s_L = L_raw;
-    } else if (s_L >= 0.0f) {
-        s_L += rel;
-        if (L_raw >= 0.0f && s_L > L_raw) s_L = L_raw;
-        if (L_raw < 0.0f && s_L > len + r) s_L = -1.0f;
-    }
-    g_allow.store(s_L, std::memory_order_relaxed);
-
-    if (hit != s_hit_prev) {
-        s_hit_prev = hit;
-        if (g_cfg.head_block_log > 0) {
-            if (hit) hblog("HEADBLOCK: contact (%s) head |%.1f| cm from body, allowed %.1f cm", mode_name(eff), len, L_raw);
-            else     hblog("HEADBLOCK: clear (%s), releasing from %.1f cm", mode_name(eff), s_L);
-        }
-    }
-    if (g_cfg.head_block_log > 1) {
-        static uint32_t s_n = 0;
-        if ((s_n++ % (uint32_t)g_cfg.head_block_log) == 0u) {
-            hblog("HEADBLOCK %s body=(%.0f %.0f %.0f) head=(%.1f %.1f %.1f)|%.1f| hit=%d loc=(%.0f %.0f %.0f) "
-                  "Lraw=%.1f L=%.1f pushed=%.1f cm r=%.1f ch=%d ignore=%d",
-                  mode_name(eff), B.x, B.y, B.z, c.x, c.y, c.z, len, (int)hit, loc.x, loc.y, loc.z,
-                  L_raw, s_L, g_pushed.load(), r, ch, n_ignore);
-        }
-    }
 }
 
-}  // namespace halo
+void eye_note_post_view(int index, UEVR_Vector3f* position, bool is_double, const HeadClamp* clamp) {
+        // THE HEAD OFFSET, and the head block's pull-back of the composed eye out of geometry, BEFORE
+        // anything after this callback's hook publishes it, so markers and the reticule reason from
+        // the eye that is actually rendered.
+        if (position != nullptr) {
+            if (is_double) {
+                auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
+                double hx = p->x, hy = p->y, hz = p->z;
+                if (halo::eye_note_post(index, &hx, &hy, &hz, clamp)) { p->x = hx; p->y = hy; p->z = hz; }
+            } else {
+                double hx = position->x, hy = position->y, hz = position->z;
+                if (halo::eye_note_post(index, &hx, &hy, &hz, clamp)) {
+                    position->x = (float)hx; position->y = (float)hy; position->z = (float)hz;
+                }
+            }
+        }
+}
+
+} // namespace halo

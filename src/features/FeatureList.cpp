@@ -3,6 +3,7 @@
 #include "features/hooks/PluginHooks.hpp"
 #include "features/hooks/ScopeHooks.hpp"
 
+#include "core/EyeTrace.hpp"
 #include "core/FireInput.hpp"
 
 namespace halo {
@@ -10,6 +11,7 @@ namespace halo {
 // Every feature's hooks table, each defined in its own folder.
 extern const FeatureHooks kForceTubeHooks;
 extern const FeatureHooks kScopeLensHooks;
+extern const FeatureHooks kHeadBlockHooks;
 
 namespace {
 
@@ -19,6 +21,7 @@ namespace {
 const FeatureHooks* const kFeatureList[] = {
     &kForceTubeHooks,
     &kScopeLensHooks,
+    &kHeadBlockHooks,
 };
 
 } // namespace
@@ -58,6 +61,22 @@ bool features_scope_pane_stands_down() {
     for (const FeatureHooks* f : kFeatureList)
         if (f->scope_pane_stands_down != nullptr && f->scope_pane_stands_down()) return true;
     return false;
+}
+
+void features_game_tick_after_leash() {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->game_tick_after_leash != nullptr) f->game_tick_after_leash();
+}
+
+void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    eye_note_pre_view(index, position, is_double);
+}
+
+void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    const HeadClamp* clamp = nullptr;
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->head_clamp != nullptr) { clamp = f->head_clamp; break; }
+    eye_note_post_view(index, position, is_double, clamp);
 }
 
 } // namespace halo
