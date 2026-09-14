@@ -9343,12 +9343,27 @@ void update() {
                     // double-count it for every already-v2 calibration.
                     const float frame_delta = calib_frame_yaw_write() - calib_frame_yaw_use();
                     const Quat  q_frame_w   = rotator_to_quat(0.0f, frame_delta, 0.0f);
-                    // The frozen value is the MESH orientation. With the socket rotation cancelled
-                    // on the apply side, the grip must be fitted against the WEAPON -- mesh times
-                    // socket -- or the fit and the apply describe different objects and the solve
-                    // is wrong by exactly the socket rotation.
+                    // The frozen value is the MESH orientation. The fit must describe the same object
+                    // the apply drives, or the solve is wrong by exactly the socket rotation:
+                    //
+                    //   MODE 2 cancels the socket rotation on the apply side (q_rel * conj(socket)),
+                    //   so it drives the WEAPON -- fit against mesh times socket.
+                    //
+                    //   MODE 3, direct drive and the default, drives the MESH and lets the engine
+                    //   put the socket's rotation on top (the stock per-weapon hold, recoil, sway) --
+                    //   fit against the mesh alone.
+                    //
+                    // THIS WAS UNCONDITIONAL until 2026-09-13, since PR #7 brought the socket term in
+                    // (mode 3 predates it and never cancelled the socket). So every mode-3 capture
+                    // put the socket rotation in the trim AND the engine added it again: the weapon
+                    // stayed where it was frozen but rotated about its socket at release. Reported as
+                    // "a rotation snapping happens ... location appears to behave fine", and CALIBJUMP
+                    // showed the mesh jumping the same ~17 deg (about +15 pitch, -6 yaw) on every
+                    // release, global and per-weapon alike. Recalibrating started from the snapped
+                    // pose, so per-weapon captures compounded it: one weapon's stored pitch delta
+                    // climbed 13 -> 30 -> 53 -> 118 deg in a row.
                     Quat q_calib_target = g_calib_gun_world;
-                    if (g_cfg.rig_sock_rot && g_dbg_sock_ok.load()) {
+                    if (g_cfg.rig_mode == 2 && g_cfg.rig_sock_rot && g_dbg_sock_ok.load()) {
                         q_calib_target = quat_mul(q_calib_target, rotator_to_quat(
                             g_dbg_sock_p.load(), g_dbg_sock_yw.load(), g_dbg_sock_r.load()));
                     }
@@ -9496,13 +9511,27 @@ void update() {
                     // G to the calibration). A frozen-vs-live comparison at the instant of the solve
                     // could never have seen that; it needed the value compared across sessions.
                     //
-                    // Kept because G/pivauto/fromcalib/resid/L are all worth reading. Do not read
-                    // `delta` as a measurement of anything.
+                    // Kept because G/pivauto/fromcalib/resid/L are all worth reading.
+                    //
+                    // CORRECTION 2026-09-13: `delta` stopped being tautological the day the socket
+                    // rotation entered the solve (PR #7). From then on q_ctrl * q_grip_new was
+                    // gun_world_frozen * socket in mode 3, and delta printed ~28 cm on every release
+                    // while the weapon visibly snapped. It still could not be read as that, because
+                    // arm_frozen used the SOCKET offset (rigsocket) and arm_live the pinned G, which
+                    // differ on their own. Now both use the arm the solve used and arm_live mirrors
+                    // the apply exactly, so delta is the release rotation acting on that arm: zero
+                    // when the release is seamless, non-zero exactly when fit and apply disagree.
                     {
                         // Gun world rotation that will apply AFTER release. Mode 3 writes
                         // q_world = q_parent * (conj(q_parent) * q_ctrl * q_grip) = q_ctrl * q_grip,
-                        // so the parent cancels and this is the whole of it.
-                        const Vec3 arm_live = quat_rotate(quat_mul(q_ctrl, q_grip_new), G_now);
+                        // so the parent cancels and this is the whole of it. Mode 2 also multiplies
+                        // in conj(socket) on the apply side, so the mirror does too.
+                        Quat q_live = quat_mul(q_ctrl, q_grip_new);
+                        if (g_cfg.rig_mode == 2 && g_cfg.rig_sock_rot && g_dbg_sock_ok.load()) {
+                            q_live = quat_mul(q_live, quat_conj(rotator_to_quat(
+                                g_dbg_sock_p.load(), g_dbg_sock_yw.load(), g_dbg_sock_r.load())));
+                        }
+                        const Vec3 arm_live = quat_rotate(q_live, sep_live ? g_calib_sock_local : G_now);
                         API::get()->log_info(
                             "[Halo-CampE-UEVR] CALIBSOLVE: piv G=(%.1f,%.1f,%.1f) pivauto=%d fromcalib=%d | "
                             "armG frozen=(%.1f,%.1f,%.1f) live=(%.1f,%.1f,%.1f) delta=(%.1f,%.1f,%.1f)cm | "
