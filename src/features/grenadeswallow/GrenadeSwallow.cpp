@@ -1,5 +1,33 @@
-// grenadeswallow (fork feature, Experimental): the left A-face grenade code stripped from the pad, by UEVR's action state.
-// Textual fragment, included by Plugin.cpp inside the XInput hook, after the ForceTube fire note. Moved verbatim; not compiled on its own.
+#include "GrenadeSwallow.hpp"
+
+#include <Windows.h>
+#include <Xinput.h>
+#include <string_view>
+
+#include "Config.hpp"
+#include "Math.hpp"                    // clampf
+#include "core/host/PluginState.hpp"
+#include "uevr/API.hpp"
+
+#include <atomic>
+#include <cstdlib>
+
+using namespace uevr;
+
+namespace halo {
+
+bool grenadeswallow_parse_key(const char* key, const char* val, double v) {
+    if (_stricmp(key, "grenadeswallow") == 0) { g_cfg.grenade_swallow = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "grenadecode")    == 0) { g_cfg.grenade_code = (int)strtol(val, nullptr, 0); return true; }
+    return false;
+}
+
+namespace {
+
+void grenadeswallow_xinput_raw_pad(_XINPUT_STATE* state) {
+    // Plugin.cpp's own state, through the bridge: the same object under the same name.
+    const auto& g_in_menu = *host::g_plugin_state.in_menu;
+
         // ---- THE GRENADE BUTTON, BY ACTION. UEVR says whether the left hand's A-face button is
         // down; the pad code it produced is stripped so the gesture is the only path to a throw.
         // Not in menus, where that button navigates.
@@ -16,3 +44,14 @@
                 state->Gamepad.wButtons &= (WORD)~(WORD)g_cfg.grenade_code;
             }
         }
+}
+
+} // namespace
+
+constinit const FeatureHooks kGrenadeSwallowHooks{
+    .key            = "grenadeswallow",
+    .parse_key      = &grenadeswallow_parse_key,
+    .xinput_raw_pad = &grenadeswallow_xinput_raw_pad,
+};
+
+} // namespace halo

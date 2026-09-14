@@ -14,6 +14,8 @@
 // Tables hold function addresses only and are constant-initialised (constinit at the definition),
 // so there is no static-initialisation order between features, the list and the dispatchers.
 
+struct _XINPUT_STATE;
+
 namespace halo {
 
 struct HeadClamp;   // core/EyeTrace.hpp
@@ -49,6 +51,10 @@ struct FeatureHooks {
     // features_stereo_post_eye: a clamp on the rendered eye, handed to the head-offset measurement
     // (core/EyeTrace.hpp). The first non-null clamp in list order is used.
     const HeadClamp* head_clamp;
+
+    // features_xinput_raw_pad: the raw pad at the top of the XInput hook, after the fire input note.
+    // The slot may modify the pad.
+    void (*xinput_raw_pad)(_XINPUT_STATE* state);
 };
 
 } // namespace halo

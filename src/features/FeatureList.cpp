@@ -12,6 +12,7 @@ namespace halo {
 extern const FeatureHooks kForceTubeHooks;
 extern const FeatureHooks kScopeLensHooks;
 extern const FeatureHooks kHeadBlockHooks;
+extern const FeatureHooks kGrenadeSwallowHooks;
 
 namespace {
 
@@ -22,6 +23,7 @@ const FeatureHooks* const kFeatureList[] = {
     &kForceTubeHooks,
     &kScopeLensHooks,
     &kHeadBlockHooks,
+    &kGrenadeSwallowHooks,
 };
 
 } // namespace
@@ -34,6 +36,8 @@ bool features_parse_key(const char* key, const char* val, double v) {
 
 void features_xinput_raw_pad(_XINPUT_STATE* state) {
     fire_input_note_pad(state);
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->xinput_raw_pad != nullptr) f->xinput_raw_pad(state);
 }
 
 void features_game_tick_late() {

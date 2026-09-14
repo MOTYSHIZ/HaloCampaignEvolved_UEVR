@@ -1751,8 +1751,6 @@ static bool parse_weaponvr_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "slidepartopendeg") == 0) { g_cfg.slide_part_open_deg = clampf((float)v, -180.0f, 180.0f); return true; }
     if (_stricmp(key, "slidealways")    == 0) { strncpy_s(g_cfg.slide_always_weapons, val, _TRUNCATE); return true; }
     if (_stricmp(key, "stealextra")     == 0) { g_cfg.steal_extra_mask = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "grenadeswallow") == 0) { g_cfg.grenade_swallow = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "grenadecode")    == 0) { g_cfg.grenade_code = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "slidehidesection") == 0) { g_cfg.slide_hide_section = (int)clampf((float)v, -1.0f, 31.0f); return true; }
     if (_stricmp(key, "slidecopyplay")  == 0) { g_cfg.slide_copy_play = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "slidecopyroot")  == 0) { strncpy_s(g_cfg.slide_copy_root, val, _TRUNCATE); return true; }

@@ -12005,7 +12005,6 @@ public:
         // release and its synthetic press share one poll. See holster_note_buttons.
         holster_note_buttons(state->Gamepad.wButtons);
         features_xinput_raw_pad(state);
-        #include "features/grenadeswallow/Plugin_grenade_button.inl"   // fork feature: grenadeswallow (grenade button)
 
         // ---- GRIP SWALLOW, BEFORE THE REBIND. The position is the whole point.
         //
