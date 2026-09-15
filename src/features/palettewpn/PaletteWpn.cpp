@@ -9,6 +9,7 @@
 #include "features/palettewpn/PoseLatch.hpp"
 #include "features/palettewpn/PaletteFrame.hpp"
 #include "features/palettewpn/PaletteKeys.hpp"
+#include "features/palettewpn/PaletteCalib.hpp"   // the aim reference slots
 #include "features/palettewpn/BlamPalette.hpp"   // blam_palette_instruments_release
 #include <cstdio>
 #include "core/Services.hpp"
@@ -59,6 +60,8 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .arm_hide_held_off           = &palette_wpn_arm_hide_held_off,
     .arm_hide_needs_rig          = &palette_wpn_arm_hide_needs_rig,
     .palette_pose                = &kPalettePoseProvider,
+    .aim_reference_offset        = &palette_calib_aim_reference_offset,
+    .aim_calibrated              = &palette_calib_aim_calibrated,
     .aim_direct_writing          = &aim_writer_compare_direct,
     .aim_direct_write_skipped    = &palette_wpn_aim_direct_write_skipped,
     .aim_direct_written          = &palette_wpn_aim_direct_written,

@@ -8081,7 +8081,7 @@ void update() {
     // Routed through the same controller-frame correction as derive_ctrl_angles (identity by
     // default): this inline copy feeds the calibration reference and the stick path, so it must
     // apply aim_fix or the reference would be captured in a different frame than the setpoint.
-    Vec3 fwd = quat_forward(halo::apply_aim_fix(cq));
+    Vec3 fwd = quat_forward(features_aim_fix_or(cq, halo::apply_aim_fix(cq)));
 
     // ---- THE TWO-HANDED HOLD, on the tick-side copy of the aim derivation.
     //
@@ -8238,7 +8238,10 @@ void update() {
 
         const bool measuring = g_aimcal_capture.exchange(false);
 
-        if (g_cfg.aim_off_valid && !measuring) {
+        float ref_off_yaw = g_cfg.aim_off_yaw, ref_off_pitch = g_cfg.aim_off_pitch, ref_off_frame = aim_frame_yaw_use();
+        bool ref_off_valid = g_cfg.aim_off_valid;
+        features_aim_reference_offset(&ref_off_yaw, &ref_off_pitch, &ref_off_valid, &ref_off_frame, calib_frame_yaw_write());
+        if (ref_off_valid && !measuring) {
             // RESTORE a saved calibration rather than re-capturing whatever the game happens to
             // be aiming at: re-capturing binds the controller to the aim of that instant, which
             // after a level load or respawn is arbitrary -- silently discarding the calibration.
@@ -8246,12 +8249,12 @@ void update() {
             // USE SITE 1 of 2: add back the frame the offset was measured against (0 when off).
             // Safe as a scalar add here, unlike the grip trim: ctrl_yaw and aim_off_yaw are both
             // plain yaws in a yaw-only computation, so there is no pitch/roll to mix.
-            g_ref_aim_yaw   = wrap180(ctrl_yaw + g_cfg.aim_off_yaw + aim_frame_yaw_use());
-            g_ref_aim_pitch = ctrl_pitch + g_cfg.aim_off_pitch;
+            g_ref_aim_yaw   = wrap180(ctrl_yaw + ref_off_yaw + ref_off_frame);
+            g_ref_aim_pitch = ctrl_pitch + ref_off_pitch;
             g_have_ref = true;
             g_gain_hold = true; g_gain_hold_until = tick + 90;   // let the aim settle before measuring gain
             API::get()->log_info("[Halo-CampE-UEVR] reference RESTORED from saved calibration: offset yaw=%.1f pitch=%.1f (frame yaw %.1f)",
-                                 g_cfg.aim_off_yaw, g_cfg.aim_off_pitch, aim_frame_yaw_use());
+                                 ref_off_yaw, ref_off_pitch, ref_off_frame);
         } else {
             // CAPTURE IN INTENT SPACE, NOT COMMAND SPACE.
             //
@@ -8290,6 +8293,7 @@ void update() {
             g_gain_hold = true; g_gain_hold_until = tick + 90;   // let the aim settle before measuring gain
 
             if (measuring) {
+                if (!features_aim_calibrated(ref_yaw - ctrl_yaw, ref_pitch - ctrl_pitch, calib_frame_yaw_write())) {
                 // Page Down release: the offset between where the hand points and where the game
                 // aims IS the calibration. Store it, not the absolute pair.
                 // WRITE SITE 1 of 2: store MINUS the frame, so the saved offset does not encode
@@ -8302,6 +8306,7 @@ void update() {
                 write_calib_file();
                 API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATED: offset yaw=%.1f pitch=%.1f -> saved",
                                      g_cfg.aim_off_yaw, g_cfg.aim_off_pitch);
+                }
             } else {
                 API::get()->log_info("[Halo-CampE-UEVR] reference captured: ctrlYaw=%.1f aimYaw=%.1f",
                                      ctrl_yaw, (float)aim_yaw);

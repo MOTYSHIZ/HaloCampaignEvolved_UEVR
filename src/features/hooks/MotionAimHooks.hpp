@@ -10,8 +10,9 @@ namespace halo {
 
 // shotpoint_aim_active, first term: true = a feature owns the aim (the author's shot-point aim stands down).
 bool features_aim_owned_by_feature();
-// derive_ctrl_angles, around both aim-fixed source poses: notes the source rotation (per thread) and returns it.
-Quat features_aim_source(const Quat& q_src);
+// derive_ctrl_angles, at both aim source poses: the rotation the forward is taken from, noted per thread and returned:
+// the placement owner's aim fix on q_src while a feature owns the aim, else his_fixed (apply_aim_fix on the same pose).
+Quat features_aim_source(const Quat& q_src, const Quat& his_fixed);
 // derive_ctrl_angles, in place of the shot-point direction and the two-handed bend: true = a feature set
 // the forward (the palette weapon's barrel and its two-handed hold), and the author's block is skipped.
 bool features_aim_forward(Vec3* fwd);

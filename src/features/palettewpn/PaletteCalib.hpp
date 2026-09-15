@@ -28,4 +28,11 @@ void pal_wpnfix_set(const std::string& key, const float q[4], const float t[3]);
 // captures and its menu reset, never while the palette weapon is off. Game thread.
 void pal_calib_write_file();
 
+// palettewpn's aim_reference_offset slot: while the palette weapon owns the aim, the reference restore uses
+// palaimoffyaw/palaimoffpitch, and adds the frame yaw only for palaimcalibver >= 2.
+bool palette_calib_aim_reference_offset(float* yaw, float* pitch, bool* valid, float* frame_yaw, float write_frame_yaw);
+// palettewpn's aim_calibrated slot: while the palette weapon owns the aim, Page Down lands in palaimoffyaw/palaimoffpitch
+// (stamped palaimcalibver=2) and halo_vr_palette_calib.cfg.
+bool palette_calib_aim_calibrated(float off_yaw, float off_pitch, float frame_yaw);
+
 } // namespace halo

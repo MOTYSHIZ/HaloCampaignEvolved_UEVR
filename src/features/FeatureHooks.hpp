@@ -203,6 +203,14 @@ struct FeatureHooks {
     // forward was set (the drawn barrel); the palette's two-handed blend is then skipped. While enabled.
     bool (*aim_bore_forward)(const Quat& q_src, Vec3* fwd);
 
+    // features_aim_reference_offset: update()'s aim reference restore (game thread). The feature may replace the saved
+    // offset (degrees), its validity and the frame yaw added to it; write_frame_yaw is calib_frame_yaw_write(). True =
+    // replaced. While enabled.
+    bool (*aim_reference_offset)(float* yaw, float* pitch, bool* valid, float* frame_yaw, float write_frame_yaw);
+    // features_aim_calibrated: update()'s Page Down store (game thread): the measured offset before the frame is
+    // removed, and that frame yaw. True = the feature stored it and the author's store is skipped. While enabled.
+    bool (*aim_calibrated)(float off_yaw, float off_pitch, float frame_yaw);
+
     // features_aim_direct_writing / _write_skipped / _written: the aim law's direct write. While enabled.
     void (*aim_direct_writing)(float wy, float wp);
     bool (*aim_direct_write_skipped)();

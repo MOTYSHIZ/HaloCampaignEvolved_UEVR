@@ -565,7 +565,26 @@ int features_reticule_render_publish_mode() {
 }
 
 bool features_aim_owned_by_feature() { return palette_pose_owns_aim(); }
-Quat features_aim_source(const Quat& q_src) { t_aim_source = q_src; return q_src; }
+Quat features_aim_fix_or(const Quat& q_src, const Quat& his_fixed) {
+    Quat q{};
+    return palette_pose_aim_fix(q_src, &q) ? q : his_fixed;
+}
+Quat features_aim_source(const Quat& q_src, const Quat& his_fixed) {
+    t_aim_source = features_aim_fix_or(q_src, his_fixed);
+    return t_aim_source;
+}
+bool features_aim_reference_offset(float* yaw, float* pitch, bool* valid, float* frame_yaw, float write_frame_yaw) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_reference_offset != nullptr && f->enabled != nullptr && f->enabled()
+            && f->aim_reference_offset(yaw, pitch, valid, frame_yaw, write_frame_yaw)) return true;
+    return false;
+}
+bool features_aim_calibrated(float off_yaw, float off_pitch, float frame_yaw) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->aim_calibrated != nullptr && f->enabled != nullptr && f->enabled()
+            && f->aim_calibrated(off_yaw, off_pitch, frame_yaw)) return true;
+    return false;
+}
 bool features_aim_forward(Vec3* fwd) {
     if (!palette_pose_owns_aim()) return false;
     // ---- THE TWO-HANDED HOLD, here and deliberately: after the source pose is chosen, before

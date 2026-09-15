@@ -385,7 +385,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     // pose BEFORE the forward is taken, so it rolls with the wrist like the rendered gun does; the
     // weapon publisher and the direct-write path route through the same call, so ray and barrel
     // agree by construction. See apply_aim_fix's definition above for why it is a right-multiply.
-    Vec3 fwd = quat_forward(features_aim_source(apply_aim_fix(cq)));
+    Vec3 fwd = quat_forward(features_aim_source(cq, apply_aim_fix(cq)));
 
     // ---- ROLL-INVARIANT SOURCE (aimsrc=1) -- STILL UNPROVEN, DO NOT SHIP ON -------------------
     //
@@ -420,7 +420,7 @@ bool derive_ctrl_angles(float* out_yaw, float* out_pitch, int32_t ridx_override,
     if (g_cfg.aim_src == 1) {
         Vec3 gpos{}; Quat gq{};
         if (get_pose(ridx, &gpos, &gq, /*use_aim=*/false)) {
-            fwd = quat_forward(features_aim_source(apply_aim_fix(gq)));
+            fwd = quat_forward(features_aim_source(gq, apply_aim_fix(gq)));
             // Position still comes from the aim pose: the sightline mixes this with cpos, and the
             // grip POSITION is a different point. Only the DIRECTION is being replaced.
         }

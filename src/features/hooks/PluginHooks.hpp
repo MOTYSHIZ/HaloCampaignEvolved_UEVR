@@ -64,6 +64,16 @@ bool features_hmd_pose_plausible(const Vec3& hp);
 bool features_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved);
 bool features_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny, bool& moved);
 
+// update() (game thread), THE AIM REFERENCE. Each is a no-op unless a feature that owns placement and aim answers.
+//   features_aim_fix_or: the tick-side aim copy's source pose: that owner's aim fix on q_src, else his_fixed (the
+//     author's apply_aim_fix on the same pose).
+//   features_aim_reference_offset: right before the reference restore: may replace the saved offset, its validity and
+//     the frame yaw added to it. True = replaced.
+//   features_aim_calibrated: the Page Down store: true = a feature stored the offset and the author's store is skipped.
+Quat features_aim_fix_or(const Quat& q_src, const Quat& his_fixed);
+bool features_aim_reference_offset(float* yaw, float* pitch, bool* valid, float* frame_yaw, float write_frame_yaw);
+bool features_aim_calibrated(float off_yaw, float off_pitch, float frame_yaw);
+
 // update() (game thread), right after the HMD translation leash block, before the calibrate key.
 void features_game_tick_after_leash();
 

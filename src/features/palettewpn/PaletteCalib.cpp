@@ -3,6 +3,8 @@
 #include "Config.hpp"
 #include "core/config/CfgRead.hpp"
 #include "core/registry/Features.hpp"   // features_layer
+#include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
+#include "uevr/API.hpp"
 #include "Math.hpp"
 
 #include <cstdio>
@@ -163,6 +165,28 @@ void pal_calib_write_file() {
                 e.match, e.q[0], e.q[1], e.q[2], e.q[3], e.t[0], e.t[1], e.t[2]);
     }
     fclose(f);
+}
+
+bool palette_calib_aim_reference_offset(float* yaw, float* pitch, bool* valid, float* frame_yaw, float write_frame_yaw) {
+    if (!palette_weapon_mode()) return false;
+    *yaw = g_cfg.pal_aim_off_yaw;
+    *pitch = g_cfg.pal_aim_off_pitch;
+    *valid = g_cfg.pal_aim_off_valid;
+    *frame_yaw = (g_cfg.pal_aim_calib_ver >= 2) ? write_frame_yaw : 0.0f;
+    return true;
+}
+
+bool palette_calib_aim_calibrated(float off_yaw, float off_pitch, float frame_yaw) {
+    if (!palette_weapon_mode()) return false;
+    g_cfg.pal_aim_off_yaw = wrap180(off_yaw - frame_yaw);
+    g_cfg.pal_aim_calib_ver = 2;
+    g_cfg.pal_aim_off_pitch = off_pitch;
+    g_cfg.pal_aim_off_valid = true;
+    g_cfg.pal_aim_off_captured = true;
+    pal_calib_write_file();
+    uevr::API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATED (palette weapon): offset yaw=%.1f pitch=%.1f -> halo_vr_palette_calib.cfg",
+                               g_cfg.pal_aim_off_yaw, g_cfg.pal_aim_off_pitch);
+    return true;
 }
 
 } // namespace halo
