@@ -1,5 +1,6 @@
 #include "Config.hpp"
 #include "core/config/CfgRead.hpp"
+#include "features/palettewpn/PaletteCalib.hpp"   // pal_apply_aim_fix
 #include "Markers.hpp"            // the grab-zone marker rides the holster marker machinery
 #include "core/MarkerFaces.hpp"
 #include "UeObject.hpp"           // TrackedObject for that marker
@@ -88,12 +89,12 @@ bool aim_hand_forward(int32_t idx, Vec3* out_fwd, Vec3* out_grip_pos) {
     // line the reticle actually sits on. Raw here and 8 deg down there is 8 cm off-axis at 60 cm
     // reach -- most of a 9 cm radius -- so the zone would miss a hand that IS on the barrel.
     if (g_cfg.aim_src == 1) {
-        *out_fwd = quat_forward(apply_aim_fix(gq));
+        *out_fwd = quat_forward(pal_apply_aim_fix(gq));
         return true;
     }
     Vec3 apos{}; Quat aq{};
     if (!get_pose(idx, &apos, &aq, /*use_aim=*/true)) return false;
-    *out_fwd = quat_forward(apply_aim_fix(aq));
+    *out_fwd = quat_forward(pal_apply_aim_fix(aq));
     return true;
 }
 

@@ -18,6 +18,7 @@ struct PalettePoseProvider {
     void (*mark)(int point, float yaw, float e0, float e1, float e2);  // the provider's STOMPLOG ring
     float (*roll_trim_deg)();                                    // the roll trim between grip rotation and weapon trim
     bool (*weapon_quat)(Quat* out);                              // the drawn weapon's world rotation as last published (raw)
+    bool (*aim_fix)(const Quat& q_src, Quat* out);               // the provider's own aim fix on an aim pose
 };
 
 bool palette_pose_owns_aim();
@@ -29,5 +30,9 @@ bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch);
 void palette_pose_mark(int point, float yaw, float e0, float e1, float e2);
 float palette_pose_roll_trim_deg();   // 0 with no provider
 bool palette_pose_weapon_quat(Quat* out);
+// The provider's aim fix on an aim pose, only while it owns placement and aim (false otherwise).
+bool palette_pose_aim_fix(const Quat& q_src, Quat* out);
+// The aim fix of whatever places the weapon: the provider's while it owns placement, the author's apply_aim_fix otherwise.
+Quat placement_aim_fix(const Quat& q_src);
 
 } // namespace halo

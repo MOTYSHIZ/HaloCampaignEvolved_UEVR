@@ -7,6 +7,7 @@
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
 #include "features/palettewpn/PaletteFrame.hpp"      // stomp_mark
 #include "features/palettewpn/PoseLatch.hpp"         // the stamped intents
+#include "features/palettewpn/PaletteCalib.hpp"      // pal_apply_aim_fix
 
 #include <atomic>
 
@@ -48,6 +49,11 @@ bool weapon_quat(Quat* out) {
                 g_dbg_pose_w_z.load(std::memory_order_relaxed), g_dbg_pose_w_w.load(std::memory_order_relaxed)};
     return true;
 }
+// The palette weapon's own aim fix (palaimfix). The dispatcher asks only while the palette weapon owns the aim.
+bool palette_aim_fix(const Quat& q_src, Quat* out) {
+    *out = pal_apply_aim_fix(q_src);
+    return true;
+}
 } // namespace
 
 constinit const PalettePoseProvider kPalettePoseProvider{
@@ -60,6 +66,7 @@ constinit const PalettePoseProvider kPalettePoseProvider{
     &stomp_mark,
     &roll_trim_deg,
     &weapon_quat,
+    &palette_aim_fix,
 };
 
 } // namespace halo

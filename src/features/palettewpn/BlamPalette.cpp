@@ -17,6 +17,7 @@
 #include "Rig.hpp"   // g_turnq_* : the player's accumulated snap/smooth turn
 #include "WeaponCalib.hpp"   // weapon_key / wpnfix: the per-weapon rigid delta
 #include "features/palettewpn/PaletteReadbacks.hpp"   // wpnfix_find, rig_socket_world
+#include "features/palettewpn/PaletteCalib.hpp"   // pal_apply_aim_fix, pal_wpnfix_find
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -4240,7 +4241,8 @@ void blam_palette_publish_poses() {
     // on the rising edge, because by the time the solve arrives the key is up.
     const bool held_global = g_cfg.palette_calib_key != 0 &&
                              (GetAsyncKeyState(g_cfg.palette_calib_key) & 0x8000) != 0;
-    const bool held_wpn = wpn_calib_held();
+    const bool held_wpn = g_cfg.pal_wpn_calib_key != 0 &&
+                          (GetAsyncKeyState(g_cfg.pal_wpn_calib_key) & 0x8000) != 0;
     const bool held = held_global || held_wpn;
     // PUBLISH THE KEY STATE HERE, BEFORE ANY EARLY RETURN. Read by blam_palette_freeze_active(),
     // which the TRACE cadence consults. Every `return` below -- palette_weapon off, no controller
@@ -4260,12 +4262,12 @@ void blam_palette_publish_poses() {
     // nothing until a restart -- so every "clear" today was clean on disk and dirty in RAM, and
     // the next capture composed onto the ghost. A cleared file must clear the offset; a written
     // file must be adopted verbatim (so a hand-edited or restored file takes effect too).
-    if (g_cfg.grip_fix_valid) {
+    if (g_cfg.pal_grip_fix_valid) {
         // Pitch only (see the capture compose below): whatever yaw/roll an older file carries is
         // dropped at adoption, so a hand-edited or legacy gripfix cannot put yaw or roll into the gun.
-        g_grip_fix_rot   = quat_twist(quat_unit(Quat{g_cfg.grip_fix[0], g_cfg.grip_fix[1], g_cfg.grip_fix[2], g_cfg.grip_fix[3]}),
+        g_grip_fix_rot   = quat_twist(quat_unit(Quat{g_cfg.pal_grip_fix[0], g_cfg.pal_grip_fix[1], g_cfg.pal_grip_fix[2], g_cfg.pal_grip_fix[3]}),
                                       Vec3{0.0f, 1.0f, 0.0f});
-        g_grip_fix_pos_m = Vec3{g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]};
+        g_grip_fix_pos_m = Vec3{g_cfg.pal_grip_fix[4], g_cfg.pal_grip_fix[5], g_cfg.pal_grip_fix[6]};
         g_grip_fix_valid = true;
     } else if (g_grip_fix_valid) {
         g_grip_fix_valid = false;
@@ -4663,7 +4665,7 @@ void blam_palette_publish_poses() {
     // its poses (Plugin.cpp, two_hand_delta): ONE shortest-arc rotation, in VR space, before the
     // recenter, so roll survives and the ray and the gun agree by construction. two_hand_delta
     // measures against the aim-fixed forward, so it composes on the aim-fixed pose here.
-    Quat aq_fixed = apply_aim_fix(aq);
+    Quat aq_fixed = pal_apply_aim_fix(aq);
     {
         Quat thd{0.0f, 0.0f, 0.0f, 1.0f};
         if (palette_two_hand_delta(&thd)) aq_fixed = quat_unit(quat_mul(thd, aq_fixed));
@@ -4689,7 +4691,7 @@ void blam_palette_publish_poses() {
     // pos = g.pos + R(g)*w.pos) and applied once by the same rule -- so a weapon with no entry
     // is exactly the global, and the freeze solve below sees a single corrected pose either way.
     const std::string wkey = weapon_key();
-    const WeaponFix* wfix = wpnfix_find(wkey);
+    const WeaponFix* wfix = pal_wpnfix_find(wkey);
     {
         static std::string s_last_wkey;
         if (wkey != s_last_wkey) { s_last_wkey = wkey; g_p_wpn_gen.fetch_add(1, std::memory_order_relaxed); }

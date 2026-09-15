@@ -33,6 +33,7 @@
 #include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
 #include "core/fixes/HostFixes.hpp"
+#include "MotionAimControl.hpp"   // apply_aim_fix
 
 #include <span>
 #include <string>
@@ -543,6 +544,14 @@ void features_stereo_post_eye_publish(int index) {
 bool palette_pose_weapon_quat(Quat* out) {
     const auto* p = palette_pose_provider();
     return p != nullptr && p->weapon_quat != nullptr && p->weapon_quat(out);
+}
+bool palette_pose_aim_fix(const Quat& q_src, Quat* out) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->owns_aim != nullptr && p->aim_fix != nullptr && p->owns_aim() && p->aim_fix(q_src, out);
+}
+Quat placement_aim_fix(const Quat& q_src) {
+    Quat q{};
+    return palette_pose_aim_fix(q_src, &q) ? q : apply_aim_fix(q_src);
 }
 float palette_pose_roll_trim_deg() {
     const auto* p = palette_pose_provider();

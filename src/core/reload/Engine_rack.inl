@@ -139,7 +139,7 @@ Vec3 reload_well_stabilize(void* comp_key, const Vec3& well_world, const Vec3& h
                                           : API::VR::get_right_controller_index();
     Vec3 ap{}; Quat aq{};
     if (ridx < 0 || !get_pose(ridx, &ap, &aq, /*use_aim=*/true)) return well_world;
-    const Quat af = apply_aim_fix(aq);
+    const Quat af = placement_aim_fix(aq);
     const Vec3 f = quat_forward(af);
     const Vec3 u = quat_rotate(af, Vec3{0.0f, 1.0f, 0.0f});
     const Vec3 r = quat_rotate(af, Vec3{1.0f, 0.0f, 0.0f});
@@ -344,7 +344,7 @@ void slide_update(const Vec3& head) {
     Vec3 ap{}; Quat aq{};
     if (idx < 0 || ridx < 0 || !get_pose(idx, &hp, &hq, /*use_aim=*/false) ||
         !get_pose(ridx, &ap, &aq, /*use_aim=*/true)) { release("no hand"); return; }
-    const Quat af = apply_aim_fix(aq);
+    const Quat af = placement_aim_fix(aq);
     const Vec3 f = quat_forward(af);
     const Vec3 u = quat_rotate(af, Vec3{0.0f, 1.0f, 0.0f});
     const Vec3 r = quat_rotate(af, Vec3{1.0f, 0.0f, 0.0f});

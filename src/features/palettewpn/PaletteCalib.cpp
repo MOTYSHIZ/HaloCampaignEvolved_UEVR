@@ -1,10 +1,13 @@
 #include "features/palettewpn/PaletteCalib.hpp"
 
 #include "Config.hpp"
+#include "core/config/CfgRead.hpp"
 #include "core/registry/Features.hpp"   // features_layer
+#include "Math.hpp"
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace halo {
 
@@ -84,6 +87,23 @@ bool palette_calib_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palwpnfix") == 0) { parse_wpnfix(val); return true; }
     if (_stricmp(key, "palwpncalibkey") == 0) { g_cfg.pal_wpn_calib_key = (int)strtol(val, nullptr, 0); return true; }
     return false;
+}
+
+Quat pal_apply_aim_fix(const Quat& q_src) {
+    CFG_HOOK_READ;   // the aim derivation calls this off the game thread: see core/config/CfgRead.hpp
+    if (!g_cfg.pal_aim_fix_valid) return q_src;
+    const Quat f{g_cfg.pal_aim_fix[0], g_cfg.pal_aim_fix[1], g_cfg.pal_aim_fix[2], g_cfg.pal_aim_fix[3]};
+    return quat_mul(q_src, f);
+}
+
+const WeaponFix* pal_wpnfix_find(const std::string& key) {
+    if (key.empty()) return nullptr;
+    for (int i = 0; i < g_cfg.pal_wpnfix_count; ++i) {
+        const auto& w = g_cfg.pal_wpnfix[i];
+        if (w.match[0] == 0) continue;
+        if (key.find(w.match) != std::string::npos) return &w;
+    }
+    return nullptr;
 }
 
 } // namespace halo

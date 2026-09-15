@@ -1,5 +1,6 @@
 #include "core/reload/ReloadEngine.hpp"
 #include "core/config/CfgRead.hpp"
+#include "core/PalettePose.hpp"   // placement_aim_fix
 
 #include "Gesture.hpp"
 #include "TwoHandAim.hpp"
@@ -323,7 +324,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                                               : API::VR::get_right_controller_index();
         Vec3 apos{}; Quat aq{};
         if (ridx >= 0 && get_pose(ridx, &apos, &aq, /*use_aim=*/true)) {
-            const Vec3 f = quat_forward(apply_aim_fix(aq));
+            const Vec3 f = quat_forward(placement_aim_fix(aq));
             well = Vec3{hand_r.x + f.x * g_cfg.reload_well_fwd,
                         hand_r.y + f.y * g_cfg.reload_well_fwd,
                         hand_r.z + f.z * g_cfg.reload_well_fwd};
