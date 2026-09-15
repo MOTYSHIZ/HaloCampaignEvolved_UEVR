@@ -279,6 +279,14 @@
 # Settings of the switchable features. The menu shows each one under its feature, in the feature's
 # tier section, and they only act while that feature is on.
 #
+# Weapon pose timing. How the weapon you see is written each frame: 6 writes it before the game's
+# own pose pass, so the weapon never flickers; 0 is the original method.
+#palbuildgate=6
+# Weapon pose refresh. 1 also refreshes the weapon's pose every headset frame, 0 only on the game's
+# own update.
+#palpubframe=0
+# Two-handed grab dot. A dot on the barrel shows where your other hand grabs for a two-handed hold.
+#twohandmarker=0
 # Manual reload: each weapon keeps its own reload state (0 the old memory, 1 per weapon type, 2 per weapon, 3 per weapon across a level load).
 #reloadstate=1
 # Manual reload: when a weapon's state is saved (1 every tick, 2 only when it leaves your hand).

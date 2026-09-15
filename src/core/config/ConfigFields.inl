@@ -466,7 +466,8 @@
     float two_hand_radius_m = 0.09f;
     // GRAB-ZONE DOT (2026-09-01, from a tester video: testers could not find the grip). A small
     // dot at the zone middle while the off hand approaches unlatched; gone once held or withdrawn.
-    bool  two_hand_marker = true;
+    // Default off, the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    bool  two_hand_marker = false;
     float two_hand_marker_scale = 0.05f;
 
     // AGREEMENT BAND, as a dot product between the hand-to-hand line and where the weapon already
@@ -1447,8 +1448,9 @@
     // from stashes the tick publisher writes. Aim hand only (the weapon is the smoothness ask);
     // the left hand and arms stay tick-published. It only refreshes a pose the tick publisher
     // has already validated -- never creates one -- and the dead-tracking reach gate is
-    // replicated. 0 = tick publishing only (the old behaviour).
-    int   pal_pub_frame = 1;
+    // replicated. 0 = tick publishing only (the old behaviour). Default 0: the value the weapon
+    // placement is tuned with (halo_vr.cfg ships the same line).
+    int   pal_pub_frame = 0;
     // Mode 5's lead fraction of one build interval along the smoothed camera rate. The 2026-09-03
     // fit measured the gun missing by 0.86 of a tick; dial live in the headset.
     float palette_cam_lead = 0.86f;
@@ -1708,7 +1710,7 @@
     // the banks can be written twice per tick against two cameras: single-frame excursions, only
     // while the aim camera moves, which is the flick's exact signature. Each mode drops a class
     // of calls so the survivor set can be found in-headset, live-flippable:
-    //   0 = off, every call applies (the shipping behaviour)
+    //   0 = off, every call applies (the original behaviour)
     //   1 = capture calls only (capture_render_palette == true)
     //   2 = weapon slot 0 only
     //   3 = capture AND slot 0
@@ -1724,7 +1726,8 @@
     //       after the build is snapshot-out + memcpy-in, a few microseconds instead of a full
     //       camera read and per-node recompose. Falls back to the in-place path on the first
     //       build after a weapon swap or a stale snapshot.
-    int   pal_build_gate = 0;
+    // Default 6, the window cure the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    int   pal_build_gate = 6;
     // POSEFREEZE (2026-09-11, the bisection): 1 = the publisher stops updating the published
     // pose, so the target side of the whole pipeline is a CONSTANT by construction -- no
     // calibration solve involved (Page Up's freeze fires one on release; this does not). If a
