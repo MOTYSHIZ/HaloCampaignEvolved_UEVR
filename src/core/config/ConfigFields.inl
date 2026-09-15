@@ -939,19 +939,9 @@
     // carry the old number forward.
     float palette_weapon_scale = 1.0f;
 
-    // THE RIGID GRIP OFFSET -- 0.5's PoseOffset, applied UPSTREAM to the controller pose in the
-    // publisher, so the palette arithmetic never learns a calibration exists. Quaternion (4,
-    // right-multiplied: a fixed wrist angle at any orientation) then translation (3, METRES, in
-    // the CONTROLLER's frame, rotated by the corrected pose at apply time -- the rigid attachment).
-    // Machine-written by the Page Up freeze-and-align gesture into the calibration file. Repeated
-    // captures COMPOSE onto the existing offset, so a match refines rather than resets.
-    float grip_fix[7] = {0,0,0,1, 0,0,0};
-    bool  grip_fix_valid = false;
-    // Same shape, for the LEFT hand (the arms' free hand): quaternion x,y,z,w then translation
-    // x,y,z in METRES, left controller frame. Solved by the Insert freeze-and-align on the rendered
-    // left hand; repeated captures compose. A measurement -- do not hand-edit.
-    // Hold to freeze the weapon, align your hand, release to solve. Page Up by default: End, Page
-    // Down, Home and Delete are all taken by the existing calibrations.
+    // The global grip capture key (palgripfix, below): hold to freeze the weapon, align your hand, release to solve.
+    // Repeated captures compose onto the existing offset. Page Up by default: End, Page Down and Delete are the
+    // author's calibrations, and Home is palwpncalibkey.
     int   palette_calib_key = 0x21;
     // Report where the game puts node 8 versus where we put it. The one measurement that settles
     // whether the hand-to-Blam conversion is right.
@@ -979,7 +969,7 @@
     // hook; 3 = ControlRotation extrapolated by its own last step.
     int   palette_cam = 14;
     // ONE SHARED AIM DIRECTION. The reticle and the barrel are computed on two paths from the same
-    // controller (aim: aim pose + aimfix + sightline; barrel: palette pose + gripfix), so they
+    // controller (aim: aim pose + aimfix + sightline; barrel: palette pose + palgripfix), so they
     // disagree by ~1 deg at rest and by whatever a frame of motion is worth. With this on, the
     // pullback rotates the palette pose so its measured barrel axis lies exactly on the camera
     // forward every build (roll about that axis kept from the controller). 0.5's

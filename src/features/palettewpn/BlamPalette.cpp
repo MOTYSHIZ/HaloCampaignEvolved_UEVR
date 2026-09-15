@@ -15,8 +15,8 @@
 #include "features/palettewpn/PoseLatch.hpp"   // the latched intents, the frame audit
 #include "Markers.hpp"        // g_cam_x/y/z: the rendered camera, for the WPNERR speed column
 #include "Rig.hpp"   // g_turnq_* : the player's accumulated snap/smooth turn
-#include "WeaponCalib.hpp"   // weapon_key / wpnfix: the per-weapon rigid delta
-#include "features/palettewpn/PaletteReadbacks.hpp"   // wpnfix_find, rig_socket_world
+#include "WeaponCalib.hpp"   // weapon_key
+#include "features/palettewpn/PaletteReadbacks.hpp"   // rig_socket_world
 #include "features/palettewpn/PaletteCalib.hpp"   // pal_apply_aim_fix, pal_wpnfix_find
 #include "uevr/API.hpp"
 
@@ -4236,8 +4236,8 @@ void blam_palette_hold_pose(int ms) {
 void blam_palette_publish_poses() {
     // The calibration key, polled here because this already runs on the game thread every frame and
     // the hook must not be reading input.
-    // Page Up = GLOBAL freeze-and-align (gripfix). Home (wpn_calib_key) = the SAME gesture, but the
-    // solve lands in the held weapon's wpnfix delta instead. Which one started the hold is latched
+    // Page Up = GLOBAL freeze-and-align (palgripfix). Home (palwpncalibkey) = the SAME gesture, but the
+    // solve lands in the held weapon's palwpnfix delta instead. Which one started the hold is latched
     // on the rising edge, because by the time the solve arrives the key is up.
     const bool held_global = g_cfg.palette_calib_key != 0 &&
                              (GetAsyncKeyState(g_cfg.palette_calib_key) & 0x8000) != 0;

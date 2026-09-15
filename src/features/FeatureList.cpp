@@ -699,10 +699,6 @@ void features_render_callbacks_register() {
 bool features_menu_command_file_absent(const char* path) {
     return service_active(SVC_STABILITY) && stability_menu_command_file_absent(path);
 }
-void features_calib_file_write(std::FILE* f) {
-    for (const FeatureHooks* ft : kFeatureList)
-        if (ft->calib_file_write != nullptr) ft->calib_file_write(f);
-}
 
 void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }
 bool features_holster_throw_too_slow(float peak_speed) { return stability_throw_too_slow(peak_speed); }

@@ -29,7 +29,5 @@ std::string features_menu_status_line();
 
 // menu_bridge_tick, before the command file read: true = the file is absent, skip the open.
 bool features_menu_command_file_absent(const char* path);
-// write_calib_file, after the rig fit block: a feature's calibration lines.
-void features_calib_file_write(std::FILE* f);
 
 } // namespace halo

@@ -50,20 +50,6 @@ bool rig_socket_world_rot(API::UObject* rig, const wchar_t* socket, Vec3* out_py
     return true;
 }
 
-const WeaponFix* wpnfix_find(const std::string& key) {
-    if (key.empty()) return nullptr;
-    // LAST match wins, for the same reason weapon_fix_for() in Config.hpp takes the last one: the
-    // table holds the shipped baseline first and the captured entries after it, and a capture is
-    // meant to outrank the baseline it was taken against.
-    const WeaponFix* hit = nullptr;
-    for (int i = 0; i < g_cfg.wpnfix_count; ++i) {
-        const auto& w = g_cfg.wpnfix[i];
-        if (w.match[0] == 0) continue;
-        if (key.find(w.match) != std::string::npos) hit = &w;
-    }
-    return hit;
-}
-
 // FRAMEAUDIT: the Blam control record's current angles, converted back to the UE-convention
 // degrees desired_aim_now() uses, so they can be matched against the generation table.
 bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg) {

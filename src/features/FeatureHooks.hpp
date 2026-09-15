@@ -250,8 +250,6 @@ struct FeatureHooks {
     void (*stereo_post_eye_sample)(int index);
     // features_stereo_post_eye_late: the stereo post-callback, after the stamp publish. While enabled.
     void (*stereo_post_eye_late)(int index);
-    // features_calib_file_write: write_calib_file, after the rig fit block. Always called (calibration data).
-    void (*calib_file_write)(std::FILE* f);
     // features_teardown: the plugin teardown, first after its log line. Always called.
     void (*teardown)();
     // features_aim_law_sampling: the XInput hook's aim law, before derive_ctrl_angles. While enabled.

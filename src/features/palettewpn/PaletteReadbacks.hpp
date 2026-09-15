@@ -19,11 +19,6 @@ bool rig_socket_world(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out)
 // The socket's WORLD rotation (pitch, yaw, roll degrees) from the posed skeleton.
 bool rig_socket_world_rot(uevr::API::UObject* rig, const wchar_t* socket, Vec3* out_pyr);
 
-// PALETTE per-weapon rigid delta (Config::WeaponFix): the entry whose match is a substring of the
-// key, or nullptr. LAST match wins, the same rule weapon_fix_for() applies, so a captured entry
-// outranks the shipped baseline it sits behind in the table. Consumed by BlamPalette.cpp.
-const WeaponFix* wpnfix_find(const std::string& key);
-
 // FRAMEAUDIT: the control record's angles in UE-convention degrees (false if unresolved).
 bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg);
 

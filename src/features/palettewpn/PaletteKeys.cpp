@@ -111,17 +111,8 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettewpnsweep")     == 0) return true;
     if (_stricmp(key, "palettewpnfix")       == 0) return true;
     if (_stricmp(key, "palettewpnfixframe")  == 0) return true;
-    if (_stricmp(key, "gripfix") == 0) {
-        // 7 comma-separated floats: quaternion x,y,z,w then translation x,y,z in metres,
-        // controller frame. Written by the Page Up gesture; see Config::grip_fix.
-        const char* s = val; int n = 0;
-        while (n < 7 && s != nullptr && *s != 0) {
-            g_cfg.grip_fix[n++] = (float)atof(s);
-            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
-        }
-        g_cfg.grip_fix_valid = (n == 7); return true;
-    }
-    // aimfix is not parsed here: the author's parse_config_file rung owns it, and that rung runs first.
+    // The palette weapon's calibration keys (palgripfix, palaimfix, palaimoff*, palaimcalibver, palwpnfix,
+    // palwpncalibkey). The author's gripfixaim, aimfix and wpnfix stay his and are not parsed here.
     if (palette_calib_parse_key(key, val, v)) return true;
     return false;
 }

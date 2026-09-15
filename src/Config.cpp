@@ -2119,8 +2119,6 @@ void write_calib_file() {
         w_dox, w_doy, w_doz,
         w_ox, w_oy, w_oz);
 
-    features_calib_file_write(f);
-
     if (g_cfg.aim_off_valid) {
         fprintf(f,
             "# Hand-to-aim mapping from the Page Down calibration. Stored as an OFFSET so it\r\n"
