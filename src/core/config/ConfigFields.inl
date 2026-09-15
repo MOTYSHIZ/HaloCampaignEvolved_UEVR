@@ -1076,11 +1076,6 @@
     // One-shot on mount: every component named for a vehicle plus everything within 20 m of the
     // eye. Finds the transform the hog is DRAWN from.
     bool  veh_hog_dump = false;
-    // One-shot: every SkeletalMeshComponent within 20 m, full path and distance, no name filter.
-    bool  melee_target_dump = false;
-    // One-shot: every LOADED StaticMesh/SkeletalMesh asset named grenade/frag/plasma. Only
-    // loaded assets show (find_uobject does not load), so run it mid-level.
-    bool  grenade_mesh_dump = false;
     // One-shot skeleton dump of the resolved hull: bone names + which bone functions exist.
     bool  veh_hog_bones = false;
     // Hide the driver's third-person body while seated (the camera sits inside it). 0 = off,

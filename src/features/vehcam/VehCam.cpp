@@ -790,8 +790,7 @@ void seat_direct_refresh() {
     }
 }
 
-// ---- VEHICLE WHEEL + SEAT CAMERA keys. meleetargetdump and grenademeshdump have always been parsed
-// here too.
+// ---- VEHICLE WHEEL + SEAT CAMERA keys.
 static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehiclewheel")   == 0) { g_cfg.vehicle_wheel = (int)v; return true; }
     if (_stricmp(key, "vehwheelpos")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_wheel_pos[0], &g_cfg.veh_wheel_pos[1], &g_cfg.veh_wheel_pos[2]); return true; }
@@ -824,8 +823,6 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamstalems")  == 0) { g_cfg.veh_cam_stale_ms = (int)clampf((float)v, 20.0f, 5000.0f); return true; }
     if (_stricmp(key, "vehcamhullcheck") == 0) { g_cfg.veh_cam_hull_check = (int)v; return true; }
     if (_stricmp(key, "vehcamhulldead") == 0) { g_cfg.veh_cam_hull_dead_s = clampf((float)v, 0.1f, 10.0f); return true; }
-    if (_stricmp(key, "meleetargetdump")== 0) { g_cfg.melee_target_dump = (v != 0.0); return true; }
-    if (_stricmp(key, "grenademeshdump")== 0) { g_cfg.grenade_mesh_dump = (v != 0.0); return true; }
     return false;
 }
 
