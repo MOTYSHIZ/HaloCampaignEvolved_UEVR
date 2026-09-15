@@ -140,7 +140,7 @@ const FeatureRow kFeatures[] = {
       "", "blamangles", FEATURE_INT(vehicle_wheel) },
     { "roomscale",    1, Tier::Experimental, "Roomscale", "Roomscale",
       "Walk around your play space and your steps move the Spartan.",
-      "roomscalethrottle", "blamangles", FEATURE_BOOL(roomscale) },
+      "blamthrottleysign,roomscalethrottle,roomscalegain,roomscalemin,roomscaledz", "blamangles", FEATURE_BOOL(roomscale) },
     { "heightcal",    1, Tier::Experimental, "Roomscale", "Auto height",
       "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it.",
       "heightmode,heightsrc,heightsample,heighttrim,heightmin,heightkey", "", FEATURE_INT(height_cal) },

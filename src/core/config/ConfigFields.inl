@@ -35,15 +35,18 @@
     // walk out; beyond it the origin is dragged as before, so the eye can never run away from
     // the body.
     bool  roomscale       = false;
-    float roomscale_gain  = 3.0f;    // desired eye speed (m/s) per metre of head offset
+    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    float roomscale_gain  = 4.0f;    // desired eye speed (m/s) per metre of head offset
     float roomscale_dead  = 0.03f;   // metres, no command inside this
     float roomscale_leash = 1.0f;    // metres, lateral leash radius while roomscale is on
     float roomscale_stick = 0.15f;   // player stick magnitude above which roomscale yields
     bool  roomscale_log   = false;   // ROOMSCALE line ~8x/s: offset, command, eye delta, slide
-    float roomscale_min   = 0.30f;   // stick magnitude floor while a command stands (clears the game deadzone)
+    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    float roomscale_min   = 0.36f;   // stick magnitude floor while a command stands (clears the game deadzone)
     float roomscale_speed = 3.3f;    // metres/s of eye travel at full stick (measured 3.0-4.7)
     float roomscale_lat   = 0.06f;   // seconds from command to visible eye motion (measured 20-57 ms)
-    float roomscale_dz    = 0.25f;   // the game's own stick deadzone (measured: 0.30 -> 0.22 m/s)
+    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    float roomscale_dz    = 0.30f;   // the game's own stick deadzone (measured: 0.30 -> 0.22 m/s)
     int   roomscale_pulse = 2;       // ticks per on-block when duty-cycling below the floor
     float roomscale_ff    = 0.0f;    // head-velocity feed-forward gain (1 = command the head's own speed)
     // INVOLUNTARY-MOTION STAND-DOWN. Roomscale can only move the eye at roomscale_speed, so an
@@ -67,7 +70,9 @@
     // Mode 3 targets: unit object throttle vector (fwd,left) and its second copy. 0 = skip.
     int   blam_unit_throttle_off  = 0x250;
     int   blam_unit_throttle_off2 = 0x25C;
-    int   blam_throttle_ysign = 1;    // sign applied to the RIGHT component (frame handedness, measured)
+    // Default -1, the measured handedness roomscale is tuned with (halo_vr.cfg ships the same line). With
+    // 1 the right component is mirrored and the pawn walks away from the head instead of closing on it.
+    int   blam_throttle_ysign = -1;   // sign applied to the RIGHT component (frame handedness, measured)
     // CAMERA BOB CANCEL: remove the walk-animation bob (fast part of camera-vs-pawn, tau seconds
     // low-pass keeps eye height / crouch) from the rendered view and the palette hand.
     bool  bob_cancel = false;

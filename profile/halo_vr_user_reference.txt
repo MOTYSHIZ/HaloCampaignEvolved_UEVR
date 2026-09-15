@@ -417,6 +417,16 @@
 #vehcamhullcheck=1
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
+# Sidestep direction. -1 or 1; flip it only if stepping sideways moves you the wrong way.
+#blamthrottleysign=-1
+# Walking response. How fast you are moved for each metre you step away from where you stand.
+#roomscalegain=4
+# Slowest stick push. When your steps go through the left stick, the smallest push sent while you
+# walk, from 0 to 1.
+#roomscalemin=0.36
+# Game stick dead zone. When your steps go through the left stick, the game's own dead zone on the
+# stick, from 0 to 0.9.
+#roomscaledz=0.30
 # Auto height: what the measured height is fitted to.
 #heightmode=absolute
 # Auto height: where the height comes from.
