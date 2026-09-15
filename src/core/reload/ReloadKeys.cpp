@@ -9,10 +9,14 @@
 
 namespace halo {
 
+bool parse_reloadstate_key(const char* key, double v);   // defined below
+
 // Moved from Config.cpp's fork parsers (parse_melee_key's additions, parse_weaponvr_key, parse_fork_port_key),
 // statements verbatim, in their original order.
 bool reload_engine_parse_key(const char* key, const char* val, double v) {
     (void)val; (void)v;
+    // First, as the fork's parse_config_key_2 ran it: the per-weapon reload state keys.
+    if (parse_reloadstate_key(key, v)) return true;
     if (_stricmp(key, "reloadframe")    == 0) { g_cfg.reload_frame = (int)v; return true; }
     if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
@@ -173,7 +177,6 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
-// NEVER CALLED, as in the fork (see the report's bug list): the per-weapon reload state keys are not parsed.
 // Per-weapon reload state (Gesture.cpp). Hoisted for the same C1061 reason as its siblings.
 bool parse_reloadstate_key(const char* key, double v) {
     if (_stricmp(key, "reloadstate")       == 0) { g_cfg.reload_state_id      = (int)clampf((float)v, 0.0f, 3.0f); return true; }
