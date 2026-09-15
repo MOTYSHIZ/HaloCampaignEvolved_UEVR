@@ -1952,16 +1952,20 @@ bool compute_pose(const Vec3& world_pos, const Vec3& cam_pos,
     // apparent size (the drop key above is computed first, and is invariant under this scaling)
     // while its disparity falls to IPD / flat_m: 0.04 deg at 100 m, under a pixel. Direction is
     // what matters, and direction is exactly what the mono image shares with a centre-eye head.
-    if (flat_m > 0.0f && dist_m > 0.01f) {
+    const bool flattened = flat_m > 0.0f && dist_m > 0.01f;
+    if (flattened) {
         const float k = flat_m / dist_m;
         d_view.x *= k; d_view.y *= k; d_view.z *= k;
         *out_size_m *= k;
     }
 
     if (m.space == 2) {
-        // Head-locked diagnostic: park it straight ahead at the measured distance.
+        // Head-locked diagnostic: park it straight ahead at the measured distance -- or at the
+        // flattened one, because *out_size_m was just scaled for THAT distance and the two must
+        // agree or the bring-up ring fills the view under mono and reads as a broken pipeline.
+        const float place_m = flattened ? flat_m : dist_m;
         out_pose->orientation = XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f};
-        out_pose->position    = XrVector3f{0.0f, 0.0f, -(dist_m > 0.05f ? dist_m : 0.05f)};
+        out_pose->position    = XrVector3f{0.0f, 0.0f, -(place_m > 0.05f ? place_m : 0.05f)};
         return true;
     }
 
@@ -3478,8 +3482,11 @@ bool xrlayer_mono_flat_active() {
 
 void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_pos,
                       float view_yaw, float view_pitch, float view_roll) {
-    if (!g_cfg.xr_layer) return;
-    if (g_state.load(std::memory_order_relaxed) != State::Armed) return;
+    if (!g_cfg.xr_layer || g_state.load(std::memory_order_relaxed) != State::Armed) {
+        // Nothing is being published, so nothing is being flattened: keep the state line honest.
+        g_mono_flat_active.store(false, std::memory_order_relaxed);
+        return;
+    }
     if (eye_index < 0 || eye_index > 1) return;
 
     // Remember this eye. What `head` is made of depends on WHICH EYES UEVR IS RENDERING -- see
@@ -3516,9 +3523,16 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     g_view_roll.store(view_roll, std::memory_order_relaxed);
     g_view_have.store(true, std::memory_order_release);
 
-    // The previous sample, for the Alternating case. Render thread only, like everything above.
-    static Vec3 s_prev_eye{};
-    static bool s_prev_have = false;
+    // The previous sample, for the Alternating and Unknown cases. Render thread only, like
+    // everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
+    // the previous sample was taken HERE: the early returns above skip this function while the
+    // layer is off or not yet armed, and the first sample after it comes back must not be
+    // averaged with one from before that (review finding, 2026-09-15).
+    static Vec3     s_prev_eye{};
+    static unsigned s_prev_seq  = 0;
+    static bool     s_prev_have = false;
+    const unsigned  seq = viewmode_samples();
+    const bool      prev_consecutive = s_prev_have && (seq == s_prev_seq + 1u);
 
     Vec3 head{};
     const ViewMode vm = viewmode_current();
@@ -3527,17 +3541,22 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
         head.x = 0.5f * (g_eye_x[0].load(std::memory_order_relaxed) + g_eye_x[1].load(std::memory_order_relaxed));
         head.y = 0.5f * (g_eye_y[0].load(std::memory_order_relaxed) + g_eye_y[1].load(std::memory_order_relaxed));
         head.z = 0.5f * (g_eye_z[0].load(std::memory_order_relaxed) + g_eye_z[1].load(std::memory_order_relaxed));
-    } else if (vm == ViewMode::Alternating && s_prev_have) {
+    } else if ((vm == ViewMode::Alternating || vm == ViewMode::Unknown) && prev_consecutive) {
+        // AFR: the previous callback was the other eye. UNKNOWN (one view per frame, verdict
+        // still pending): the same average is a half-frame lag if it turns out to be Mono and
+        // exactly right if it turns out to be AFR -- never ONE eye alone, which under AFR is the
+        // half-IPD hop this exists to remove.
         head.x = 0.5f * (eye_pos.x + s_prev_eye.x);
         head.y = 0.5f * (eye_pos.y + s_prev_eye.y);
         head.z = 0.5f * (eye_pos.z + s_prev_eye.z);
     } else {
-        // Mono, or too early to know. Under Mono this is exact; on the very first frames of a
-        // stereo session the error is half an IPD and CONSTANT, which is not the drift this
-        // function exists to remove.
+        // Mono (exact: the view IS the centre eye), or no usable previous sample. On the very
+        // first frame of a stereo session the error is half an IPD and CONSTANT, which is not
+        // the drift this function exists to remove.
         head = eye_pos;
     }
     s_prev_eye  = eye_pos;
+    s_prev_seq  = seq;
     s_prev_have = true;
 
     // FLATTEN TO INFINITY under the Mono rendering method (compute_pose explains why). Gated on
@@ -4488,6 +4507,7 @@ void xrlayer_shutdown() {
     g_source_override.store(nullptr, std::memory_order_release);
     g_live.store(false, std::memory_order_relaxed);
     g_state.store(State::Off, std::memory_order_relaxed);
+    g_mono_flat_active.store(false, std::memory_order_relaxed);   // no quads, nothing flattened
 
     // The atlas layout goes with the swapchain it sized. Leaving stale cells behind would let a
     // slot accept a source against a rectangle of an image that no longer exists.

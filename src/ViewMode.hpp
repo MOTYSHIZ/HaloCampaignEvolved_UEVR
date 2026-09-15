@@ -18,6 +18,8 @@
 //   2 Alternating (AFR)       | 1                   | 0          | ALTERNATES left / right by frame
 //   3 Mono (monofix backend)  | 1                   | 0          | the CENTRE eye (midpoint), every frame
 //
+// (Extreme Compatibility Mode forces the AFR plumbing whatever the method says.)
+//
 // So under AFR a per-index slot averages nothing and the "head" hops +/- half an IPD every frame
 // (a 45 Hz shimmer on every quad). Under Mono the single view IS the head, which the slot logic
 // gets right only until the method is flipped live: the other slot then keeps the last eye it saw
@@ -31,16 +33,30 @@
 // Classifies the topology FROM THE CALLBACKS THEMSELVES, on the render thread, with no engine
 // call and no logging:
 //   * a slot that has not reported within the last few callbacks is STALE -> one view per frame;
-//   * one view per frame whose position jumps by an IPD with alternating sign is ALTERNATING;
+//   * one view per frame whose position SWINGS by two IPDs with alternating sign is ALTERNATING;
 //   * one view per frame that moves like a head is MONO.
+// The swing test is on the SECOND difference of the position, not the first: under AFR the
+// per-frame delta is (camera motion) +/- IPD, and a sign test on that only works while the camera
+// moves slower than one IPD per frame -- 8 cm, i.e. any vehicle and nearly a sprint at 72 Hz
+// (review finding, 2026-09-15). The difference of two consecutive deltas cancels the common
+// motion and leaves +/- 2 IPD plus acceleration, which is millimetres per frame^2 even in a
+// Warthog, so the verdict no longer depends on how fast the player is going.
 // The declared VR_RenderingMethod is read separately on the game thread's 2 s poll and kept
 // alongside, for the log line and for the one decision that must not rest on a heuristic alone
 // (flattening the compositor quads, XrLayer.cpp -- that needs the topology AND the declaration).
 //
 // The detector rather than the declaration decides how the consumers average, because the
 // declaration can be true and inert: an older backend ignores VR_RenderingMethod=3 and renders
-// stereo; the PureDark AFW backend reads 3 as Alternate Frame Warping. What the callbacks DO is
-// the only fact that matters to a consumer of the callbacks.
+// stereo; the PureDark AFW backend reads 3 as Alternate Frame Warping, which renders the eyes by
+// turns and therefore reads Alternating here. (A hypothetical backend whose method 3 rendered ONE
+// FIXED eye every frame would read Mono and, with the declaration, flatten the quads against a
+// scene that still has depth; no such backend is known, and the VIEWMODE log line names the
+// method so the combination is visible.) What the callbacks DO is the only fact that matters to a
+// consumer of the callbacks.
+//
+// HEADLESS CAVEAT: under the SimVR/OpenVR harness the runtime reports no HMD, UEVR's eye offsets
+// are zero, and AFR is indistinguishable from Mono by construction -- an AFR arm reading "mono"
+// there is the rig, not the detector.
 //
 // Render thread: plain working state, one atomic to publish. Game thread: atomics only.
 
@@ -49,7 +65,8 @@
 namespace halo {
 
 enum class ViewMode : int {
-    Unknown     = 0,   // too few samples yet -- treat the current view as the head
+    Unknown     = 0,   // one view per frame, verdict pending -- consumers average this sample with
+                       // the previous one (harmless under Mono, correct under AFR), never one eye
     Stereo      = 1,   // two views per frame, one per index: average the two slots
     Alternating = 2,   // one view per frame, alternating eyes: average this sample with the last
     Mono        = 3,   // one view per frame, the centre eye: this sample IS the head
@@ -71,7 +88,9 @@ int  viewmode_declared();
 // AND UEVR declares the Mono method (3). Both are required -- see the header comment.
 bool viewmode_is_mono();
 
-// Number of post-callbacks counted so far (a liveness counter for the state line).
+// Number of post-callbacks counted so far. A consumer that averages "this sample with the
+// previous one" keys on it: two samples are consecutive only if this count moved by exactly one
+// between them, which is what rules out a previous sample from before the consumer was armed.
 unsigned viewmode_samples();
 
 const char* viewmode_name(ViewMode m);

@@ -51,8 +51,14 @@ void aim_converge_note_post(int view_index, float x, float y, float z) {
     // the eye alternates by frame); under Mono nothing -- the one view is the centre eye and its
     // delta carries no IPD at all. The old "both slots ever seen" test averaged a live eye with a
     // slot frozen at the last frame of the previous method after a live flip.
-    static float s_prev_d[3] = {0.0f, 0.0f, 0.0f};
-    static bool  s_prev_have = false;
+    // CONSECUTIVE = the ViewMode sample counter moved by exactly one since the previous delta was
+    // taken here; the have_pre early return above can skip a sample, and a delta from before a
+    // gap must not be averaged with the one after it.
+    static float    s_prev_d[3] = {0.0f, 0.0f, 0.0f};
+    static unsigned s_prev_seq  = 0;
+    static bool     s_prev_have = false;
+    const unsigned  seq = viewmode_samples();
+    const bool      prev_consecutive = s_prev_have && (seq == s_prev_seq + 1u);
 
     const ViewMode vm = viewmode_current();
     float dx, dy, dz;
@@ -60,15 +66,20 @@ void aim_converge_note_post(int view_index, float x, float y, float z) {
         dx = (g_eye[0].d[0] + g_eye[1].d[0]) * 0.5f;
         dy = (g_eye[0].d[1] + g_eye[1].d[1]) * 0.5f;
         dz = (g_eye[0].d[2] + g_eye[1].d[2]) * 0.5f;
-    } else if (vm == ViewMode::Alternating && s_prev_have) {
+    } else if ((vm == ViewMode::Alternating || vm == ViewMode::Unknown) && prev_consecutive) {
+        // AFR: the previous callback was the other eye. Unknown (verdict pending): the same
+        // average costs nothing if it turns out to be Mono and is right if it turns out to be
+        // AFR -- never one eye alone, whose half-IPD lateral residual is above the 3 cm engage
+        // threshold and would bend the aim by itself.
         dx = (g_eye[i].d[0] + s_prev_d[0]) * 0.5f;
         dy = (g_eye[i].d[1] + s_prev_d[1]) * 0.5f;
         dz = (g_eye[i].d[2] + s_prev_d[2]) * 0.5f;
     } else {
-        // Mono, or the first frames of anything: use the one we have rather than publishing nothing.
+        // Mono (the centre eye: no IPD in it at all), or no usable previous delta.
         dx = g_eye[i].d[0]; dy = g_eye[i].d[1]; dz = g_eye[i].d[2];
     }
     s_prev_d[0] = g_eye[i].d[0]; s_prev_d[1] = g_eye[i].d[1]; s_prev_d[2] = g_eye[i].d[2];
+    s_prev_seq  = seq;
     s_prev_have = true;
 
     g_eye_delta_x = dx;
