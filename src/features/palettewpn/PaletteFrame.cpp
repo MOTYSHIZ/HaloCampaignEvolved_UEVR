@@ -34,9 +34,6 @@ using namespace uevr;
 namespace halo {
 
 // ---- CROSS-MODULE PUBLISHES (namespace halo: BlamPalette/WeaponCalib extern these).
-// The rendered-view pitch, published beside the yaw for the palette's frame math.
-std::atomic<float> g_dbg_view_in_pitch{0.0f};
-
 // The yaw the stereo callback actually OUTPUT this frame -- the rendered base the palette's lock
 // correction divides against. Stored on every path through the callback (passthrough when the
 // lock is off or unprimed, the assigned value when it holds), so the palette maths reads what was
@@ -377,7 +374,6 @@ void palette_wpn_game_tick_after_vehicle(uint32_t tick) {
         double cp = 0.0, cy = 0.0;
         const bool have_cam = read_control_rotation(&cp, &cy, nullptr);
         const float view_yaw = halo::g_view_base_yaw.load();
-        const float view_pit = halo::g_dbg_view_in_pitch.load();
 
         // Gun: where the FP mesh's weapon socket really is, world cm, and the mesh's rotation.
         g_tick_stage = "parent_frame";
@@ -411,13 +407,13 @@ void palette_wpn_game_tick_after_vehicle(uint32_t tick) {
         if (pwl) API::get()->log_info(
             "[Halo-CampE-UEVR] TRACE head=(%.2f %.2f %.2f)m rot(p%.0f y%.0f r%.0f) | "
             "hand=(%.2f %.2f %.2f)m rot(p%.0f y%.0f r%.0f) hand-head=(%.2f %.2f %.2f)m | "
-            "cam(p%.0f y%.0f) view(p%.0f y%.0f) | gun_socket_world=(%.0f %.0f %.0f)cm "
+            "cam(p%.0f y%.0f) view(y%.0f) | gun_socket_world=(%.0f %.0f %.0f)cm "
             "gun_rel_eye=(%.0f %.0f %.0f)cm mesh_rot(p%.0f y%.0f r%.0f) | "
             "aim_origin=(%.0f %.0f %.0f)cm | ok:hmd%d hand%d cam%d gun%d par%d",
             head_ue.x, head_ue.y, head_ue.z, hp, hy, hr,
             hand_ue.x, hand_ue.y, hand_ue.z, gp, gy, gr,
             hh.x, hh.y, hh.z,
-            (float)cp, (float)cy, view_pit, view_yaw,
+            (float)cp, (float)cy, view_yaw,
             gun_pos.x, gun_pos.y, gun_pos.z,
             gre.x, gre.y, gre.z,
             gun_rot.x, gun_rot.y, gun_rot.z,
