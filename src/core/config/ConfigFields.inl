@@ -989,6 +989,35 @@
     // behind). The global grip capture keeps pitch only, so this is the deliberate global roll knob.
     // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
     float palette_roll_trim = 6.0f;
+
+    // THE PALETTE WEAPON'S CALIBRATION (palettewpn): its own keys, read and written only by the palette weapon's
+    // placement and aim, never by the author's rig and never into his files. Each default is the value the
+    // palette weapon was tuned with, and halo_vr.cfg ships the same lines. Captures are saved to
+    // halo_vr_palette_calib.cfg, which is parsed after every other file. *_captured marks a value that came from
+    // that file or from a capture; only those are written back to it.
+    // palgripfix (Page Up): rigid grip offset, quaternion x,y,z,w then translation x,y,z in metres, UE pose frame.
+    float pal_grip_fix[7] = {0.0f, 0.0f, 0.0f, 1.0f, 0.012217f, -0.003179f, -0.024766f};
+    bool  pal_grip_fix_valid = true;
+    bool  pal_grip_fix_captured = false;
+    // palaimfix (a measurement): aim correction quaternion x,y,z,w, right-multiplied onto the aim pose.
+    float pal_aim_fix[4] = {-0.069756f, 0.0f, 0.0f, 0.997564f};
+    bool  pal_aim_fix_valid = true;
+    bool  pal_aim_fix_captured = false;
+    // palaimoffyaw / palaimoffpitch (Page Down): the hand-to-aim reference offset, degrees. palaimcalibver 2 = the
+    // yaw is stored relative to the view-lock yaw, which is added back on use.
+    float pal_aim_off_yaw = 0.0f;
+    float pal_aim_off_pitch = 0.0f;
+    bool  pal_aim_off_valid = true;
+    bool  pal_aim_off_captured = false;
+    int   pal_aim_calib_ver = 2;
+    // palwpnfix=<match>,qx,qy,qz,qw,tx,ty,tz (Home): per-weapon rigid delta, UE axes. One entry per match.
+    WeaponFix pal_wpnfix[kMaxWeaponAdjust] = {
+        {"FP_AssaultRifle", {0.0f, -0.017452f, 0.0f, 0.999848f}, {0.000159f, -0.000435f, -0.005567f}},
+        {"FP_Shotgun",      {0.0f, 0.0f, 0.0f, 1.0f},            {0.0f, 0.0f, 0.0f}},
+    };
+    int   pal_wpnfix_count = 2;
+    // palwpncalibkey: the per-weapon capture key (Home).
+    int   pal_wpn_calib_key = 0x24;
     // (palettewpnlockgain / palettewpnlockpitch / palettewpnsweep / palettewpnbasis /
     // palettewpnfix / palettewpnfixframe are RETIRED: each was a live A/B for a question the
     // world-space pullback and the upstream grip offset have since answered. Accepted by the

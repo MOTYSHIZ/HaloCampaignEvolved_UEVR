@@ -164,6 +164,7 @@ constexpr bool    kTierDefaultOn[kTierCount] = { true, true, false, false };
 
 // The kConfigFiles index that last set each master key this load (-1 = no file set it).
 int  s_layer = 0;
+bool s_layer_open = false;   // load_config's layer walk is running (features_layer)
 int  s_key_layer[kCount];
 int  s_switch_layer[kTierCount];
 bool s_switch_on[kTierCount];
@@ -184,6 +185,7 @@ const char* layer_source(int layer) {
     case 2:  return "halo_vr_dev.cfg";
     case 3:  return "halo_vr_calib.cfg";
     case 4:  return "halo_vr_weapons.cfg";
+    case 5:  return "halo_vr_palette_calib.cfg";
     default: return "cfg";
     }
 }
@@ -235,6 +237,8 @@ void features_path(const char* data_dir, char* out, size_t cap) {
 
 } // namespace
 
+char g_pal_calib_path[MAX_PATH] = {0};
+
 void features_begin_load() {
     s_layer = 0;
     for (int i = 0; i < kCount; ++i) s_key_layer[i] = -1;
@@ -246,7 +250,9 @@ void features_begin_load() {
 
 void features_config_reload_begin() { cfg_reload_begin(); }
 
-void features_set_layer(int layer) { s_layer = layer; }
+void features_set_layer(int layer) { s_layer = layer; s_layer_open = true; }
+
+int features_layer() { return s_layer_open ? s_layer : -1; }
 
 void features_note_key(const char* key, const char* val) {
     if (key == nullptr) return;
@@ -266,6 +272,7 @@ void features_note_key(const char* key, const char* val) {
 }
 
 void features_apply() {
+    s_layer_open = false;
     for (int i = 0; i < kCount; ++i) {
         if (!row_from_tier(i)) continue;
         kFeatures[i].set(g_cfg, tier_on(kFeatures[i].tier) ? kFeatures[i].on : 0);

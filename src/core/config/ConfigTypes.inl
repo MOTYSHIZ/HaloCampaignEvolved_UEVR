@@ -27,3 +27,8 @@ struct ScopeCfg {
     float rot[3] = {0.0f, 0.0f, 0.0f};
     float size = 0.04f;
 };
+
+// THE PALETTE WEAPON'S CALIBRATION FILE (halo_vr_palette_calib.cfg): the palette weapon's own machine-owned capture
+// file, the last kConfigFiles entry. Defined in core/registry/Features.cpp.
+extern char g_pal_calib_path[MAX_PATH];
+constexpr int kPalCalibLayer = 5;

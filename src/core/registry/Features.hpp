@@ -15,6 +15,8 @@ void features_begin_load();
 void features_config_reload_begin();
 // load_config: the kConfigFiles index about to be parsed, so an explicit key knows its source.
 void features_set_layer(int layer);
+// A parse slot: the kConfigFiles index load_config is parsing, or -1 outside its layer walk (a file parsed on its own).
+int features_layer();
 // parse_config_file: every key line, before it is applied.
 void features_note_key(const char* key, const char* val);
 // load_config: after every layer is parsed. Unset masters take their tier value; sub-settings and

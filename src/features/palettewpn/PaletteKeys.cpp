@@ -2,6 +2,7 @@
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
+#include "features/palettewpn/PaletteCalib.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -121,6 +122,7 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
         g_cfg.grip_fix_valid = (n == 7); return true;
     }
     // aimfix is not parsed here: the author's parse_config_file rung owns it, and that rung runs first.
+    if (palette_calib_parse_key(key, val, v)) return true;
     return false;
 }
 
