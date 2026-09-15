@@ -12,7 +12,6 @@
 #include "TwoHandAim.hpp"
 #include "UeObject.hpp"
 #include "WeaponCalib.hpp"
-#include "WeaponOffset.hpp"
 #include "core/fixes/TickStage.hpp"   // g_tick_stage
 #include "core/host/ArmsState.hpp"   // arms_hide_update
 #include "core/host/PluginState.hpp"
@@ -227,10 +226,9 @@ void aim_reanchor_request(const char* why) {
 void palette_wpn_game_tick_after_blam_drive() { blam_palette_hook_tick(); }
 
 void palette_wpn_game_tick_before_vehicle() {
-    // ---- PER-WEAPON DELTAS: every tick. After the config reload above (a reload restores the
-    // calibrated base and would wipe an applied adjustment), before anything below reads
-    // grip/off. Re-captures its base only when g_cfg_load_gen changes, so per-tick is safe.
-    weapon_offset_update();
+    // The per-weapon deltas are not applied here: the author's update() already calls
+    // weapon_offset_update() every tick, earlier in the same block, and a second call wrote the
+    // same values again.
 
     // ---- PALETTE WEAPON MODE (armdriver 3, experimental). The fork's per-tick placement work, at
     // the fork's position in the tick: the FP arm hide (arms_update, which normally calls it, only
