@@ -955,13 +955,15 @@
     // at the hip -- both hands are already within 30 cm there. Seating now needs the mag to have
     // RISEN this far (m) above where it was grabbed, and to reach the magazine WELL: a point this
     // far (m) forward of the aim hand along the aim direction, within reload_join_dist.
-    float reload_lift = 0.12f;
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    float reload_lift = 0.08f;
     float reload_well_fwd = 0.15f;
     // PER-WEAPON WELL + INSERT MARKER (2026-09-01, from a tester video: testers had no idea
     // where the mag goes). The seat target is now the weapon's own magazine component when one
     // resolved (the exact insert point, per weapon, nothing to calibrate; reload_well_fwd is the
     // fallback), and a small ring marks it while the mag is in hand.
-    bool  reload_well_marker = true;
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    bool  reload_well_marker = false;
     float reload_well_marker_scale = 0.08f;
     // MARKER COLOURS (from the headset, 2026-09-06): "r,g,b" 0..1, each zone dot its own colour so they
     // tell apart at a glance. Red = the rack zone, blue = the two-hand zone, green = the mag
@@ -974,7 +976,8 @@
     // THE SLIDE: inside reload_join_dist (now the CAPTURE radius) the held mag leaves the hand
     // and travels into the well over this many ms, landing on the weapon's own magazine pose;
     // the reload fires on arrival. Replaces the four-tick debounce (the travel time is one).
-    int   reload_slide_ms = 200;
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    int   reload_slide_ms = 100;
     // After the seat, hold the first-person pose this long so the game's own reload animation
     // does not play out over the reload the player just performed. Covers the animation's length;
     // tune per weapon if a long one shows its tail. 0 = let the animation play.
@@ -983,7 +986,8 @@
     // arms' Animation Blueprints, ANIMDUMP 2026-09-02): GlobalAnimRateScale on those components
     // is set to reload_anim_rate for reload_anim_ms, then restored. The reload completes in a
     // blink instead of playing out over a magazine the player already seated. rate 0 = off.
-    float reload_anim_rate = 30.0f;
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    float reload_anim_rate = 0.0f;
     int   reload_anim_ms   = 1200;
     // HOLD the weapon AnimBP's FirstPersonState at idle for reload_anim_ms after the seat, so the
     // reload state never enters and the animation (and its notify-driven sound) never runs.
@@ -1250,7 +1254,8 @@
     //              own listener (the head) whenever the sim positions that listener, and posts
     //              every step on it. A newer sim emitter replaces it (the old one is then
     //              unregistered for real), so it never goes stale across rooms.
-    int   ak_mimic = 0;
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    int   ak_mimic = 7;
     // akmimic4event: in mode 4 the plugin posts THIS event (hashed) on the sim's emitter in place
     // of the game's reload sound, so the test cannot be mistaken for the game's own audio. Empty =
     // re-issue the game's sound.
@@ -1295,12 +1300,15 @@
     // THE MAG IN THE HAND (live, 2026-09-04): an offset in the hand's own frame (right, up,
     // forward; metres) and a rotation (pitch, yaw, roll; degrees) applied to the held mag before
     // the slide-in, so the seat target is untouched.
-    float reload_hand_off[3] = {0.0f, 0.0f, 0.0f};
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    float reload_hand_off[3] = {0.03f, -0.03f, 0.03f};
     // ROOM ANCHOR for rendered markers (belt mag, zone dots, dropped mags): 1 = the STANDING
     // ORIGIN (the frame UEVR renders the head's offset from; the palette publisher uses it, and
     // the arms hold still when the head moves), 0 = the HMD (the old helper: a marker then
     // shifts opposite to every head motion -- "the mag moves when I move my head").
-    int   room_anchor = 0;   // 0 = the HMD (development's behaviour); 1 = the standing origin, what roomscale needs
+    // Default 1, the value the reload markers are tuned with (halo_vr.cfg ships the same line). Read
+    // only by the fork's marker placement (manual reload, rack, wrist HUD, the marker anchor service).
+    int   room_anchor = 1;   // 0 = the HMD (development's behaviour); 1 = the standing origin, what roomscale needs
     // THE INSERT IS THE HAND'S (from the headset, 2026-09-04): once the mag reaches the well it LOCKS onto
     // the well's axis, and the hand's travel up that axis is what pushes it in; it seats when it
     // is home. reload_insert_mode 1 = that; 0 = the old timed slide (reload_slide_ms), kept.
@@ -1312,7 +1320,8 @@
     float reload_insert = 0.08f;
     float reload_insert_done = 0.01f;
     float reload_insert_sign = 1.0f;
-    float reload_hand_rot[3] = {0.0f, 0.0f, 0.0f};
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    float reload_hand_rot[3] = {-90.0f, 0.0f, 0.0f};
 
     // ================================================================================================
     // EXPERIMENTAL, PORTED FROM THE FORK: tuning fields of the palette weapon stack (armdriver mode 3),
@@ -1402,7 +1411,8 @@
     // same body frame and metres as reloadmagoff, separated by commas, matched the way the wpnoff
     // table matches (case-insensitive substring of the weapon key). No entry = the global above.
     // Live: the cfg is re-read in play, so this tunes in the headset without a rebuild.
-    char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.05";
+    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.00";
     // THE RELOAD WHILE RUNNING (from the headset, 2026-09-11: the mag is not keeping up, reloading on the
     // move is nearly impossible). Root cause, verified in code: the seat and rack tests map the
     // hand to world through the RENDERED camera (g_cam_*, stored per frame on the render path)

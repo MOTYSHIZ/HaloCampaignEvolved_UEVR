@@ -313,6 +313,28 @@
 #coophide=1
 # Manual reload: the same when playing alone.
 #hidesolo=1
+# Magazine lift. How far the magazine must rise above where you took it from your belt before it can
+# go in, in metres.
+#reloadlift=0.08
+# Magazine slide-in time. How long the magazine takes to slide from your hand into the gun, in
+# milliseconds.
+#reloadslidems=100
+# Belt magazine spot for each weapon. Where a weapon's spare magazine sits on your belt, written as
+# Weapon:x/y/z in metres, entries separated by commas; a weapon not listed uses the standard spot.
+#reloadmagoffw=Magnum:-0.22/-0.50/0.00
+# Magazine position in your hand. Offset of the held magazine from your hand, in metres (right, up,
+# forward).
+#reloadhandoff=0.03,-0.03,0.03
+# Magazine angle in your hand. Rotation of the held magazine, in degrees (pitch, yaw, roll).
+#reloadhandrot=-90,0,0
+# Game reload animation speed-up. After you seat a magazine the game's own reload animation plays
+# this many times faster; 0 leaves it alone.
+#reloadanimrate=0
+# Magazine well ring. A small ring marks where the magazine goes while you hold one.
+#reloadwellmarker=0
+# Markers stay put in the room. 1 keeps the belt magazine, the grab dots and dropped magazines fixed in
+# the room when you move your head; 0 places them from your head, so they shift as it moves.
+#roomanchor=1
 # Melee by swinging: your other hand can punch too.
 #meleeleft=1
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.

@@ -112,7 +112,7 @@ const FeatureRow kFeatures[] = {
       "", "scope", FEATURE_BOOL(scope_lens) },
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
-      "gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog",
+      "gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,roomanchor",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
