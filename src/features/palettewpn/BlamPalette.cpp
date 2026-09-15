@@ -4773,7 +4773,7 @@ void blam_palette_publish_poses() {
             // PER-WEAPON: the solve is a delta in the fully corrected pose's frame (global*weapon),
             // so it composes onto the WEAPON layer by the same rule: w.rot' = w.rot * d_rot,
             // w.pos' = w.pos + R(w.rot) * d_pos. The global is untouched.
-            wpn_calib_take_pending();
+            s_pend_is_wpn = false;   // the per-weapon hold's latch, taken by this solve
             if (wkey.empty()) {
                 API::get()->log_info("[Halo-CampE-UEVR] PALETTECAL(WPN): no weapon in hand -- nothing written");
             } else {
@@ -4784,12 +4784,12 @@ void blam_palette_publish_poses() {
                 wp = Vec3{wp.x + dp.x, wp.y + dp.y, wp.z + dp.z};
                 const float q[4] = {wr.x, wr.y, wr.z, wr.w};
                 const float t[3] = {wp.x, wp.y, wp.z};
-                wpnfix_set(wkey, q, t);
+                pal_wpnfix_set(wkey, q, t);
                 float gp = 0.0f, gy = 0.0f, gr = 0.0f;
                 quat_to_rotator(wr.x, wr.y, wr.z, wr.w, &gp, &gy, &gr);
                 API::get()->log_info(
                     "[Halo-CampE-UEVR] PALETTECAL(WPN) '%s': this match moved %.1f cm, rotated %.0f deg; "
-                    "weapon delta rot=(p%.1f y%.1f r%.1f) pos=(%.1f %.1f %.1f)cm -> halo_vr_weapons.cfg",
+                    "weapon delta rot=(p%.1f y%.1f r%.1f) pos=(%.1f %.1f %.1f)cm -> halo_vr_palette_calib.cfg",
                     wkey.c_str(), dm * 100.0f, ang_deg, gp, gy, gr, wp.x * 100.0f, wp.y * 100.0f, wp.z * 100.0f);
             }
         } else {
@@ -4830,12 +4830,13 @@ void blam_palette_publish_poses() {
                 "rotated %.0f deg; total rot=(p%.1f y%.1f r%.1f) pos=(%.1f %.1f %.1f)cm",
                 dm * 100.0f, ang_deg, gp, gy, gr, g_grip_fix_pos_m.x * 100.0f,
                 g_grip_fix_pos_m.y * 100.0f, g_grip_fix_pos_m.z * 100.0f);
-            g_cfg.grip_fix[0] = g_grip_fix_rot.x; g_cfg.grip_fix[1] = g_grip_fix_rot.y;
-            g_cfg.grip_fix[2] = g_grip_fix_rot.z; g_cfg.grip_fix[3] = g_grip_fix_rot.w;
-            g_cfg.grip_fix[4] = g_grip_fix_pos_m.x; g_cfg.grip_fix[5] = g_grip_fix_pos_m.y;
-            g_cfg.grip_fix[6] = g_grip_fix_pos_m.z;
-            g_cfg.grip_fix_valid = true;
-            write_calib_file();
+            g_cfg.pal_grip_fix[0] = g_grip_fix_rot.x; g_cfg.pal_grip_fix[1] = g_grip_fix_rot.y;
+            g_cfg.pal_grip_fix[2] = g_grip_fix_rot.z; g_cfg.pal_grip_fix[3] = g_grip_fix_rot.w;
+            g_cfg.pal_grip_fix[4] = g_grip_fix_pos_m.x; g_cfg.pal_grip_fix[5] = g_grip_fix_pos_m.y;
+            g_cfg.pal_grip_fix[6] = g_grip_fix_pos_m.z;
+            g_cfg.pal_grip_fix_valid = true;
+            g_cfg.pal_grip_fix_captured = true;
+            pal_calib_write_file();
         }
     }
 

@@ -11174,6 +11174,8 @@ public:
             // capture, and doing that to halo_vr.cfg would destroy its comments.
             sprintf_s(g_wpn_calib_path, MAX_PATH,
                       "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_weapons.cfg", appdata);
+            sprintf_s(g_pal_calib_path, MAX_PATH,
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_palette_calib.cfg", appdata);
         } else {
             strcpy_s(g_cfg_path, MAX_PATH, "halo_vr.cfg");
             strcpy_s(g_user_cfg_path, MAX_PATH, "halo_vr_user.cfg");
@@ -11182,6 +11184,7 @@ public:
             strcpy_s(g_calib_path, MAX_PATH, "halo_vr_calib.cfg");
             strcpy_s(g_data_dir, MAX_PATH, "data");
             strcpy_s(g_wpn_calib_path, MAX_PATH, "halo_vr_weapons.cfg");
+            strcpy_s(g_pal_calib_path, MAX_PATH, "halo_vr_palette_calib.cfg");
         }
         strcpy_s(g_calib_path_right, MAX_PATH, g_calib_path);
 

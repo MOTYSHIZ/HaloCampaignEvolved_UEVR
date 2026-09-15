@@ -1882,6 +1882,7 @@ const char* const kConfigFiles[] = {
     // Listed here rather than loaded by its own call so the gate above stamps it too -- an
     // unstamped file is one whose edits are only ever read when some OTHER file happens to change.
     g_wpn_calib_path,
+    g_pal_calib_path,
 };
 constexpr int kConfigFileCount = (int)(sizeof(kConfigFiles) / sizeof(kConfigFiles[0]));
 

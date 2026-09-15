@@ -5,6 +5,7 @@
 #include "core/registry/Features.hpp"   // features_layer
 #include "Math.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -104,6 +105,64 @@ const WeaponFix* pal_wpnfix_find(const std::string& key) {
         if (key.find(w.match) != std::string::npos) return &w;
     }
     return nullptr;
+}
+
+void pal_wpnfix_set(const std::string& key, const float q[4], const float t[3]) {
+    if (key.empty()) return;
+    int slot = -1;
+    for (int i = 0; i < g_cfg.pal_wpnfix_count; ++i) {
+        if (g_cfg.pal_wpnfix[i].match[0] != 0 && key.find(g_cfg.pal_wpnfix[i].match) != std::string::npos) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (g_cfg.pal_wpnfix_count >= kMaxWeaponAdjust) return;
+        slot = g_cfg.pal_wpnfix_count++;
+        strncpy_s(g_cfg.pal_wpnfix[slot].match, sizeof(g_cfg.pal_wpnfix[slot].match), key.c_str(), _TRUNCATE);
+    }
+    for (int i = 0; i < 4; ++i) g_cfg.pal_wpnfix[slot].q[i] = q[i];
+    for (int i = 0; i < 3; ++i) g_cfg.pal_wpnfix[slot].t[i] = t[i];
+    g_cfg.pal_wpnfix[slot].captured = true;
+    pal_calib_write_file();
+}
+
+// Machine-owned and rewritten whole, like halo_vr_weapons.cfg: only a captured value is written, so a shipped value
+// is never copied into the player's file, where the copy would outlive a later release's better one.
+void pal_calib_write_file() {
+    FILE* f = nullptr;
+    if (g_pal_calib_path[0] == 0 || fopen_s(&f, g_pal_calib_path, "wb") != 0 || f == nullptr) return;
+    fprintf(f, "# halo_vr - PALETTE WEAPON CALIBRATION. Written by the weapon placement's captures (Page Up = grip,\r\n"
+               "# Home = the weapon in hand, Page Down = aim) while the weapon follows your hand. Parsed after every\r\n"
+               "# other file. Machine-owned: rewritten in full on every capture, so do not hand-edit it. It holds only\r\n"
+               "# what was captured; everything else stays on the shipped values in halo_vr.cfg. Delete this file to go\r\n"
+               "# back to the shipped calibration.\r\n");
+    if (g_cfg.pal_grip_fix_captured && g_cfg.pal_grip_fix_valid) {
+        fprintf(f, "\r\n# Rigid grip offset (Page Up): quaternion x,y,z,w then translation x,y,z in metres, UE pose frame.\r\n"
+                   "palgripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
+                g_cfg.pal_grip_fix[0], g_cfg.pal_grip_fix[1], g_cfg.pal_grip_fix[2], g_cfg.pal_grip_fix[3],
+                g_cfg.pal_grip_fix[4], g_cfg.pal_grip_fix[5], g_cfg.pal_grip_fix[6]);
+    }
+    if (g_cfg.pal_aim_fix_captured && g_cfg.pal_aim_fix_valid) {
+        fprintf(f, "\r\n# Aim correction: quaternion x,y,z,w, right-multiplied onto the aim pose.\r\n"
+                   "palaimfix=%.6f,%.6f,%.6f,%.6f\r\n",
+                g_cfg.pal_aim_fix[0], g_cfg.pal_aim_fix[1], g_cfg.pal_aim_fix[2], g_cfg.pal_aim_fix[3]);
+    }
+    if (g_cfg.pal_aim_off_captured && g_cfg.pal_aim_off_valid) {
+        fprintf(f, "\r\n# Hand-to-aim offset (Page Down), degrees. palaimcalibver 2 = the yaw is relative to the view-lock yaw.\r\n"
+                   "palaimcalibver=%d\r\npalaimoffyaw=%.3f\r\npalaimoffpitch=%.3f\r\n",
+                g_cfg.pal_aim_calib_ver, g_cfg.pal_aim_off_yaw, g_cfg.pal_aim_off_pitch);
+    }
+    bool wpn_header = false;
+    for (int i = 0; i < g_cfg.pal_wpnfix_count; ++i) {
+        const auto& e = g_cfg.pal_wpnfix[i];
+        if (!e.captured || e.match[0] == 0) continue;
+        if (!wpn_header) {
+            fprintf(f, "\r\n# Per-weapon rigid delta (Home): palwpnfix=<match>,qx,qy,qz,qw,tx,ty,tz, quaternion then metres,\r\n"
+                       "# UE axes (X forward, Y right, Z up). Delete a line to put that weapon back on the shipped value.\r\n");
+            wpn_header = true;
+        }
+        fprintf(f, "palwpnfix=%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
+                e.match, e.q[0], e.q[1], e.q[2], e.q[3], e.t[0], e.t[1], e.t[2]);
+    }
+    fclose(f);
 }
 
 } // namespace halo
