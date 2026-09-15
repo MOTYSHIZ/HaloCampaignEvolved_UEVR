@@ -100,7 +100,7 @@ const FeatureRow kFeatures[] = {
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
-      "palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker", "", FEATURE_BOOL(palette_weapon) },
+      "palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst", "", FEATURE_BOOL(palette_weapon) },
     { "aimbore",      1, Tier::Experimental, "Weapon", "Aim along the drawn barrel",
       "Shots follow the barrel of the weapon you see, not only your hand.",
       "", "palettewpn", FEATURE_INT(aim_bore) },

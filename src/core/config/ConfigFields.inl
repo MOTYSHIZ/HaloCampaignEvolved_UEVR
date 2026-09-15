@@ -960,7 +960,8 @@
     bool  palette_barrel_lock = false;
     // Fixed roll of the gun about its barrel, degrees, every weapon (+ = clockwise seen from
     // behind). The global grip capture keeps pitch only, so this is the deliberate global roll knob.
-    float palette_roll_trim = 0.0f;
+    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    float palette_roll_trim = 6.0f;
     // (palettewpnlockgain / palettewpnlockpitch / palettewpnsweep / palettewpnbasis /
     // palettewpnfix / palettewpnfixframe are RETIRED: each was a live A/B for a question the
     // world-space pullback and the upstream grip offset have since answered. Accepted by the
@@ -1504,7 +1505,8 @@
     int   pal_pub_frame = 0;
     // Mode 5's lead fraction of one build interval along the smoothed camera rate. The 2026-09-03
     // fit measured the gun missing by 0.86 of a tick; dial live in the headset.
-    float palette_cam_lead = 0.86f;
+    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    float palette_cam_lead = 0.3f;
     // ---- CAMLEAD (2026-09-12). From the headset: "any mopvement i make overshoots and comes back".
     // That is a VELOCITY-PROPORTIONAL error, zero at rest, growing with speed, settling when he
     // stops. Not noise. And the miss was already fitted once, on 2026-09-11, at 0.86 OF A TICK,
@@ -1959,7 +1961,8 @@
     // Hz, 120 means about 2.4 deg of reversal per frame, which clips the measured tail (p99 3.6
     // deg, max 16.7) while leaving the bulk (p95 ~1.1 deg) untouched.
     float rev_clamp_dps = 120.0f;
-    int   mesh_const = 1;
+    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    int   mesh_const = 0;
     // Degrees of camera movement between the brackets above which the sample is contaminated.
     // Modes 1 and 3 only. The reflected-call gap runs ~10-20 ms, so at 100 deg/s of camera motion
     // a clean sample needs the camera essentially parked; this is deliberately tight.

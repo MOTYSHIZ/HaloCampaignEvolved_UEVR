@@ -287,6 +287,15 @@
 #palpubframe=0
 # Two-handed grab dot. A dot on the barrel shows where your other hand grabs for a two-handed hold.
 #twohandmarker=0
+# Weapon roll. Turns every weapon about its barrel by this many degrees (positive is clockwise seen
+# from behind the gun).
+#paletterolltrim=6
+# Weapon turn lead. How far ahead of your turning the weapon is placed, as a fraction of one game
+# update; only some weapon camera methods use it.
+#palettecamlead=0.3
+# Weapon camera sampling. 0 uses every camera sample, 1 skips samples taken while the camera moved, 2
+# pairs each with the midpoint, 3 skips and then holds a clean one.
+#meshconst=0
 # Manual reload: each weapon keeps its own reload state (0 the old memory, 1 per weapon type, 2 per weapon, 3 per weapon across a level load).
 #reloadstate=1
 # Manual reload: when a weapon's state is saved (1 every tick, 2 only when it leaves your hand).
