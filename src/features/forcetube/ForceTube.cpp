@@ -70,7 +70,8 @@ bool     s_hook_refused = false;
 
 uintptr_t hooked_create_for_haptics(uintptr_t params) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
-    // SIM THREAD: atomics and arithmetic only. A spawn whose muzzle origin sits on the player is
+    // SIM THREAD: atomics, arithmetic and three cfg reads (forcetube, its radius and fire window, through
+    // the guard above). A spawn whose muzzle origin sits on the player is
     // the player's round; NPC fire from further than ~4.5 m never matches, and the rare enemy
     // shooting from inside your chest has bigger problems than a phantom kick.
     if (g_cfg.force_tube && g_unit_pvalid.load(std::memory_order_relaxed) &&
