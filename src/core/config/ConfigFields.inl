@@ -924,6 +924,22 @@
     // one measured view-lock yaw -- and every constant that remains is the Page Up fix's job.
     // Hand-tunable knobs on a solved frame are how six coupled wrongs impersonate one right.
     bool  palette_weapon = false;
+    // HIDE THE STOCK ARMS WHILE THE WEAPON FOLLOWS YOUR HAND (palettehidearms, a sub-setting of
+    // palettewpn). While palettewpn is requested, features_apply turns the author's rig driver off
+    // (rig) unless a cfg file sets rig, and derives his arm hide unless a cfg file sets armhide:
+    //   0 = leave the arms as the author's settings say
+    //   1 = armhidemode 3 with armhidebone Shoulder_L,Shoulder_R: both arms hidden by bone on the mesh
+    //       the rig tracks, the modular armour meshes hidden whole (the palette presentation, used
+    //       with the rig off since 2026-08-25)
+    //   2 = the same, with the weapon-carrying mesh found live as the weapon actor's attach parent
+    //       instead of through the rig tracker's handle
+    //   3 = armhidemode 1, the author's SetVisibility whole-mesh hide. A whole-mesh hide through
+    //       armhidemode 2 took the palette weapon with the arms (2026-08-25); SetVisibility is the
+    //       other engine call and is untested under the palette weapon.
+    // armhidemode and armhidebone keep any value a cfg file sets. Default 1.
+    int   palette_hide_arms = 1;
+    // Derived, not a key: the approach in effect after that resolution (0 = none).
+    int   palette_hide_arms_active = 0;
     // Grip offset in the WEAPON's own frame, centimetres: X along the barrel, Y left, Z up.
     // The weapon's authored origin is not at its grip, so placing it at the hand hangs it forward.
     float palette_weapon_off_x = 0.0f;

@@ -301,6 +301,11 @@
 #palettecalibkey=0x21
 # This weapon's placement calibration key. The same gesture, saved for the weapon in your hand only.
 #palwpncalibkey=0x24
+# Hide the arms while the weapon follows your hand. The standard weapon rig also turns off while this
+# feature is on. 0 leaves the arms, 1 hides both arms at the shoulder (default), 2 the same with the
+# weapon's mesh found another way, 3 hides the whole arm meshes another way, which may take the weapon
+# with them. A choice of your own for Hide the stock arms, or for the weapon rig, wins.
+#palettehidearms=1
 # The weapon placement calibration itself: grip offset, aim fix, aim offset and per-weapon trims. These are
 # measurements written by the two keys above and by the aim calibration (Page Down) while the weapon follows your
 # hand, not settings: do not hand-edit them. Captures are saved to halo_vr_palette_calib.cfg; the calibration menu's

@@ -73,6 +73,7 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettehook")    == 0) { g_cfg.palette_hook       = (int)v; return true; }
     if (_stricmp(key, "palettehooktest")==0) { g_cfg.palette_hook_test   = (int)v; return true; }
     if (_stricmp(key, "palettewpn")     == 0) { g_cfg.palette_weapon      = (v != 0.0); return true; }
+    if (_stricmp(key, "palettehidearms") == 0) { g_cfg.palette_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "palettewpnoffx") == 0) { g_cfg.palette_weapon_off_x = clampf((float)v,-200.0f,200.0f); return true; }
     if (_stricmp(key, "palettewpnoffy") == 0) { g_cfg.palette_weapon_off_y = clampf((float)v,-200.0f,200.0f); return true; }
     if (_stricmp(key, "palettewpnoffz") == 0) { g_cfg.palette_weapon_off_z = clampf((float)v,-200.0f,200.0f); return true; }

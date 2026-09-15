@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 using uevr::API;
@@ -33,6 +34,10 @@ char s_removed[128] = "";              // the palette hooks the last release rem
 bool s_his_hook_before = false;        // the palettearm builder hook was installed when that release began
 double s_t_release = 0.0, s_t_released = 0.0;
 bool s_arm_hide_applied = false;       // the current arm hide was applied by this feature
+// What that hide was applied with, so a release undoes exactly it even after the cfg changed under it
+// (a live switch-off reloads armhidebone and palettehidearms before the release sweep runs).
+char s_applied_bones[64] = "";
+int  s_applied_keep_source = 1;        // 1 the rig tracker's handle, 2 the weapon actor's attach parent
 
 double now_ms_d() {
     return std::chrono::duration<double, std::milli>(
@@ -127,12 +132,26 @@ void palette_wpn_arm_driver_active(int mode, bool switched) {
 
 // ---- THE ARM HIDE (Arms.cpp's hooks)
 
+namespace {
+// The mesh that carries the weapon bones, found the way the applied hide says: 1 the rig tracker's
+// handle, 2 live as the first-person weapon actor's attach parent (the same walk and class check the
+// rig resolve uses), which does not depend on the tracker's handle.
+API::UObject* weapon_mesh(int source) {
+    if (source != 2) return rig_tracked_component();
+    auto* par = follow_object(fp_weapon_root(), L"AttachParent");
+    if (par == nullptr || class_name_of(par).find(L"BPC_FP_SkeletalMesh_C") == std::wstring::npos) return nullptr;
+    return par;
+}
+} // namespace
+
 // Handles the bone modes while the feature is enabled (armhidemode 0 and 3), and releases a hide it
 // applied even after the feature switched off. Modes 1 and 2 stay the author's.
 bool palette_wpn_arm_hide_component(API::UObject* comp, bool hide, int mode, bool enabled) {
     if (hide) {
         s_arm_hide_applied = enabled && mode != 1 && mode != 2;
         if (!s_arm_hide_applied) return false;
+        strncpy_s(s_applied_bones, sizeof(s_applied_bones), g_cfg.arm_hide_bone, _TRUNCATE);
+        s_applied_keep_source = (g_cfg.palette_hide_arms_active == 2) ? 2 : 1;
     } else if (!s_arm_hide_applied || mode == 1 || mode == 2) {
         return false;
     }
@@ -142,11 +161,12 @@ bool palette_wpn_arm_hide_component(API::UObject* comp, bool hide, int mode, boo
     // COMMA-SEPARATED bone list (fork addition). A single name behaves exactly as before; the palette
     // weapon presentation passes "Shoulder_L,Shoulder_R" so both arms hide by bone while the weapon
     // branch stays drawn. Everything at or below space is trimmed: a CRLF file leaves '\r' on the last
-    // token, and FName Add-mode would CREATE that bogus name and hide nothing.
+    // token, and FName Add-mode would CREATE that bogus name and hide nothing. The list is the one the
+    // hide was applied with, so a release after a cfg change still undoes every bone it hid.
     std::wstring bones[8];
     int nbones = 0;
     {
-        const char* s2 = g_cfg.arm_hide_bone;
+        const char* s2 = s_applied_bones;
         while (*s2 != 0 && nbones < 8) {
             const char* e = s2;
             while (*e != 0 && *e != ',') ++e;
@@ -160,10 +180,14 @@ bool palette_wpn_arm_hide_component(API::UObject* comp, bool hide, int mode, boo
     // Mode 3 (weapon-only, fork addition, only when armhidemode=3): the FP pawn is MODULAR -- armour
     // pieces are separate skeletal-mesh components of the same classes, and an arm bone name is a
     // silent no-op on them. So whole-hide every swept component EXCEPT the one the rig tracks (it
-    // carries the weapon bones), and bone-hide the arm list on that one.
-    API::UObject* keep = (mode == 3) ? rig_tracked_component() : nullptr;
+    // carries the weapon bones), and bone-hide the arm list on that one. palettehidearms=2 names that
+    // mesh through the weapon actor instead of the rig tracker (weapon_mesh).
+    API::UObject* keep = (mode == 3) ? weapon_mesh(s_applied_keep_source) : nullptr;
     switch (mode) {
-        case 3:  if (comp == keep) {
+        case 3:  if (comp == keep || (!hide && keep == nullptr)) {
+                     // A release that can no longer name the weapon mesh unhides the arm bones on every
+                     // swept mesh (UnHideBoneByName on a mesh without those bones changes nothing), so
+                     // no bone hide outlives the release.
                      for (int bi = 0; bi < nbones; ++bi) {
                          if (hide) call_hide_bone(comp, bones[bi].c_str());
                          else      call_unhide_bone(comp, bones[bi].c_str());
@@ -184,6 +208,19 @@ bool palette_wpn_arm_hide_component(API::UObject* comp, bool hide, int mode, boo
 
 bool palette_wpn_arm_hide_held_off() {
     bool& s_any_hidden = *host::g_arms_state.any_hidden;
+    // THE DERIVED HIDE ACTS ONLY WHILE THE PALETTE WEAPON OWNS PLACEMENT. palettehidearms derives the
+    // arm hide from the request (palettewpn), but the arbiter can fall back to the author's rig when
+    // the palette hook is unavailable; the weapon is then the stock one, so the derived hide is held
+    // off and anything it applied is released. A hide the player set with armhide is not derived and
+    // is left to the author's pass.
+    if (g_cfg.palette_hide_arms_active != 0 && !palette_weapon_mode()) {
+        if (s_any_hidden) arms_release_hide();
+        return true;
+    }
+    // palettehidearms=2 names the weapon mesh through the weapon actor. Until it can (no weapon drawn
+    // yet), hold the sweep off: with no mesh to keep, mode 3 would hide every mesh whole, the weapon's
+    // included.
+    if (g_cfg.palette_hide_arms_active == 2 && g_cfg.arm_hide_mode == 3 && weapon_mesh(2) == nullptr) return true;
     // ADDITION -- HOLD OFF WHILE THE FP BUILD IS DARK, AND FOR TWO SECONDS AFTER IT RETURNS.
     // Bisected 2026-08-26: with the sweep running, every respawn froze the palette-driven
     // PrimaryWeapon socket at the stock pose ~1 s in -- the hide lands on the freshly rebuilt
@@ -217,8 +254,11 @@ bool palette_wpn_arm_hide_held_off() {
     return false;
 }
 
-// Mode 3 bone-hides on the component the rig tracks, so it needs the rig like mode 0.
-bool palette_wpn_arm_hide_needs_rig() { return g_cfg.arm_hide_mode == 3; }
+// Mode 3 bone-hides on the component the rig tracks, so it needs the rig like mode 0, except under
+// palettehidearms=2, which names that component through the weapon actor (held off above until it can).
+bool palette_wpn_arm_hide_needs_rig() {
+    return g_cfg.arm_hide_mode == 3 && g_cfg.palette_hide_arms_active != 2;
+}
 
 // The feature switched off: a hide it applied is released now (its mode 3 whole-hides are not the
 // author's to undo), and the author's pass re-applies his own on its next tick.

@@ -1,4 +1,5 @@
 #include "core/registry/Features.hpp"
+#include "core/registry/ArmHideDerive.hpp"
 
 #include "Config.hpp"
 #include "features/FeatureList.hpp"
@@ -100,7 +101,7 @@ const FeatureRow kFeatures[] = {
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
-      "palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst,palettecalibkey,palwpncalibkey", "", FEATURE_BOOL(palette_weapon) },
+      "palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst,palettecalibkey,palwpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
     { "aimbore",      1, Tier::Experimental, "Weapon", "Aim along the drawn barrel",
       "Shots follow the barrel of the weapon you see, not only your hand.",
       "", "palettewpn", FEATURE_INT(aim_bore) },
@@ -171,10 +172,15 @@ bool s_switch_on[kTierCount];
 // Shared infrastructure the resolver turns on for its consumers, unless a file sets it.
 int  s_palette_hook_layer = -1;
 int  s_pose_latch_layer   = -1;
-// The author's arm hide mode, left alone for manual reload's arm hide when a file sets it.
+// The author's rig, arm hide mode and bone list, left alone by the arm hide and rig derivation when a
+// file sets them.
 int  s_arm_hide_mode_layer = -1;
+int  s_arm_hide_bone_layer = -1;
+int  s_rig_layer = -1;
 // The reloadhidearms resolution last logged (approach * 16 + reason), -1 before the first load.
 int  s_hide_arms_logged = -1;
+// The palette weapon's rig and arm hide resolution last logged, -1 before the first load.
+int  s_pal_hide_logged = -1;
 
 int tier_index(Tier t) { return (int)t; }
 
@@ -246,6 +252,8 @@ void features_begin_load() {
     s_palette_hook_layer = -1;
     s_pose_latch_layer = -1;
     s_arm_hide_mode_layer = -1;
+    s_arm_hide_bone_layer = -1;
+    s_rig_layer = -1;
 }
 
 void features_config_reload_begin() { cfg_reload_begin(); }
@@ -269,6 +277,8 @@ void features_note_key(const char* key, const char* val) {
     if (_stricmp(key, "palettehook") == 0) { s_palette_hook_layer = s_layer; return; }
     if (_stricmp(key, "poselatch") == 0)   { s_pose_latch_layer = s_layer; return; }
     if (_stricmp(key, "armhidemode") == 0) { s_arm_hide_mode_layer = s_layer; return; }
+    if (_stricmp(key, "armhidebone") == 0) { s_arm_hide_bone_layer = s_layer; return; }
+    if (_stricmp(key, "rig") == 0)         { s_rig_layer = s_layer; return; }
 }
 
 void features_apply() {
@@ -293,41 +303,46 @@ void features_apply() {
     if (s_palette_hook_layer < 0) g_cfg.palette_hook = g_cfg.palette_weapon ? 1 : 0;
     if (s_pose_latch_layer < 0)   g_cfg.pose_latch   = g_cfg.palette_weapon ? 2 : 0;
 
-    // MANUAL RELOAD HIDES THE AUTHOR'S STOCK ARMS (reloadhidearms, a sub-setting of reloadvr), through
-    // his own arm hide: armhide on, and for approach 2 his SetVisibility mode, each only where no file
-    // sets that key, so a player's own armhide or armhidemode wins. While the palette weapon is
-    // requested it owns the arm hide with its own mode, so this stands down. Approach 3 (only during a
-    // reload) is held off between reloads by reloadvr's arm hide hold-off. With reloadvr off nothing is
-    // derived: armhide and armhidemode stay exactly as the files and the author's defaults say.
+    // THE PALETTE WEAPON'S RIG AND ARM HIDE, AND MANUAL RELOAD'S ARM HIDE (ArmHideDerive.cpp). Each
+    // derives only the author's keys no cfg file sets, and load_config rebuilds the Config before this,
+    // so a feature switched off gives back the layered values with nothing to undo here. The hides
+    // themselves are applied and released by his arm hide pass (Arms.cpp) through the feature hooks.
     {
-        int armhide_layer = -1;
+        ArmHideLayers set;
+        set.rig         = s_rig_layer >= 0;
+        set.armhidemode = s_arm_hide_mode_layer >= 0;
+        set.armhidebone = s_arm_hide_bone_layer >= 0;
         for (int i = 0; i < kCount; ++i)
-            if (_stricmp(kFeatures[i].key, "armhide") == 0) armhide_layer = s_key_layer[i];
-        int active = 0, reason = 0;
-        const char* why = "";
-        if (!g_cfg.reload_vr)                                    { reason = 1; why = "manual reload is off"; }
-        else if (g_cfg.reload_hide_arms <= 0)                    { reason = 2; why = "reloadhidearms=0"; }
-        else if (g_cfg.palette_weapon || g_cfg.arm_driver == 3)  { reason = 3; why = "the palette weapon owns the arm hide"; }
-        else if (armhide_layer >= 0)                             { reason = 4; why = "armhide is set in a cfg file"; }
-        else {
-            active = g_cfg.reload_hide_arms;
-            g_cfg.arm_hide = true;
-            if (active == 2 && s_arm_hide_mode_layer < 0) g_cfg.arm_hide_mode = 1;
-            reason = (s_arm_hide_mode_layer >= 0) ? 6 : 5;
-            why = (active == 3) ? "hidden only while a reload is in progress"
-                : (s_arm_hide_mode_layer >= 0) ? "hidden while manual reload is on, with the armhidemode a cfg file sets"
-                : "hidden while manual reload is on";
+            if (_stricmp(kFeatures[i].key, "armhide") == 0) set.armhide = s_key_layer[i] >= 0;
+        const ArmHideResolution r = arm_hide_derive(g_cfg, set);
+
+        // ONE LINE PER ENGAGE OR REVERT of the palette weapon's rig and arm hide, with the reason.
+        const int pal_stamp = (r.rig_reason * 16 + r.pal_reason) * 16 + r.pal_active;
+        if (pal_stamp != s_pal_hide_logged) {
+            const bool was_engaged = (s_pal_hide_logged >= 0)
+                && ((s_pal_hide_logged % 16) != 0 || (s_pal_hide_logged / 256) == 3);
+            const bool engaged = r.rig_off || r.pal_active != 0;
+            const bool quiet = (s_pal_hide_logged < 0 && r.rig_reason == 1);   // startup with the palette weapon simply off
+            s_pal_hide_logged = pal_stamp;
+            if (!quiet) {
+                uevr::API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE/RIG palettewpn %s: rig %d (%s); arms %s (palettehidearms=%d, approach %d, armhide %d, armhidemode %d, armhidebone %s)",
+                    engaged ? "engages" : (was_engaged ? "reverts" : "stands down"),
+                    g_cfg.rig_enabled ? 1 : 0, arm_hide_rig_reason_text(r.rig_reason),
+                    arm_hide_pal_reason_text(r.pal_reason), g_cfg.palette_hide_arms, r.pal_active,
+                    g_cfg.arm_hide ? 1 : 0, g_cfg.arm_hide_mode, g_cfg.arm_hide_bone);
+            }
         }
-        g_cfg.reload_hide_arms_active = active;
-        const int stamp = active * 16 + reason;
+
+        const int stamp = r.reload_active * 16 + r.reload_reason;
         if (stamp != s_hide_arms_logged) {
             const int prev_active = (s_hide_arms_logged < 0) ? 0 : (s_hide_arms_logged / 16);
-            const bool quiet = (s_hide_arms_logged < 0 && reason == 1);   // startup with manual reload simply off
+            const bool quiet = (s_hide_arms_logged < 0 && r.reload_reason == 1);   // startup with manual reload simply off
             s_hide_arms_logged = stamp;
             if (!quiet) {
                 uevr::API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE reloadhidearms=%d %s: %s (approach %d, armhide %d, armhidemode %d)",
-                    g_cfg.reload_hide_arms, active != 0 ? "engages" : (prev_active != 0 ? "releases" : "stands down"),
-                    why, active, g_cfg.arm_hide ? 1 : 0, g_cfg.arm_hide_mode);
+                    g_cfg.reload_hide_arms, r.reload_active != 0 ? "engages" : (prev_active != 0 ? "releases" : "stands down"),
+                    arm_hide_reload_reason_text(r.reload_active, r.reload_reason), r.reload_active,
+                    g_cfg.arm_hide ? 1 : 0, g_cfg.arm_hide_mode);
             }
         }
     }
@@ -361,6 +376,8 @@ static const EffectiveKey kEffectiveKeys[] = {
     { "palettewpn",       [] { return (double)g_cfg.palette_weapon; } },
     { "twohand",          [] { return (double)g_cfg.two_hand; } },
     { "armhide",          [] { return (double)g_cfg.arm_hide; } },
+    { "armhidemode",      [] { return (double)g_cfg.arm_hide_mode; } },
+    { "rig",              [] { return (double)g_cfg.rig_enabled; } },
     { "reloadvr",         [] { return (double)g_cfg.reload_vr; } },
     { "slidevr",          [] { return (double)g_cfg.slide_vr; } },
     { "coophide",         [] { return (double)g_cfg.coop_hide; } },

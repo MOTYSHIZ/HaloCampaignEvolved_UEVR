@@ -1068,14 +1068,18 @@ void palette_wpn_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, ui
     const auto onfoot_reticule_tick = ps.onfoot_reticule_tick;
     // ON-FOOT RETICULE WITHOUT THE RIG DRIVER.
     //
-    // The block above is the rig DRIVER and only runs with rig=1, but the on-foot reticule (the aim
-    // point, the hosted crosshair widget, the compositor publish) lives inside it. With the palette
-    // weapon placing the gun and rig=0, none of it ran: no aim point, no widget, and the compositor
-    // layer reported NO TARGET PUBLISHED. The rig component and its parent are still resolved for
-    // the palette (see the resolve gate), so the reticule runs here from those, with no rig writes.
-    // rig=1 never reaches this; its call inside the driver is unchanged. g_stick_mode is written
-    // once per tick above both, so this and the seated publish below cannot both run.
-    if (!g_cfg.rig_enabled && palette_weapon_mode() && !g_stick_mode.load()
+    // The block above is the rig DRIVER, but the on-foot reticule (the aim point, the hosted crosshair
+    // widget, the compositor publish) lives inside it, and the driver never runs while the palette
+    // weapon owns placement: with rig=0 its gate is closed, and with rig=1 the palette weapon stands it
+    // down (palette_wpn_rig_driver_stood_down returns palette_weapon_mode()). Either way none of it
+    // ran: no aim point, no widget, and the compositor layer reported NO TARGET PUBLISHED. The rig
+    // component and its parent are still resolved for the palette (see the resolve gate), so the
+    // reticule runs here from those, with no rig writes. Gated on palette_weapon_mode() alone: the
+    // driver gate and this call both run inside update() on the game thread, and the mode mirror is
+    // written only by the arbiter, which runs after update() returns, so in any one tick exactly one
+    // of the two reticule calls can run. g_stick_mode is written once per tick above both, so this and
+    // the seated publish below cannot both run.
+    if (palette_weapon_mode() && !g_stick_mode.load()
         && (g_cfg.aim_reticule || g_aim_marker.active)) {
         auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
         Vec3 comp_world{};
