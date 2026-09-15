@@ -362,6 +362,12 @@
 # Rack through the fire animation. An older rack method that plays the weapon's own firing animation
 # while you pull; leave it off.
 #slidefire=0
+# Fire-animation rack length. With the older rack method on, how far into the firing animation the
+# slide is when fully pulled, in seconds.
+#slidefireback=0.10
+# Fire-animation rack start. With the older rack method on, how long the firing animation runs at
+# normal speed before your hand takes it over, in seconds.
+#slidefireentry=0
 # Lens brightness. Exposure of the image in the lens; higher is brighter.
 #scopeev=0.5
 # Lens image strength. A multiplier on the image shown in the lens.

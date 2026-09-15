@@ -848,10 +848,12 @@
     // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
     bool  slide_fire = false;
     int   slide_fire_state = 19;     // measured 2026-09-03: a shot takes FirstPersonState 0 -> 19 for 0.8 s
-    float slide_fire_back = 0.08f;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_fire_back = 0.10f;
     // The idle-to-fire transition needs rate-scaled time to blend in; a frozen rate at entry
     // stalls it and nothing ever shows. The first slide_fire_entry seconds run at rate 1.
-    float slide_fire_entry = 0.01f;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_fire_entry = 0.0f;
     // Where the slide is HOME again on the way forward. On release the animation runs to here
     // and the state is handed back -- not to the end of the recoil, where the game's 300 ms
     // idle re-assertions restart the fire and the slide cycles again (seen 2026-09-03).
