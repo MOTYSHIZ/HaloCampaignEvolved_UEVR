@@ -63,6 +63,9 @@ void reload_engine_gesture_reset();
 void reload_engine_ticks(bool poses_ok, const Vec3& hpos);
 // The engine switched off (both availabilities gone): every lock, record, hidden part and marker let go.
 void reload_engine_released();
+// A reload is in progress: the engine runs and the magazine is out, the seat is pending, or the lock
+// waits for the rack. Game thread.
+bool reload_engine_reload_busy();
 
 // The held weapon's OWN magazine mesh: the first-person gun is separate static mesh
 // components on the skeleton's sockets, and one of them is the magazine. nullptr when the

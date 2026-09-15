@@ -628,4 +628,6 @@ bool reload_engine_mag_in_hand(API::UObject* m, const Vec3& gpos, const Vec3& hp
     return true;
 }
 
+bool reload_engine_reload_busy() { return reload_engine_active() && reload_gestures_busy(); }
+
 } // namespace halo

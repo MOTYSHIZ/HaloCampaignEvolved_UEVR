@@ -341,6 +341,9 @@
 #reloadanimrate=0
 # Magazine well ring. A small ring marks where the magazine goes while you hold one.
 #reloadwellmarker=0
+# Hide the arms while manual reload is on: 0 never, 1 always (default), 2 always, other method, 3 only
+# during a reload. A choice of your own for Hide the stock arms wins.
+#reloadhidearms=1
 # Markers stay put in the room. 1 keeps the belt magazine, the grab dots and dropped magazines fixed in
 # the room when you move your head; 0 places them from your head, so they shift as it moves.
 #roomanchor=1

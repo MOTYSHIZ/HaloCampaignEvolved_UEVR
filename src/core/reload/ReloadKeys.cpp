@@ -19,6 +19,7 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (parse_reloadstate_key(key, v)) return true;
     if (_stricmp(key, "reloadframe")    == 0) { g_cfg.reload_frame = (int)v; return true; }
     if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
+    if (_stricmp(key, "reloadhidearms") == 0) { g_cfg.reload_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
     if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }
     if (_stricmp(key, "maghidename") == 0) { strncpy_s(g_cfg.mag_hide_name, val, _TRUNCATE); return true; }

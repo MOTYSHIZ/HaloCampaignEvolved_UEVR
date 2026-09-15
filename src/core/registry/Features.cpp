@@ -112,7 +112,7 @@ const FeatureRow kFeatures[] = {
       "scopeev,scopetint,scopetonecurve,scopeeyedist,scopesource,scopertfmt,scopeshowflags,scopesfflags,scopeseptrans,scopereticletint", "scope", FEATURE_BOOL(scope_lens) },
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
-      "gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,roomanchor",
+      "gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,roomanchor,reloadhidearms",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
@@ -170,6 +170,10 @@ bool s_switch_on[kTierCount];
 // Shared infrastructure the resolver turns on for its consumers, unless a file sets it.
 int  s_palette_hook_layer = -1;
 int  s_pose_latch_layer   = -1;
+// The author's arm hide mode, left alone for manual reload's arm hide when a file sets it.
+int  s_arm_hide_mode_layer = -1;
+// The reloadhidearms resolution last logged (approach * 16 + reason), -1 before the first load.
+int  s_hide_arms_logged = -1;
 
 int tier_index(Tier t) { return (int)t; }
 
@@ -237,6 +241,7 @@ void features_begin_load() {
     for (int t = 0; t < kTierCount; ++t) { s_switch_layer[t] = -1; s_switch_on[t] = false; }
     s_palette_hook_layer = -1;
     s_pose_latch_layer = -1;
+    s_arm_hide_mode_layer = -1;
 }
 
 void features_config_reload_begin() { cfg_reload_begin(); }
@@ -257,6 +262,7 @@ void features_note_key(const char* key, const char* val) {
     }
     if (_stricmp(key, "palettehook") == 0) { s_palette_hook_layer = s_layer; return; }
     if (_stricmp(key, "poselatch") == 0)   { s_pose_latch_layer = s_layer; return; }
+    if (_stricmp(key, "armhidemode") == 0) { s_arm_hide_mode_layer = s_layer; return; }
 }
 
 void features_apply() {
@@ -279,6 +285,45 @@ void features_apply() {
     //   placement off they stay at 0 and the author's pose path is untouched.
     if (s_palette_hook_layer < 0) g_cfg.palette_hook = g_cfg.palette_weapon ? 1 : 0;
     if (s_pose_latch_layer < 0)   g_cfg.pose_latch   = g_cfg.palette_weapon ? 2 : 0;
+
+    // MANUAL RELOAD HIDES THE AUTHOR'S STOCK ARMS (reloadhidearms, a sub-setting of reloadvr), through
+    // his own arm hide: armhide on, and for approach 2 his SetVisibility mode, each only where no file
+    // sets that key, so a player's own armhide or armhidemode wins. While the palette weapon is
+    // requested it owns the arm hide with its own mode, so this stands down. Approach 3 (only during a
+    // reload) is held off between reloads by reloadvr's arm hide hold-off. With reloadvr off nothing is
+    // derived: armhide and armhidemode stay exactly as the files and the author's defaults say.
+    {
+        int armhide_layer = -1;
+        for (int i = 0; i < kCount; ++i)
+            if (_stricmp(kFeatures[i].key, "armhide") == 0) armhide_layer = s_key_layer[i];
+        int active = 0, reason = 0;
+        const char* why = "";
+        if (!g_cfg.reload_vr)                                    { reason = 1; why = "manual reload is off"; }
+        else if (g_cfg.reload_hide_arms <= 0)                    { reason = 2; why = "reloadhidearms=0"; }
+        else if (g_cfg.palette_weapon || g_cfg.arm_driver == 3)  { reason = 3; why = "the palette weapon owns the arm hide"; }
+        else if (armhide_layer >= 0)                             { reason = 4; why = "armhide is set in a cfg file"; }
+        else {
+            active = g_cfg.reload_hide_arms;
+            g_cfg.arm_hide = true;
+            if (active == 2 && s_arm_hide_mode_layer < 0) g_cfg.arm_hide_mode = 1;
+            reason = (s_arm_hide_mode_layer >= 0) ? 6 : 5;
+            why = (active == 3) ? "hidden only while a reload is in progress"
+                : (s_arm_hide_mode_layer >= 0) ? "hidden while manual reload is on, with the armhidemode a cfg file sets"
+                : "hidden while manual reload is on";
+        }
+        g_cfg.reload_hide_arms_active = active;
+        const int stamp = active * 16 + reason;
+        if (stamp != s_hide_arms_logged) {
+            const int prev_active = (s_hide_arms_logged < 0) ? 0 : (s_hide_arms_logged / 16);
+            const bool quiet = (s_hide_arms_logged < 0 && reason == 1);   // startup with manual reload simply off
+            s_hide_arms_logged = stamp;
+            if (!quiet) {
+                uevr::API::get()->log_info("[Halo-CampE-UEVR] ARMHIDE reloadhidearms=%d %s: %s (approach %d, armhide %d, armhidemode %d)",
+                    g_cfg.reload_hide_arms, active != 0 ? "engages" : (prev_active != 0 ? "releases" : "stands down"),
+                    why, active, g_cfg.arm_hide ? 1 : 0, g_cfg.arm_hide_mode);
+            }
+        }
+    }
 
     // The reload's last write: hook threads read g_cfg again.
     cfg_reload_end();

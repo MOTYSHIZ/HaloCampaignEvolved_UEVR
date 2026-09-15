@@ -1384,6 +1384,18 @@
     // Default 1, the value the reload markers are tuned with (halo_vr.cfg ships the same line). Read
     // only by the fork's marker placement (manual reload, rack, wrist HUD, the marker anchor service).
     int   room_anchor = 1;   // 0 = the HMD (development's behaviour); 1 = the standing origin, what roomscale needs
+    // HIDE THE STOCK ARMS FOR MANUAL RELOAD (reloadhidearms, a sub-setting of reloadvr). The author's
+    // first-person arms read as a second pair of hands while the reload gestures run.
+    //   0 = leave the arms as the author's settings say
+    //   1 = while reloadvr is on, hide them through his whole-component hide (armhide, armhidemode 2)
+    //   2 = the same through SetVisibility (his armhidemode 1)
+    //   3 = hide them only while a reload is in progress (the drop until the seat and the rack finish)
+    // Resolved in features_apply: an armhide (or armhidemode) set in any cfg file wins, and while the
+    // palette weapon is requested it owns the arm hide, so this stands down. Default 1 (halo_vr.cfg ships
+    // the same line).
+    int   reload_hide_arms = 1;
+    // Derived, not a key: the approach in effect after that resolution (0 = none).
+    int   reload_hide_arms_active = 0;
     // THE INSERT IS THE HAND'S (from the headset, 2026-09-04): once the mag reaches the well it LOCKS onto
     // the well's axis, and the hand's travel up that axis is what pushes it in; it seats when it
     // is home. reload_insert_mode 1 = that; 0 = the old timed slide (reload_slide_ms), kept.
