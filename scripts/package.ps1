@@ -130,10 +130,15 @@ foreach ($catalog in 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt') {
 # values without it would have every one of them silently ignored.
 # wpngrip joined it 2026-09-13 for the same reason: where a weapon's front handle sits off its
 # barrel is a measurement of that weapon, captured in a headset, not a setting anyone chooses.
+# palgripfix / palaimfix / palaimoffyaw / palaimoffpitch / palaimcalibver / palwpnfix joined it
+# 2026-09-15 as the palette weapon placement's measured fit: the same kind of numbers as grip and
+# wpnfix, captured in a headset for that placement, with palaimcalibver as their frame stamp.
+# The placement's captures go to its own halo_vr_palette_calib.cfg, never to this file.
 $calibKeys = @('grip','gripyaw','griproll','calibver','offx','offy','offz','aimoffyaw','aimoffpitch',
                'aimcalibver','dirgrip','dirgripyaw','dirgriproll','diroffx','diroffy','diroffz',
                'pivauto','pivx','pivy','pivz','calibrelative','wpnfix','wpnfixver','wpnscope','wpnoff',
-               'wpngrip')
+               'wpngrip',
+               'palgripfix','palaimfix','palaimoffyaw','palaimoffpitch','palaimcalibver','palwpnfix')
 $cfgActive = @(Select-String -Path (Join-Path $stage 'halo_vr.cfg') -Pattern '^([A-Za-z0-9_]+)=' |
     ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() })
 $stray = @($cfgActive | Where-Object { $calibKeys -notcontains $_ })

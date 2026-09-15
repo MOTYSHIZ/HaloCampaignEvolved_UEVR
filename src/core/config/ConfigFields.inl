@@ -35,17 +35,17 @@
     // walk out; beyond it the origin is dragged as before, so the eye can never run away from
     // the body.
     bool  roomscale       = false;
-    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value roomscale is tuned with.
     float roomscale_gain  = 4.0f;    // desired eye speed (m/s) per metre of head offset
     float roomscale_dead  = 0.03f;   // metres, no command inside this
     float roomscale_leash = 1.0f;    // metres, lateral leash radius while roomscale is on
     float roomscale_stick = 0.15f;   // player stick magnitude above which roomscale yields
     bool  roomscale_log   = false;   // ROOMSCALE line ~8x/s: offset, command, eye delta, slide
-    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value roomscale is tuned with.
     float roomscale_min   = 0.36f;   // stick magnitude floor while a command stands (clears the game deadzone)
     float roomscale_speed = 3.3f;    // metres/s of eye travel at full stick (measured 3.0-4.7)
     float roomscale_lat   = 0.06f;   // seconds from command to visible eye motion (measured 20-57 ms)
-    // Default: the value roomscale is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value roomscale is tuned with.
     float roomscale_dz    = 0.30f;   // the game's own stick deadzone (measured: 0.30 -> 0.22 m/s)
     int   roomscale_pulse = 2;       // ticks per on-block when duty-cycling below the floor
     float roomscale_ff    = 0.0f;    // head-velocity feed-forward gain (1 = command the head's own speed)
@@ -70,7 +70,7 @@
     // Mode 3 targets: unit object throttle vector (fwd,left) and its second copy. 0 = skip.
     int   blam_unit_throttle_off  = 0x250;
     int   blam_unit_throttle_off2 = 0x25C;
-    // Default -1, the measured handedness roomscale is tuned with (halo_vr.cfg ships the same line). With
+    // Default -1, the measured handedness roomscale is tuned with. With
     // 1 the right component is mirrored and the pawn walks away from the head instead of closing on it.
     int   blam_throttle_ysign = -1;   // sign applied to the RIGHT component (frame handedness, measured)
     // CAMERA BOB CANCEL: remove the walk-animation bob (fast part of camera-vs-pawn, tau seconds
@@ -171,8 +171,8 @@
     // blipcolor=E1870013,0,0.6,1. The id is the object's leading dword (see g_blip_type); an
     // unlisted species takes blip_color_other and logs its id once, so the palette fills in from
     // play instead of needing a survey per level.
-    // Default: the species palette the wrist radar is tuned with, in the order of the blipcolor lines
-    // halo_vr.cfg ships (a line for the same species replaces its entry).
+    // Default: the species palette the wrist radar is tuned with, in the built-in
+    // order (a blipcolor line for the same species replaces its entry).
     BlipColor blip_color[kMaxBlipColor] = {
         { 0xE1870013u, 0.10f, 0.55f, 1.00f },
         { 0xF7A2162Au, 0.45f, 1.00f, 0.15f },
@@ -193,8 +193,8 @@
     // Name-keyed palette: repeatable `blipname=<class substring>,<r>,<g>,<b>`, e.g.
     // blipname=Grunt,1,0,0. Checked BEFORE the id palette, first match wins, and it survives
     // level loads where the id table does not.
-    // Default: the name palette the wrist radar is tuned with, in the order of the blipname lines
-    // halo_vr.cfg ships (first match wins, and a line for the same name replaces its entry).
+    // Default: the name palette the wrist radar is tuned with, in the built-in
+    // order (first match wins, and a blipname line for the same name replaces its entry).
     BlipName  blip_name[kMaxBlipName] = {
         { "Flood", 1.00f, 0.85f, 0.00f },
         { "Brute", 0.60f, 0.10f, 1.00f },
@@ -235,11 +235,11 @@
     // (0x0E human / 0x0D covenant), 25 m range, moving-only, rotating with your facing.
     bool  wrist_radar = true;
     // Blip mesh scale, and the radar's world radius as a fraction of the tracker panel.
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_radar_blip = 0.004f;
     // Emissive gain on the coloured radar dots -- same pre-exposure problem as the hosted panels
     // (aimwidgetgain), separate knob because the dots are solid colour and saturate earlier.
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_radar_gain = 1500.0f;
     // In-plane rotation of the blip field on the panel, degrees, and a left/right mirror. The
     // blip frame rides the PANEL's pose, and the panel itself is rolled to sit on the forearm
@@ -320,7 +320,7 @@
     // the muzzle, at chest height and forward, while the reference is the unit's origin at the
     // feet, so a metre is not enough. The trigger gate below is what actually excludes NPC fire,
     // which is why this can be loose.
-    // Default 0.5, the value the gunstock is tuned with (halo_vr.cfg ships the same line).
+    // Default 0.5, the value the gunstock is tuned with.
     float force_tube_radius = 0.5f;
     int   force_tube_fire_ms = 250;
     int   force_tube_channel = 0;
@@ -331,22 +331,22 @@
     // log line per distinct live WBP_ class -- because hosting REMOVES the widget from the flat
     // HUD and a guessed name would eat the wrong element. Fill it from the census log.
     bool  wrist_hud = false;
-    // Default: the three left-wrist panels the HUD is tuned with (halo_vr.cfg ships the same line), so
+    // Default: the three left-wrist panels the HUD is tuned with, so
     // the feature hosts panels when switched on from the menu; set it empty for the census.
     char  wrist_hud_classes[256] = "WBP_ShieldHealthBar,WBP_WeaponCradle,WBP_GrenadeCradle";
     // Second list, anchored to the AIM hand's wrist (the motion tracker's natural home), with its
     // own placement keys below -- the two forearms are mirror poses, so shared offsets fit neither.
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     char  wrist_hud_classes_r[256] = "WBP_MotionTracker";
     // Controller-local anchor offset, metres (x right, y up, z back -- +z runs up the forearm).
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_hud_off[3] = {-0.14f, 0.06f, -0.41f};
     // Local orientation trim, degrees (pitch, yaw, roll), composed as a quaternion on the pose.
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_hud_rot[3] = {0.0f, 120.0f, 105.0f};
     // World scale of each quad, and the along-forearm gap (m) between stacked slots.
     float wrist_hud_scale = 0.04f;
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_hud_gap = 0.18f;
     // DrawSize (px) requested for each hosted widget's render target.
     float wrist_hud_draw = 512.0f;
@@ -367,9 +367,9 @@
     bool  wrist_hud_trigger = true;
     // Right-wrist placement, tuned independently of the left (wristhudoffr / wristhudrotr /
     // wristhudgapr). Same axes as the left keys, in the RIGHT controller's local frame.
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_hud_off_r[3] = {0.17f, 0.01f, -0.11f};
-    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the wrist HUD is tuned with.
     float wrist_hud_rot_r[3] = {-15.0f, 195.0f, 105.0f};
     float wrist_hud_gap_r = 0.18f;
     // HUD PLACEMENT (hudplacement, a sub-setting of wristhud): 0 = on the wrists (everything above,
@@ -408,34 +408,34 @@
     // ---- (after the author's Config.hpp line 2802)
     int   scope_res = 512;
     // 2 = SCS_FinalColorLDR: fully post-processed (bloom, reflections, tonemap); exposure forced manual below.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     int   scope_capture_source = 9;
     // 2 = RTF_RGBA8, 6 = RGBA16f.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     int   scope_rt_format = 6;
     // Manual exposure bias (EV) on the capture -- the brightness knob (live).
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     float scope_ev = 0.5f;
     int   scope_pp_override = 1;        // 0 = do not touch the capture's PostProcessSettings
     bool  scope_cvar_dump = false;      // one-shot log of Lumen/SceneCapture console variables
     // Display multiplier on the lens (live); exposure itself is scope_ev.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     float scope_tint = 11.0f;
     int   scope_round = 1;              // 1 = round lens (flattened Cylinder cap), 0 = square Plane
 
     // ---- (after the author's Config.hpp line 2924)
     // 1 = build the capture deferred with ShowFlagSettings Lumen flags on (build-time only).
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     int   scope_showflags = 1;
     int   scope_probe = 0;              // 1 = log the render target's centre pixel once a second (GPU readback; dev only)
     // Capture ToneCurveAmount (live): 0 = linear output (undoes the lens double-tonemap), <0 = leave alone.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     float scope_tone_curve = 0.5f;
     // Measured 2026-08-19: the tone-curve-0 capture path drops SEPARATE translucency (the shield
     // wall renders in the main view but not in the lens; A/B on the same spot flipped only by the
     // ToneCurveAmount write). r.SeparateTranslucency=0 folds translucency into scene colour so the
     // linear capture keeps it. GLOBAL cvar (main view too). -1 = leave alone.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     int   scope_sep_trans = 0;
     float scope_cam_fwd = 40.0f;        // capture camera push forward along the aim ray (cm, live) so the gun's own scope housing is not in its view
     // Real scope optics are rotationally symmetric: rolling the rifle must NOT roll the image.
@@ -446,7 +446,7 @@
     // (profile dir, alpha = shape). Rolls with the gun like a real etched reticle.
     int   scope_reticle = 1;
     float scope_reticle_scale = 0.8f;   // relative to the lens size
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     float scope_reticle_tint[3] = { 0.02f, 0.02f, 0.02f };
     // GPU measurement (CPU timers cannot see render cost):
     // concmd: any engine console command, executed once each time the VALUE CHANGES (live) --
@@ -459,7 +459,7 @@
     // runs ONLY while the lens is within this many cm of the camera -- i.e. while actually aiming.
     // Hip-carried, the lens keeps its last frame, like a real scope you are not looking through.
     // +8 cm hysteresis on the way out. 0 = gate off, capture always on while a scope is held. Live.
-    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the scope lens is tuned with.
     float scope_eye_dist = 15.0f;
     // Capture rate cap (Hz). The engine tick runs uncapped (measured 91-133 fps) while the headset
     // shows 72 -- captures above the display rate are wasted GPU. >0 = manual CaptureScene calls at
@@ -472,8 +472,8 @@
     // name list was split on commas and spaces only, so the line ending stayed on that last name and
     // the engine never matched it.
     char  scope_sf_names[512] = "LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows";
-    // Default: the two scoped weapons the lens is tuned for, the same as the scopewpn lines halo_vr.cfg
-    // ships. A scopewpn line for the same weapon replaces its entry.
+    // Default: the two scoped weapons the lens is tuned for, built in so the
+    // feature needs no cfg line. A scopewpn line for the same weapon replaces its entry.
     ScopeCfg scopes[8] = {
         { "FP_BattleRifle", 10.5f, { 11.5f, 0.0f, 28.5f }, { 90.0f, 85.0f, 90.0f }, 0.033f },
         { "FP_SniperRifle", 5.0f, { 0.0f, -20.0f, 9.0f }, { 0.0f, 0.0f, 0.0f }, 0.04f },
@@ -526,7 +526,7 @@
     float two_hand_radius_m = 0.09f;
     // GRAB-ZONE DOT (2026-09-01, from a tester video: testers could not find the grip). A small
     // dot at the zone middle while the off hand approaches unlatched; gone once held or withdrawn.
-    // Default off, the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    // Default off, the value the weapon placement is tuned with.
     bool  two_hand_marker = false;
     float two_hand_marker_scale = 0.05f;
 
@@ -599,14 +599,14 @@
     // mesh stem (the FlakCannon class renders the FuelRodCannon mesh).
     char  reload_skip_weapons[128] = "PlasmaPistol,PlasmaRifle,SentinelBeam,BeamRifle,EnergySword";
     int   slide_node = 0;
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_travel = 0.03f;
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_radius = 0.16f;
     float slide_sign = 1.0f;
     // Where the slide sits relative to the AIM hand, metres in the aim-fixed frame (right, up,
     // forward). The node's own world position is the third-person gun's, not the rendered one.
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_off[3] = {0.0f, 0.06f, -0.14f};
     // slide_zone: where the grab zone is. 1 = the slide PART's own rendered position (its bounds
     // centre, published every tick by the parts rebuild) -- no hand-relative guess; 0 = slide_off
@@ -628,7 +628,7 @@
     // @reloadonly makes the rack live only in the reload state (the shotgun: a chambered round
     // means the pump is just the foregrip, the hold takes it).
     bool  slide_zone_priority = true;
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_zone_back = 0.0f;
     // After a reload the slide stays locked back and the trigger is dead until it is racked.
     bool  slide_lock_reload = true;
@@ -840,7 +840,7 @@
     // A rack spec may name several parts joined by + (they move together: spiker hammer and
     // pin) and end in @rot for a HINGE (the rocket launcher's clamp): the parts rotate about
     // slide_part_rot_axis (0 pitch, 1 yaw, 2 roll) by slide_part_rot_deg per cm of pull.
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     int   slide_part_rot_axis = 2;
     float slide_part_rot_deg = 6.0f;
     float slide_part_open_deg = 60.0f;   // a hinge's OPEN angle on the reload press (held until racked closed)
@@ -870,14 +870,14 @@
     // held at slide_fire_state (the enum value the ANIMSTATE probe names at a shot) and the
     // mesh's GlobalAnimRateScale is steered so the fire animation's time follows the hand from
     // 0 to slide_fire_back seconds (slide fully back), then runs to the end on release.
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     bool  slide_fire = false;
     int   slide_fire_state = 19;     // measured 2026-09-03: a shot takes FirstPersonState 0 -> 19 for 0.8 s
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_fire_back = 0.10f;
     // The idle-to-fire transition needs rate-scaled time to blend in; a frozen rate at entry
     // stalls it and nothing ever shows. The first slide_fire_entry seconds run at rate 1.
-    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the rack is tuned with.
     float slide_fire_entry = 0.0f;
     // Where the slide is HOME again on the way forward. On release the animation runs to here
     // and the state is handed back -- not to the end of the recoil, where the game's 300 ms
@@ -993,35 +993,35 @@
     bool  palette_barrel_lock = false;
     // Fixed roll of the gun about its barrel, degrees, every weapon (+ = clockwise seen from
     // behind). The global grip capture keeps pitch only, so this is the deliberate global roll knob.
-    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the weapon placement is tuned with.
     float palette_roll_trim = 6.0f;
 
     // THE PALETTE WEAPON'S CALIBRATION (palettewpn): its own keys, read and written only by the palette weapon's
-    // placement and aim, never by the author's rig and never into his files. Each default is the value the
-    // palette weapon was tuned with, and halo_vr.cfg ships the same lines. Captures are saved to
-    // halo_vr_palette_calib.cfg, which is parsed after every other file. *_captured marks a value that came from
-    // that file or from a capture; only those are written back to it.
+    // placement and aim, never by the author's rig and never into his files. Calibration the author's way: these
+    // compiled defaults are the NEUTRAL built-in fit (no grip offset, no aim correction, no per-weapon delta, the
+    // absolute stamp), and the tuned fit ships as active lines in halo_vr.cfg, where package.ps1 allows these keys
+    // beside his, so the schema stamp travels with the numbers it describes. Captures are saved to the machine-owned
+    // halo_vr_palette_calib.cfg (the way his per-weapon captures go to halo_vr_weapons.cfg), which is parsed after
+    // every other file. *_captured marks a value that came from that file or from a capture; only those are written
+    // back to it.
     // palgripfix (Page Up): rigid grip offset, quaternion x,y,z,w then translation x,y,z in metres, UE pose frame.
-    float pal_grip_fix[7] = {0.0f, 0.0f, 0.0f, 1.0f, 0.012217f, -0.003179f, -0.024766f};
-    bool  pal_grip_fix_valid = true;
+    float pal_grip_fix[7] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    bool  pal_grip_fix_valid = false;
     bool  pal_grip_fix_captured = false;
     // palaimfix (a measurement): aim correction quaternion x,y,z,w, right-multiplied onto the aim pose.
-    float pal_aim_fix[4] = {-0.069756f, 0.0f, 0.0f, 0.997564f};
-    bool  pal_aim_fix_valid = true;
+    float pal_aim_fix[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool  pal_aim_fix_valid = false;
     bool  pal_aim_fix_captured = false;
     // palaimoffyaw / palaimoffpitch (Page Down): the hand-to-aim reference offset, degrees. palaimcalibver 2 = the
     // yaw is stored relative to the view-lock yaw, which is added back on use.
     float pal_aim_off_yaw = 0.0f;
     float pal_aim_off_pitch = 0.0f;
-    bool  pal_aim_off_valid = true;
+    bool  pal_aim_off_valid = false;
     bool  pal_aim_off_captured = false;
-    int   pal_aim_calib_ver = 2;
+    int   pal_aim_calib_ver = 1;
     // palwpnfix=<match>,qx,qy,qz,qw,tx,ty,tz (Home): per-weapon rigid delta, UE axes. One entry per match.
-    WeaponFix pal_wpnfix[kMaxWeaponAdjust] = {
-        {"FP_AssaultRifle", {0.0f, -0.017452f, 0.0f, 0.999848f}, {0.000159f, -0.000435f, -0.005567f}},
-        {"FP_Shotgun",      {0.0f, 0.0f, 0.0f, 1.0f},            {0.0f, 0.0f, 0.0f}},
-    };
-    int   pal_wpnfix_count = 2;
+    WeaponFix pal_wpnfix[kMaxWeaponAdjust];
+    int   pal_wpnfix_count = 0;
     // palwpncalibkey: the per-weapon capture key (Home).
     int   pal_wpn_calib_key = 0x24;
     // (palettewpnlockgain / palettewpnlockpitch / palettewpnsweep / palettewpnbasis /
@@ -1059,14 +1059,14 @@
     // at the hip -- both hands are already within 30 cm there. Seating now needs the mag to have
     // RISEN this far (m) above where it was grabbed, and to reach the magazine WELL: a point this
     // far (m) forward of the aim hand along the aim direction, within reload_join_dist.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     float reload_lift = 0.08f;
     float reload_well_fwd = 0.15f;
     // PER-WEAPON WELL + INSERT MARKER (2026-09-01, from a tester video: testers had no idea
     // where the mag goes). The seat target is now the weapon's own magazine component when one
     // resolved (the exact insert point, per weapon, nothing to calibrate; reload_well_fwd is the
     // fallback), and a small ring marks it while the mag is in hand.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     bool  reload_well_marker = false;
     float reload_well_marker_scale = 0.08f;
     // MARKER COLOURS (from the headset, 2026-09-06): "r,g,b" 0..1, each zone dot its own colour so they
@@ -1080,7 +1080,7 @@
     // THE SLIDE: inside reload_join_dist (now the CAPTURE radius) the held mag leaves the hand
     // and travels into the well over this many ms, landing on the weapon's own magazine pose;
     // the reload fires on arrival. Replaces the four-tick debounce (the travel time is one).
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     int   reload_slide_ms = 100;
     // After the seat, hold the first-person pose this long so the game's own reload animation
     // does not play out over the reload the player just performed. Covers the animation's length;
@@ -1090,7 +1090,7 @@
     // arms' Animation Blueprints, ANIMDUMP 2026-09-02): GlobalAnimRateScale on those components
     // is set to reload_anim_rate for reload_anim_ms, then restored. The reload completes in a
     // blink instead of playing out over a magazine the player already seated. rate 0 = off.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     float reload_anim_rate = 0.0f;
     int   reload_anim_ms   = 1200;
     // HOLD the weapon AnimBP's FirstPersonState at idle for reload_anim_ms after the seat, so the
@@ -1146,7 +1146,7 @@
     float veh_wheel_pos[3] = { 0.45f, -0.535f, 1.697f };
     float veh_wheel_radius = 0.24f;   // metres; the catch reaches 1.3x this, for rim grabs
     float veh_wheel_lock = 200.0f;   // hand rotation (deg) for full lock -- 90 was twitchy
-    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the vehicle features are tuned with.
     int   veh_steer_sign = -1;       // flip if the hog steers the wrong way
     int   veh_wheel_grip = 1;        // 1 = grip holds the wheel (the natural gesture); 0 = hands-in-zone alone
     // Grip is ALSO the Warthog's brake (measured 0x0200 RB, 2026-08-20), so while the wheel is
@@ -1167,7 +1167,7 @@
     // rendered view is MOVED to the seat: the pre-stereo callback hands us the camera position
     // as a writable pointer. 0 = off, 1 = while mounted, 2 = always (on-foot validation).
     int   veh_cam = 0;
-    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the vehicle features are tuned with.
     float veh_cam_off[3] = { 20.0f, 0.0f, -20.0f };   // cm, added after conversion
     // Seat-camera position source: 0 = the rider's own position, 1 = the VEHICLE's. 0 measured
     // better 2026-08-21: the rider position lands on 95-100% of rendered frames against 91-97%
@@ -1195,14 +1195,14 @@
     int   veh_hide_body = 0;
     // Low pass on the BOOM LENGTH only, seconds (anchor mode 1). The boom extends with speed
     // and that must be tracked; the frame-scale curve gap must not be.
-    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the vehicle features are tuned with.
     float veh_cam_boom_tau = 0.12f;
     // Filter order on the boom: 1 = single pole, 2 = two poles at half the time constant each --
     // same group delay, twice the rolloff. Cascaded one-poles, so it cannot ring.
     int   veh_boom_order = 2;
     // Read the mounted vehicle's facing straight out of its object (+0x1D4, found by spin test:
     // swept 3226 deg as a unit vector) instead of inferring it from travel.
-    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the vehicle features are tuned with.
     int   veh_facing = 1;
     int   veh_facing_off = 0x1D4;
     float veh_facing_bias = 0.0f;
@@ -1210,7 +1210,7 @@
     // IN-VEHICLE VIEW ORIENTATION. The vehicle can spin or roll under you; in VR that swings
     // the world around your head. With this on, the BASE view yaw follows the vehicle (forward
     // stays forward) and pitch/roll are flattened, with the headset adding free-look on top.
-    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the vehicle features are tuned with.
     // A setting of the seat camera: the view override acts only with vehcam on.
     int   veh_view = 1;
     int   veh_view_flat = 1;    // zero the pitch/roll the vehicle contributes
@@ -1364,7 +1364,7 @@
     //              own listener (the head) whenever the sim positions that listener, and posts
     //              every step on it. A newer sim emitter replaces it (the old one is then
     //              unregistered for real), so it never goes stale across rooms.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     int   ak_mimic = 7;
     // akmimic4event: in mode 4 the plugin posts THIS event (hashed) on the sim's emitter in place
     // of the game's reload sound, so the test cannot be mistaken for the game's own audio. Empty =
@@ -1410,13 +1410,13 @@
     // THE MAG IN THE HAND (live, 2026-09-04): an offset in the hand's own frame (right, up,
     // forward; metres) and a rotation (pitch, yaw, roll; degrees) applied to the held mag before
     // the slide-in, so the seat target is untouched.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     float reload_hand_off[3] = {0.03f, -0.03f, 0.03f};
     // ROOM ANCHOR for rendered markers (belt mag, zone dots, dropped mags): 1 = the STANDING
     // ORIGIN (the frame UEVR renders the head's offset from; the palette publisher uses it, and
     // the arms hold still when the head moves), 0 = the HMD (the old helper: a marker then
     // shifts opposite to every head motion -- "the mag moves when I move my head").
-    // Default 1, the value the reload markers are tuned with (halo_vr.cfg ships the same line). Read
+    // Default 1, the value the reload markers are tuned with. Read
     // only by the fork's marker placement (manual reload, rack, wrist HUD, the marker anchor service).
     int   room_anchor = 1;   // 0 = the HMD (development's behaviour); 1 = the standing origin, what roomscale needs
     // HIDE THE STOCK ARMS FOR MANUAL RELOAD (reloadhidearms, a sub-setting of reloadvr). The author's
@@ -1426,8 +1426,7 @@
     //   2 = the same through SetVisibility (his armhidemode 1)
     //   3 = hide them only while a reload is in progress (the drop until the seat and the rack finish)
     // Resolved in features_apply: an armhide (or armhidemode) set in any cfg file wins, and while the
-    // palette weapon is requested it owns the arm hide, so this stands down. Default 1 (halo_vr.cfg ships
-    // the same line).
+    // palette weapon is requested it owns the arm hide, so this stands down. Default 1.
     int   reload_hide_arms = 1;
     // Derived, not a key: the approach in effect after that resolution (0 = none).
     int   reload_hide_arms_active = 0;
@@ -1442,7 +1441,7 @@
     float reload_insert = 0.08f;
     float reload_insert_done = 0.01f;
     float reload_insert_sign = 1.0f;
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     float reload_hand_rot[3] = {-90.0f, 0.0f, 0.0f};
 
     // ================================================================================================
@@ -1533,7 +1532,7 @@
     // same body frame and metres as reloadmagoff, separated by commas, matched the way the wpnoff
     // table matches (case-insensitive substring of the weapon key). No entry = the global above.
     // Live: the cfg is re-read in play, so this tunes in the headset without a rebuild.
-    // Default: the value manual reload is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value manual reload is tuned with.
     char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.00";
     // THE RELOAD WHILE RUNNING (from the headset, 2026-09-11: the mag is not keeping up, reloading on the
     // move is nearly impossible). Root cause, verified in code: the seat and rack tests map the
@@ -1581,11 +1580,11 @@
     // the left hand and arms stay tick-published. It only refreshes a pose the tick publisher
     // has already validated -- never creates one -- and the dead-tracking reach gate is
     // replicated. 0 = tick publishing only (the old behaviour). Default 0: the value the weapon
-    // placement is tuned with (halo_vr.cfg ships the same line).
+    // placement is tuned with.
     int   pal_pub_frame = 0;
     // Mode 5's lead fraction of one build interval along the smoothed camera rate. The 2026-09-03
     // fit measured the gun missing by 0.86 of a tick; dial live in the headset.
-    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the weapon placement is tuned with.
     float palette_cam_lead = 0.3f;
     // ---- CAMLEAD (2026-09-12). From the headset: "any mopvement i make overshoots and comes back".
     // That is a VELOCITY-PROPORTIONAL error, zero at rest, growing with speed, settling when he
@@ -1859,7 +1858,7 @@
     //       after the build is snapshot-out + memcpy-in, a few microseconds instead of a full
     //       camera read and per-node recompose. Falls back to the in-place path on the first
     //       build after a weapon swap or a stale snapshot.
-    // Default 6, the window cure the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    // Default 6, the window cure the weapon placement is tuned with.
     int   pal_build_gate = 6;
     // POSEFREEZE (2026-09-11, the bisection): 1 = the publisher stops updating the published
     // pose, so the target side of the whole pipeline is a CONSTANT by construction -- no
@@ -2041,7 +2040,7 @@
     // Hz, 120 means about 2.4 deg of reversal per frame, which clips the measured tail (p99 3.6
     // deg, max 16.7) while leaving the bulk (p95 ~1.1 deg) untouched.
     float rev_clamp_dps = 120.0f;
-    // Default: the value the weapon placement is tuned with (halo_vr.cfg ships the same line).
+    // Default: the value the weapon placement is tuned with.
     int   mesh_const = 0;
     // Degrees of camera movement between the brackets above which the sample is contaminated.
     // Modes 1 and 3 only. The reflected-call gap runs ~10-20 ms, so at 100 deg/s of camera motion

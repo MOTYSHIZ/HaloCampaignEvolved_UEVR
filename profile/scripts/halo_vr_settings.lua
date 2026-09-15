@@ -119,13 +119,6 @@ local HINTS = {
     aimcalibkey    = { t = "key" },
     palettecalibkey = { t = "key" },
     palwpncalibkey  = { t = "key" },
-    -- The weapon placement calibration: measurements its captures write, never edited from the menu.
-    palgripfix     = { hide = true },
-    palaimfix      = { hide = true },
-    palaimcalibver = { hide = true },
-    palaimoffyaw   = { hide = true },
-    palaimoffpitch = { hide = true },
-    palwpnfix      = { hide = true },
     hmdleash       = { t = "bool" },
     hmdleashlat    = { t = "slider", min = 0, max = 100 },   -- cm
     hmdleashvert   = { t = "slider", min = 0, max = 100 },   -- cm
