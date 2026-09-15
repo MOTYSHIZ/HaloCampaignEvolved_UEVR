@@ -37,8 +37,18 @@ TrackedObject g_rig_parent_track;   // the rig's attach parent by array slot (ch
 
 // ================================================================ SVC_RIG_GUARD
 
+namespace { bool s_guard_was_on = false; }
+
 void stability_tick_begin() {
-    if (!guard_on()) { g_tick_fault_pending = false; return; }
+    // THE GUARD COMING ON LIVE. The parent track is normally set when the rig's parent resolves, which
+    // happens once per new rig; a guard switched on (stabilityfixes or roomscale) after that found the
+    // track empty, read the live parent as gone, and dropped a healthy rig. Adopt the current parent on
+    // the on edge instead. set() compares pointers against the object array and never dereferences, so
+    // a parent that really is stale fails to adopt and the guard still drops it.
+    const bool on = guard_on();
+    if (on && !s_guard_was_on) g_rig_parent_track.set(g_rig_parent);
+    s_guard_was_on = on;
+    if (!on) { g_tick_fault_pending = false; return; }
     // AFTER A FAULT: whatever pointer the game rejected, the rig and its parent are the two the
     // tick trusts blindly; drop them and resolve again rather than fault on the same one next tick.
     if (g_tick_fault_pending) {
