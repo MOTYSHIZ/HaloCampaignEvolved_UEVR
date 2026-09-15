@@ -187,6 +187,23 @@ namespace {
 
 constexpr int MAX_SLOTS = 6;
 
+// WHERE A HOSTED WIDGET LIVED ON THE FLAT HUD, captured before RemoveFromParent clears it, so switching
+// the wrist HUD off can give the widget back at once instead of at the next level load (wh_unhost).
+// Everything is read by reflection: the layout's size comes from its struct, and a missing property or
+// parameter only skips that part of the restore.
+struct WhHome {
+    TrackedObject parent;            // the panel the widget was a child of
+    bool     have_vis = false;       // the widget's own Visibility before hosting set it to Visible
+    uint8_t  vis = 0;
+    bool     canvas = false;         // its slot was a CanvasPanelSlot: layout, z order and auto size come back too
+    uint8_t  layout[256] = {0};
+    int      layout_size = 0;
+    bool     have_zorder = false;
+    int32_t  zorder = 0;
+    bool     have_autosize = false;
+    bool     autosize = false;
+};
+
 struct WhSlot {
     std::wstring  match;    // class-name substring from wristhudclasses / wristhudclassesr
     TrackedObject comp;     // our WidgetComponent
@@ -196,6 +213,7 @@ struct WhSlot {
     // instance grabbed mid-construction hosts as a BLANK panel (measured: healthy tint chain,
     // bound target, black quad -- the widget itself had nothing in it yet).
     uevr::API::UObject* cand = nullptr;
+    WhHome        home;     // where the hosted widget came from (wh_unhost)
     bool          right = false;   // anchored to the aim hand instead of the off hand
     bool          failed = false;
     int           misses = 0;      // sweeps that found nothing for this slot; eight = back off to one per 1200 ticks
@@ -225,12 +243,106 @@ bool live_widget_instance(API::UObject* o) {
     return false;
 }
 
-// Take the widget off the flat HUD and give it to our quad -- the reticule's host sequence.
-void wh_host(API::UObject* comp, API::UObject* w) {
+// A struct property's bytes, by reflection. 0 = not a struct property, or larger than `cap`.
+int wh_struct_prop(API::UObject* o, const wchar_t* name, uint8_t* out, int cap) {
+    auto* cls = o->get_class();
+    auto* prop = (cls != nullptr) ? cls->find_property(name) : nullptr;
+    if (prop == nullptr) return 0;
+    auto* fc = prop->get_class();
+    if (fc == nullptr || fc->get_fname() == nullptr || fc->get_name() != L"StructProperty") return 0;
+    auto* st = static_cast<API::FStructProperty*>(prop)->get_struct();
+    const int size = (st != nullptr) ? st->get_struct_size() : 0;
+    if (size <= 0 || size > cap) return 0;
+    memcpy(out, reinterpret_cast<const uint8_t*>(o) + prop->get_offset(), (size_t)size);
+    return size;
+}
+
+// Call a one-argument function with the argument placed at its reflected offset. false = the function
+// or the parameter is not there (nothing is called). `p_out` receives the whole parameter block.
+bool wh_call1(API::UObject* o, const wchar_t* fn_name, const wchar_t* arg, const uint8_t* bytes, int size,
+              uint8_t* p_out = nullptr, int* p_size = nullptr) {
+    auto* cls = o->get_class();
+    auto* fn = (cls != nullptr) ? cls->find_function(fn_name) : nullptr;
+    if (fn == nullptr) return false;
+    const int psz = fn->get_properties_size();
+    auto* ap = fn->find_property(arg);
+    if (ap == nullptr || psz <= 0 || psz > (int)RIG_PARAM_BUF) return false;
+    const int off = ap->get_offset();
+    if (off < 0 || off + size > psz) return false;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    memcpy(p + off, bytes, (size_t)size);
+    o->call_function(fn_name, p);
+    if (p_out != nullptr) memcpy(p_out, p, (size_t)psz);
+    if (p_size != nullptr) *p_size = psz;
+    return true;
+}
+
+// Take the widget off the flat HUD and give it to our quad -- the reticule's host sequence. Where it came
+// from is remembered first (see WhHome).
+void wh_host(WhSlot& sl, API::UObject* comp, API::UObject* w) {
+    sl.home = WhHome{};
+    { alignas(16) uint8_t p[RIG_PARAM_BUF] = {0}; w->call_function(L"GetParent", p);
+      sl.home.parent.set(*reinterpret_cast<API::UObject**>(p)); }
+    if (auto* v = w->get_property_data<uint8_t>(L"Visibility")) { sl.home.vis = *v; sl.home.have_vis = true; }
+    API::UObject* slot = nullptr;
+    if (auto** sp = w->get_property_data<API::UObject*>(L"Slot")) slot = *sp;
+    if (slot != nullptr && class_name_of(slot).find(L"CanvasPanelSlot") != std::wstring::npos) {
+        sl.home.canvas = true;
+        sl.home.layout_size = wh_struct_prop(slot, L"LayoutData", sl.home.layout, (int)sizeof(sl.home.layout));
+        if (auto* z = slot->get_property_data<int32_t>(L"ZOrder")) { sl.home.zorder = *z; sl.home.have_zorder = true; }
+        if (auto* a = slot->get_property_data<bool>(L"bAutoSize")) { sl.home.autosize = *a; sl.home.have_autosize = true; }
+    }
     { alignas(16) uint8_t p[64] = {0}; p[0] = 0; w->call_function(L"SetVisibility", p); }  // SelfHitTestInvisible=0? 0 = Visible
     { alignas(16) uint8_t p[64] = {0}; w->call_function(L"RemoveFromParent", p); }
     { alignas(16) uint8_t p[64] = {0}; *reinterpret_cast<void**>(p) = w;
       comp->call_function(L"SetWidget", p); }
+}
+
+// GIVE THE WIDGET BACK TO THE FLAT HUD: off our quad, back into the panel it came from, with its slot
+// layout and visibility as they were. Every handle is re-validated through the object array first, so a
+// widget a level load already destroyed is simply forgotten. Game thread. The quad itself stays (hidden),
+// and the slot re-hosts on its next sweep if the wrist HUD comes back on.
+void wh_unhost(WhSlot& sl) {
+    auto* w = sl.widget.get();
+    if (auto* comp = sl.comp.get()) {
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};   // SetWidget(nullptr)
+        comp->call_function(L"SetWidget", p);
+    }
+    auto* par = sl.home.parent.get();
+    if (w != nullptr && par != nullptr) {
+        uint8_t blk[RIG_PARAM_BUF] = {0};
+        int psz = 0;
+        API::UObject* nslot = nullptr;
+        const bool added = wh_call1(par, L"AddChild", L"Content", reinterpret_cast<const uint8_t*>(&w),
+                                    (int)sizeof(w), blk, &psz);
+        if (added) {
+            auto* fn = par->get_class()->find_function(L"AddChild");
+            auto* rp = (fn != nullptr) ? fn->find_property(L"ReturnValue") : nullptr;
+            if (rp != nullptr && rp->get_offset() >= 0 && rp->get_offset() + (int)sizeof(void*) <= psz)
+                memcpy(&nslot, blk + rp->get_offset(), sizeof(void*));
+        }
+        bool lay = false, zo = false, au = false, vi = false;
+        if (nslot != nullptr && sl.home.canvas && class_name_of(nslot).find(L"CanvasPanelSlot") != std::wstring::npos) {
+            if (sl.home.layout_size > 0)
+                lay = wh_call1(nslot, L"SetLayout", L"InLayoutData", sl.home.layout, sl.home.layout_size);
+            if (sl.home.have_zorder)
+                zo = wh_call1(nslot, L"SetZOrder", L"InZOrder", reinterpret_cast<const uint8_t*>(&sl.home.zorder), 4);
+            if (sl.home.have_autosize) {
+                const uint8_t b = sl.home.autosize ? 1 : 0;
+                au = wh_call1(nslot, L"SetAutoSize", L"InbAutoSize", &b, 1);
+            }
+        }
+        if (sl.home.have_vis) vi = wh_call1(w, L"SetVisibility", L"InVisibility", &sl.home.vis, 1);
+        API::get()->log_info("[Halo-CampE-UEVR] WRISTHUD returned '%ls' to %ls: added=%d slot=%ls layout=%d(%d bytes) "
+                             "zorder=%d autosize=%d visibility=%d",
+                             sl.match.c_str(), class_name_of(par).c_str(), (int)added,
+                             nslot != nullptr ? class_name_of(nslot).c_str() : L"none",
+                             (int)lay, sl.home.layout_size, (int)zo, (int)au, (int)vi);
+    }
+    sl.widget.reset();
+    sl.home = WhHome{};
+    sl.cand = nullptr;
+    sl.misses = 0;
 }
 
 void parse_one_list(const char* p, bool right) {
@@ -263,10 +375,12 @@ void parse_slots() {
     if (s_classes_active == both) return;
     s_classes_active = both;
     // A re-parse must not ORPHAN live panels: hide each component before dropping its handle, or
-    // the quads freeze mid-world holding their hosted widgets. (The widget itself stays hosted --
-    // giving it back to the flat HUD is a bigger job; a level load restores it.)
-    for (int i = 0; i < s_slot_count; ++i)
+    // the quads freeze mid-world holding their hosted widgets, and give each hosted widget back to
+    // the flat HUD (wh_unhost), or a slot the new list drops keeps its widget off the HUD.
+    for (int i = 0; i < s_slot_count; ++i) {
         if (auto* c = s_slots[i].comp.get()) holster_marker_show(c, false);
+        wh_unhost(s_slots[i]);
+    }
     for (int i = 0; i < MAX_SLOTS; ++i) s_slots[i] = WhSlot{};
     s_slot_count = 0;
     parse_one_list(g_cfg.wrist_hud_classes, false);
@@ -363,13 +477,13 @@ void sweep(API::UObject* owner) {
                   auto* d = reinterpret_cast<double*>(p);
                   d[0] = g_cfg.wrist_hud_draw; d[1] = g_cfg.wrist_hud_draw;
                   comp->call_function(L"SetDrawSize", p); }
-                wh_host(comp, o);
+                wh_host(sl, comp, o);
                 widget_quad_finish(owner, comp, 10.0f);
                 sl.comp.set(comp);
                 if (sl.match.find(L"WeaponCradle") != std::wstring::npos) wh_cradle_dump(o);
             } else {
                 // Component survived a HUD rebuild; only the widget died. Re-host the new one.
-                wh_host(sl.comp.get(), o);
+                wh_host(sl, sl.comp.get(), o);
             }
             sl.widget.set_at(o, i); sl.misses = 0;
             API::get()->log_info("[Halo-CampE-UEVR] WRISTHUD hosting %ls (slot %d, '%ls')",
@@ -962,8 +1076,8 @@ void wristhud_place() {
     if (!g_cfg.wrist_hud) {
         // OFF EDGE: nothing below runs any more, so anything left showing would freeze in the
         // world at its last pose. Hide the panels and every radar dot, and give the ammo box its
-        // visibility back. The hosted game widgets themselves stay off the flat HUD until the next
-        // level load (the re-parse note in parse_slots says why that is a bigger job).
+        // visibility back. The hosted game widgets themselves go back to the flat HUD on the game
+        // thread, in wristhud_released.
         if (s_was_on) {
             for (int i = 0; i < s_slot_count; ++i)
                 if (auto* c = s_slots[i].comp.get()) holster_marker_show(c, false);
@@ -1732,6 +1846,16 @@ namespace {
 bool wrist_hud_enabled() { return g_cfg.wrist_hud; }
 }  // namespace
 
+// The feature switched off (game thread, config reload): every hosted widget goes back to the flat HUD
+// now. The render pass hides the quads and radar dots and restores the ammo box on its own off edge.
+void wristhud_released() {
+    wh_cradle_restore();
+    for (int i = 0; i < s_slot_count; ++i) {
+        if (auto* c = s_slots[i].comp.get()) holster_marker_show(c, false);
+        wh_unhost(s_slots[i]);
+    }
+}
+
 constinit const FeatureHooks kWristHudHooks{
     .key                        = "wristhud",
     .parse_key                  = &wristhud_parse_key,
@@ -1742,6 +1866,7 @@ constinit const FeatureHooks kWristHudHooks{
     .widget_tint_mul            = &wristhud_widget_tint_mul,
     .enabled                    = &wrist_hud_enabled,
     .services                   = SVC_UNIT_STATE | SVC_HIDDEN_RELOAD | SVC_WIDGET_HOSTS,
+    .released                   = &wristhud_released,
 };
 
 } // namespace halo
