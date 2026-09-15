@@ -6515,6 +6515,7 @@ void update() {
         // the reticule back once the layer has proven itself.
         static bool s_layer_ever_live = false;
         if (xrlayer_live()) s_layer_ever_live = true;
+        if (features_xrlayer_latch_released()) s_layer_ever_live = false;
 
         reticule_widget_set_scene_hidden(g_cfg.xr_layer_hide_ws != 0 && s_layer_ever_live);
     }
@@ -6550,7 +6551,7 @@ void update() {
     // inside, which submits a command list on the game's own D3D12 queue. Both are cheap in theory
     // and neither was measured, which is exactly the combination this project keeps getting caught
     // by. Now it is one line in the perf window.
-    { PerfScope _perf(PERF_XRSRC); xrsource_tick(tick); }
+    if (features_xrsource_wanted()) { PerfScope _perf(PERF_XRSRC); xrsource_tick(tick); }
 
     // THE SCOPE, also above every early-out: it must HIDE the pane on ticks where the aim stack
     // is parked (menus, seats, invalid pose -- the paths that return early below), and the
@@ -7161,8 +7162,6 @@ void update() {
         NAVW_MARK(nullptr);
         features_tick_stage("after nav_world");
     }
-
-    features_xrlayer_early(tick);
 
     if (!g_cfg.enabled) { g_out_rx = 0.0f; g_out_ry = 0.0f; g_driving = false; return; }
 

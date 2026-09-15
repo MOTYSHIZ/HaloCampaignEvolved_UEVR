@@ -117,8 +117,11 @@ bool features_reticle_rescan_follow(bool hud_hide, int reticle_count);
 void features_reticle_hide_begin();
 void features_reticle_hide_dead();
 bool features_reticle_hide_end();
-// update() (game thread), right after the nav lane block, before the enabled early-out.
-void features_xrlayer_early(uint32_t tick);
+// update() (game thread), the author's compositor-reticule block, right after the liveness latch:
+// true = clear the latch (the layer is switched off, so the world reticule must not stay hidden).
+bool features_xrlayer_latch_released();
+// update() (game thread), the author's xrsource_tick call: false = skip the walk this tick.
+bool features_xrsource_wanted();
 // update() (game thread), the stick-mode detector, right after the force overrides decide `want`.
 void features_stick_mode_want(bool want);
 // update() (game thread), the stick-mode exit: true = re-anchored after a death (skips the fold).

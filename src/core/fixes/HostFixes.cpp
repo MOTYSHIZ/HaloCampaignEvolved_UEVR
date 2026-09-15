@@ -176,39 +176,33 @@ bool stability_reticle_hide_end() {
     return stab_on() && s_hide_dead;
 }
 
-void stability_xrlayer_early(uint32_t tick) {
-    if (!stab_on()) return;
-    // THE COMPOSITOR RETICULE's game-thread half, above every early-out so its config mirror,
-    // bring-up and liveness watchdog keep running on the ticks the aim stack parks on. With
-    // xrlayer=0 it stores the config mirror and returns (and tears down on the 1 -> 0 edge).
-    g_tick_stage = "xrlayer";
-    xrlayer_tick();
-    {
-        // LATCH ON FIRST LIVENESS, THEN STAY HIDDEN. xrlayer_live() is "a quad reached the runtime
-        // this window", so a quiet window would otherwise hand the world reticule back and show two
-        // crosshairs. Never live -> the world reticule stays, so a layer that never works can never
-        // leave the player with none.
-        static bool s_layer_ever_live = false;
-        if (!g_cfg.xr_layer) s_layer_ever_live = false;
-        else if (xrlayer_live()) s_layer_ever_live = true;
-        reticule_widget_set_scene_hidden(g_cfg.xr_layer && g_cfg.xr_layer_hide_ws != 0 && s_layer_ever_live);
+// THE COMPOSITOR RETICULE. The author's update() runs xrlayer_tick, the world-reticule latch,
+// reticule_mode3_reassert and xrsource_tick every tick, above the early-outs. This service used to
+// run its own copy of all four later in the same tick, so each ran twice and the two latches
+// disagreed (below). It now adds its two changes to the author's block instead.
+//
+// THE LATCH. The author's latch never clears, so switching xrlayer off after the layer was once
+// live left the world reticule hidden with no compositor reticule to replace it. Cleared while the
+// layer is off; called right after the author's liveness test, so a layer still live on the first
+// off tick cannot set it again.
+bool stability_xrlayer_latch_released() {
+    return stab_on() && !g_cfg.xr_layer;
+}
+
+// THE SOURCE WALK. With xrlayersrc=1 (the default) the author's xrsource_tick walks the hosted
+// crosshair's widget chain every tick even while the layer is off. Skipped while the layer is off,
+// and reset once on the way off so no resolved source outlives the layer.
+namespace { bool s_src_was_on = false; }
+bool stability_xrsource_wanted() {
+    if (!stab_on() || g_cfg.xr_layer) {
+        s_src_was_on = true;
+        return true;
     }
-    reticule_mode3_reassert();
-    {
-        // Resolves the hosted crosshair widget's render target to an ID3D12Resource and copies it
-        // into the layer's atlas. GATED ON xrlayer: with xrlayersrc=1 (the default) it walks the
-        // widget chain every tick even while the layer is off, which would be new work in a build
-        // that has the feature disabled.
-        static bool s_src_was_on = false;
-        if (g_cfg.xr_layer) {
-            xrsource_tick(tick);
-            s_src_was_on = true;
-        } else if (s_src_was_on) {
-            s_src_was_on = false;
-            xrsource_reset();
-        }
+    if (s_src_was_on) {
+        s_src_was_on = false;
+        xrsource_reset();
     }
-    g_tick_stage = "after xrlayer";
+    return false;
 }
 
 namespace { bool s_entered_dead = false; }

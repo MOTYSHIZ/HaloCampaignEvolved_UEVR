@@ -374,7 +374,8 @@ bool features_reticle_rescan_follow(bool hud_hide, int reticle_count) { return s
 void features_reticle_hide_begin() { stability_reticle_hide_begin(); }
 void features_reticle_hide_dead() { stability_reticle_hide_dead(); }
 bool features_reticle_hide_end() { return stability_reticle_hide_end(); }
-void features_xrlayer_early(uint32_t tick) { stability_xrlayer_early(tick); }
+bool features_xrlayer_latch_released() { return stability_xrlayer_latch_released(); }
+bool features_xrsource_wanted() { return stability_xrsource_wanted(); }
 void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
 bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
