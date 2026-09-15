@@ -296,6 +296,22 @@
 # Weapon camera sampling. 0 uses every camera sample, 1 skips samples taken while the camera moved, 2
 # pairs each with the midpoint, 3 skips and then holds a clean one.
 #meshconst=0
+# Weapon placement calibration key. Hold it, put your controller where the frozen weapon's grip is, and release:
+# the grip is saved for every weapon.
+#palettecalibkey=0x21
+# This weapon's placement calibration key. The same gesture, saved for the weapon in your hand only.
+#palwpncalibkey=0x24
+# The weapon placement calibration itself: grip offset, aim fix, aim offset and per-weapon trims. These are
+# measurements written by the two keys above and by the aim calibration (Page Down) while the weapon follows your
+# hand, not settings: do not hand-edit them. Captures are saved to halo_vr_palette_calib.cfg; the calibration menu's
+# weapon placement reset deletes that file and these values apply again.
+#palgripfix=0.000000,0.000000,0.000000,1.000000,0.012217,-0.003179,-0.024766
+#palaimfix=-0.069756,0.000000,0.000000,0.997564
+#palaimcalibver=2
+#palaimoffyaw=0.000
+#palaimoffpitch=0.000
+#palwpnfix=FP_AssaultRifle,0.000000,-0.017452,0.000000,0.999848,0.000159,-0.000435,-0.005567
+#palwpnfix=FP_Shotgun,0.000000,0.000000,0.000000,1.000000,0.000000,0.000000,0.000000
 # Manual reload: each weapon keeps its own reload state (0 the old memory, 1 per weapon type, 2 per weapon, 3 per weapon across a level load).
 #reloadstate=1
 # Manual reload: when a weapon's state is saved (1 every tick, 2 only when it leaves your hand).

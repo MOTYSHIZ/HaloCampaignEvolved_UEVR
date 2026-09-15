@@ -35,4 +35,8 @@ bool palette_calib_aim_reference_offset(float* yaw, float* pitch, bool* valid, f
 // (stamped palaimcalibver=2) and halo_vr_palette_calib.cfg.
 bool palette_calib_aim_calibrated(float off_yaw, float off_pitch, float frame_yaw);
 
+// palettewpn's menu_command slot: calibreset:palette deletes halo_vr_palette_calib.cfg (the shipped values return
+// with the reload it causes); calibreset:palwpn drops the held weapon's captured palwpnfix. Neither creates the file.
+bool palette_calib_menu_command(const std::string& line);
+
 } // namespace halo

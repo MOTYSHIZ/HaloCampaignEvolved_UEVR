@@ -5,6 +5,9 @@
 #include "core/registry/Features.hpp"   // features_layer
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode
 #include "uevr/API.hpp"
+#include "WeaponCalib.hpp"   // weapon_key
+
+#include <Windows.h>
 #include "Math.hpp"
 
 #include <cstdio>
@@ -187,6 +190,39 @@ bool palette_calib_aim_calibrated(float off_yaw, float off_pitch, float frame_ya
     uevr::API::get()->log_info("[Halo-CampE-UEVR] AIM CALIBRATED (palette weapon): offset yaw=%.1f pitch=%.1f -> halo_vr_palette_calib.cfg",
                                g_cfg.pal_aim_off_yaw, g_cfg.pal_aim_off_pitch);
     return true;
+}
+
+bool palette_calib_menu_command(const std::string& line) {
+    const bool file_there = g_pal_calib_path[0] != 0 && GetFileAttributesA(g_pal_calib_path) != INVALID_FILE_ATTRIBUTES;
+    if (line == "calibreset:palette") {
+        if (file_there) DeleteFileA(g_pal_calib_path);
+        uevr::API::get()->log_info(file_there
+            ? "[Halo-CampE-UEVR] PALETTECAL: removed halo_vr_palette_calib.cfg -- the shipped weapon placement calibration applies again"
+            : "[Halo-CampE-UEVR] PALETTECAL: no halo_vr_palette_calib.cfg to remove -- already on the shipped weapon placement calibration");
+        return true;
+    }
+    if (line == "calibreset:palwpn") {
+        const std::string key = weapon_key();
+        if (key.empty()) {
+            uevr::API::get()->log_info("[Halo-CampE-UEVR] PALETTECAL(WPN): nothing cleared -- no weapon in hand");
+            return true;
+        }
+        // A captured entry lives in the file; with the file gone there is nothing on disk to clear, and a rewrite here
+        // would create the file outside a capture.
+        for (int i = 0; file_there && i < g_cfg.pal_wpnfix_count; ++i) {
+            const WeaponFix& e = g_cfg.pal_wpnfix[i];
+            if (!e.captured || e.match[0] == 0 || key.find(e.match) == std::string::npos) continue;
+            for (int j = i; j + 1 < g_cfg.pal_wpnfix_count; ++j) g_cfg.pal_wpnfix[j] = g_cfg.pal_wpnfix[j + 1];
+            g_cfg.pal_wpnfix[--g_cfg.pal_wpnfix_count] = WeaponFix{};
+            pal_calib_write_file();
+            uevr::API::get()->log_info("[Halo-CampE-UEVR] PALETTECAL(WPN): cleared the captured placement for '%s' -- "
+                                       "its shipped value applies again with the reload", key.c_str());
+            return true;
+        }
+        uevr::API::get()->log_info("[Halo-CampE-UEVR] PALETTECAL(WPN): '%s' had no captured placement to clear", key.c_str());
+        return true;
+    }
+    return false;
 }
 
 } // namespace halo

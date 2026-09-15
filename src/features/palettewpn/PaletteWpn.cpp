@@ -46,6 +46,7 @@ void palette_wpn_released() {
 constinit const FeatureHooks kPaletteWpnHooks{
     .key      = "palettewpn",
     .parse_key = &palette_wpn_parse_key,
+    .menu_command = &palette_calib_menu_command,
     .gesture_reset      = &palette_wpn_gesture_reset,
     .rig_resolve_wanted = &palette_wpn_rig_resolve_wanted,
     .sim_record_written = &palette_wpn_sim_record_written,

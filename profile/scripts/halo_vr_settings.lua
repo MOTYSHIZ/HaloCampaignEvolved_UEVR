@@ -35,6 +35,9 @@
 --                                                                      handles: rocket launcher)
 --                                      calibreset:wpngrip           -> drop the EQUIPPED weapon's
 --                                                                      recorded handle
+--                                      calibreset:palette           -> delete halo_vr_palette_calib.cfg
+--                                      calibreset:palwpn            -> drop the EQUIPPED weapon's
+--                                                                      weapon placement capture
 -- If the catalog mirror is missing, the plugin is not loaded/current -- the menu says so.
 
 local REF_FILE    = "halo_vr_user_reference.txt"
@@ -114,6 +117,15 @@ local HINTS = {
     menudetect     = { t = "bool" },
     calibkey       = { t = "key" },
     aimcalibkey    = { t = "key" },
+    palettecalibkey = { t = "key" },
+    palwpncalibkey  = { t = "key" },
+    -- The weapon placement calibration: measurements its captures write, never edited from the menu.
+    palgripfix     = { hide = true },
+    palaimfix      = { hide = true },
+    palaimcalibver = { hide = true },
+    palaimoffyaw   = { hide = true },
+    palaimoffpitch = { hide = true },
+    palwpnfix      = { hide = true },
     hmdleash       = { t = "bool" },
     hmdleashlat    = { t = "slider", min = 0, max = 100 },   -- cm
     hmdleashvert   = { t = "slider", min = 0, max = 100 },   -- cm
@@ -199,6 +211,7 @@ local LABELS = {
     maprstickdown = "Right stick down presses", mapfrom = "Rebind this button", mapto = "...so it sends this button",
     mapmenuback = "Back button in menus", mapbtnlog = "Log button presses", menusuppress = "Pause remaps in menus",
     menudetect = "Detect menus", calibkey = "Weapon pose calibration key", aimcalibkey = "Aim calibration key",
+    palettecalibkey = "Weapon placement calibration key", palwpncalibkey = "This weapon's placement calibration key",
     hmdleash = "Keep the game camera with you", hmdleashlat = "Free movement sideways",
     hmdleashvert = "Free movement up and down", cutscenesize = "Cutscene screen size",
     aimreticule = "Show the reticule", aimreticuletrace = "Place the reticule on the surface you aim at",
@@ -974,6 +987,21 @@ local function draw_calib()
         imgui.set_tooltip("Deletes halo_vr_calib.cfg (this hand) -- the shipped Quest Touch fit\n" ..
                           "applies again within ~2 s. That is ALL THREE gestures at once: weapon\n" ..
                           "pose, aim ray and support hand. Recalibrate to redo them.")
+    end
+    imgui.spacing()
+
+    -- THE WEAPON PLACEMENT ("Weapon follows your hand") keeps its captures in its own file, so it has its own resets.
+    if imgui.button("Use shipped weapon placement calibration") then fire("calibreset:palette") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Deletes halo_vr_palette_calib.cfg -- the shipped grip, aim and per-weapon\n" ..
+                          "placement of 'Weapon follows your hand' applies again within ~2 s.\n" ..
+                          "Those are captured with Page Up (grip), Home (this weapon) and\n" ..
+                          "Page Down (aim) while that feature is on.")
+    end
+    if imgui.button("Use shipped weapon placement for THIS WEAPON") then fire("calibreset:palwpn") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Clears the Home capture for the weapon IN YOUR HANDS RIGHT NOW ->\n" ..
+                          "back to its shipped placement. If it has none, this does nothing and says so.")
     end
     imgui.spacing()
 
