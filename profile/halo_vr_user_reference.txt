@@ -435,6 +435,15 @@
 #vehcamguard=1
 # Vehicle seat camera: fall back to the chase anchor when the vehicle body stops matching.
 #vehcamhullcheck=1
+# Seat camera position. Where the seat camera sits, in centimetres (forward, right, up).
+#vehcamoff=20,0,-20
+# Seat camera smoothing. How quickly the chase-based seat camera follows changes in its distance, in
+# seconds.
+#vehcamboomtau=0.12
+# Vehicle facing. 1 reads which way the vehicle really points, 0 works it out from how it moves.
+#vehfacing=1
+# Steering direction. -1 or 1; flip it if the vehicle steers the wrong way.
+#vehsteersign=-1
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
 # Sidestep direction. -1 or 1; flip it only if stepping sideways moves you the wrong way.

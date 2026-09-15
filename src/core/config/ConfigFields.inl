@@ -1111,7 +1111,8 @@
     float veh_wheel_pos[3] = { 0.45f, -0.535f, 1.697f };
     float veh_wheel_radius = 0.24f;   // metres; the catch reaches 1.3x this, for rim grabs
     float veh_wheel_lock = 200.0f;   // hand rotation (deg) for full lock -- 90 was twitchy
-    int   veh_steer_sign = 1;        // flip if the hog steers the wrong way
+    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    int   veh_steer_sign = -1;       // flip if the hog steers the wrong way
     int   veh_wheel_grip = 1;        // 1 = grip holds the wheel (the natural gesture); 0 = hands-in-zone alone
     // Grip is ALSO the Warthog's brake (measured 0x0200 RB, 2026-08-20), so while the wheel is
     // held those bits are swallowed -- otherwise every steering input brakes. Let go of the
@@ -1131,7 +1132,8 @@
     // rendered view is MOVED to the seat: the pre-stereo callback hands us the camera position
     // as a writable pointer. 0 = off, 1 = while mounted, 2 = always (on-foot validation).
     int   veh_cam = 0;
-    float veh_cam_off[3] = { 0.0f, 0.0f, 78.0f };   // cm, added after conversion
+    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    float veh_cam_off[3] = { 20.0f, 0.0f, -20.0f };   // cm, added after conversion
     // Seat-camera position source: 0 = the rider's own position, 1 = the VEHICLE's. 0 measured
     // better 2026-08-21: the rider position lands on 95-100% of rendered frames against 91-97%
     // for the vehicle, and it is ALREADY at the seat.
@@ -1158,20 +1160,24 @@
     int   veh_hide_body = 0;
     // Low pass on the BOOM LENGTH only, seconds (anchor mode 1). The boom extends with speed
     // and that must be tracked; the frame-scale curve gap must not be.
-    float veh_cam_boom_tau = 0.5f;
+    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    float veh_cam_boom_tau = 0.12f;
     // Filter order on the boom: 1 = single pole, 2 = two poles at half the time constant each --
     // same group delay, twice the rolloff. Cascaded one-poles, so it cannot ring.
     int   veh_boom_order = 2;
     // Read the mounted vehicle's facing straight out of its object (+0x1D4, found by spin test:
     // swept 3226 deg as a unit vector) instead of inferring it from travel.
-    int   veh_facing = 0;
+    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    int   veh_facing = 1;
     int   veh_facing_off = 0x1D4;
     float veh_facing_bias = 0.0f;
     float veh_cam_scale = 304.8f;                   // cm per Blam world unit
     // IN-VEHICLE VIEW ORIENTATION. The vehicle can spin or roll under you; in VR that swings
     // the world around your head. With this on, the BASE view yaw follows the vehicle (forward
     // stays forward) and pitch/roll are flattened, with the headset adding free-look on top.
-    int   veh_view = 0;
+    // Default: the value the vehicle features are tuned with (halo_vr.cfg ships the same line).
+    // A setting of the seat camera: the view override acts only with vehcam on.
+    int   veh_view = 1;
     int   veh_view_flat = 1;    // zero the pitch/roll the vehicle contributes
     int   veh_log = 0;
 

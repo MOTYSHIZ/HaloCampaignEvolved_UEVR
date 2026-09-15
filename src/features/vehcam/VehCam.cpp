@@ -237,9 +237,11 @@ void wheel_markers_update(bool active) {
 void vehicle_update(float dt) {
     // The HEADING feeds the view anchor and the seat camera, not just the wheel, so this runs
     // whenever ANY vehicle feature is on. Gating the whole function on vehiclewheel meant that
-    // switching the steering off silently killed the heading the camera depends on.
+    // switching the steering off silently killed the heading the camera depends on. vehview is not
+    // one of them: it is a setting of the seat camera (the view override reads it only with vehcam
+    // on), so on its own it runs nothing here.
     const bool want_wheel = (g_cfg.vehicle_wheel != 0);
-    const bool want_any = want_wheel || g_cfg.veh_view != 0 || g_cfg.veh_cam != 0;
+    const bool want_any = want_wheel || g_cfg.veh_cam != 0;
     if (!g_cfg.enabled || !want_any) { vehicle_reset(); return; }
     seat_direct_refresh();   // vehseatdirect: live rider read that does not wait on the sim hook
     // Only while actually seated in something: the mounted flag is the biped's parent datum
