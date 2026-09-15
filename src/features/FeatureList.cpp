@@ -796,7 +796,13 @@ void features_config_loaded() {
     const uint32_t svc_off = s_service_mask & ~svc_now;
     // The reload engine first: its release reads the weapon object the resets below clear.
     const uint32_t kEngine = SVC_MANUAL_RELOAD_AVAILABLE | SVC_RACK_AVAILABLE;
-    if ((s_service_mask & kEngine) != 0 && (svc_now & kEngine) == 0) reload_engine_released();
+    if ((s_service_mask & kEngine) != 0 && (svc_now & kEngine) == 0) {
+        reload_engine_released();
+        // The held weapon's object index is the engine's to publish (nothing else writes it). Cleared with
+        // the engine even while another consumer keeps the weapon object service on, or the probe would go
+        // on resolving the weapon that was held when reload switched off.
+        if ((svc_now & SVC_WEAPON_OBJECT) != 0) weapon_object_reset();
+    }
     if ((svc_off & SVC_CAMERA_BOB) != 0) camera_bob_reset();
     if ((svc_off & SVC_HIDDEN_RELOAD) != 0) hidden_reload_reset();
     if ((svc_off & SVC_RACK_AVAILABLE) != 0) weapon_object_rack_reset();
