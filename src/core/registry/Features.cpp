@@ -116,7 +116,7 @@ const FeatureRow kFeatures[] = {
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
-      "", "", FEATURE_BOOL(slide_vr) },
+      "slideradius,slidetravel,slideoff,slidezoneback,slidepartrotaxis,slidefire", "", FEATURE_BOOL(slide_vr) },
     { "meleeleft",    1, Tier::Experimental, "Melee and grenades", "Punch with your other hand",
       "Your other hand can melee too.",
       "", "meleeswing", FEATURE_BOOL(melee_left) },

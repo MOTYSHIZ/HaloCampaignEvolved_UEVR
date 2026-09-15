@@ -539,12 +539,15 @@
     // mesh stem (the FlakCannon class renders the FuelRodCannon mesh).
     char  reload_skip_weapons[128] = "PlasmaPistol,PlasmaRifle,SentinelBeam,BeamRifle,EnergySword";
     int   slide_node = 0;
-    float slide_travel = 0.012f;
-    float slide_radius = 0.10f;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_travel = 0.03f;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_radius = 0.16f;
     float slide_sign = 1.0f;
     // Where the slide sits relative to the AIM hand, metres in the aim-fixed frame (right, up,
     // forward). The node's own world position is the third-person gun's, not the rendered one.
-    float slide_off[3] = {0.0f, 0.06f, 0.02f};
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_off[3] = {0.0f, 0.06f, -0.14f};
     // slide_zone: where the grab zone is. 1 = the slide PART's own rendered position (its bounds
     // centre, published every tick by the parts rebuild) -- no hand-relative guess; 0 = slide_off
     // from the aim hand (the fallback when no part exists). slide_zone_back: metres further back
@@ -565,7 +568,8 @@
     // @reloadonly makes the rack live only in the reload state (the shotgun: a chambered round
     // means the pump is just the foregrip, the hold takes it).
     bool  slide_zone_priority = true;
-    float slide_zone_back = 0.03f;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    float slide_zone_back = 0.0f;
     // After a reload the slide stays locked back and the trigger is dead until it is racked.
     bool  slide_lock_reload = true;
     // SLIDECHAMBER (2026-09-03): on an EMPTY gun the seat does not fire the game's reload; the
@@ -772,11 +776,12 @@
     // take precedence over the shipped table, so one short line retunes one gun
     // ("slidebones=Shotgun:PumpJnt_M@reloadonly@back=-0.08") without retyping the table.
     char  slide_bones_override[512] = "";
-    char  slide_bones[320] = "Magnum:Slide_M@back=0.03@insert=0.14,Shotgun:PumpJnt_M@reloadonly@everyshot@pump,BattleRifle:Ophandle_M,FuelRodCannon:Slider_M,AssaultRifle:Ejector_L,SniperRifle:Ejector_L,SMG:EjectorJnt_R,SpikeRifle:Hammer_M+HammerPin_M,NeedleRifle:EnergyRotatorJnt_M,RocketLauncher:Upperpart_R@rot@pulldown";
+    char  slide_bones[320] = "Magnum:Slide_M@back=0.03@insert=0.20,Shotgun:PumpJnt_M@reloadonly@everyshot@pump,BattleRifle:Ophandle_M,FuelRodCannon:Slider_M,AssaultRifle:Ejector_L,SniperRifle:Ejector_L,SMG:EjectorJnt_R,SpikeRifle:Hammer_M+HammerPin_M,NeedleRifle:EnergyRotatorJnt_M,RocketLauncher:Upperpart_R@rot@pulldown@up=-0.06@right=-0.05";
     // A rack spec may name several parts joined by + (they move together: spiker hammer and
     // pin) and end in @rot for a HINGE (the rocket launcher's clamp): the parts rotate about
     // slide_part_rot_axis (0 pitch, 1 yaw, 2 roll) by slide_part_rot_deg per cm of pull.
-    int   slide_part_rot_axis = 0;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    int   slide_part_rot_axis = 2;
     float slide_part_rot_deg = 6.0f;
     float slide_part_open_deg = 60.0f;   // a hinge's OPEN angle on the reload press (held until racked closed)
     // Weapons whose rack is required after EVERY seat, not only an empty one (the rocket
@@ -805,7 +810,8 @@
     // held at slide_fire_state (the enum value the ANIMSTATE probe names at a shot) and the
     // mesh's GlobalAnimRateScale is steered so the fire animation's time follows the hand from
     // 0 to slide_fire_back seconds (slide fully back), then runs to the end on release.
-    bool  slide_fire = true;
+    // Default: the value the rack is tuned with (halo_vr.cfg ships the same line).
+    bool  slide_fire = false;
     int   slide_fire_state = 19;     // measured 2026-09-03: a shot takes FirstPersonState 0 -> 19 for 0.8 s
     float slide_fire_back = 0.08f;
     // The idle-to-fire transition needs rate-scaled time to blend in; a frozen rate at entry

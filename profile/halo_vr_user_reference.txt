@@ -335,6 +335,24 @@
 # Markers stay put in the room. 1 keeps the belt magazine, the grab dots and dropped magazines fixed in
 # the room when you move your head; 0 places them from your head, so they shift as it moves.
 #roomanchor=1
+# Rack grab reach. How close your other hand must be to the slide, pump or handle to grab it, in
+# metres.
+#slideradius=0.16
+# Rack pull length. How far you pull the slide back before it clicks, in game units (0.012 is about
+# 3.7 cm).
+#slidetravel=0.03
+# Rack zone fallback position. Where the grab zone sits when a weapon has no separate slide part, in
+# metres from your aiming hand (right, up, forward).
+#slideoff=0,0.06,-0.14
+# Rack zone shift. Moves the grab zone further back along the barrel from the slide's centre, in
+# metres.
+#slidezoneback=0
+# Hinge axis. The axis a hinged part such as the rocket launcher's clamp turns about (0 pitch, 1 yaw,
+# 2 roll).
+#slidepartrotaxis=2
+# Rack through the fire animation. An older rack method that plays the weapon's own firing animation
+# while you pull; leave it off.
+#slidefire=0
 # Melee by swinging: your other hand can punch too.
 #meleeleft=1
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
