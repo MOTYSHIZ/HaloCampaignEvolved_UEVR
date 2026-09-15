@@ -291,7 +291,8 @@
     // the muzzle, at chest height and forward, while the reference is the unit's origin at the
     // feet, so a metre is not enough. The trigger gate below is what actually excludes NPC fire,
     // which is why this can be loose.
-    float force_tube_radius = 1.0f;
+    // Default 0.5, the value the gunstock is tuned with (halo_vr.cfg ships the same line).
+    float force_tube_radius = 0.5f;
     int   force_tube_fire_ms = 250;
     int   force_tube_channel = 0;
 

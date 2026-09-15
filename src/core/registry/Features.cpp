@@ -131,7 +131,7 @@ const FeatureRow kFeatures[] = {
       "wristradar,hudplacement,wristhudclasses,wristhudoff,wristhudrot,wristhudgap,wristhudclassesr,wristhudoffr,wristhudrotr,wristradarblip,wristradargain", "", FEATURE_BOOL(wrist_hud) },
     { "forcetube",    1, Tier::Experimental, "Haptics", "ForceTube gunstock",
       "A kick in the ForceTube gunstock on every round you fire.",
-      "forcetubekick", "", FEATURE_BOOL(force_tube) },
+      "forcetubekick,forcetuberadius", "", FEATURE_BOOL(force_tube) },
     { "vehcam",       1, Tier::Experimental, "Vehicles", "Vehicle seat camera",
       "A first-person view from your seat in vehicles.",
       "vehview,vehhidebody,vehcamguard,vehcamhullcheck", "blamangles", FEATURE_INT(veh_cam) },

@@ -404,6 +404,9 @@
 #wristradargain=1500
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
+# Your own shots only. How close to you a fired round must start to kick the gunstock, in game units
+# (1 is about 3 m).
+#forcetuberadius=0.5
 # Vehicle seat camera: the view turns with the vehicle and stays level.
 #vehview=1
 # Vehicle seat camera: hide your own body while seated (0 off, 1 hide, 2 hide and shrink).
