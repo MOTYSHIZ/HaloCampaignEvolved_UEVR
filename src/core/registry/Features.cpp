@@ -128,7 +128,7 @@ const FeatureRow kFeatures[] = {
       "", "holster,blamangles", FEATURE_BOOL(holster_poll_throw) },
     { "wristhud",     1, Tier::Experimental, "HUD", "Wrist HUD",
       "Shield, weapon and grenade readouts on your forearm, and the motion tracker on your wrist.",
-      "wristradar,hudplacement", "", FEATURE_BOOL(wrist_hud) },
+      "wristradar,hudplacement,wristhudclasses,wristhudoff,wristhudrot,wristhudgap,wristhudclassesr,wristhudoffr,wristhudrotr,wristradarblip,wristradargain", "", FEATURE_BOOL(wrist_hud) },
     { "forcetube",    1, Tier::Experimental, "Haptics", "ForceTube gunstock",
       "A kick in the ForceTube gunstock on every round you fire.",
       "forcetubekick", "", FEATURE_BOOL(force_tube) },

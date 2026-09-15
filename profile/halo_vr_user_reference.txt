@@ -382,6 +382,26 @@
 #wristradar=1
 # Wrist HUD: where the panels sit (0 on the wrists, 1 on the sides of the weapon).
 #hudplacement=0
+# Left wrist panels. The game's HUD panels shown on your other hand's forearm, by name, separated by
+# commas.
+#wristhudclasses=WBP_ShieldHealthBar,WBP_WeaponCradle,WBP_GrenadeCradle
+# Left panel position. Offset from that controller in metres (right, up, back along the forearm).
+#wristhudoff=-0.14,0.06,-0.41
+# Left panel angle. Rotation of those panels in degrees (pitch, yaw, roll).
+#wristhudrot=0,120,105
+# Left panel spacing. Distance between stacked panels along the forearm, in metres.
+#wristhudgap=0.18
+# Right wrist panels. The game's HUD panels shown on your aiming hand's wrist, by name, separated by
+# commas.
+#wristhudclassesr=WBP_MotionTracker
+# Right panel position. Offset from the aiming controller in metres (right, up, back).
+#wristhudoffr=0.17,0.01,-0.11
+# Right panel angle. Rotation of the aiming wrist's panels in degrees (pitch, yaw, roll).
+#wristhudrotr=-15,195,105
+# Radar dot size. Size of the dots on the wrist motion tracker.
+#wristradarblip=0.004
+# Radar dot brightness. Glow strength of the dots on the wrist motion tracker.
+#wristradargain=1500
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
 # Vehicle seat camera: the view turns with the vehicle and stays level.

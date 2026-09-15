@@ -206,10 +206,12 @@
     // (0x0E human / 0x0D covenant), 25 m range, moving-only, rotating with your facing.
     bool  wrist_radar = true;
     // Blip mesh scale, and the radar's world radius as a fraction of the tracker panel.
-    float wrist_radar_blip = 0.010f;
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_radar_blip = 0.004f;
     // Emissive gain on the coloured radar dots -- same pre-exposure problem as the hosted panels
     // (aimwidgetgain), separate knob because the dots are solid colour and saturate earlier.
-    float wrist_radar_gain = 200.0f;
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_radar_gain = 1500.0f;
     // In-plane rotation of the blip field on the panel, degrees, and a left/right mirror. The
     // blip frame rides the PANEL's pose, and the panel itself is rolled to sit on the forearm
     // (wristhudrotr), so "panel up" is not "ahead of you" by exactly that roll -- this is the
@@ -299,17 +301,23 @@
     // log line per distinct live WBP_ class -- because hosting REMOVES the widget from the flat
     // HUD and a guessed name would eat the wrong element. Fill it from the census log.
     bool  wrist_hud = false;
-    char  wrist_hud_classes[256] = "";
+    // Default: the three left-wrist panels the HUD is tuned with (halo_vr.cfg ships the same line), so
+    // the feature hosts panels when switched on from the menu; set it empty for the census.
+    char  wrist_hud_classes[256] = "WBP_ShieldHealthBar,WBP_WeaponCradle,WBP_GrenadeCradle";
     // Second list, anchored to the AIM hand's wrist (the motion tracker's natural home), with its
     // own placement keys below -- the two forearms are mirror poses, so shared offsets fit neither.
-    char  wrist_hud_classes_r[256] = "";
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    char  wrist_hud_classes_r[256] = "WBP_MotionTracker";
     // Controller-local anchor offset, metres (x right, y up, z back -- +z runs up the forearm).
-    float wrist_hud_off[3] = {0.0f, 0.02f, 0.12f};
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_hud_off[3] = {-0.14f, 0.06f, -0.41f};
     // Local orientation trim, degrees (pitch, yaw, roll), composed as a quaternion on the pose.
-    float wrist_hud_rot[3] = {0.0f, 0.0f, 0.0f};
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_hud_rot[3] = {0.0f, 120.0f, 105.0f};
     // World scale of each quad, and the along-forearm gap (m) between stacked slots.
     float wrist_hud_scale = 0.04f;
-    float wrist_hud_gap = 0.06f;
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_hud_gap = 0.18f;
     // DrawSize (px) requested for each hosted widget's render target.
     float wrist_hud_draw = 512.0f;
     // Quad blend mode: 0 = opaque (full rect, transparent art padding goes black), 1 = masked
@@ -329,8 +337,10 @@
     bool  wrist_hud_trigger = true;
     // Right-wrist placement, tuned independently of the left (wristhudoffr / wristhudrotr /
     // wristhudgapr). Same axes as the left keys, in the RIGHT controller's local frame.
-    float wrist_hud_off_r[3] = {0.0f, 0.0f, -0.22f};
-    float wrist_hud_rot_r[3] = {0.0f, 90.0f, 90.0f};
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_hud_off_r[3] = {0.17f, 0.01f, -0.11f};
+    // Default: the value the wrist HUD is tuned with (halo_vr.cfg ships the same line).
+    float wrist_hud_rot_r[3] = {-15.0f, 195.0f, 105.0f};
     float wrist_hud_gap_r = 0.18f;
     // HUD PLACEMENT (hudplacement, a sub-setting of wristhud): 0 = on the wrists (everything above,
     // unchanged), 1 = on the sides of the held weapon. On the weapon, every panel rides the drawn weapon
