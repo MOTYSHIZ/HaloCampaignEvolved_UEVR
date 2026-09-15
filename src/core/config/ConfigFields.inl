@@ -422,7 +422,8 @@
     // (profile dir, alpha = shape). Rolls with the gun like a real etched reticle.
     int   scope_reticle = 1;
     float scope_reticle_scale = 0.8f;   // relative to the lens size
-    float scope_reticle_tint[3] = { 1.0f, 1.0f, 1.0f };
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    float scope_reticle_tint[3] = { 0.02f, 0.02f, 0.02f };
     // GPU measurement (CPU timers cannot see render cost):
     // concmd: any engine console command, executed once each time the VALUE CHANGES (live) --
     // "stat unit" / "stat GPU" put the engine's own GPU pass timings on screen if this build

@@ -391,6 +391,8 @@
 # Shields and glass in the lens. 0 draws see-through surfaces such as shields into the lens image, and
 # this also applies to the main view; -1 leaves the game's setting alone.
 #scopeseptrans=0
+# Lens reticle colour. Red, green and blue of the etched reticle in the lens, from 0 to 1.
+#scopereticletint=0.02,0.02,0.02
 # Melee by swinging: your other hand can punch too.
 #meleeleft=1
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
