@@ -171,9 +171,20 @@
     // blipcolor=E1870013,0,0.6,1. The id is the object's leading dword (see g_blip_type); an
     // unlisted species takes blip_color_other and logs its id once, so the palette fills in from
     // play instead of needing a survey per level.
-    BlipColor blip_color[kMaxBlipColor];
-    int       blip_color_n = 0;
-    float     blip_color_other[3] = {0.85f, 0.85f, 0.95f};
+    // Default: the species palette the wrist radar is tuned with, in the order of the blipcolor lines
+    // halo_vr.cfg ships (a line for the same species replaces its entry).
+    BlipColor blip_color[kMaxBlipColor] = {
+        { 0xE1870013u, 0.10f, 0.55f, 1.00f },
+        { 0xF7A2162Au, 0.45f, 1.00f, 0.15f },
+        { 0xE82C06B5u, 0.75f, 0.20f, 1.00f },
+        { 0xF83915ADu, 0.10f, 0.55f, 1.00f },
+        { 0xF2540FF0u, 0.00f, 0.00f, 0.35f },
+        { 0xE1E2006Eu, 1.00f, 0.85f, 0.00f },
+        { 0xED740BFDu, 1.00f, 0.00f, 0.00f },
+        { 0xE22700B3u, 1.00f, 0.85f, 0.00f },
+    };
+    int       blip_color_n = 8;
+    float     blip_color_other[3] = {0.0f, 1.0f, 1.0f};
     // Bumped by every palette edit. The renderer builds one render target per species and caches
     // it for the session, so without this a live blipcolor change has nothing to act on -- the
     // colour only appeared on a species' FIRST sighting, which made the palette effectively
@@ -182,8 +193,21 @@
     // Name-keyed palette: repeatable `blipname=<class substring>,<r>,<g>,<b>`, e.g.
     // blipname=Grunt,1,0,0. Checked BEFORE the id palette, first match wins, and it survives
     // level loads where the id table does not.
-    BlipName  blip_name[kMaxBlipName];
-    int       blip_name_n = 0;
+    // Default: the name palette the wrist radar is tuned with, in the order of the blipname lines
+    // halo_vr.cfg ships (first match wins, and a line for the same name replaces its entry).
+    BlipName  blip_name[kMaxBlipName] = {
+        { "Flood", 1.00f, 0.85f, 0.00f },
+        { "Brute", 0.60f, 0.10f, 1.00f },
+        { "Hunter", 1.00f, 0.40f, 0.00f },
+        { "Spartan", 0.10f, 1.00f, 0.10f },
+        { "Elite", 0.10f, 0.30f, 1.00f },
+        { "Grunt", 0.15f, 0.55f, 1.00f },
+        { "Jackal", 0.00f, 0.85f, 0.65f },
+        { "Sentinel", 0.30f, 0.30f, 0.30f },
+        { "Marine", 1.00f, 1.00f, 1.00f },
+        { "Johnson", 1.00f, 1.00f, 1.00f },
+    };
+    int       blip_name_n = 10;
 
     // NATIVE-BLIP INVESTIGATION (trackerdump): one-shot on value CHANGE. Finds the live
     // WBP_MotionTracker instance and logs every UObject whose outer chain reaches it, plus every

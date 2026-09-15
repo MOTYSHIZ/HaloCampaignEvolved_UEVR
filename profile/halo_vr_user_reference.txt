@@ -419,6 +419,9 @@
 #wristradarblip=0.004
 # Radar dot brightness. Glow strength of the dots on the wrist motion tracker.
 #wristradargain=1500
+# Radar colour for other contacts. Red, green and blue of the dots for a contact with no colour of its
+# own, from 0 to 1.
+#blipcolorother=0.00,1.00,1.00
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
 # Your own shots only. How close to you a fired round must start to kick the gunstock, in game units
