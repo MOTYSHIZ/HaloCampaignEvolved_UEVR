@@ -537,6 +537,10 @@ void features_stereo_post_eye_publish(int index) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->stereo_post_eye_publish != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_publish(index);
 }
+bool palette_pose_weapon_quat(Quat* out) {
+    const auto* p = palette_pose_provider();
+    return p != nullptr && p->weapon_quat != nullptr && p->weapon_quat(out);
+}
 float palette_pose_roll_trim_deg() {
     const auto* p = palette_pose_provider();
     return (p != nullptr && p->roll_trim_deg != nullptr) ? p->roll_trim_deg() : 0.0f;

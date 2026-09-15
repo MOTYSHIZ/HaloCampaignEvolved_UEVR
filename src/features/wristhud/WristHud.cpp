@@ -33,9 +33,6 @@ using uevr::API;
 namespace halo {
 
 extern std::atomic<float> g_view_base_yaw;   // Plugin.cpp: the yaw handed to UEVR every frame
-// The palette weapon's world pose as last resolved (published in the palette weapon's Plugin.cpp block),
-// read only by hudwpnanchor 3 while armdriver 3 owns the weapon.
-extern std::atomic<float> g_dbg_pose_w_x, g_dbg_pose_w_y, g_dbg_pose_w_z, g_dbg_pose_w_w;
 
 std::atomic<bool> g_wristhud_lt{false};
 
@@ -869,8 +866,8 @@ bool wh_weapon_anchor(WhWpnAnchor* out) {
     Vec3 p{};
     if (rig == nullptr || !call_socket_location(rig, L"PrimaryWeapon", &p)) return false;
     if (how == 3) {
-        const Quat q{g_dbg_pose_w_x.load(std::memory_order_relaxed), g_dbg_pose_w_y.load(std::memory_order_relaxed),
-                     g_dbg_pose_w_z.load(std::memory_order_relaxed), g_dbg_pose_w_w.load(std::memory_order_relaxed)};
+        Quat q{};
+        if (!palette_pose_weapon_quat(&q)) return false;
         const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
         if (!(n > 0.5f) || !std::isfinite(n)) return false;
         out->pos = p; out->q = Quat{q.x / n, q.y / n, q.z / n, q.w / n}; out->how = 3;

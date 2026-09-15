@@ -17,6 +17,7 @@ struct PalettePoseProvider {
     bool (*stamped_intent)(bool two_back, float* yaw, float* pitch);   // the intent one or two snapshots back
     void (*mark)(int point, float yaw, float e0, float e1, float e2);  // the provider's STOMPLOG ring
     float (*roll_trim_deg)();                                    // the roll trim between grip rotation and weapon trim
+    bool (*weapon_quat)(Quat* out);                              // the drawn weapon's world rotation as last published (raw)
 };
 
 bool palette_pose_owns_aim();
@@ -27,5 +28,6 @@ bool palette_pose_stamp_available();
 bool palette_pose_stamped_intent(bool two_back, float* yaw, float* pitch);
 void palette_pose_mark(int point, float yaw, float e0, float e1, float e2);
 float palette_pose_roll_trim_deg();   // 0 with no provider
+bool palette_pose_weapon_quat(Quat* out);
 
 } // namespace halo

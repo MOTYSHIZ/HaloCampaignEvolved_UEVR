@@ -14,6 +14,7 @@ namespace halo {
 // The palette's measured barrel axis in the trimmed pose frame (Plugin.cpp BARRELAXIS), for aimbore=3.
 extern std::atomic<float> g_barrel_axis_x, g_barrel_axis_y, g_barrel_axis_z;
 extern std::atomic<bool>  g_barrel_axis_valid;
+extern std::atomic<float> g_dbg_pose_w_x, g_dbg_pose_w_y, g_dbg_pose_w_z, g_dbg_pose_w_w;   // PaletteFrame.cpp
 
 namespace {
 bool barrel_axis(Vec3* out) {
@@ -39,6 +40,12 @@ bool stamped_intent(bool two_back, float* yaw, float* pitch) {
     return true;
 }
 float roll_trim_deg() { return g_cfg.palette_roll_trim; }
+// The palette's WORLD pose as last resolved (PaletteFrame publishes), read raw: the consumer normalizes.
+bool weapon_quat(Quat* out) {
+    *out = Quat{g_dbg_pose_w_x.load(std::memory_order_relaxed), g_dbg_pose_w_y.load(std::memory_order_relaxed),
+                g_dbg_pose_w_z.load(std::memory_order_relaxed), g_dbg_pose_w_w.load(std::memory_order_relaxed)};
+    return true;
+}
 } // namespace
 
 constinit const PalettePoseProvider kPalettePoseProvider{
@@ -50,6 +57,7 @@ constinit const PalettePoseProvider kPalettePoseProvider{
     &stamped_intent,
     &stomp_mark,
     &roll_trim_deg,
+    &weapon_quat,
 };
 
 } // namespace halo
