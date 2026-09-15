@@ -987,7 +987,8 @@ void blam_palette_watch() {
 // CPU access: the sim's rebuild (writer) and the mesh sync's read (reader), each as module+RVA,
 // which is exactly where a hook lands a write that survives. Same trap list, handler and report
 // as palettewatch (our own module's accesses are filtered in the handler). Game thread.
-void blam_slide_watch() {
+// `release` = palettewpn switched off: disarm whatever is armed, whatever the keys say.
+void blam_slide_watch(bool release) {
     static uintptr_t s_armed = 0;
     auto disarm = [&](bool report) {
         arm_all(0);
@@ -999,7 +1000,7 @@ void blam_slide_watch() {
         }
         s_armed = 0;
     };
-    if (!g_cfg.slide_watch || g_cfg.palette_watch != 0) {
+    if (release || !g_cfg.slide_watch || g_cfg.palette_watch != 0) {
         if (s_armed != 0) {
             disarm(true);
             if (g_veh != nullptr && g_cfg.palette_watch == 0) { RemoveVectoredExceptionHandler(g_veh); g_veh = nullptr; }
@@ -6581,7 +6582,7 @@ void blam_palette_hook_tick() {
     // work from here with no hook at all, which is what a discovery tool has to be able to do.
     blam_palette_scan();
     blam_palette_watch();
-    blam_slide_watch();
+    blam_slide_watch(false);
     blam_palette_final_hook_tick();
     blam_palette_sniff_tick();
     blam_palette_term_tick();
@@ -6746,6 +6747,7 @@ void hooked_node_slerp(void* a, void* b, void* t, void* dst) {
 namespace {
 std::atomic<int> g_sniff_run{0};
 std::atomic<bool> g_sniff_started{false};
+std::atomic<uint32_t> g_sniff_gen{0};   // a thread exits once its generation is retired (release)
 struct SniffEv { double t_ms; int to_stock; float dist; };
 constexpr int kSniffCap = 8192;
 SniffEv g_sniff_ev[kSniffCap];
@@ -6765,9 +6767,11 @@ bool sniff_read_node(const float** out, float* x, float* y, float* z) {
         return false;
     }
 }
-DWORD WINAPI sniff_thread(LPVOID) {
+DWORD WINAPI sniff_thread(LPVOID arg) {
+    const uint32_t gen = (uint32_t)(uintptr_t)arg;
     int last_state = -1;   // 0 ours, 1 stock
     while (true) {
+        if (g_sniff_gen.load(std::memory_order_relaxed) != gen) return 0;
         if (g_sniff_run.load(std::memory_order_relaxed) == 0) { Sleep(50); last_state = -1; continue; }
         const float wx = g_dbg_node8_x.load(std::memory_order_relaxed);
         const float wy = g_dbg_node8_y.load(std::memory_order_relaxed);
@@ -6816,7 +6820,8 @@ void blam_palette_sniff_tick() {
     const bool was = g_sniff_run.load(std::memory_order_relaxed) != 0;
     if (want && !g_sniff_started.load(std::memory_order_relaxed)) {
         g_sniff_started.store(true, std::memory_order_relaxed);
-        HANDLE h = CreateThread(nullptr, 0, &sniff_thread, nullptr, 0, nullptr);
+        HANDLE h = CreateThread(nullptr, 0, &sniff_thread,
+                                (LPVOID)(uintptr_t)g_sniff_gen.load(std::memory_order_relaxed), 0, nullptr);
         if (h != nullptr) CloseHandle(h);
     }
     if (want && !was) g_sniff_run.store(1, std::memory_order_relaxed);
@@ -7115,6 +7120,34 @@ void blam_palette_release(const char* why, char* out, size_t cap) {
         API::get()->log_info("[Halo-CampE-UEVR] PALETTEWPN: released (%s): %s", why ? why : "?", buf);
     }
     if (out != nullptr && cap > 0) std::snprintf(out, cap, "palettewpn hooks %s", n ? buf : "none");
+}
+
+// PALETTEWPN SWITCHED OFF. The dev discovery instruments install things that outlive the ticks that
+// manage them (those ticks only run while the feature is on): hardware watchpoints on every thread and
+// the exception handler behind them (palettewatch, slidewatch), inline hooks on the renderer and the FP
+// poser (palettefinal, fpanimkill), a sampler thread (palsniff) and an unwritten row buffer (termlog).
+// All of it goes here. palettescan installs nothing (a sweep per call) and needs no release. Game thread.
+void blam_palette_instruments_release() {
+    blam_slide_watch(true);
+    if (g_watching.load(std::memory_order_relaxed)) {
+        arm_all(0);
+        g_watching.store(false, std::memory_order_relaxed);
+        report_writers();
+        for (int i = 0; i < kMaxWriters; ++i) {
+            g_writers[i].rip.store(0, std::memory_order_relaxed);
+            g_writers[i].n.store(0, std::memory_order_relaxed);
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] PALETTEWATCH: disarmed (palettewpn switched off)");
+    }
+    if (g_veh != nullptr) { RemoveVectoredExceptionHandler(g_veh); g_veh = nullptr; }
+    blam_palette_release("palettewpn switched off", nullptr, 0);
+    if (g_sniff_run.exchange(0, std::memory_order_relaxed) != 0) sniff_flush();
+    if (g_sniff_started.exchange(false, std::memory_order_relaxed)) g_sniff_gen.fetch_add(1, std::memory_order_relaxed);
+    if (termlog::g_was_on) {
+        termlog::g_was_on = false;
+        termlog::flush();
+        branchlog::flush();
+    }
 }
 
 } // namespace halo

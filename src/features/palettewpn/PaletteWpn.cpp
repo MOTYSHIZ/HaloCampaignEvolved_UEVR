@@ -8,6 +8,7 @@
 #include "features/palettewpn/PoseLatch.hpp"
 #include "features/palettewpn/PaletteFrame.hpp"
 #include "features/palettewpn/PaletteKeys.hpp"
+#include "features/palettewpn/BlamPalette.hpp"   // blam_palette_instruments_release
 #include <cstdio>
 #include "core/Services.hpp"
 
@@ -33,6 +34,11 @@ bool palette_wpn_enabled() { return g_cfg.palette_weapon || g_cfg.arm_driver == 
 void palette_wpn_gesture_reset() { palette_two_hand_reset(); }
 // The FP weapon-actor route and the rig component, while mode 3 owns.
 bool palette_wpn_rig_resolve_wanted() { return palette_weapon_mode(); }
+// Switched off: the arm hide it applied, then every dev instrument it left installed.
+void palette_wpn_released() {
+    palette_wpn_arm_hide_released();
+    blam_palette_instruments_release();
+}
 }  // namespace
 
 constinit const FeatureHooks kPaletteWpnHooks{
@@ -78,7 +84,7 @@ constinit const FeatureHooks kPaletteWpnHooks{
     .game_tick_after_rig_driver = &palette_wpn_game_tick_after_rig_driver,
     .enabled  = &palette_wpn_enabled,
     .services = SVC_MARKER_ANCHOR | SVC_CAMERA_BOB | SVC_WEAPON_OBJECT,
-    .released = &palette_wpn_arm_hide_released,
+    .released = &palette_wpn_released,
 };
 
 } // namespace halo

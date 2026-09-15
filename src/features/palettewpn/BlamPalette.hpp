@@ -185,6 +185,10 @@ int  blam_palette_pose_hook_sync();
 // FP anim kill) and drop the published pose, holds and freezes. Writes the removed ids to `out`
 // (may be null). The slide capture hook is NOT touched: it belongs to slidevr, not to placement.
 void blam_palette_release(const char* why, char* out, size_t cap);
+// palettewpn switched off (game thread): the dev discovery instruments too -- watchpoints and their
+// exception handler, the palettefinal and fpanimkill hooks with the pose hook, the palsniff thread,
+// and the termlog rows.
+void blam_palette_instruments_release();
 // True once the pose hook has refused this session (prologue mismatch or a failed install); the
 // arbiter then falls back to UeRig. blam_palette_retry() re-arms it on an armdriver key change.
 bool blam_palette_unavailable();
