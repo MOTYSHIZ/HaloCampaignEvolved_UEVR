@@ -14,8 +14,9 @@
 namespace halo {
 
 namespace {
-// The calibration file's palette lines (write_calib_file, between the rig fit and the aim offset). Written
-// whether or not the feature is enabled, so a measured fix is never dropped from the file.
+// The calibration file's palette line (write_calib_file, between the rig fit and the aim offset). Written
+// whether or not the feature is enabled, so a measured fix is never dropped from the file. aimfix is not
+// written here: the author's write_calib_file writes it, once.
 void palette_wpn_calib_file_write(FILE* f) {
     if (g_cfg.grip_fix_valid) {
         fprintf(f,
@@ -25,16 +26,6 @@ void palette_wpn_calib_file_write(FILE* f) {
             "gripfix=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\r\n",
             g_cfg.grip_fix[0], g_cfg.grip_fix[1], g_cfg.grip_fix[2], g_cfg.grip_fix[3],
             g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]);
-    }
-
-    if (g_cfg.aim_fix_valid) {
-        fprintf(f,
-            "# RIGID hand-to-aim mapping (Page Down). Quaternion x,y,z,w in the aim source pose's\r\n"
-            "# frame, applied to the pose before the forward vector is taken, so it rolls with the\r\n"
-            "# wrist like the gun does. Supersedes aimoffyaw/aimoffpitch. A measurement -- do not\r\n"
-            "# hand-edit.\r\n"
-            "aimfix=%.6f,%.6f,%.6f,%.6f\r\n",
-            g_cfg.aim_fix[0], g_cfg.aim_fix[1], g_cfg.aim_fix[2], g_cfg.aim_fix[3]);
     }
 }
 bool palette_wpn_enabled() { return g_cfg.palette_weapon || g_cfg.arm_driver == 3; }

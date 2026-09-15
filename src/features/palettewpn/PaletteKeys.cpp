@@ -120,16 +120,7 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
         }
         g_cfg.grip_fix_valid = (n == 7); return true;
     }
-    if (_stricmp(key, "aimfix") == 0) {
-        // 4 comma-separated floats: quaternion x,y,z,w in the aim source pose's frame. A
-        // measurement from the calibration file; see Config::aim_fix.
-        const char* s = val; int n = 0;
-        while (n < 4 && s != nullptr && *s != 0) {
-            g_cfg.aim_fix[n++] = (float)atof(s);
-            s = strchr(s, (int)0x2C); if (s != nullptr) ++s;
-        }
-        g_cfg.aim_fix_valid = (n == 4); return true;
-    }
+    // aimfix is not parsed here: the author's parse_config_file rung owns it, and that rung runs first.
     return false;
 }
 
