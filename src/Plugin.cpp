@@ -11575,6 +11575,13 @@ public:
 
                 // ---- TORSO FRAME A/B. Answers patorsoframe with a number instead of a feeling.
                 //
+                // !!! PROVEN UNABLE TO ANSWER ITS QUESTION (2026-09-14, one in-headset session). This
+                // measures the torso yaw in the PALETTE's own space, where root never rotates: its
+                // control, mode 0, read exactly 0.000 twice while the tester SAW mode 0 swing with
+                // the gun, and modes 3 and 4 both read ~1 while both visibly swung. In that frame a
+                // magnitude cannot separate the two signs. Kept only as a palette-space torso probe;
+                // for a world-space answer use paworld, immediately below the arm-driver branches.
+                //
                 // The modes differ by a SIGN, and PaletteArm.cpp says plainly that handedness between
                 // the UE rotator and the Blam basis is a coin-flip that costs a headset round-trip to
                 // settle. It has already cost one, and that attempt failed on the READOUT: "which felt
@@ -11676,6 +11683,213 @@ public:
                             "while aim swept %.0f) over %u ticks, rejected stale=%u stickturn=%u | %s | %s",
                             g_cfg.pa_torso_frame, r, ab_sum_torso, ab_sum_aim, ab_n, ab_stale, ab_turning,
                             verdict, expect);
+                    }
+                }
+            }
+
+            // ---- ARM WORLD PROBE (paworld=1): WHICH PART OF THE ARM SWINGS WITH THE AIM?
+            //
+            // WHY. The torso A/B above measured in the palette's own space and failed its control;
+            // the tester then SAW modes 3 and 4 both swing, which falsified "pick the right sign".
+            // With the shoulder anchor, wrist target and rest lift all already in the body frame, the
+            // arm still swings -- and reading the frame algebra produced two wrong guesses in a row.
+            // So this does not reason about frames. It measures in the one the player sees.
+            //
+            // THE FRAME: UE WORLD, from the RENDERED skeleton. GetSocketLocation on the rig mesh
+            // returns world positions -- the renderer's own numbers, no Blam conversion, no
+            // handedness to get wrong. Each point is taken RELATIVE TO THE CAMERA'S POSITION
+            // (translation only), so head bob and any camera orbit cancel while orientation stays
+            // world-fixed. A joint that ignores the aim barely moves in that frame; one glued to the
+            // aim-rotating camera sweeps an arc.
+            //
+            //     S = sum|d(P - cam)| / sum(|d aim| in rad * horizontal distance of P from cam)
+            //     S ~ 0  world-fixed (body-locked)            S ~ 1  rotates rigidly with the aim
+            //
+            // Placed AFTER both arm-driver branches, so it measures whichever driver owns the arms,
+            // and after the per-tick liveness guard, so the rig pointers are validated this tick.
+            //
+            // THREE CONTROLS, each able to FAIL -- the last two instruments had none that could:
+            //   * METRIC -- two synthetic points from the same inputs: one locked to the aim (must
+            //     read 1.00), one fixed in the world (must read 0.00). Off => the arithmetic is wrong
+            //     and nothing else on the line counts.
+            //   * IK-VISIBLE -- GetSocketLocation might return the game's own camera-glued animation
+            //     instead of the palette IK, and that pose ALSO rotates with the aim, so S ~ 1
+            //     everywhere would be the wrong answer for the wrong reason. On ticks where the aim
+            //     does NOT rotate, nothing glued to the camera can move; only IK following the
+            //     controller can. Pushing the gun forward and back must move the wrist well over
+            //     20 cm on those ticks, or the reads are not seeing the IK at all.
+            //   * BONES -- a socket name that does not exist makes GetSocketLocation quietly return
+            //     the COMPONENT's own origin. A candidate within 0.05 cm of it is unresolved, never
+            //     a joint.
+            //
+            // The aim side follows aim_left_hand -- never assume the right controller aims.
+            if (g_cfg.pa_world_probe && !g_in_menu.load() && !g_stick_mode.load()) {
+                auto* rc = reinterpret_cast<API::UObject*>(g_rig_component.load(std::memory_order_relaxed));
+                if (rc != nullptr && g_rig_parent != nullptr) {
+                    static API::UObject* wp_rc = nullptr;
+                    static int           wp_key = -1;
+                    static std::wstring  wp_name[3];                        // shoulder, elbow, wrist
+                    static bool          wp_have[3] = {false, false, false};
+                    static bool          wp_prev_ok = false;
+                    static Vec3          wp_prev_rel[5]{};                  // 3 joints + 2 synthetic
+                    static float         wp_prev_aim = 0.0f, wp_prev_body = 0.0f;
+                    static double        wp_path[5]{}, wp_ref[5]{};
+                    static double        wp_push = 0.0;
+                    static uint32_t      wp_turn_n = 0, wp_still_n = 0, wp_stickturn = 0;
+                    static uint32_t      wp_next = 128, wp_said = 0;
+
+                    const bool left = g_cfg.aim_left_hand;
+                    const int  key  = g_cfg.pa_torso_frame * 2 + (left ? 1 : 0);
+
+                    // ---- (Re)resolve on a new rig, aim side or torso mode, and start the tallies over.
+                    if (rc != wp_rc || key != wp_key) {
+                        wp_rc = rc;
+                        wp_key = key;
+                        for (int i = 0; i < 5; ++i) { wp_path[i] = 0.0; wp_ref[i] = 0.0; }
+                        wp_push = 0.0;
+                        wp_turn_n = wp_still_n = wp_stickturn = wp_said = 0;
+                        wp_next = 128;
+                        wp_prev_ok = false;
+
+                        Vec3 origin{};
+                        const bool have_origin = call_ret_vec3(rc, L"K2_GetComponentLocation", &origin);
+                        auto resolves = [&](const std::wstring& n) -> bool {
+                            Vec3 p{};
+                            if (!have_origin || !call_socket_location(rc, n.c_str(), &p)) return false;
+                            const float dx = p.x - origin.x, dy = p.y - origin.y, dz = p.z - origin.z;
+                            return (dx * dx + dy * dy + dz * dz) > (0.05f * 0.05f);
+                        };
+                        auto lower = [](std::wstring s) {
+                            for (auto& c : s) if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+                            return s;
+                        };
+
+                        // The real skeleton, once per rig -- so the next session has names, not guesses.
+                        std::vector<std::wstring> bones;
+                        {
+                            alignas(16) uint8_t pn[RIG_PARAM_BUF] = {0};
+                            rc->call_function(L"GetNumBones", pn);
+                            const int32_t nb = *reinterpret_cast<int32_t*>(pn);
+                            if (nb > 0 && nb <= 512) {
+                                bones.reserve((size_t)nb);
+                                for (int32_t b = 0; b < nb; ++b) {
+                                    alignas(16) uint8_t pb[RIG_PARAM_BUF] = {0};
+                                    *reinterpret_cast<int32_t*>(pb) = b;          // GetBoneName(int32@0) -> FName@4
+                                    rc->call_function(L"GetBoneName", pb);
+                                    bones.push_back(reinterpret_cast<API::FName*>(pb + 4)->to_string());
+                                }
+                            }
+                        }
+                        int logged = 0;
+                        for (const auto& b : bones) {
+                            const std::wstring lb = lower(b);
+                            const bool armish = lb.find(L"shoulder") != std::wstring::npos ||
+                                                lb.find(L"clavicle") != std::wstring::npos ||
+                                                lb.find(L"arm")      != std::wstring::npos ||
+                                                lb.find(L"elbow")    != std::wstring::npos ||
+                                                lb.find(L"wrist")    != std::wstring::npos ||
+                                                lb.find(L"hand")     != std::wstring::npos;
+                            if (armish && logged < 48) {
+                                ++logged;
+                                API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD bone: '%ls'", b.c_str());
+                            }
+                        }
+
+                        // Known rig socket names first; then skeleton bones on the aim side by keyword.
+                        const std::wstring sfx = left ? L"_L" : L"_R";
+                        const std::wstring sfx_lc = left ? L"_l" : L"_r";
+                        const std::wstring known[3] = { L"ShoulderArmor" + sfx, L"ElbowPart2" + sfx, L"Wrist" + sfx };
+                        static const wchar_t* const kKeys[3][3] = {
+                            { L"clavicle", L"upperarm", L"shoulder" },
+                            { L"forearm",  L"lowerarm", L"elbow"    },
+                            { L"wrist",    L"hand",     L"wrist"    } };
+                        for (int i = 0; i < 3; ++i) {
+                            wp_have[i] = false;
+                            wp_name[i].clear();
+                            if (resolves(known[i])) { wp_name[i] = known[i]; wp_have[i] = true; continue; }
+                            for (const auto& b : bones) {
+                                const std::wstring lb = lower(b);
+                                if (lb.size() < 2 || lb.compare(lb.size() - 2, 2, sfx_lc) != 0) continue;
+                                bool hit = false;
+                                for (int k = 0; k < 3; ++k) if (lb.find(kKeys[i][k]) != std::wstring::npos) { hit = true; break; }
+                                if (hit && resolves(b)) { wp_name[i] = b; wp_have[i] = true; break; }
+                            }
+                        }
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] ARMWORLD resolved (aim=%s, %u bones): shoulder='%ls' elbow='%ls' wrist='%ls'",
+                            left ? "L" : "R", (unsigned)bones.size(),
+                            wp_have[0] ? wp_name[0].c_str() : L"UNRESOLVED",
+                            wp_have[1] ? wp_name[1].c_str() : L"UNRESOLVED",
+                            wp_have[2] ? wp_name[2].c_str() : L"UNRESOLVED");
+                    }
+
+                    // ---- Sample.
+                    Vec3 cam{};
+                    Vec3 pj[3]{};
+                    bool ok = call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &cam);
+                    for (int i = 0; i < 3 && ok; ++i) {
+                        if (wp_have[i]) ok = call_socket_location(rc, wp_name[i].c_str(), &pj[i]);
+                    }
+                    const float aim  = g_dbg_view_in.load();
+                    const float body = g_dbg_view_out.load();
+                    if (ok) {
+                        const float ar = aim * 0.01745329252f;
+                        Vec3 rel[5]{};
+                        for (int i = 0; i < 3; ++i) rel[i] = Vec3{pj[i].x - cam.x, pj[i].y - cam.y, pj[i].z - cam.z};
+                        rel[3] = Vec3{50.0f * std::cos(ar), 50.0f * std::sin(ar), 0.0f};   // synthetic: aim-locked
+                        rel[4] = Vec3{50.0f, 0.0f, 0.0f};                                  // synthetic: world-fixed
+                        if (wp_prev_ok) {
+                            const float d_aim  = std::fabs(wrap180(aim  - wp_prev_aim));
+                            const float d_body = std::fabs(wrap180(body - wp_prev_body));
+                            if (d_body > 0.15f) {
+                                ++wp_stickturn;                                // the body moved: not this test
+                            } else if (d_aim > 0.3f) {
+                                const double da = (double)d_aim * 0.01745329252;
+                                for (int i = 0; i < 5; ++i) {
+                                    if (i < 3 && !wp_have[i]) continue;
+                                    const float dx = rel[i].x - wp_prev_rel[i].x;
+                                    const float dy = rel[i].y - wp_prev_rel[i].y;
+                                    const float dz = rel[i].z - wp_prev_rel[i].z;
+                                    wp_path[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                    wp_ref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
+                                }
+                                ++wp_turn_n;
+                            } else if (d_aim < 0.1f && wp_have[2]) {
+                                const float dx = rel[2].x - wp_prev_rel[2].x;
+                                const float dy = rel[2].y - wp_prev_rel[2].y;
+                                const float dz = rel[2].z - wp_prev_rel[2].z;
+                                wp_push += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                ++wp_still_n;
+                            }
+                        }
+                        for (int i = 0; i < 5; ++i) wp_prev_rel[i] = rel[i];
+                        wp_prev_aim  = aim;
+                        wp_prev_body = body;
+                        wp_prev_ok   = true;
+                    } else {
+                        wp_prev_ok = false;                                    // a failed read breaks the chain
+                    }
+
+                    // ---- Report on a COUNT, not a modulo, so a count that stalls on a boundary cannot
+                    // print the same line on every tick (the torso A/B above did exactly that).
+                    if (wp_turn_n >= wp_next && wp_said < 40) {
+                        wp_next = wp_turn_n + 128;
+                        ++wp_said;
+                        auto S = [&](int i) -> double { return (wp_ref[i] > 1e-6) ? wp_path[i] / wp_ref[i] : -1.0; };
+                        const double s_sh = S(0), s_el = S(1), s_wr = S(2), s_lock = S(3), s_fix = S(4);
+                        const bool metric_ok = std::fabs(s_lock - 1.0) < 0.05 && s_fix >= 0.0 && s_fix < 0.02;
+                        const bool ik_seen   = wp_push > 20.0;
+                        auto joint = [](double s) {
+                            return s < 0.0 ? "n/a" : s < 0.25 ? "WORLD-FIXED" : s > 0.6 ? "SWINGS WITH AIM" : "PARTIAL";
+                        };
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] ARMWORLD patorsoframe=%d | METRIC %s (aim-locked=%.2f want 1, "
+                            "world-fixed=%.2f want 0) | IK-VISIBLE %s (wrist moved %.1f cm over %u still-aim "
+                            "ticks, want >20) | S shoulder=%.2f %s | elbow=%.2f %s | wrist=%.2f %s | over %u "
+                            "turning ticks, stickturn=%u",
+                            g_cfg.pa_torso_frame, metric_ok ? "ok" : "FAILED", s_lock, s_fix,
+                            ik_seen ? "ok" : "NOT YET -- push the gun forward and back", wp_push, wp_still_n,
+                            s_sh, joint(s_sh), s_el, joint(s_el), s_wr, joint(s_wr), wp_turn_n, wp_stickturn);
                     }
                 }
             }

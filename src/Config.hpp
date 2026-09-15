@@ -3746,6 +3746,18 @@ struct Config {
     // handedness ambiguity this test exists to settle. See its site in Plugin.cpp for the rest.
     bool  pa_torso_ab     = false;
 
+    // ARM WORLD PROBE. Off by default; when on, four reflection calls per tick (camera position and
+    // three rig sockets) plus a one-shot bone enumeration per rig -- a diagnostic, not for play.
+    //
+    // Answers "which part of the arm swings with the aim?" in UE WORLD space, read from the
+    // RENDERED skeleton: the shoulder joint, the elbow, or only the arm's direction. Reports
+    // S = 0 (world-fixed) .. 1 (rotates rigidly with the aim) per joint, and carries three controls
+    // that can fail -- a synthetic metric check, an IK-visible check (push the gun forward and back
+    // with the aim held still), and a bone-resolution check. Replaces pa_torso_ab, which measured in
+    // the palette's own space and was shown by its own control to be unable to answer. See its site
+    // in Plugin.cpp.
+    bool  pa_world_probe  = false;
+
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends
     // the two along the shortest arc.
