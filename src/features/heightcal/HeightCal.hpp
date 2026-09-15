@@ -46,9 +46,6 @@ extern const FeatureHooks kHeightCalHooks;
 // The auto height keys (height*).
 bool heightcal_parse_key(const char* key, const char* val, double v);
 
-// The last XrFrameEndInfo::displayTime seen on the submit path (XrLayer.cpp). 0 = none yet.
-extern std::atomic<int64_t> g_xr_last_display_time;
-
 // GAME THREAD, once per tick, with the plausibility-gated HMD pose (UEVR pose space, metres).
 // `active` = on-foot gameplay (not a menu, vehicle or cutscene); while inactive the last origin Y is
 // held. `ignore` = actors the floor trace must not hit. Returns true when this feature owns the

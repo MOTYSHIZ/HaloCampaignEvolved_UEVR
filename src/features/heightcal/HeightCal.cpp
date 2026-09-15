@@ -7,6 +7,7 @@
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the floor trace ignores
 #include "core/EyeTrace.hpp"
+#include "core/XrDisplayTime.hpp"
 #include "core/host/PluginState.hpp"
 #include "XrLayerBridge.hpp"
 #include "thirdparty/openvr.h"
@@ -25,8 +26,6 @@
 using namespace uevr;
 
 namespace halo {
-
-std::atomic<int64_t> g_xr_last_display_time{0};
 
 namespace {
 
@@ -138,7 +137,7 @@ bool xr_probe(float hmd_y, float* out_off, float* out_resid) {
              (void*)sess);
     }
 
-    const int64_t t = g_xr_last_display_time.load(std::memory_order_relaxed);
+    const int64_t t = xr_display_time();
     if (t == 0) {
         // Probed at 2 Hz: 20 misses is ~10 s with no frame ever reaching the submit path.
         if (++g_xr.no_time >= 20) {

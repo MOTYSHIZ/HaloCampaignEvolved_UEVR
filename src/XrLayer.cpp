@@ -55,6 +55,7 @@
 // The SHIPPING attachment. Included after the OpenXR headers on purpose: XrLayerAbi.h pulls in the
 // same vendored copy, and both sides of the ABI must see one set of struct layouts.
 #include "XrLayerBridge.hpp"
+#include "core/XrDisplayTime.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -2913,6 +2914,7 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
 XRAPI_ATTR uint32_t XRAPI_CALL bridge_end_frame(XrSession session, const XrFrameEndInfo* info,
                                                 const XrCompositionLayerBaseHeader** out,
                                                 uint32_t cap, void* /*user*/) {
+    if (info != nullptr) halo::xr_display_time_note((int64_t)info->displayTime);
     return produce_layers(session, info, out, cap);
 }
 
@@ -2921,6 +2923,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hooked_end_frame(XrSession session, const XrFrame
     // Fail-open on every path below: anything unexpected forwards the call untouched.
     if (g_end_frame_orig == nullptr) return XR_ERROR_RUNTIME_FAILURE;
     if (info == nullptr) return g_end_frame_orig(session, info);
+    halo::xr_display_time_note((int64_t)info->displayTime);
 
     // The local array bound, and nothing more: room for UEVR's layers plus ours.
     constexpr uint32_t MAX_LAYERS = 32;
