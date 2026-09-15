@@ -938,6 +938,9 @@ thread_local bool t_ak_our_post = false;   // set around the plugin's own posts
 std::atomic<int> s_ak_log_left{0};
 // The muted id set and window, published for the audio thread.
 std::atomic<long long> g_ak_win_until{0};
+// The reload engine is ticking. The detours stay installed for the session; with this false they pass
+// every call straight through (see ak_engine_released).
+std::atomic<bool>      g_ak_engine_on{false};
 std::atomic<uint32_t>  g_ak_mute_ids[48];
 // Wwise's id of a name: FNV-1 32 over the lowercase bytes (verified against 12 logged ids).
 uint32_t ak_fnv(const std::string& name) { uint32_t h = 0x811C9DC5u; for (unsigned char ch : name) { h *= 0x01000193u; h ^= (uint32_t)tolower(ch); } return h; }
@@ -1000,7 +1003,7 @@ int ak_setposition_detour(uint64_t go, const void* pos, uint8_t flags) {
     if (!t_ak_our_post && pos != nullptr && go != 0 && go == g_ak_listener.load(std::memory_order_relaxed) && !IsBadReadPtr(pos, 48)) {
         memcpy(g_ak_head_pos, pos, 48); g_ak_head_pos_ok.store(true, std::memory_order_relaxed);
         const uint64_t held = g_ak_adopted.load(std::memory_order_relaxed);
-        if (g_cfg.ak_mimic == 7 && held != 0 && s_ak_setposition_orig) { t_ak_our_post = true; s_ak_setposition_orig(held, pos, flags); t_ak_our_post = false; }
+        if (g_ak_engine_on.load(std::memory_order_relaxed) && g_cfg.ak_mimic == 7 && held != 0 && s_ak_setposition_orig) { t_ak_our_post = true; s_ak_setposition_orig(held, pos, flags); t_ak_our_post = false; }
     }
     if (ak_window_open() && !t_ak_our_post && pos != nullptr && !IsBadReadPtr(pos, 48)) { if (auto* r = ak_recipe_for(go, true)) { memcpy(r->pos, pos, 48); r->has_pos = true; } }
     return s_ak_setposition_orig(go, pos, flags);
@@ -1008,7 +1011,7 @@ int ak_setposition_detour(uint64_t go, const void* pos, uint8_t flags) {
 AkUnregisterFn s_ak_unregister_orig = nullptr;
 std::atomic<uint64_t> g_ak_deferred_unreg{0};   // the sim's reload emitter whose unregister we held back
 int ak_unregister_detour(uint64_t go) {
-    if (g_cfg.ak_mimic == 7 && !t_ak_our_post && go != 0 && go < 0xFFFFFFull) {
+    if (g_ak_engine_on.load(std::memory_order_relaxed) && g_cfg.ak_mimic == 7 && !t_ak_our_post && go != 0 && go < 0xFFFFFFull) {
         const uint64_t held = g_ak_adopted.load(std::memory_order_relaxed);
         if (go == held) return 1;   // ours now; the sim thinks it is gone
         const uint64_t newest = g_ak_newest.load(std::memory_order_relaxed);
@@ -1358,6 +1361,22 @@ void ak_mute_tick() {
     if (s_akm_until == 0) return;
     if (now_ticks() < s_akm_until) { ak_mute_stop_tick(); return; }
     ak_id_mute_end();
+}
+// BOTH RELOAD FEATURES SWITCHED OFF (reload_engine_released, game thread). The Wwise detours stay
+// installed -- removing an inline hook while the audio thread may be inside it is the riskier move -- but
+// stand down: the flag above makes the akmimic 7 adoption and head-position push pass through, a mute
+// window still open is closed now (restoring the events it muted, which only the engine's own tick did),
+// and the sim emitter akmimic 7 was holding goes back to the engine. A detour already past the flag test
+// on another thread can still adopt one emitter; it is released the next time reload comes on and off.
+void ak_engine_released() {
+    g_ak_engine_on.store(false, std::memory_order_relaxed);
+    if (s_akm_n > 0 || s_akm_until != 0 || g_ak_win_until.load(std::memory_order_relaxed) != 0) ak_id_mute_end();
+    const uint64_t held = g_ak_adopted.exchange(0, std::memory_order_relaxed);
+    if (held != 0 && s_ak_unregister_orig != nullptr) {
+        t_ak_our_post = true; s_ak_unregister_orig(held); t_ak_our_post = false;
+        if (g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] AKMIMIC7: released the held sim emitter 0x%llX (reload switched off)", (unsigned long long)held);
+    }
+    g_ak_newest.store(0, std::memory_order_relaxed);
 }
 // reloadstepsound: "Weapon:drop=Ev,seat=Ev,rack=Ev;*:drop=Ev" -- the event for this weapon and step.
 std::string ak_step_event_in(const char* table, const char* step) {

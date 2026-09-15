@@ -134,6 +134,7 @@ void reload_engine_tick_begin(float dt, bool active) {
     reload_anim_rate_tick();
     reload_state_hold_tick();
     if (!active) return;
+    g_ak_engine_on.store(true, std::memory_order_relaxed);
     mag_dump_probe();
     anim_dump_tick();
     anim_vars_tick();
@@ -544,6 +545,7 @@ void reload_engine_ticks(bool poses_ok, const Vec3& hpos) {
 void reload_engine_released() {
     reload_release_all("manual reload and rack switched off");
     s_reload_on = false;
+    ak_engine_released();   // the Wwise detours stand down, an open mute window closes, an adopted emitter goes back
     // The state went Idle above with the engine already off, so its state hook did not run: the magazine
     // comes back, and the well marker, the slide into the well, the rack parts and the holds let go here.
     mag_hide_apply(false);
