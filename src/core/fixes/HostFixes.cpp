@@ -192,6 +192,19 @@ bool stability_xrlayer_latch_released() {
 // THE SOURCE WALK. With xrlayersrc=1 (the default) the author's xrsource_tick walks the hosted
 // crosshair's widget chain every tick even while the layer is off. Skipped while the layer is off,
 // and reset once on the way off so no resolved source outlives the layer.
+// THE MOVEMENT PROBE. The author's update() samples the camera and logs a PROBE line on every
+// step while the stick is held: an engine call per sample, found spamming a play session
+// (2026-09-02). Gated on the dev key moveprobe, as the fork gated it.
+bool stability_move_probe_allowed() {
+    return !stab_on() || g_cfg.move_probe;
+}
+
+// EXTRA STEAL BITS (stealextra). Pad bits stripped alongside the author's holster steal, for a
+// code the button log names (2026-09-04: left X still threw a grenade). Steal only, never injected.
+unsigned short stability_steal_extra_mask() {
+    return stab_on() ? (unsigned short)g_cfg.steal_extra_mask : (unsigned short)0;
+}
+
 namespace { bool s_src_was_on = false; }
 bool stability_xrsource_wanted() {
     if (!stab_on() || g_cfg.xr_layer) {

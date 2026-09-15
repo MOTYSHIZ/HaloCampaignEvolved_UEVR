@@ -30,6 +30,8 @@ void stability_reticle_hide_dead();
 bool stability_reticle_hide_end();               // true = a hosted crosshair died: rescan
 bool stability_xrlayer_latch_released();        // the author's reticule latch: true = the layer is off, clear it
 bool stability_xrsource_wanted();               // the author's xrsource_tick: false = the layer is off, skip
+bool stability_move_probe_allowed();            // the author's movement PROBE: false = moveprobe is off
+unsigned short stability_steal_extra_mask();    // stealextra bits for the author's holster steal, or 0
 void stability_stick_mode_want(bool want);       // note a stick-mode entry on the death camera
 bool stability_stick_exit_after_death();         // true = the exit re-anchored after a death
 void stability_turn_gate_note(bool fp_control_now);   // turnlog: a flick a gate swallowed

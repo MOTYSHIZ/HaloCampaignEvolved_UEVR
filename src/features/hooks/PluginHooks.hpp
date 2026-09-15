@@ -36,6 +36,9 @@ void features_xinput_after_calib_trigger(_XINPUT_STATE* state);
 // on_xinput_get_state (the XInput hook's thread), right before the vehicle hard brake's pad-side
 // delivery, after the movement rotation and the d-pad shift.
 void features_xinput_before_brake(_XINPUT_STATE* state);
+// on_xinput_get_state (the XInput hook's thread), the holster steal: extra pad bits OR-ed into the
+// author's steal mask (0 = none).
+unsigned short features_steal_extra_mask();
 
 // update() (game thread), right after scope_frame_end(tick).
 void features_game_tick_late();
@@ -122,6 +125,8 @@ bool features_reticle_hide_end();
 bool features_xrlayer_latch_released();
 // update() (game thread), the author's xrsource_tick call: false = skip the walk this tick.
 bool features_xrsource_wanted();
+// update() (game thread), the author's movement PROBE condition: false = do not sample this tick.
+bool features_move_probe_allowed();
 // update() (game thread), the stick-mode detector, right after the force overrides decide `want`.
 void features_stick_mode_want(bool want);
 // update() (game thread), the stick-mode exit: true = re-anchored after a death (skips the fold).

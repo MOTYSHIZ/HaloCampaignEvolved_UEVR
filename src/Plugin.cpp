@@ -8502,7 +8502,7 @@ void update() {
         const float lx = g_out_lx.load(), ly = g_out_ly.load();
         const float mag = std::sqrt(lx * lx + ly * ly);
 
-        if (g_rig_parent != nullptr && mag > 0.5f) {
+        if (features_move_probe_allowed() && g_rig_parent != nullptr && mag > 0.5f) {
             Vec3 now{};
             if (call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &now)) {
                 if (probe_have && (tick - probe_tick) >= 12) {
@@ -12684,7 +12684,7 @@ public:
             // that button. Ours is body-frame only, so the premise does not hold here. That is
             // what made this steal look justified while it was quietly disabling a control.
             const WORD steal = (WORD)((WORD)g_cfg.holster_throw_mask
-                                    | (WORD)g_cfg.holster_gswitch_mask);
+                                    | (WORD)g_cfg.holster_gswitch_mask | features_steal_extra_mask());
             const WORD before = state->Gamepad.wButtons;
             state->Gamepad.wButtons &= (WORD)~steal;
             if (g_cfg.map_btn_log && before != state->Gamepad.wButtons) {

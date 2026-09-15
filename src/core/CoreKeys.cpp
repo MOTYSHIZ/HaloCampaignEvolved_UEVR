@@ -20,7 +20,8 @@ bool core_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehfacingoff")   == 0) { g_cfg.veh_facing_off = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "vehlog")         == 0) { g_cfg.veh_log = (int)v; return true; }
     if (_stricmp(key, "vehseatpub")     == 0) { g_cfg.veh_seat_pub = (int)v; return true; }
-    // SVC_WEAPON_OBJECT (core/WeaponObject), core/MarkerFaces, and two keys with no reader (see the bug list).
+    // SVC_WEAPON_OBJECT (core/WeaponObject), core/MarkerFaces, and two stabilityfixes gates on the author's
+    // code (core/fixes/HostFixes): moveprobe (his movement PROBE) and stealextra (extra holster steal bits).
     if (_stricmp(key, "magrender")      == 0) { g_cfg.mag_render = (int)v; return true; }
     if (_stricmp(key, "moveprobe")      == 0) { g_cfg.move_probe     = (v != 0.0); return true; }
     if (_stricmp(key, "roomanchor")     == 0) { g_cfg.room_anchor = (int)clampf((float)v, 0.0f, 1.0f); return true; }

@@ -376,6 +376,8 @@ void features_reticle_hide_dead() { stability_reticle_hide_dead(); }
 bool features_reticle_hide_end() { return stability_reticle_hide_end(); }
 bool features_xrlayer_latch_released() { return stability_xrlayer_latch_released(); }
 bool features_xrsource_wanted() { return stability_xrsource_wanted(); }
+bool features_move_probe_allowed() { return stability_move_probe_allowed(); }
+unsigned short features_steal_extra_mask() { return stability_steal_extra_mask(); }
 void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
 bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
