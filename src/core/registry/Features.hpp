@@ -10,6 +10,9 @@ namespace halo {
 
 // load_config: before the first file is parsed.
 void features_begin_load();
+// load_config, immediately before g_cfg is reset: with stabilityfixes on, hook threads read a copy of the
+// cfg until features_apply has written the reload's last value (core/config/CfgRead.hpp).
+void features_config_reload_begin();
 // load_config: the kConfigFiles index about to be parsed, so an explicit key knows its source.
 void features_set_layer(int layer);
 // parse_config_file: every key line, before it is applied.

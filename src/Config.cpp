@@ -1954,6 +1954,7 @@ void load_config() {
     // Costs users nothing: `yield` is a `constexpr false` in release builds, so this is dev-only.
     const int keep_blam_aim = g_cfg.blam_aim;
 
+    features_config_reload_begin();   // FEATURE REGISTRY hook: hook threads read a copy while g_cfg is rebuilt
     g_cfg = Config{};
     g_cfg.blam_aim = keep_blam_aim;
     // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset

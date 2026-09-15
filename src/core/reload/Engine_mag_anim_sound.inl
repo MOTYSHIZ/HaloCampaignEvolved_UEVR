@@ -1000,6 +1000,7 @@ int ak_setrtpc_detour(uint32_t rtpc, float value, uint64_t go, int32_t ms, int32
     return s_ak_setrtpc_orig(rtpc, value, go, ms, curve, bypass);
 }
 int ak_setposition_detour(uint64_t go, const void* pos, uint8_t flags) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (!t_ak_our_post && pos != nullptr && go != 0 && go == g_ak_listener.load(std::memory_order_relaxed) && !IsBadReadPtr(pos, 48)) {
         memcpy(g_ak_head_pos, pos, 48); g_ak_head_pos_ok.store(true, std::memory_order_relaxed);
         const uint64_t held = g_ak_adopted.load(std::memory_order_relaxed);
@@ -1011,6 +1012,7 @@ int ak_setposition_detour(uint64_t go, const void* pos, uint8_t flags) {
 AkUnregisterFn s_ak_unregister_orig = nullptr;
 std::atomic<uint64_t> g_ak_deferred_unreg{0};   // the sim's reload emitter whose unregister we held back
 int ak_unregister_detour(uint64_t go) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_ak_engine_on.load(std::memory_order_relaxed) && g_cfg.ak_mimic == 7 && !t_ak_our_post && go != 0 && go < 0xFFFFFFull) {
         const uint64_t held = g_ak_adopted.load(std::memory_order_relaxed);
         if (go == held) return 1;   // ours now; the sim thinks it is gone
@@ -1074,6 +1076,7 @@ void ak_ours_tick() {
     for (auto& o : s_ak_ours) if (o.go != 0 && t - o.at > ms_to_ticks(4000)) { s_ak_unregister(o.go); o.go = 0; }
 }
 uint32_t ak_post_detour(uint32_t id, uint64_t go, uint32_t flags, void* cb, void* cookie, uint32_t next, void* pext, uint32_t playing) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const long long until = g_ak_win_until.load(std::memory_order_relaxed);
     const bool in_window = until != 0 && now_ticks() < until;
     bool muted = false;

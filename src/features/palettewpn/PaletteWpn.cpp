@@ -1,4 +1,5 @@
 #include "features/palettewpn/PaletteWpn.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "features/palettewpn/PaletteArmDriver.hpp"   // palette_weapon_mode(), the arbiter and arm hide slots
 #include "Config.hpp"
@@ -29,7 +30,7 @@ void palette_wpn_calib_file_write(FILE* f) {
             g_cfg.grip_fix[4], g_cfg.grip_fix[5], g_cfg.grip_fix[6]);
     }
 }
-bool palette_wpn_enabled() { return g_cfg.palette_weapon || g_cfg.arm_driver == 3; }
+bool palette_wpn_enabled() { CFG_HOOK_READ; return g_cfg.palette_weapon || g_cfg.arm_driver == 3; }
 // The palette weapon's own hold (armdriver mode 3); a no-op when idle.
 void palette_wpn_gesture_reset() { palette_two_hand_reset(); }
 // The FP weapon-actor route and the rig component, while mode 3 owns.

@@ -1,4 +1,5 @@
 #include "features/slidevr/SlideVr.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
@@ -18,7 +19,7 @@ bool slide_vr_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
-bool slide_vr_enabled() { return g_cfg.slide_vr; }
+bool slide_vr_enabled() { CFG_HOOK_READ; return g_cfg.slide_vr; }
 }  // namespace
 
 constinit const FeatureHooks kSlideVrHooks{

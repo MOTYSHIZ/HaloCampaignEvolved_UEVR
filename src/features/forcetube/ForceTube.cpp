@@ -1,4 +1,5 @@
 #include "ForceTube.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"      // unit position (the player filter) + sim_tls layout doctrine
 #include "core/UnitState.hpp"
@@ -68,6 +69,7 @@ int      s_hook_id = -1;
 bool     s_hook_refused = false;
 
 uintptr_t hooked_create_for_haptics(uintptr_t params) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // SIM THREAD: atomics and arithmetic only. A spawn whose muzzle origin sits on the player is
     // the player's round; NPC fire from further than ~4.5 m never matches, and the rare enemy
     // shooting from inside your chest has bigger problems than a phantom kick.
@@ -208,7 +210,7 @@ void forcetube_game_tick_late() {
 } // namespace
 
 namespace {
-bool force_tube_enabled() { return g_cfg.force_tube; }
+bool force_tube_enabled() { CFG_HOOK_READ; return g_cfg.force_tube; }
 }  // namespace
 
 constinit const FeatureHooks kForceTubeHooks{

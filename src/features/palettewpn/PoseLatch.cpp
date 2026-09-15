@@ -1,4 +1,5 @@
 #include "features/palettewpn/PoseLatch.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "core/Services.hpp"   // SVC_POSE_INTENTS: a consumer wants the stamped intents
@@ -72,6 +73,7 @@ std::atomic<float> g_intent_prev2_y{0.0f}, g_intent_prev2_p{0.0f};
 std::atomic<bool>  g_intent_prev2_ok{false};
 
 void pose_latch_refresh(int site) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Only while the palette weapon (armdriver mode 3) owns the aim: a latched hand sample is part of
     // that stack's frame audit, and the author's aim path reads the live pose.
     const int mode = palette_weapon_mode() ? g_cfg.pose_latch : 0;
@@ -141,6 +143,7 @@ void pose_latch_refresh(int site) {
 
 // The latched pose for idx, or false when the live read must be used.
 bool pose_latch_lookup(UEVR_TrackedDeviceIndex idx, bool use_aim, API::VR::Pose* out) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const int mode = palette_weapon_mode() ? g_cfg.pose_latch : 0;
     if (mode == 0 || idx < 0) return false;
     bool hit = false;
@@ -185,6 +188,7 @@ void aim_writer_note_blam(float yaw_deg, float pitch_deg) {
     g_wa_blam_ms.store(snap_now_ms(), std::memory_order_relaxed);
 }
 void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.palette_weapon_log == 0) return;     // diagnostic only; no work in play
     static double s_sum = 0.0, s_max = 0.0;
     static uint32_t s_n = 0, s_skip = 0;
@@ -212,9 +216,10 @@ void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
 // zero, so the loop cannot become a third writer) but skip the UE write, leaving the Blam
 // record as the ONLY aim writer. The honest single-writer test: blamangles=0 instead left
 // nothing moving the aim at all (hand vs ControlRotation corr +0.21/-0.34/-0.09).
-bool palette_wpn_aim_direct_write_skipped() { return g_cfg.aim_direct_write == 0; }
+bool palette_wpn_aim_direct_write_skipped() { CFG_HOOK_READ; return g_cfg.aim_direct_write == 0; }
 
 void palette_wpn_aim_direct_written(float yaw, float pitch) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Point 22: the UE direct write, stamped with the snapshot this thread's hand came from.
     if (g_cfg.stomp_log != 0) stomp_mark(22, yaw, pitch, (float)pose_latch_last_gen(),
                (float)g_tick_id.load(std::memory_order_relaxed));

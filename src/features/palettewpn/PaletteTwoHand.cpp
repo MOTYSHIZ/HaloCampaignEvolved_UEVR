@@ -1,4 +1,5 @@
 #include "Config.hpp"
+#include "core/config/CfgRead.hpp"
 #include "Markers.hpp"            // the grab-zone marker rides the holster marker machinery
 #include "core/MarkerFaces.hpp"
 #include "UeObject.hpp"           // TrackedObject for that marker
@@ -256,6 +257,7 @@ void palette_two_hand_update(float dt) {
 }
 
 bool palette_two_hand_blend(Vec3* fwd) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (fwd == nullptr) return false;
     const float blend = g_th_blend.load(std::memory_order_acquire);
     if (!(blend > 0.0f)) return false;

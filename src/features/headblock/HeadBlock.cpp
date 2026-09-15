@@ -1,4 +1,5 @@
 #include "HeadBlock.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"               // g_unit_mounted: the trace stands down while mounted
 #include "core/UnitState.hpp"
@@ -53,6 +54,7 @@ int headblock_clamp_mode() {
 }
 
 void headblock_clamp_shift(int mode, const double c[3]) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
         double s[3] = {0.0, 0.0, 0.0};
         if (mode == 3) {
             // Horizontal only (UE Z is up): a crouch is not a lean.
@@ -234,7 +236,7 @@ void headblock_game_tick_after_leash() {
 }  // namespace
 
 namespace {
-bool head_block_enabled() { return g_cfg.head_block != 0; }
+bool head_block_enabled() { CFG_HOOK_READ; return g_cfg.head_block != 0; }
 }  // namespace
 
 constinit const FeatureHooks kHeadBlockHooks{

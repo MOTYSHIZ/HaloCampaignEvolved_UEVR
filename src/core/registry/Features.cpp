@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "features/FeatureList.hpp"
 #include "features/hooks/ConfigHooks.hpp"   // features_menu_status_line
+#include "core/config/CfgRead.hpp"
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -238,6 +239,8 @@ void features_begin_load() {
     s_pose_latch_layer = -1;
 }
 
+void features_config_reload_begin() { cfg_reload_begin(); }
+
 void features_set_layer(int layer) { s_layer = layer; }
 
 void features_note_key(const char* key, const char* val) {
@@ -276,6 +279,9 @@ void features_apply() {
     //   placement off they stay at 0 and the author's pose path is untouched.
     if (s_palette_hook_layer < 0) g_cfg.palette_hook = g_cfg.palette_weapon ? 1 : 0;
     if (s_pose_latch_layer < 0)   g_cfg.pose_latch   = g_cfg.palette_weapon ? 2 : 0;
+
+    // The reload's last write: hook threads read g_cfg again.
+    cfg_reload_end();
 }
 
 // ---- WHAT IS ACTUALLY RUNNING (data\halo_vr_effective.txt). The catalog carries each switch's

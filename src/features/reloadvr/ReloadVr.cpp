@@ -1,4 +1,5 @@
 #include "features/reloadvr/ReloadVr.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "core/Services.hpp"
@@ -6,7 +7,7 @@
 namespace halo {
 
 namespace {
-bool reload_vr_enabled() { return g_cfg.reload_vr; }
+bool reload_vr_enabled() { CFG_HOOK_READ; return g_cfg.reload_vr; }
 }  // namespace
 
 constinit const FeatureHooks kReloadVrHooks{

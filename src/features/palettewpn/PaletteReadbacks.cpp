@@ -1,4 +1,5 @@
 #include "features/palettewpn/PaletteReadbacks.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "features/palettewpn/PoseLatch.hpp"   // pose_latch_last_gen, aim_writer_note_blam
@@ -80,6 +81,7 @@ bool blam_ctl_read_ue_deg(float* yaw_deg, float* pitch_deg) {
 }
 
 void palette_wpn_sim_record_written(float yaw, float pitch) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     aim_writer_note_blam(yaw, pitch);
     if (g_cfg.stomp_log != 0) {   // Point 23: the Blam record write, once per snapshot generation (this runs ~2600/s).
         static uint32_t s_last_gen = 0xFFFFFFFFu;

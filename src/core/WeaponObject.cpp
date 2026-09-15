@@ -1,4 +1,5 @@
 #include "core/WeaponObject.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "core/Services.hpp"
@@ -93,6 +94,7 @@ namespace {
 // run along its Y (the barrel, by the authoring convention) so the slide can be named by eye,
 // the same way the arms rig was walked.
 void weapon_object_nodes_probe() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // The palette-node slide (superseded by the native parts, slideparthide 7) is the only thing
     // this per-frame memory walk served; with native parts it only froze the game every second
     // with its readback (2026-09-06). It runs for its own debug keys, or for a non-native slide.

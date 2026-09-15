@@ -1,4 +1,5 @@
 #include "HeightCal.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"
 #include "core/UnitState.hpp"
@@ -917,7 +918,7 @@ std::string heightcal_menu_status_line() {
 }  // namespace
 
 namespace {
-bool height_cal_enabled() { return g_cfg.height_cal != 0; }
+bool height_cal_enabled() { CFG_HOOK_READ; return g_cfg.height_cal != 0; }
 }  // namespace
 
 constinit const FeatureHooks kHeightCalHooks{

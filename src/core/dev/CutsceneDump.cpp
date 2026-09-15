@@ -1,6 +1,7 @@
 // CutsceneDump -- see the header. Dev builds only.
 
 #include "core/dev/CutsceneDump.hpp"
+#include "core/config/CfgRead.hpp"
 #include "DevTools.hpp"
 
 #if HALO_VR_DEV
@@ -33,6 +34,7 @@ bool g_registered = false;
 //     and visible, as opposed to skipping the barrier and hoping.
 // Written as a 32bpp top-down BMP straight from the BGRA8 rows; no image library.
 void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* /*rtv_v*/) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     static int      s_state = 0;          // 0 idle, 1 copy recorded, 2 written (until re-armed)
     static int      s_seen  = 0;          // edge trigger on the cfg value
     static uint32_t s_wait  = 0;

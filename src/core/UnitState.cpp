@@ -1,4 +1,5 @@
 #include "core/UnitState.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"          // the author's grenade atomics
 #include "Config.hpp"
@@ -171,6 +172,7 @@ static void publish_seated_unit_state(uintptr_t rec_base) {
 
 
 void publish_unit_state(uintptr_t rec_base) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     uint32_t datum = 0;
     const uintptr_t obj = resolve_unit_object(rec_base, &datum);
     {
@@ -242,6 +244,7 @@ void publish_unit_state(uintptr_t rec_base) {
 }
 
 void unit_state_stick_mode_publish(bool off_thread) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     std::atomic<uintptr_t>& g_ctl_rec = *host::g_blamdrive_state.ctl_rec;
     const uintptr_t OFF_CTL_YAW = host::g_blamdrive_state.off_ctl_yaw;
     const auto resolve_control_record = host::g_blamdrive_state.resolve_control_record;

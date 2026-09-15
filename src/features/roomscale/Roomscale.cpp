@@ -1,4 +1,5 @@
 #include "Roomscale.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include <Windows.h>
 #include <Xinput.h>
@@ -390,6 +391,7 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
 }
 
 void roomscale_xinput_before_brake(_XINPUT_STATE* state) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Plugin.cpp's own state, through the bridge: the same objects under the same names.
     const auto& g_dpad_shift_active = *host::g_plugin_state.dpad_shift_active;
     const auto& g_in_menu           = *host::g_plugin_state.in_menu;
@@ -424,6 +426,7 @@ void roomscale_xinput_before_brake(_XINPUT_STATE* state) {
 }
 
 void roomscale_sim_unit_state_end(uintptr_t obj) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // ROOMSCALE THROTTLE, MODE 3: write the UNIT's own throttle vectors (found by BLAMUNIT-DUMP:
     // +0x250 fwd/+0x254 left, second copy at +0x25C/+0x260) from this sim-side path, so the
     // value sits there whenever the biped reads it. THE ONE THAT MOVES THE BIPED: eye speed =
@@ -474,7 +477,7 @@ void roomscale_sim_unit_state_end(uintptr_t obj) {
 } // namespace
 
 namespace {
-bool roomscale_enabled() { return g_cfg.roomscale; }
+bool roomscale_enabled() { CFG_HOOK_READ; return g_cfg.roomscale; }
 }  // namespace
 
 constinit const FeatureHooks kRoomscaleHooks{

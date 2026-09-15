@@ -1,4 +1,5 @@
 #include "features/meleeleft/MeleeLeft.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "core/Services.hpp"
@@ -217,7 +218,7 @@ bool meleeleft_parse_key(const char* key, const char* val, double v) {
 }
 
 namespace {
-bool melee_left_enabled() { return g_cfg.melee_left; }
+bool melee_left_enabled() { CFG_HOOK_READ; return g_cfg.melee_left; }
 }  // namespace
 
 namespace {

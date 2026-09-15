@@ -1,4 +1,5 @@
 #include "WristHud.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"          // the unit state the radar scan is handed
 #include "Config.hpp"
@@ -1072,6 +1073,7 @@ void wristhud_tick() {
 // when im moving"). Standing still it looked fine, which is why it survived this long. The weapon
 // rig already solved exactly this by re-applying on the render path; this is the same treatment.
 void wristhud_place() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     static bool s_was_on = false;
     if (!g_cfg.wrist_hud) {
         // OFF EDGE: nothing below runs any more, so anything left showing would freeze in the
@@ -1816,6 +1818,7 @@ void wristhud_render_frame() {
 }
 
 void wristhud_xinput_after_calib_trigger(_XINPUT_STATE* state) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
         // ---- WRIST HUD GLANCE GATE. After the calibration eat above so calibration keeps
         // precedence (its zeroed trigger reads as "not held" here). While the trigger serves the
         // HUD it is swallowed from the game -- a glance must not also fire LT's native action.
@@ -1832,6 +1835,7 @@ void wristhud_xinput_after_calib_trigger(_XINPUT_STATE* state) {
 }
 
 void wristhud_sim_unit_state_radar(uintptr_t obj) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.wrist_hud) blip_dump_probe(obj);
     if (g_cfg.wrist_hud && g_cfg.wrist_radar) blip_scan(obj);   // the radar exists only with the wrist HUD
 }
@@ -1843,7 +1847,7 @@ float wristhud_widget_tint_mul() {
 } // namespace
 
 namespace {
-bool wrist_hud_enabled() { return g_cfg.wrist_hud; }
+bool wrist_hud_enabled() { CFG_HOOK_READ; return g_cfg.wrist_hud; }
 }  // namespace
 
 // The feature switched off (game thread, config reload): every hosted widget goes back to the flat HUD

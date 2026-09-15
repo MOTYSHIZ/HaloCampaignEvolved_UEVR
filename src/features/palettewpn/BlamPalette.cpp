@@ -1,4 +1,5 @@
 #include "features/palettewpn/BlamPalette.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"     // resolve_object_by_datum: the weapon object through the sim's table
 #include "core/UnitState.hpp"
@@ -1681,6 +1682,7 @@ void flush() {
 // same answer, and what the buffer previously held cannot influence the outcome.
 bool apply_weapon_branch(PaletteNode* palette, Mat3* out_delta_basis = nullptr, NodeMatrix* out_delta_pos = nullptr,
                          const PaletteNode* ref = nullptr) {
+                             CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (!g_p_valid.load(std::memory_order_acquire)) return false;
 
     const PaletteNode* R = (ref != nullptr) ? ref : palette;
@@ -2435,6 +2437,7 @@ void report() {
 } // namespace whynot
 
 bool resolve_world_pullback(bool render_ctx = false) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     termlog::Row tr{};
     const bool tlog = g_cfg.term_log != 0;
     tr.ctx = render_ctx ? 1 : 0;
@@ -3597,6 +3600,7 @@ static void palette_precompose() {
     whynot::pre_ok.fetch_add(1, std::memory_order_relaxed);
 }
 void apply_after_pose(int32_t local_player, int32_t weapon_slot) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     weapon_object_probe_from_builder();
     if (g_cfg.palette_hook_test <= 0 && !palette_weapon_mode()) return;
 
@@ -3940,6 +3944,7 @@ std::atomic<int64_t> g_fp_built_ms{0};
 // A gap that follows the aim step closely IS the smoothing, and the fix is to divide by this
 // camera instead of by the aim.
 static void obscam_capture() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (!g_cfg.palette_weapon_log && g_cfg.palette_cam != 13) return;
     const HMODULE sim = GetModuleHandleA("HaloSimulation_tag_release.dll");
     if (sim == nullptr) return;
@@ -4092,6 +4097,7 @@ static void obscam_capture() {
 }
 
 void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_palette) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (local_player == 0 && weapon_slot == 0) g_n8_gate6.store(0u, std::memory_order_relaxed);
     if (g_cfg.palette_weapon_log) {
         palslot::note_call(local_player, weapon_slot);
@@ -4992,6 +4998,7 @@ bool rr_apply_banks(PaletteNode* const* bank, int nb, int32_t cnt) {
 }
 } // namespace
 void blam_palette_render_refresh() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.pal_render == 0 || !palette_weapon_mode()) return;
     rr_summary();
     // THE CAMERA FIRST, unconditionally (fitted 2026-09-11): a skipped refresh used to leave
@@ -6297,6 +6304,7 @@ void blam_palette_stamp_bank() {
 // anchor, VR->UE swizzle, the stashed rigid grip offset by the publisher's own rule, normalize,
 // store. Refreshes only -- if the tick publisher has not validated a pose, this does nothing.
 void blam_palette_republish_frame() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.pal_pub_frame == 0) return;
     if (!palette_weapon_mode()) return;
     if (!g_p_valid.load(std::memory_order_acquire)) return;
@@ -6407,6 +6415,7 @@ void blam_palette_republish_frame() {
     g_p_seq.fetch_add(1, std::memory_order_acq_rel);
 }
 void blam_palette_wpnerr_frame() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const bool on = g_cfg.wpn_err_log != 0;
     if (!on) {
         if (s_we_was_on) { we_flush(); s_we_was_on = false; }
@@ -6614,6 +6623,7 @@ BankBlendFn g_blend_original = nullptr;
 int g_blend_hook_id = -1;
 uintptr_t hooked_bank_blend(uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
                             uintptr_t a5, uintptr_t a6, uintptr_t a7, uintptr_t a8) {
+                                CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.palette_final == 2 && palette_weapon_mode()) {
         const long long ga = g_golden.at_ms.load(std::memory_order_relaxed);
         const long long gn = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -6641,6 +6651,7 @@ using NodeSlerpFn = void (*)(void*, void*, void*, void*);
 NodeSlerpFn g_slerp_original = nullptr;
 int g_slerp_hook_id = -1;
 void hooked_node_slerp(void* a, void* b, void* t, void* dst) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     g_slerp_original(a, b, t, dst);
     // MINIMAL unless gameplay is live: the level-load crashes ride this function's load-time
     // call storms, so outside live gameplay the hook is a tail-call and nothing more.
@@ -6846,6 +6857,7 @@ FpAnimFn g_fpanim_original = nullptr;
 int g_fpanim_hook_id = -1;
 uintptr_t hooked_fp_anim(uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
                          uintptr_t a5, uintptr_t a6, uintptr_t a7, uintptr_t a8) {
+                             CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // SUPPRESSION IS DEAD (T-pose AND frozen locomotion: this function is part of the unit's
     // whole update, not just the FP pose). Mode 1 is SURGICAL instead: the poser runs in
     // full -- movement, state, everything -- and the moment it returns, our golden bytes land

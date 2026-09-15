@@ -3,6 +3,7 @@
 // declarations the scope code uses.
 
 #include "ScopeLens.hpp"
+#include "core/config/CfgRead.hpp"
 #include "core/fixes/TickStage.hpp"
 
 #include "Scope.hpp"
@@ -744,7 +745,7 @@ bool scopelens_pane_stands_down() {
 } // namespace
 
 namespace {
-bool scope_lens_enabled() { return g_cfg.scope_lens; }
+bool scope_lens_enabled() { CFG_HOOK_READ; return g_cfg.scope_lens; }
 }  // namespace
 
 constinit const FeatureHooks kScopeLensHooks{

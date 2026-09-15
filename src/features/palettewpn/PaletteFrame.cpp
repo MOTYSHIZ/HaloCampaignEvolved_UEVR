@@ -1,4 +1,5 @@
 #include "features/palettewpn/PaletteFrame.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Arms.hpp"
 #include "features/palettewpn/BlamPalette.hpp"
@@ -159,6 +160,7 @@ static void stomp_flush_async() {
     }).detach();
 }
 static void stomp_sample(int point) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.stomp_log == 0) { stomp_flush(); return; }
     if (point == 0 && stomplog::g_n.load(std::memory_order_relaxed) >= (stomplog::kCap * 4) / 5)
         stomp_flush_async();
@@ -185,6 +187,7 @@ static void stomp_sample(int point) {
 // makes ring order a true arrival order across threads. Points 4..7 = build calls,
 // 4 + weapon_slot*2 + (capture ? 0 : 1). Flushing stays with stomp_sample on the tick.
 void stomp_mark(int point, float yaw, float e0, float e1, float e2) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.stomp_log == 0) return;
     const int i = stomplog::g_n.fetch_add(1, std::memory_order_relaxed);
     stomplog::g_rows[i % stomplog::kCap] = stomplog::Row{stomplog::now_ms(), point, yaw, e0, e1, e2};
@@ -844,6 +847,7 @@ bool palette_wpn_rig_driver_stood_down() {
 }
 
 void palette_wpn_stereo_pre_eye_instruments(int index) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const auto& ps = host::g_plugin_state;
     const std::atomic<float>& g_dbg_view_out = *ps.dbg_view_out;
     const std::atomic<bool>&  g_stick_mode = *ps.stick_mode;
@@ -970,6 +974,7 @@ void palette_wpn_render_refresh() {
 }
 
 void palette_wpn_stereo_pre_eye_meters(int index) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const std::atomic<float>& g_dbg_view_out = *host::g_plugin_state.dbg_view_out;
     // ---- FPMESH METER (Config.hpp fpmesh_log): does the FP mesh's own transform step at
     // sim rate under the 90 Hz view? Read-only; the embedded camera is recovered through
@@ -1014,6 +1019,7 @@ void palette_wpn_stereo_post_eye_sample(int index) {
 }
 
 void palette_wpn_stereo_post_eye_late(int index) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const auto& ps = host::g_plugin_state;
     const std::atomic<bool>&  g_have_eye_pos = *ps.have_eye_pos;
     const std::atomic<float>& g_eye_pos_x = *ps.eye_pos_x;
@@ -1036,6 +1042,7 @@ void palette_wpn_teardown() {
 }
 
 void palette_wpn_aim_law_sampling() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // POSELATCH site 3: latch at the instant the aim is sampled.
     halo::pose_latch_refresh(3);
 }

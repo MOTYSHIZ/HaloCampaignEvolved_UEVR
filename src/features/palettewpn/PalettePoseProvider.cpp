@@ -1,4 +1,5 @@
 #include "features/palettewpn/PalettePoseProvider.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "features/palettewpn/BlamPalette.hpp"      // palette_trim_rotations
 #include "features/palettewpn/PaletteTwoHand.hpp"   // palette_two_hand_blend
@@ -27,6 +28,7 @@ bool barrel_axis(Vec3* out) {
 // only taken while the pose latch runs in palette weapon mode: poselatch 0 never stores it, and
 // poselatch 3 stores it from the XInput-rate law (aimrate=1) only.
 bool stamp_available() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.pose_latch == 0) return false;
     if (g_cfg.pose_latch == 3 && !g_cfg.aim_rate_render) return false;
     return true;
@@ -39,7 +41,7 @@ bool stamped_intent(bool two_back, float* yaw, float* pitch) {
     *pitch = two_back ? g_intent_prev2_p.load(std::memory_order_relaxed) : g_intent_prev_p.load(std::memory_order_relaxed);
     return true;
 }
-float roll_trim_deg() { return g_cfg.palette_roll_trim; }
+float roll_trim_deg() { CFG_HOOK_READ; return g_cfg.palette_roll_trim; }
 // The palette's WORLD pose as last resolved (PaletteFrame publishes), read raw: the consumer normalizes.
 bool weapon_quat(Quat* out) {
     *out = Quat{g_dbg_pose_w_x.load(std::memory_order_relaxed), g_dbg_pose_w_y.load(std::memory_order_relaxed),

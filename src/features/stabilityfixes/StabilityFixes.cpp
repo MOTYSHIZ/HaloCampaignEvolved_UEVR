@@ -1,4 +1,5 @@
 #include "features/stabilityfixes/StabilityFixes.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
@@ -10,7 +11,7 @@ namespace halo {
 
 namespace {
 
-bool stability_fixes_enabled() { return g_cfg.stability_fixes; }
+bool stability_fixes_enabled() { CFG_HOOK_READ; return g_cfg.stability_fixes; }
 
 bool stabilityfixes_parse_key(const char* key, const char* val, double v) {
     (void)val;

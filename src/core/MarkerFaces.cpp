@@ -1,4 +1,5 @@
 #include "core/MarkerFaces.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "Markers.hpp"            // the author's machinery: g_cam_*, g_view_base_yaw, holster_marker_*
@@ -157,6 +158,7 @@ void marker_render_drop(API::UObject* comp) {
         if (r.key.load(std::memory_order_relaxed) == comp) { r.active.store(false, std::memory_order_relaxed); return; }
 }
 void markers_render_place() {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.mag_render == 0 || !service_active(SVC_MARKER_ANCHOR)) return;   // a marker-anchoring feature is on
     Vec3 hp{}; Quat hr{};
     if (!get_pose(API::VR::get_hmd_index(), &hp, &hr, /*use_aim=*/false)) return;

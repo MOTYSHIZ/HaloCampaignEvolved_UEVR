@@ -1,4 +1,5 @@
 #include "features/holsterpollthrow/HolsterPollThrow.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"          // the author's grenade atomics
 #include "Config.hpp"
@@ -73,6 +74,7 @@ std::atomic<long long> g_greninst_at_ms{0};
 std::atomic<float>     g_greninst_vx{0.0f}, g_greninst_vy{0.0f}, g_greninst_vz{0.0f};
 
 void throw_dump_probe(uintptr_t obj) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     constexpr uintptr_t SPAN = 0x600;
     constexpr int       NDW  = (int)(SPAN / 4);
     static uint32_t  s_prev[NDW];
@@ -250,6 +252,7 @@ void throw_dump_probe(uintptr_t obj) {
 // any remapping, and BEFORE the press mask is composed into the same poll -- so the throw the
 // player just released goes out in the very report that shows the grip open.
 void holster_note_buttons(unsigned short buttons) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Holster.cpp's clock, through the bridge.
     const auto now_ticks = host::g_holster_state.now_ticks;
     const auto ms_to_ticks = host::g_holster_state.ms_to_ticks;
@@ -399,6 +402,7 @@ void holsterpollthrow_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
 }
 
 void holsterpollthrow_unit_state_grenades(uintptr_t obj) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Grenade type and counts from raw unit offsets: only for the fork's grenade-gesture variant
     // (holsterpollthrow, experimental). Off, g_unit_gvalid stays false and the author's pouches keep
     // their fail-closed "counts unknown" behaviour exactly as he shipped it.
@@ -416,6 +420,7 @@ void holsterpollthrow_unit_state_grenades(uintptr_t obj) {
 }
 
 void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // ---- GRENINSTANT mode 2: backdate the throw-start stamp (doctrine in Config.hpp). The
     // stamp at unit+0x38C is written by the game within ~1 ms of the press; the first probe call
     // that sees it change during the press window rewrites it N ticks into the past, once per
@@ -496,6 +501,7 @@ void holsterpollthrow_game_tick_after_blam_aim() {
 #if HALO_VR_DEV
 
 void holsterpollthrow_blam_create_before(uintptr_t params) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // BlamAim.cpp's spawn origin offset, through the bridge.
     const uintptr_t P_VEC1 = host::g_blamaim_state.p_vec1;
 
@@ -515,6 +521,7 @@ void holsterpollthrow_blam_create_before(uintptr_t params) {
 }
 
 void holsterpollthrow_blam_create_after(uintptr_t params, uintptr_t cret) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     (void)params;
     // ---- GRENTRACK arm: try the return value as an object datum, on this thread (the resolve
     // walks the sim TLS, which only this thread owns). A failed resolve is logged as itself --
@@ -635,7 +642,7 @@ bool holsterpollthrow_parse_key(const char* key, const char* val, double v) {
 }
 
 namespace {
-bool holster_poll_throw_enabled() { return g_cfg.holster_poll_throw; }
+bool holster_poll_throw_enabled() { CFG_HOOK_READ; return g_cfg.holster_poll_throw; }
 }  // namespace
 
 namespace {

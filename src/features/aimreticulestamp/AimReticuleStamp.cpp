@@ -1,4 +1,5 @@
 #include "features/aimreticulestamp/AimReticuleStamp.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
@@ -28,7 +29,7 @@ bool aim_reticule_stamp_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
-bool aim_reticule_stamp_enabled() { return g_cfg.aim_reticule_stamp != 0; }
+bool aim_reticule_stamp_enabled() { CFG_HOOK_READ; return g_cfg.aim_reticule_stamp != 0; }
 
 // The stamped placement (modes 1/2) owns the compositor reticle's publish at render, and only while the
 // palette weapon owns the aim and its latch stamps the intent. Without it the render publish never fires
@@ -40,6 +41,7 @@ int reticule_render_publish_mode() {
 
 // The stereo post-callback, after the eye publish: the stamped reticle placed at render rate.
 void stereo_post_eye_publish(int index) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     const auto& ps = host::g_plugin_state;
     const std::atomic<bool>&  g_stick_mode = *ps.stick_mode;
     const std::atomic<bool>&  g_have_view_pos = *ps.have_view_pos;

@@ -1,4 +1,5 @@
 #include "features/vehcam/VehCam.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "BlamDrive.hpp"          // blam_control_record(): the VEHSEAT line's record flag
 #include "Config.hpp"
@@ -868,6 +869,7 @@ void vehcam_game_tick_vehicle() {
 }
 
 void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Plugin.cpp's view position mirror, through the bridge.
     auto& g_view_pos_x = *host::g_plugin_state.view_pos_x;
     auto& g_view_pos_y = *host::g_plugin_state.view_pos_y;
@@ -1266,6 +1268,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
 }
 
 bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (rotation == nullptr) return false;
     // Plugin.cpp's view debug values and lock prime, through the bridge.
     auto& g_dbg_view_in  = *host::g_plugin_state.dbg_view_in;
@@ -1369,6 +1372,7 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
 }
 
 void vehcam_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
             // WRITE SURVIVAL (vehlog): the rendered eye against the seat we wrote this frame. The
             // gap is the HMD offset from the standing origin -- under 2 m in any real play space.
             // More than 3 m means the camera was replaced between our write and the render.
@@ -1391,7 +1395,7 @@ void vehcam_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
 }  // namespace
 
 namespace {
-bool veh_cam_enabled() { return g_cfg.veh_cam != 0 || g_cfg.vehicle_wheel != 0; }
+bool veh_cam_enabled() { CFG_HOOK_READ; return g_cfg.veh_cam != 0 || g_cfg.vehicle_wheel != 0; }
 }  // namespace
 
 void vehcam_released() {

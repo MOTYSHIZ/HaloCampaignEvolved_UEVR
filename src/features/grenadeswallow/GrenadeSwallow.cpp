@@ -1,4 +1,5 @@
 #include "GrenadeSwallow.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include <Windows.h>
 #include <Xinput.h>
@@ -26,6 +27,7 @@ bool grenadeswallow_parse_key(const char* key, const char* val, double v) {
 namespace {
 
 void grenadeswallow_xinput_raw_pad(_XINPUT_STATE* state) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     // Plugin.cpp's own state, through the bridge: the same object under the same name.
     const auto& g_in_menu = *host::g_plugin_state.in_menu;
 
@@ -50,7 +52,7 @@ void grenadeswallow_xinput_raw_pad(_XINPUT_STATE* state) {
 } // namespace
 
 namespace {
-bool grenade_swallow_enabled() { return g_cfg.grenade_swallow != 0; }
+bool grenade_swallow_enabled() { CFG_HOOK_READ; return g_cfg.grenade_swallow != 0; }
 }  // namespace
 
 constinit const FeatureHooks kGrenadeSwallowHooks{

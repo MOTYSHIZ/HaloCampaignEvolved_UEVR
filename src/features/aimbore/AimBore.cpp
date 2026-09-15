@@ -1,4 +1,5 @@
 #include "features/aimbore/AimBore.hpp"
+#include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
@@ -23,11 +24,12 @@ bool aim_bore_parse_key(const char* key, const char* val, double v) {
     return false;
 }
 
-bool aim_bore_enabled() { return g_cfg.aim_bore != 0; }
+bool aim_bore_enabled() { CFG_HOOK_READ; return g_cfg.aim_bore != 0; }
 
 // The aim derivation's palette branch (features_aim_forward), before the palette's two-handed blend: true =
 // the forward is the drawn barrel. Only reached while the palette weapon owns the aim.
 bool aim_bore_forward(const Quat& q_src, Vec3* fwd_out) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     Vec3& fwd = *fwd_out;
     // ---- AIMBORE (aimbore=1): the aim IS the drawn barrel. The palette renders the weapon as
     // f(aim-fixed hand) * G * W in UE convention, f(q) = (-q.z, q.x, q.y, -q.w). f is a
