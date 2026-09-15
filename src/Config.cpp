@@ -1234,6 +1234,10 @@ static bool parse_xrlayer_key(const char* key, double v) {
     // the runtime accepts would just make xrEndFrame reject the frame, which is a worse way to
     // learn the number than reading the ARMED line.
     if (_stricmp(key, "xrlayerbudget")   == 0) { g_cfg.xr_layer_budget    = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    // Mono-method flattening (Config.hpp explains). 5 m floor: below that the "flattened" quad
+    // would still carry visible disparity and the key would look like it does nothing.
+    if (_stricmp(key, "xrlayermonoflat") == 0) { g_cfg.xr_layer_mono_flat  = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "xrlayermonofar")  == 0) { g_cfg.xr_layer_mono_far_m = clampf((float)v, 5.0f, 1000.0f); return true; }
     return false;
 }
 

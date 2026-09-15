@@ -2,6 +2,7 @@
 
 #include "AimConverge.hpp"
 #include "Config.hpp"
+#include "ViewMode.hpp"
 
 #include <cmath>
 
@@ -44,15 +45,35 @@ void aim_converge_note_post(int view_index, float x, float y, float z) {
     // -- it IS part of this eye's view position -- but it is not part of where the PLAYER is. Taking
     // one eye would bake ~3 cm of lateral offset into the correction permanently, which at a 5 m
     // target is a third of a degree of standing aim bias for nothing. Averaging cancels it exactly.
-    // Until the second eye has been seen, use the one we have rather than publishing nothing.
-    const bool both = g_eye[0].have_delta && g_eye[1].have_delta;
-    const float k = both ? 0.5f : 1.0f;
-    const int   a = both ? 0 : i;
-    const int   b = both ? 1 : i;
+    //
+    // WHICH TWO SAMPLES TO AVERAGE DEPENDS ON THE RENDERING METHOD (ViewMode.hpp): under Native
+    // Stereo the two index slots; under AFR this sample and the previous one (both are index 0,
+    // the eye alternates by frame); under Mono nothing -- the one view is the centre eye and its
+    // delta carries no IPD at all. The old "both slots ever seen" test averaged a live eye with a
+    // slot frozen at the last frame of the previous method after a live flip.
+    static float s_prev_d[3] = {0.0f, 0.0f, 0.0f};
+    static bool  s_prev_have = false;
 
-    g_eye_delta_x = (g_eye[a].d[0] + g_eye[b].d[0]) * k;
-    g_eye_delta_y = (g_eye[a].d[1] + g_eye[b].d[1]) * k;
-    g_eye_delta_z = (g_eye[a].d[2] + g_eye[b].d[2]) * k;
+    const ViewMode vm = viewmode_current();
+    float dx, dy, dz;
+    if (vm == ViewMode::Stereo && g_eye[0].have_delta && g_eye[1].have_delta) {
+        dx = (g_eye[0].d[0] + g_eye[1].d[0]) * 0.5f;
+        dy = (g_eye[0].d[1] + g_eye[1].d[1]) * 0.5f;
+        dz = (g_eye[0].d[2] + g_eye[1].d[2]) * 0.5f;
+    } else if (vm == ViewMode::Alternating && s_prev_have) {
+        dx = (g_eye[i].d[0] + s_prev_d[0]) * 0.5f;
+        dy = (g_eye[i].d[1] + s_prev_d[1]) * 0.5f;
+        dz = (g_eye[i].d[2] + s_prev_d[2]) * 0.5f;
+    } else {
+        // Mono, or the first frames of anything: use the one we have rather than publishing nothing.
+        dx = g_eye[i].d[0]; dy = g_eye[i].d[1]; dz = g_eye[i].d[2];
+    }
+    s_prev_d[0] = g_eye[i].d[0]; s_prev_d[1] = g_eye[i].d[1]; s_prev_d[2] = g_eye[i].d[2];
+    s_prev_have = true;
+
+    g_eye_delta_x = dx;
+    g_eye_delta_y = dy;
+    g_eye_delta_z = dz;
     g_have_eye_delta = true;
 }
 

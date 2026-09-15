@@ -1946,6 +1946,21 @@ struct Config {
     // this to 2 or 3 forces the ORDERING to run, which is the interesting path; 0 layers is only
     // the early-out. Watch drops= move in the state line.
     int   xr_layer_budget = 0;
+    // MONO FLATTENING (ViewMode.hpp; compute_pose in XrLayer.cpp). Under the monofix backend's
+    // Mono rendering method (VR_RenderingMethod=3) the scene is ONE image rendered from between the
+    // eyes and shown to both, so nothing in it has binocular disparity: it all fuses at infinity.
+    // A compositor quad placed at its true distance is then the only thing in view WITH disparity
+    // -- IPD/distance, ~1.2 deg at 3 m, several reticule-widths -- and with the eyes converged on
+    // the scene it doubles and no longer sits on what it marks.
+    //   1 (default) = while the callbacks read as one centre view per frame AND UEVR declares
+    //                 method 3, every quad slides out along its own ray to xrlayermonofar metres
+    //                 with its angular size held, so its disparity matches the image (~0).
+    //   0           = never.
+    //   2           = always -- an A/B of the mechanism that needs no mono session.
+    int   xr_layer_mono_flat = 1;
+    // metres. Where flattened quads are parked. At 100 m the residual disparity is 0.04 deg,
+    // under a pixel on a Quest 3; a runtime composes a quad at any distance.
+    float xr_layer_mono_far_m = 100.0f;
 
     // cm, per axis. 0 = NO CLAMP (default) -- see the note at the clamp site: per-axis clamping
     // rotates the offset vector once any axis saturates, so it corrupts direction, not just reach.
