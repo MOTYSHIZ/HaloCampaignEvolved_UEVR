@@ -109,7 +109,7 @@ const FeatureRow kFeatures[] = {
       "", "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
     { "scopelens",    1, Tier::Experimental, "Weapon", "Scope lens on the weapon",
       "A magnifying lens in the scope housing of the scoped weapons. The standard scope stands down while on.",
-      "", "scope", FEATURE_BOOL(scope_lens) },
+      "scopeev,scopetint,scopetonecurve,scopeeyedist,scopesource,scopertfmt,scopeshowflags,scopesfflags,scopeseptrans", "scope", FEATURE_BOOL(scope_lens) },
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
       "gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,roomanchor",

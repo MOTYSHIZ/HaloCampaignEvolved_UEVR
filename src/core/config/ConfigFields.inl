@@ -367,23 +367,36 @@
 
     // ---- (after the author's Config.hpp line 2802)
     int   scope_res = 512;
-    int   scope_capture_source = 2;     // SCS_FinalColorLDR: fully post-processed (bloom, reflections, tonemap); exposure forced manual below
-    int   scope_rt_format = 2;          // RTF_RGBA8
-    float scope_ev = 0.0f;              // manual exposure bias (EV) on the capture -- the brightness knob (live)
+    // 2 = SCS_FinalColorLDR: fully post-processed (bloom, reflections, tonemap); exposure forced manual below.
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    int   scope_capture_source = 9;
+    // 2 = RTF_RGBA8, 6 = RGBA16f.
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    int   scope_rt_format = 6;
+    // Manual exposure bias (EV) on the capture -- the brightness knob (live).
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    float scope_ev = 0.5f;
     int   scope_pp_override = 1;        // 0 = do not touch the capture's PostProcessSettings
     bool  scope_cvar_dump = false;      // one-shot log of Lumen/SceneCapture console variables
-    float scope_tint = 1.0f;            // display multiplier on the lens (live); exposure itself is scope_ev
+    // Display multiplier on the lens (live); exposure itself is scope_ev.
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    float scope_tint = 11.0f;
     int   scope_round = 1;              // 1 = round lens (flattened Cylinder cap), 0 = square Plane
 
     // ---- (after the author's Config.hpp line 2924)
-    int   scope_showflags = 0;          // 1 = build the capture deferred with ShowFlagSettings Lumen flags on (build-time only)
+    // 1 = build the capture deferred with ShowFlagSettings Lumen flags on (build-time only).
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    int   scope_showflags = 1;
     int   scope_probe = 0;              // 1 = log the render target's centre pixel once a second (GPU readback; dev only)
-    float scope_tone_curve = -1.0f;     // capture ToneCurveAmount (live): 0 = linear output (undoes the lens double-tonemap), <0 = leave alone
+    // Capture ToneCurveAmount (live): 0 = linear output (undoes the lens double-tonemap), <0 = leave alone.
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    float scope_tone_curve = 0.5f;
     // Measured 2026-08-19: the tone-curve-0 capture path drops SEPARATE translucency (the shield
     // wall renders in the main view but not in the lens; A/B on the same spot flipped only by the
     // ToneCurveAmount write). r.SeparateTranslucency=0 folds translucency into scene colour so the
     // linear capture keeps it. GLOBAL cvar (main view too). -1 = leave alone.
-    int   scope_sep_trans = -1;
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    int   scope_sep_trans = 0;
     float scope_cam_fwd = 40.0f;        // capture camera push forward along the aim ray (cm, live) so the gun's own scope housing is not in its view
     // Real scope optics are rotationally symmetric: rolling the rifle must NOT roll the image.
     // The lens disc rolls with the gun, so the capture gets the gun's roll to cancel it out.
@@ -405,7 +418,8 @@
     // runs ONLY while the lens is within this many cm of the camera -- i.e. while actually aiming.
     // Hip-carried, the lens keeps its last frame, like a real scope you are not looking through.
     // +8 cm hysteresis on the way out. 0 = gate off, capture always on while a scope is held. Live.
-    float scope_eye_dist = 45.0f;
+    // Default: the value the scope lens is tuned with (halo_vr.cfg ships the same line).
+    float scope_eye_dist = 15.0f;
     // Capture rate cap (Hz). The engine tick runs uncapped (measured 91-133 fps) while the headset
     // shows 72 -- captures above the display rate are wasted GPU. >0 = manual CaptureScene calls at
     // this cadence (never ABOVE the engine rate; at/below it, every frame, so no strobing);
@@ -413,14 +427,19 @@
     float scope_hz = 72.0f;
     // Comma-separated FEngineShowFlags names forced ON for the capture when scope_showflags=1.
     // Unknown names are ignored by the engine. Applied at scope BUILD (level reload), no deploy.
-    char  scope_sf_names[512] =
-        "LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows,Lighting,"
-        "ReflectionEnvironment,ScreenSpaceReflections,AmbientOcclusion,DistanceFieldAO,"
-        "Bloom,VolumetricFog,Fog,Atmosphere,Particles,Translucency,SeparateTranslucency,PostProcessing";
-    ScopeCfg scopes[8];
+    // Default: the four names the tuned scope applied. Its cfg line also listed Lighting last, but the
+    // name list was split on commas and spaces only, so the line ending stayed on that last name and
+    // the engine never matched it.
+    char  scope_sf_names[512] = "LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows";
+    // Default: the two scoped weapons the lens is tuned for, the same as the scopewpn lines halo_vr.cfg
+    // ships. A scopewpn line for the same weapon replaces its entry.
+    ScopeCfg scopes[8] = {
+        { "FP_BattleRifle", 10.5f, { 11.5f, 0.0f, 28.5f }, { 90.0f, 85.0f, 90.0f }, 0.033f },
+        { "FP_SniperRifle", 5.0f, { 0.0f, -20.0f, 9.0f }, { 0.0f, 0.0f, 0.0f }, 0.04f },
+    };
     // Entries in scopes[] (scopewpn= lines). Its own counter: scope_count below is the per-weapon
     // SCOPE TRIM table (wpn_scope[]), a different table with a different element type.
-    int   scope_cfg_count = 0;
+    int   scope_cfg_count = 2;
     // scopelens (EXPERIMENTAL, fork, default off): the physical lens scopes above (scopewpn entries).
     // Its own master because `scope` is the author's pane: with scopelens=1 the lens owns every scoped
     // weapon it has an entry for and the author's pane toggle stands down, so two scope systems never

@@ -155,9 +155,9 @@ bool write_show_flags(API::UObject* cap) {
     std::wstring names[32];
     int n = 0;
     for (const char* p = g_cfg.scope_sf_names; *p != 0 && n < 32; ) {
-        while (*p == ',' || *p == ' ') ++p;
+        while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
         const char* e = p;
-        while (*e != 0 && *e != ',' && *e != ' ') ++e;
+        while (*e != 0 && *e != ',' && *e != ' ' && *e != '\t' && *e != '\r' && *e != '\n') ++e;
         if (e > p) names[n++].assign(p, e);
         p = e;
     }
