@@ -441,12 +441,19 @@ void features_append_dev_reference(std::string& text) {
         const auto& r = kFeatures[i];
         const int def = (r.tier == Tier::Stable) ? r.get(kBuiltin)
                                                  : (kTierDefaultOn[tier_index(r.tier)] ? r.on : 0);
-        sprintf_s(line, sizeof(line), "# [%s] %s%s%s%s%s\r\n#%s=%d\r\n",
-                  kTierName[tier_index(r.tier)], r.desc,
-                  r.subkeys[0] ? " Sub-settings: " : "", r.subkeys,
-                  r.needs[0] ? ". Needs: " : "", r.needs,
-                  r.key, def);
-        text += line;
+        // Built as a string: a row's description and sub-setting list have no length limit, and a
+        // fixed buffer that a long row overflows makes sprintf_s end the process.
+        text += "# [";
+        text += kTierName[tier_index(r.tier)];
+        text += "] ";
+        text += r.desc;
+        if (r.subkeys[0]) { text += " Sub-settings: "; text += r.subkeys; }
+        if (r.needs[0])   { text += ". Needs: ";       text += r.needs; }
+        text += "\r\n#";
+        text += r.key;
+        text += "=";
+        text += std::to_string(def);
+        text += "\r\n";
     }
     for (int t = 1; t < kTierCount; ++t) {
         sprintf_s(line, sizeof(line), "# Tier switch: every %s feature whose own key is not set.\r\n#%s=%d\r\n",
