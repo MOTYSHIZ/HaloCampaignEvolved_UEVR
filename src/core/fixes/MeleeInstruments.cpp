@@ -128,7 +128,10 @@ bool melee_fired(long long now, float speed, float reach) {
         hold_src_ok = true;
     }
     s_hold_was_armed = (g_cfg.melee_aim_hold_ms > 0 && hold_src_ok);
-    if (s_hold_was_armed) {
+    // Mode 1's hold is already stored, with these same values, by the author's strike path in Gesture.cpp
+    // just before this slot runs (same condition, speed included). Only mode 0's swing-start hold is ours.
+    const bool stored_by_author = g_cfg.melee_aim_mode == 1 && speed > 0.0001f;
+    if (s_hold_was_armed && !stored_by_author) {
         g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
         g_melee_aim_ctrl_pitch.store(hp, std::memory_order_relaxed);
         g_melee_aim_hold_until.store(now + ms_to_ticks(g_cfg.melee_aim_hold_ms),
