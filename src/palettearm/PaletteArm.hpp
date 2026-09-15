@@ -11,7 +11,8 @@
 
 #pragma once
 
-#include <atomic>   // g_pa_torso_yaw
+#include <atomic>    // g_pa_torso_yaw / g_pa_torso_seq
+#include <cstdint>
 
 namespace halo {
 
@@ -54,10 +55,13 @@ const char* palettearm_status_jitter();
 // same trap.
 bool palettearm_unavailable();
 
-// The solved torso yaw in degrees -- the frame the shoulders hang from. Published so the tick can
-// answer "does this basis stay with the body, or follow the aim?" against the two view yaws, which
-// keep internal linkage in Plugin.cpp. Only meaningful while the palette arm driver is running.
-extern std::atomic<float> g_pa_torso_yaw;
+// The solved torso yaw in degrees -- the frame the shoulders hang from -- and a publish counter.
+// Published so the tick can answer "does this basis stay with the body, or follow the aim?" against
+// the two view yaws, which keep internal linkage in Plugin.cpp. Only meaningful while the palette
+// arm driver is running. Check the counter before trusting the yaw: a stale yaw reads as a torso
+// that is perfectly still, which is the answer the A/B is hoping for.
+extern std::atomic<float>    g_pa_torso_yaw;
+extern std::atomic<uint32_t> g_pa_torso_seq;
 
 // True when the palette owns the weapon, so the legacy MESH drive must stand down -- otherwise the
 // container displaces the gun and the palette displaces it again, and the two compose.

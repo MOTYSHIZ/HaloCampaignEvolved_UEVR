@@ -3739,10 +3739,11 @@ struct Config {
     // it failed on the READOUT rather than the test: "which felt steadier" cannot separate nearly
     // right from exactly right, and cannot be handed to anyone else.
     //
-    // With this on, the tick reports the torso's residual against the BODY frame and against the
-    // AIM frame, over frames where those two actually diverged. The smaller residual names the
-    // frame the torso is locked to, which is the whole question. See the note at its site in
-    // Plugin.cpp for why the comparison lives there and not in the view callback.
+    // With this on, the tick reports R = sum|d torso| / sum|d aim| over ticks where the controller
+    // turned and the body (stick-turn yaw) did not: ~0 = locked to the BODY (the goal), ~1 = follows
+    // the AIM uncorrected (mode 0, the control), ~2 = correction with the WRONG sign. Magnitudes on
+    // purpose -- a signed comparison between Blam's basis and UE rotators would carry the same
+    // handedness ambiguity this test exists to settle. See its site in Plugin.cpp for the rest.
     bool  pa_torso_ab     = false;
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS

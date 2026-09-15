@@ -11573,71 +11573,109 @@ public:
                 // detour -- which is exactly why this site must stay cheap.
                 { PerfScope _perf(PERF_PALARM); palettearm_update(delta); }
 
-                // ---- TORSO FRAME A/B. Answers patorsoframe 3-vs-4-vs-5 with a number.
+                // ---- TORSO FRAME A/B. Answers patorsoframe with a number instead of a feeling.
                 //
-                // The modes differ by a SIGN, and the note in PaletteArm.cpp says plainly that
-                // handedness between the UE rotator and the Blam basis is a coin-flip which costs
-                // a headset round-trip to settle. It has already cost one. The failure of the last
-                // attempt was not the test, it was the READOUT: "which felt steadier" cannot
-                // separate a torso that is nearly right from one that is exactly right, and it
-                // cannot be reported to anyone else.
+                // The modes differ by a SIGN, and PaletteArm.cpp says plainly that handedness between
+                // the UE rotator and the Blam basis is a coin-flip that costs a headset round-trip to
+                // settle. It has already cost one, and that attempt failed on the READOUT: "which felt
+                // steadier" cannot separate nearly-right from exactly-right, and cannot be handed on.
                 //
-                // WHAT MAKES IT DECIDABLE. Every frame, the torso yaw either moves with the BODY
-                // (the locked rendered view) or with the AIM (the yaw the aim drove). Those two
-                // separate only while you turn the controller without turning your head -- so the
-                // window SELECTS ITSELF rather than relying on the player performing the gesture
-                // precisely. When they have not separated this frame there is nothing to learn,
-                // and the sample is discarded instead of diluting the answer.
+                // MAGNITUDES, NOT SIGNED DELTAS -- and this is the whole design. The torso yaw comes
+                // from Blam's basis; the aim and body yaws are UE rotators. Differencing them directly
+                // (the first version of this block) gave the instrument the SAME handedness ambiguity
+                // as the question it exists to answer, so it could confidently name the wrong mode. A
+                // yaw rotation's MAGNITUDE is identical in either handedness, so instead:
                 //
-                // Read at ONE INSTANT ON ONE CLOCK: all three yaws are sampled here, right after
-                // the palette wrote its torso. The obvious alternative -- correlating in the view
-                // callback -- would compare a ~32 Hz torso against 90+ Hz view yaws and alias, and
-                // the error would scale with turn speed, which is this project's oldest trap.
+                //     R = sum|d torso| / sum|d aim|, over ticks where the aim turned and the body did not
+                //
+                //     R ~ 0   torso locked to the BODY             <- the goal
+                //     R ~ 1   torso follows the AIM, uncorrected    (mode 0 is exactly this -- the control)
+                //     R ~ 2   correction applied with the WRONG SIGN: it double-counts the aim
+                //
+                // Modes 3 and 4 are one rotation and its negation, so one must read ~0, the other ~2,
+                // and they must sum to ~2. MODE 0 IS THE CONTROL: root IS the aim-driven camera, so it
+                // must read ~1. If it does not, the instrument is wrong and nothing it says about 3 or
+                // 4 means anything -- which is what a control arm is for.
+                //
+                // The body yaw is the locked BASE yaw: it moves with stick turning, never with the
+                // head. So "the body did not move" means "no stick turn" and the head is free -- except
+                // in modes 5 and 6, which fold head yaw into the torso on purpose.
+                //
+                // TWO WAYS THIS COULD REPORT A FALSE SUCCESS, both closed:
+                //   * A torso that stopped being published reads d=0, i.e. "perfectly body-locked".
+                //     g_pa_torso_seq must have advanced, or the tick is counted as STALE instead.
+                //   * Lag. The torso is written from the palette detour, later in the frame than the
+                //     view callback writes aim and body. A SUM OF MAGNITUDES over a back-and-forth sweep
+                //     is unchanged by a one-frame shift; an instantaneous difference grows with turn
+                //     speed. That is the two-clocks trap, and why this is a ratio of sums.
                 if (g_cfg.pa_torso_ab) {
                     static float    ab_prev_torso = 0.0f, ab_prev_aim = 0.0f, ab_prev_body = 0.0f;
-                    static double   ab_err_body = 0.0, ab_err_aim = 0.0;
-                    static uint32_t ab_n = 0, ab_said = 0;
+                    static uint32_t ab_prev_seq = 0;
+                    static double   ab_sum_torso = 0.0, ab_sum_aim = 0.0;
+                    static uint32_t ab_n = 0, ab_stale = 0, ab_turning = 0, ab_said = 0;
                     static int      ab_mode = -1;
-                    static bool     ab_have = false;
+                    static bool     ab_have = false, ab_stale_said = false;
 
-                    const float t_now = ::halo::g_pa_torso_yaw.load(std::memory_order_relaxed);
-                    const float a_now = g_dbg_view_in.load();
-                    const float b_now = g_dbg_view_out.load();
+                    const uint32_t seq   = ::halo::g_pa_torso_seq.load(std::memory_order_relaxed);
+                    const float    t_now = ::halo::g_pa_torso_yaw.load(std::memory_order_relaxed);
+                    const float    a_now = g_dbg_view_in.load();
+                    const float    b_now = g_dbg_view_out.load();
 
                     // A mode change invalidates everything accumulated under the old one.
                     if (ab_mode != g_cfg.pa_torso_frame) {
                         ab_mode = g_cfg.pa_torso_frame;
-                        ab_err_body = ab_err_aim = 0.0; ab_n = 0; ab_said = 0; ab_have = false;
+                        ab_sum_torso = ab_sum_aim = 0.0;
+                        ab_n = ab_stale = ab_turning = ab_said = 0;
+                        ab_have = false;
+                        ab_stale_said = false;
                     }
 
                     if (ab_have) {
-                        const float d_torso = wrap180(t_now - ab_prev_torso);
-                        const float d_aim   = wrap180(a_now - ab_prev_aim);
-                        const float d_body  = wrap180(b_now - ab_prev_body);
-                        // Only informative while aim and body actually diverged.
-                        if (std::fabs(d_aim - d_body) > 0.05f) {
-                            ab_err_body += std::fabs(d_torso - d_body);
-                            ab_err_aim  += std::fabs(d_torso - d_aim);
-                            ++ab_n;
+                        const float d_aim   = std::fabs(wrap180(a_now - ab_prev_aim));
+                        const float d_body  = std::fabs(wrap180(b_now - ab_prev_body));
+                        const float d_torso = std::fabs(wrap180(t_now - ab_prev_torso));
+                        if (d_aim > 0.3f) {                         // the controller actually turned
+                            if (seq == ab_prev_seq)  ++ab_stale;    // torso not republished
+                            else if (d_body > 0.15f) ++ab_turning;  // stick turn: the body moved
+                            else { ab_sum_torso += d_torso; ab_sum_aim += d_aim; ++ab_n; }
                         }
                     }
-                    ab_prev_torso = t_now; ab_prev_aim = a_now; ab_prev_body = b_now;
-                    ab_have = true;
+                    ab_prev_torso = t_now;
+                    ab_prev_aim   = a_now;
+                    ab_prev_body  = b_now;
+                    ab_prev_seq   = seq;
+                    ab_have       = true;
 
-                    // Enough separation to be worth reporting, then every ~64 further samples.
-                    if (ab_n >= 60 && (ab_n % 64u) == 0 && ab_said < 40) {
-                        ++ab_said;
-                        const double eb = ab_err_body / (double)ab_n;
-                        const double ea = ab_err_aim  / (double)ab_n;
-                        // Whichever frame the torso tracked shows the SMALLER residual. The margin
-                        // is what says whether the answer is real or a coin toss on noise.
-                        const char* verdict = (eb < ea * 0.5) ? "LOCKED TO BODY  <-- this mode is correct"
-                                            : (ea < eb * 0.5) ? "FOLLOWS THE AIM <-- wrong sign for this mode"
-                                                              : "INCONCLUSIVE -- keep turning, or the margin is noise";
+                    // Say WHY there is no verdict, instead of going quiet.
+                    if (!ab_stale_said && ab_stale >= 120 && ab_n == 0) {
+                        ab_stale_said = true;
                         API::get()->log_info(
-                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | residual vs BODY=%.3f "
-                            "vs AIM=%.3f deg/frame over %u separated frames | %s",
-                            g_cfg.pa_torso_frame, eb, ea, ab_n, verdict);
+                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | NO DATA: the controller turned "
+                            "on %u ticks but the torso yaw was never republished. The palette is not being "
+                            "driven -- no weapon in hand, or the palette hook is installed but not called.",
+                            g_cfg.pa_torso_frame, ab_stale);
+                    }
+
+                    if (ab_n >= 60 && (ab_n % 64u) == 0u && ab_said < 40 && ab_sum_aim > 0.0) {
+                        ++ab_said;
+                        const double r = ab_sum_torso / ab_sum_aim;
+                        const char* verdict =
+                              (r < 0.35)             ? "LOCKED TO BODY"
+                            : (r > 0.65 && r < 1.35) ? "FOLLOWS THE AIM (uncorrected)"
+                            : (r > 1.65)             ? "DOUBLE-COUNTS THE AIM (wrong sign)"
+                            :                          "BETWEEN BANDS";
+                        const char* expect =
+                              (g_cfg.pa_torso_frame == 0) ? "CONTROL: must read ~1 or this instrument is wrong"
+                            : (g_cfg.pa_torso_frame == 3 || g_cfg.pa_torso_frame == 4)
+                                                          ? "one of 3/4 should read ~0 and the other ~2"
+                            : (g_cfg.pa_torso_frame == 5) ? "folds in head yaw: needs the head still"
+                            : (g_cfg.pa_torso_frame == 6) ? "blends hands+head: between 0 and 1 if the sign is right"
+                            :                               "no expectation for this mode";
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | R=%.3f (torso swept %.0f deg "
+                            "while aim swept %.0f) over %u ticks, rejected stale=%u stickturn=%u | %s | %s",
+                            g_cfg.pa_torso_frame, r, ab_sum_torso, ab_sum_aim, ab_n, ab_stale, ab_turning,
+                            verdict, expect);
                     }
                 }
             }

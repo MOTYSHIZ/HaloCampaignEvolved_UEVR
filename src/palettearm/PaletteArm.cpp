@@ -763,18 +763,22 @@ bool drive_palette(const pa::PaletteAccess& access) {
     //
     // The question patorsoframe 3-vs-4 exists to answer -- which sign converts aim frame to body
     // frame -- is a coin-flip the code cannot settle by reading itself, and "which felt steadier"
-    // has already cost one headset round-trip. What settles it is whether THIS basis stays with
-    // the body or follows the aim while the two diverge.
+    // has already cost one headset round-trip.
     //
-    // ONE NUMBER, not the correlation, and the split is deliberate. The two yaws it has to be
-    // compared against (the aim-driven camera yaw and the locked rendered yaw) have internal
-    // linkage in Plugin.cpp on purpose -- only their delta is exported, because the delta is what
-    // consumers should depend on. So the comparison is done THERE, in the tick, immediately after
-    // palettearm_update returns: all three numbers are then read at one instant on one clock.
-    // Correlating a tick-rate torso yaw against render-rate view yaws would alias, which is the
-    // two-clocks trap this file already carries scars from.
+    // WRITTEN HERE, IN THE DETOUR -- not in palettearm_update(). An earlier version of this note
+    // claimed the tick read all three yaws "at one instant on one clock"; it does not. This runs
+    // on the game's palette build, later in the frame, while the tick samples whatever was last
+    // written. The consumer is therefore built to be insensitive to a small lag (it compares sums
+    // of MAGNITUDES over a sweep, which a one-frame shift does not change) rather than pretending
+    // the lag is not there.
+    //
+    // THE SEQUENCE COUNTER IS NOT DECORATION. A torso that stops being published reads a delta of
+    // exactly zero -- which is indistinguishable from a perfectly body-locked torso, i.e. the
+    // RIGHT answer. Without a freshness check the instrument's failure mode is to report success.
+    // Yaw first, then the counter, so a reader that sees a new count gets the new yaw.
     g_pa_torso_yaw.store(std::atan2(torso_basis.forward.y, torso_basis.forward.x) * 57.2957795f,
                          std::memory_order_relaxed);
+    g_pa_torso_seq.fetch_add(1, std::memory_order_relaxed);
 
     // Which physical hand aims. Asked once, so left-handed play needs no second code path.
     const bool aim_is_right = !g_cfg.aim_left_hand;
@@ -1946,10 +1950,12 @@ void hand_fix_tick() {
 
 } // namespace
 
-// The solved torso yaw, degrees, in the same frame the shoulders are hung from. Written every frame
-// the basis validates; read by the tick's torso A/B. Outside the anonymous namespace because the
-// comparison deliberately happens in Plugin.cpp -- see the note at the store site.
-std::atomic<float> g_pa_torso_yaw{0.0f};
+// The solved torso yaw, degrees, in the same frame the shoulders are hung from, plus a counter that
+// advances on every publish. Written from the palette detour every frame the basis validates; read
+// by the tick's torso A/B. Outside the anonymous namespace because the comparison deliberately
+// happens in Plugin.cpp -- see the note at the store site.
+std::atomic<float>    g_pa_torso_yaw{0.0f};
+std::atomic<uint32_t> g_pa_torso_seq{0};
 
 bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
