@@ -80,7 +80,7 @@ pa::ArmTuning    s_arm_tuning;
 // palettearm_parse_key() for the measurement that made it necessary.
 int              s_pa_chest_node = -1;
 // paaimlead -- see the top of drive_palette().
-bool             s_aim_lead = false;
+bool             s_aim_lead = true;    // DEFAULT ON since 2026-09-16: yaw S 0.16-0.26 vs 0.31-0.44 without it (round 3); pitch unchanged.
 // WORLD SCALE (paworldscale, 2026-09-16). The hand offset off the head and the shoulder offsets are
 // real-world METRES, and the world is rendered at UEVR's world scale: the UeRig route was calibrated
 // to rig_scale = 131.2 UE cm per metre so the gun sits on the hand IN THE HEADSET. The palette route
