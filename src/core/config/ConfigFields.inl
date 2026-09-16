@@ -4,6 +4,9 @@
 
     // ---- (after the author's Config.hpp line 261)
     // AIMBORE (2026-09-13). One calibration for the gun, the shot and the reticle.
+    //   A SETTING OF THE WEAPON PLACEMENT, not a switch beside it: the placement derives this to 1
+    //   while it is on (OwnedKeyDerive.cpp) unless a cfg layer sets it, and the bore path is reached
+    //   only from the placement's own aim branch, so the default below is what runs with it off.
     //   0 = the aim is the aim-fixed hand forward. The drawn weapon also carries the global grip
     //       rotation and the held weapon's trim, so the barrel sits off the shot by that trim
     //       (measured: the AR's 2.0 deg pitch trim = barrel 2.0 deg above the aim).
@@ -502,6 +505,25 @@
     // hand never false-fired and is not gated. ms=0 disables.
     int   melee_shot_ms    = 250;
     float melee_shot_dist  = 0.25f;
+
+    // ---- THE OFF HAND'S OWN SWING THRESHOLDS. The author's meleespeed / meleeext / meleereach /
+    // meleemaxspeed / meleemaxreach / meleetau / meleecooldown / meleehold stay HIS: his defaults,
+    // read by his Gesture.cpp for the AIM hand's swing, and by nothing of ours. These are the same
+    // quantities with the same parse, the same units and the same clamps, for the OFF hand only,
+    // shipped at the values this gesture is tuned for. Nothing reads them with meleeleft off.
+    //
+    // The two that differ from his: an off hand that is also holding a magazine, steadying a barrel
+    // and reaching for a pouch throws far more false positives than the weapon hand, so the speed
+    // and the extension both sit well above his.
+    float melee_left_speed     = 5.00f;   // m/s at the peak of the swing (his: 1.50)
+    float melee_left_ext       = 2.20f;   // m/s of extension away from the head (his: 1.50)
+    float melee_left_reach     = 0.30f;   // m the hand must be from the head
+    float melee_left_max_speed = 12.0f;   // m/s above which the sample is tracking noise
+    float melee_left_max_reach = 1.20f;   // m beyond which the sample is tracking noise
+    float melee_left_tau_ms    = 20.0f;   // smoothing of the measured speed
+    int   melee_left_cooldown_ms = 500;   // after a punch lands
+    int   melee_left_hold_ms   = 80;      // how long the melee button is held down
+
     // OFF-HAND chop rescue: extension OR this much travel since the swing began. A vertical chop
     // arcs around the shoulder -- huge speed and over a metre of travel with the extension gate
     // never passing (measured: ext 1.43/1.80 vs the 2.20 gate, disp 1.13/0.77). Noise and the
@@ -1533,6 +1555,20 @@
     // table matches (case-insensitive substring of the weapon key). No entry = the global above.
     // Live: the cfg is re-read in play, so this tunes in the headset without a rebuild.
     // Default: the value manual reload is tuned with.
+    // ---- THE FORK'S OWN RELOAD DISTANCES. The author's reloadjoin and reloadmagoff stay HIS: his
+    // defaults, read by his code (Gesture.cpp's MagHeld test, Holster.cpp's mag marker fallback) and
+    // by nothing of ours. These two are the same quantities with the same parse and the same units,
+    // shipped at the values this reload gesture is tuned for, and the fork reads only these.
+    //
+    // reloadseat: how close the fetch hand must come to the aim hand to seat the magazine, metres.
+    // Hand-to-hand rather than hand-to-weapon: the gun is a separate actor whose grip point moves
+    // per weapon, while the two controllers are always both known. 0.30 (his) captures the magazine
+    // from a foot away; 0.07 is the measured reach of the real gesture.
+    float reload_seat_dist = 0.07f;
+    // reloadmagbelt: body-frame belt point (x right, y up, z back, metres) the spare magazine hangs
+    // from -- the LEFT hip, the fetch hand's side. A reloadmagoffw entry for the weapon in hand
+    // replaces it.
+    float reload_mag_belt[3] = {-0.22f, -0.65f, 0.00f};
     char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.00";
     // THE RELOAD WHILE RUNNING (from the headset, 2026-09-11: the mag is not keeping up, reloading on the
     // move is nearly impossible). Root cause, verified in code: the seat and rack tests map the

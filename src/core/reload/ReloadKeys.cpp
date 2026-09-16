@@ -19,6 +19,10 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (parse_reloadstate_key(key, v)) return true;
     if (_stricmp(key, "reloadframe")    == 0) { g_cfg.reload_frame = (int)v; return true; }
     if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
+    // Parsed exactly as the author parses reloadjoin and reloadmagoff, so a value means the same
+    // thing in either key: the same clamp on the one, a bare three-float read on the other.
+    if (_stricmp(key, "reloadseat")     == 0) { g_cfg.reload_seat_dist = clampf((float)v, 0.05f, 1.0f); return true; }
+    if (_stricmp(key, "reloadmagbelt")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_belt[0], &g_cfg.reload_mag_belt[1], &g_cfg.reload_mag_belt[2]); return true; }
     if (_stricmp(key, "reloadhidearms") == 0) { g_cfg.reload_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
     if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }

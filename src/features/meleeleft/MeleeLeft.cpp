@@ -88,7 +88,7 @@ void offhand_melee_update(float dt) {
 
     const Vec3  rel{pos.x - hpos.x, pos.y - hpos.y, pos.z - hpos.z};
     const float reach = std::sqrt(rel.x * rel.x + rel.y * rel.y + rel.z * rel.z);
-    if (reach > g_cfg.melee_max_reach) {
+    if (reach > g_cfg.melee_left_max_reach) {
         s2_have = false;
         s2_vel = Vec3{0.0f, 0.0f, 0.0f};
         s2_ext = 0.0f;
@@ -108,14 +108,14 @@ void offhand_melee_update(float dt) {
     s2_prev_rel = rel;
     s2_prev_reach = reach;
 
-    const float a = ema_alpha(g_cfg.melee_tau_ms, dt);
+    const float a = ema_alpha(g_cfg.melee_left_tau_ms, dt);
     s2_vel.x += (raw.x - s2_vel.x) * a;
     s2_vel.y += (raw.y - s2_vel.y) * a;
     s2_vel.z += (raw.z - s2_vel.z) * a;
     s2_ext   += (ext_raw - s2_ext) * a;
 
     const float speed = std::sqrt(s2_vel.x * s2_vel.x + s2_vel.y * s2_vel.y + s2_vel.z * s2_vel.z);
-    if (speed > g_cfg.melee_max_speed) {
+    if (speed > g_cfg.melee_left_max_speed) {
         s2_have = false;
         s2_vel = Vec3{0.0f, 0.0f, 0.0f};
         s2_ext = 0.0f;
@@ -137,30 +137,30 @@ void offhand_melee_update(float dt) {
     } else if (s2_in_swing) {
         s2_in_swing = false;
         if (g_cfg.melee_log) {
-            const bool would = (s2_pk_spd   >= g_cfg.melee_speed) &&
-                               (s2_pk_ext   >= g_cfg.melee_ext ||
+            const bool would = (s2_pk_spd   >= g_cfg.melee_left_speed) &&
+                               (s2_pk_ext   >= g_cfg.melee_left_ext ||
                                 (g_cfg.melee_disp > 0.0f && s2_pk_disp >= g_cfg.melee_disp)) &&
-                               (s2_pk_reach >= g_cfg.melee_reach);
+                               (s2_pk_reach >= g_cfg.melee_left_reach);
             API::get()->log_info(
                 "[Halo-CampE-UEVR] MELEE swing (OFF HAND)  speed=%.2f  ext=%.2f  reach=%.2f  disp=%.2f   "
                 "(need spd>=%.2f ext>=%.2f reach>=%.2f) -- %s",
                 s2_pk_spd, s2_pk_ext, s2_pk_reach, s2_pk_disp,
-                g_cfg.melee_speed, g_cfg.melee_ext, g_cfg.melee_reach,
+                g_cfg.melee_left_speed, g_cfg.melee_left_ext, g_cfg.melee_left_reach,
                 would ? "FIRED" : "no");
         }
         s2_pk_spd = 0.0f; s2_pk_ext = 0.0f; s2_pk_reach = 0.0f; s2_pk_disp = 0.0f;
     }
 
     if (nowt < s_cooldown_until)   return;
-    if (speed < g_cfg.melee_speed) return;
+    if (speed < g_cfg.melee_left_speed) return;
     // Extension OR travel. A vertical chop arcs around the shoulder: the hand-to-head distance
     // barely grows (measured 2026-08-31: ext 1.43 and 1.80 against the 2.20 gate) while the hand
     // itself travels over a metre (disp 1.13, 0.77). Ambient jitter and the gunstock's kick both
     // stay under 0.1 m, so travel separates a chop from noise as cleanly as extension separates
     // a punch from it.
     const bool travelled = g_cfg.melee_disp > 0.0f && disp >= g_cfg.melee_disp;
-    if (s2_ext < g_cfg.melee_ext && !travelled) return;
-    if (reach < g_cfg.melee_reach) return;
+    if (s2_ext < g_cfg.melee_left_ext && !travelled) return;
+    if (reach < g_cfg.melee_left_reach) return;
 
     // GUNSTOCK KICK vs PUNCH. While the trigger is down (+ a tail) with the ForceTube on, the
     // stock's kick jolts the off hand into threshold-clearing VELOCITY (2.31 and 2.46 against the
@@ -188,8 +188,8 @@ void offhand_melee_update(float dt) {
         return;
     }
 
-    g_melee_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);
-    s_cooldown_until = nowt + ms_to_ticks(g_cfg.melee_cooldown_ms);
+    g_melee_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_left_hold_ms), std::memory_order_relaxed);
+    s_cooldown_until = nowt + ms_to_ticks(g_cfg.melee_left_cooldown_ms);
 
     // Aim hold along the punch, mode 1 only -- mode 0 wants the swing-start aim, which this
     // detector does not track; the shipped mode is 1.
@@ -214,6 +214,16 @@ bool meleeleft_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeshotms")    == 0) { g_cfg.melee_shot_ms  = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
     if (_stricmp(key, "meleeshotdist")  == 0) { g_cfg.melee_shot_dist = clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = clampf((float)v, 0.0f, 2.0f); return true; }
+    // Parsed exactly as the author parses his own melee thresholds, so a value means the same thing
+    // in either key: the same clamps, the same units.
+    if (_stricmp(key, "meleeleftspeed")    == 0) { g_cfg.melee_left_speed     = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleeleftext")      == 0) { g_cfg.melee_left_ext       = clampf((float)v, 0.0f, 20.0f); return true; }
+    if (_stricmp(key, "meleeleftreach")    == 0) { g_cfg.melee_left_reach     = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleeleftmaxspeed") == 0) { g_cfg.melee_left_max_speed = clampf((float)v, 1.0f, 100.0f); return true; }
+    if (_stricmp(key, "meleeleftmaxreach") == 0) { g_cfg.melee_left_max_reach = clampf((float)v, 0.3f, 5.0f); return true; }
+    if (_stricmp(key, "meleelefttau")      == 0) { g_cfg.melee_left_tau_ms    = clampf((float)v, 0.0f, 200.0f); return true; }
+    if (_stricmp(key, "meleeleftcooldown") == 0) { g_cfg.melee_left_cooldown_ms = (int)clampf((float)v, 0.0f, 5000.0f); return true; }
+    if (_stricmp(key, "meleelefthold")     == 0) { g_cfg.melee_left_hold_ms   = (int)clampf((float)v, 8.0f, 1000.0f); return true; }
     return false;
 }
 

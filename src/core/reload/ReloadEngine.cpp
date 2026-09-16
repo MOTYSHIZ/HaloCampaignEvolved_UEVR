@@ -88,11 +88,11 @@ bool s_reload_on = true;   // one release on the off edge (at a boot with reload
 
 #include "core/reload/Engine_ammo_dump_magdrop.inl"   // the rounds probe and the dropped magazine
 
-// The belt point for the weapon in hand: a reloadmagoffw entry if one matches, the global
-// reloadmagoff otherwise. Both the rendered mag and the grab zone read this, so what you see and
+// The belt point for the weapon in hand: a reloadmagoffw entry if one matches, the fork's own
+// reloadmagbelt otherwise (the author's reloadmagoff stays his, for his own mag marker fallback). Both the rendered mag and the grab zone read this, so what you see and
 // what you reach for stay the same point.
 Vec3 mag_belt_point() {
-    Vec3 mo{g_cfg.reload_mag_off[0], g_cfg.reload_mag_off[1], g_cfg.reload_mag_off[2]};
+    Vec3 mo{g_cfg.reload_mag_belt[0], g_cfg.reload_mag_belt[1], g_cfg.reload_mag_belt[2]};
     const std::string key = weapon_key();
     if (key.empty() || g_cfg.reload_mag_off_w[0] == 0) return mo;
     std::string lk = key; for (auto& ch : lk) ch = (char)tolower((unsigned char)ch);
@@ -340,7 +340,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
         if ((s_rl++ % 15u) == 0u)
             API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f)",
                                  join * 100.0f, (hand_l.y - s_grab_y) * 100.0f,
-                                 g_cfg.reload_join_dist * 100.0f, g_cfg.reload_lift * 100.0f);
+                                 g_cfg.reload_seat_dist * 100.0f, g_cfg.reload_lift * 100.0f);
     }
     // THE SLIDE, in place of the old four-tick debounce. Inside the capture radius (and
     // lifted) the magazine leaves the hand and travels into the well over reload_slide_ms;
@@ -371,7 +371,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
         // THE WELL'S MOUTH (insert mode). The seat point is the seated mag's own centre,
         // inside the grip, so a radius around it only fires when the mag is nearly home.
         // The lock instead happens anywhere on the axis from reload_insert below the seat up
-        // to the seat, within reload_join_dist of the axis SIDEWAYS; the abort is sideways too.
+        // to the seat, within reload_seat_dist of the axis SIDEWAYS; the abort is sideways too.
         bool  axis_ok = false; float lateral_m = join, d_axis_cm = 0.0f;
         if (g_cfg.reload_insert_mode == 1 && have_well_world && rot_ok) {
             const Quat qs = rotator_to_quat(g_reload_slide_pitch.load(std::memory_order_relaxed),
@@ -386,7 +386,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
             lateral_m = std::sqrt(lat.x * lat.x + lat.y * lat.y + lat.z * lat.z) / 100.0f;
             axis_ok = true;
         }
-        const float jd = g_cfg.reload_join_dist + reload_gate_pad_m();
+        const float jd = g_cfg.reload_seat_dist + reload_gate_pad_m();
         const bool in_mouth = axis_ok
             ? (lateral_m <= jd && d_axis_cm >= -(reload_insert_for_weapon() + jd) * 100.0f && d_axis_cm <= jd * 100.0f)
             : (join <= jd);
