@@ -96,6 +96,10 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "slideoff")       == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.slide_off[0], &g_cfg.slide_off[1], &g_cfg.slide_off[2]); return true; }
     if (_stricmp(key, "slidezone")      == 0) { g_cfg.slide_zone = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "slidemarkersize")    == 0) { g_cfg.slide_marker_size = clampf((float)v, 0.01f, 0.5f); return true; }
+    // The rack's own log switch. It was parsed under palettewpn, which read it once; every other
+    // reader is the rack engine here, so with a build that has no palettewpn folder the key stopped
+    // parsing while the code that reads it kept running.
+    if (_stricmp(key, "slidelog")           == 0) { g_cfg.slide_log = (v != 0.0); return true; }
     if (_stricmp(key, "slidemarkercolor")   == 0) { strncpy_s(g_cfg.slide_marker_color, val, _TRUNCATE); return true; }
     if (_stricmp(key, "wellmarkercolor")    == 0) { strncpy_s(g_cfg.well_marker_color, val, _TRUNCATE); return true; }
     if (_stricmp(key, "slidezoneback")  == 0) { g_cfg.slide_zone_back = clampf((float)v, -0.2f, 0.2f); return true; }

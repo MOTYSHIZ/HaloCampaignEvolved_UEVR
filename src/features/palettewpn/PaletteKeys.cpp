@@ -70,7 +70,6 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettetwohandmarkercolor") == 0) { strncpy_s(g_cfg.two_hand_marker_color, val, _TRUNCATE); return true; }
     if (_stricmp(key, "paletteslidezonepriority") == 0) { g_cfg.slide_zone_priority = (v != 0.0); return true; }
     if (_stricmp(key, "paletteslidewatch")     == 0) { g_cfg.slide_watch = (v != 0.0); return true; }
-    if (_stricmp(key, "slidelog")       == 0) { g_cfg.slide_log = (v != 0.0); return true; }
     if (_stricmp(key, "palettepokeamt") == 0) { g_cfg.palette_poke_amt   = clampf((float)v, -10.0f, 10.0f); return true; }
     if (_stricmp(key, "palettewatch")   == 0) { g_cfg.palette_watch      = (int)v; return true; }
     if (_stricmp(key, "palettehook")    == 0) { g_cfg.palette_hook       = (int)v; return true; }

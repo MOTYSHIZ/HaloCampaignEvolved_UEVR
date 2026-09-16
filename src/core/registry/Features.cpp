@@ -29,7 +29,18 @@ namespace {
 // A ROW: the feature's ONE master key (the single switch the menu toggle writes), the value that
 // key takes when the feature is on, the tier, the menu group and name, a one-line plain-language
 // description, its sub-settings (keys that only act while the master is on, shown nested under it
-// in the menu), the master keys it needs, and accessors for the master field.
+// in the menu), its dev keys, the master keys it needs, and accessors for the master field.
+//
+// EVERY FORK KEY HAS EXACTLY ONE OWNER: a row's sub-settings, a row's dev keys, or kCoreKeys below.
+// The split between the two lists is the split between the two shipped catalogs -- a sub-setting is
+// documented in halo_vr_user_reference.txt and gets a menu row, a dev key is documented in
+// halo_vr_dev.cfg and never gets one.
+//
+// WHERE A KEY IS PARSED IS NOT WHERE IT IS OWNED. A key a core service reads is parsed in core
+// (core/CoreKeys.cpp, core/reload/ReloadKeys.cpp) so that it still parses in a build with that
+// feature's folder removed, while the row below records which feature it acts for: vehfacing,
+// vehfacingoff, vehlog and vehseatpub are core/UnitState's, listed under vehcam;
+// holsterpollthrowlog is core/UnitState's evidence gate, listed under holsterpollthrow.
 //
 // TIERS AND DEFAULTS
 //   Stable        the author's released features. The registry never writes them: the built-in
@@ -59,7 +70,9 @@ struct FeatureRow {
     const char* group;
     const char* name;
     const char* desc;
-    const char* subkeys;
+    const char* subkeys;   // its PLAYER SETTINGS: one player-catalog entry each, drawn under it in the menu
+    const char* devkeys;   // its DEV KEYS: probes, dumps, logs and captured calibration. Dev catalog only,
+                           // never a menu row -- see the split in features_append_dev_reference.
     const char* needs;
     int  (*get)(const Config&);
     void (*set)(Config&, int);
@@ -73,88 +86,202 @@ const FeatureRow kFeatures[] = {
     // defaults). Listed so the menu and the logs show them beside the rest.
     { "aimreticule",  1, Tier::Stable, "", "Reticule in the world",
       "The game's crosshair drawn out in the world, where your shots land.",
-      "", "", FEATURE_BOOL(aim_reticule) },
+      "",
+      "",
+      "", FEATURE_BOOL(aim_reticule) },
     { "xrlayer",      1, Tier::Stable, "", "Headset-drawn reticule",
       "The reticule drawn by the headset itself, so the game's lighting never dims it.",
-      "", "aimreticule", FEATURE_BOOL(xr_layer) },
+      "",
+      "",
+      "aimreticule", FEATURE_BOOL(xr_layer) },
     { "cutscenemono", 6, Tier::Stable, "", "Cutscene screen",
       "Cutscenes shown on one flat screen in front of you.",
-      "cutscenesize", "", FEATURE_INT(cutscene_mono) },
+      "cutscenesize",
+      "",
+      "", FEATURE_INT(cutscene_mono) },
     { "cullfix",      1, Tier::Stable, "", "Distant detail",
       "Keeps distant objects drawn at VR view distances.",
-      "culldist", "", FEATURE_BOOL(cull_fix) },
+      "culldist",
+      "",
+      "", FEATURE_BOOL(cull_fix) },
     { "meleeswing",   1, Tier::Stable, "", "Melee by swinging",
       "Swing your weapon hand to melee.",
-      "", "", FEATURE_BOOL(melee_swing) },
+      "",
+      "",
+      "", FEATURE_BOOL(melee_swing) },
     { "holster",      1, Tier::Stable, "", "Holsters",
       "Reach over a shoulder to stow or draw a weapon, and to your chest for a grenade.",
-      "", "", FEATURE_BOOL(holster_enabled) },
+      "",
+      "",
+      "", FEATURE_BOOL(holster_enabled) },
     { "twohand",      1, Tier::Stable, "", "Two-handed aiming",
       "Bring your other hand to the barrel and squeeze its grip to steady your aim.",
-      "", "", FEATURE_INT(two_hand) },
+      "",
+      "",
+      "", FEATURE_INT(two_hand) },
     { "scope",        1, Tier::Stable, "", "Scope",
       "Squeeze the left trigger to zoom through a lens on your aim line.",
-      "", "", FEATURE_BOOL(scope_enabled) },
+      "",
+      "",
+      "", FEATURE_BOOL(scope_enabled) },
     { "armhide",      1, Tier::Stable, "", "Hide the stock arms",
       "Hides the game's own first-person arms.",
-      "", "", FEATURE_BOOL(arm_hide) },
+      "",
+      "",
+      "", FEATURE_BOOL(arm_hide) },
 
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
-      "aimbore,palettetwohandmin,palettetwohandmax,palettetwohandagreemin,palettetwohandagreefull,palettetwohandlog,palettecam,paletteposelatch,paletterolltrim,palettebuildgate,palettepubframe,palettetwohandmarker,palettecamlead,palettemeshconst,palettecalibkey,palettewpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
+      "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
+      "palettepubframe,paletterolltrim,palettetwohandagreefull,palettetwohandagreemin,palettetwohandlog,"
+      "palettetwohandmarker,palettetwohandmax,palettetwohandmin,palettewpncalibkey",
+      "camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,judderlog,liftyaw,"
+      "palaimcalibver,palaimfix,palaimoffpitch,palaimoffyaw,paletteaimdirectwrite,paletteaimreticulefresh,"
+      "palettebank,palettebarrellock,palettecam,palettecamsmooth,palettefinal,palettehook,palettehooktest,"
+      "palettelatch,palettelatchms,palettelerp,palettelocal,palettemeshconstgate,palettepoke,palettepokeamt,"
+      "palettepokecount,palettepokenode,paletteposelatch,palettescan,paletteslidewatch,"
+      "paletteslidezonepriority,palettesync,palettetwohandblendms,palettetwohandhaptic,"
+      "palettetwohandmarkercolor,palettetwohandmarkerscale,palettetwohandrad,palettewatch,palettewpnoffx,"
+      "palettewpnoffy,palettewpnoffz,palettewpnscale,palgripfix,palrender,palsniff,palstep,palstepctx,"
+      "palstepsrc,palwpnfix,pinuevrframe,posefilter,posefilterbeta,posefilterdcut,posefiltermin,"
+      "posefilterrbeta,posefreeze,revclamp,revclampdps,stomplog,termlog,tremor,tremorhz,tremorq,wpnerrlog",
+      "", FEATURE_BOOL(palette_weapon) },
     { "aimreticulestamp", 1, Tier::Experimental, "Weapon", "Reticule placed every frame",
       "The headset-drawn reticule is placed each frame on exactly where your shots go.",
-      "", "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
+      "",
+      "",
+      "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
     { "scopelens",    1, Tier::Experimental, "Weapon", "Scope lens on the weapon",
       "A magnifying lens in the scope housing of the scoped weapons. The standard scope stands down while on.",
-      "scopeev,scopetint,scopetonecurve,scopeeyedist,scopesource,scopertfmt,scopeshowflags,scopesfflags,scopeseptrans,scopereticletint", "scope", FEATURE_BOOL(scope_lens) },
+      "scopeev,scopeeyedist,scopereticletint,scopertfmt,scopeseptrans,scopesfflags,scopeshowflags,"
+      "scopesource,scopetint,scopetonecurve",
+      "scopeabtest,scopecamfwd,scopecvardump,scopehz,scopepp,scopeprobe,scopereticle,scopereticlescale,"
+      "scoperollfix,scoperound,scopewpn",
+      "scope", FEATURE_BOOL(scope_lens) },
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
-      "reloadseat,reloadmagbelt,reloadholdfire,reloadresetholds,reloadvrlog,reloadshotgunlog,gripexclusive,reloadakmute,reloadakmimic,reloadcoophide,reloadhidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,reloadroomanchor,reloadhidearms",
+      "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
+      "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagbelt,reloadmagoffw,reloadresetholds,"
+      "reloadroomanchor,reloadseat,reloadshotgunlog,reloadslidems,reloadstate,reloadstatedeath,"
+      "reloadstatedrop,reloadstatehide,reloadstatelevel,reloadstatelog,reloadstatesave,reloadstatewaitms,"
+      "reloadvrlog,reloadwellmarker",
+      "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"
+      "akmimic4event,akmutenames,akpostrva,akrtpc,akrtpcglobal,akrtpcrestore,akrtpcvalue,akstack,akvtcount,"
+      "akvtdump,akvtglobal,ammoscrub,ammoseq,animdump,animobjs,animseqset,animvars,animvarset,coopauto,"
+      "coopmaskms,coopstopat,magdrop,magdropms,magdump,maghide,maghidename,reloadanimms,reloadanimmscoop,"
+      "reloadaudiodump,reloadframe,reloadholdstate,reloadinsert,reloadinsertdone,reloadinsertmode,"
+      "reloadinsertsign,reloadmaskms,reloadmutems,reloadmutevariant,reloadpauseanim,reloadpressat,"
+      "reloadpressms,reloadpressmscoop,reloadskipweapons,reloadstepsound,reloadstepvariant,reloadstepvia,"
+      "reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,reserveoff,roundsoff,wellmarkercolor,wpnammodump,"
+      "zonehandrel",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
-      "slideradius,slidetravel,slideoff,slidezoneback,slidepartrotaxis,slidefire,slidefireback,slidefireentry", "", FEATURE_BOOL(slide_vr) },
+      "slidefire,slidefireback,slidefireentry,slideoff,slidepartrotaxis,slideradius,slidetravel,"
+      "slidezoneback",
+      "slidealways,slidebones,slidechamber,slidechamberweapons,slidecopy,slidecopyalign,slidecopyaxis,"
+      "slidecopybone,slidecopyclass,slidecopyfollower,slidecopyfp,slidecopyhide,slidecopyleader,"
+      "slidecopymode,slidecopynonanite,slidecopyplay,slidecopyrel,slidecopyroot,slidecopyseq,slidecopysign,"
+      "slidecopysweep,slidecopytest,slidefararray,slidefarcm,slidefirefwd,slidefirestate,slidehidemat,"
+      "slidehidematslot,slidehidepbo,slidehidesection,slidelockreload,slidelog,slidemarker,slidemarkercolor,"
+      "slidemarkersize,slidemontage,slidemorph,slidepart,slidepartaxis,slidepartbind,slidepartbone,"
+      "slidepartdropmode,slidepartframe,slideparthide,slidepartkids,slidepartmagdrop,slidepartmaghide,"
+      "slidepartmat,slidepartopendeg,slidepartorphans,slidepartpivot,slidepartrotdeg,slidepartshadow,"
+      "slidepartsign,slideparttest,slidepartui,slidephantom,slideseq,slideseqback,slideseqfwd,slideseqsweep,"
+      "slidesign,slideslot,slideundoreload,slideweapons,slidezone",
+      "", FEATURE_BOOL(slide_vr) },
     { "meleeleft",    1, Tier::Experimental, "Melee and grenades", "Punch with your other hand",
       "Your other hand can melee too, on its own swing thresholds.",
-      "meleeleftspeed,meleeleftext,meleeleftreach,meleeleftmaxspeed,meleeleftmaxreach,meleelefttau,meleeleftcooldown,meleelefthold,meleeleftlog",
+      "meleeleftcooldown,meleeleftext,meleelefthold,meleeleftlog,meleeleftmaxreach,meleeleftmaxspeed,"
+      "meleeleftreach,meleeleftspeed,meleelefttau",
+      "meleeleftdisp,meleeleftshotdist,meleeleftshotms",
       "meleeswing", FEATURE_BOOL(melee_left) },
     { "grenadeswallow", 1, Tier::Experimental, "Melee and grenades", "Grenades from the pouches only",
       "The left face button stops throwing grenades; grenades come from your chest pouches.",
-      "grenadecode,grenadeswallowlog", "", FEATURE_INT(grenade_swallow) },
+      "",
+      "grenadecode,grenadeswallowlog",
+      "", FEATURE_INT(grenade_swallow) },
     { "holsterpollthrow", 1, Tier::Experimental, "Melee and grenades", "Grenade throw on release",
       "A grenade leaves your hand the instant you open your grip, and the pouches show your real grenade counts.",
-      "holsterpollthrowlog", "holster,blamangles", FEATURE_BOOL(holster_poll_throw) },
+      "",
+      "holsterpollthrowbackdate,holsterpollthrowdump,holsterpollthrowgripmaskl,holsterpollthrowgripmaskr,"
+      "holsterpollthrowhand,holsterpollthrowinstant,holsterpollthrowlog,holsterpollthrowspeed",
+      "holster,blamangles", FEATURE_BOOL(holster_poll_throw) },
     { "wristhud",     1, Tier::Experimental, "HUD", "Wrist HUD",
       "Shield, weapon and grenade readouts on your forearm, and the motion tracker on your wrist.",
-      "wristradar,wristhudplacement,wristhudclasses,wristhudoff,wristhudrot,wristhudgap,wristhudclassesr,wristhudoffr,wristhudrotr,wristradarblip,wristradargain,wristblipcolorother", "", FEATURE_BOOL(wrist_hud) },
+      "wristblipcolorother,wristhudclasses,wristhudclassesr,wristhudgap,wristhudoff,wristhudoffr,"
+      "wristhudplacement,wristhudrot,wristhudrotr,wristradar,wristradarblip,wristradargain",
+      "wristblipbytes,wristblipcolor,wristblipdump,wristblipname,wristhudammotext,wristhudblend,"
+      "wristhudblendr,wristhuddraw,wristhudgainr,wristhudgapr,wristhudscale,wristhudtrigger,wristhudwpnammo,"
+      "wristhudwpnanchor,wristhudwpnfallback,wristhudwpngap,wristhudwpngrenade,wristhudwpnlog,"
+      "wristhudwpnscale,wristhudwpnshield,wristhudwpntracker,wristradaraimsign,wristradarcenter,"
+      "wristradarflip,wristradarlog,wristradarrot,wristradartest,wristradartilt,wristtrackerdump,"
+      "wristtrackermid",
+      "", FEATURE_BOOL(wrist_hud) },
     { "forcetube",    1, Tier::Experimental, "Haptics", "ForceTube gunstock",
       "A kick in the ForceTube gunstock on every round you fire.",
-      "forcetubekick,forcetuberadius", "", FEATURE_BOOL(force_tube) },
+      "forcetubekick,forcetuberadius",
+      "forcetubechannel,forcetubefirems",
+      "", FEATURE_BOOL(force_tube) },
     { "vehcam",       1, Tier::Experimental, "Vehicles", "Vehicle seat camera",
       "A first-person view from your seat in vehicles.",
-      "vehview,vehhidebody,vehcamguard,vehcamhullcheck,vehcamoff,vehcamboomtau,vehfacing", "blamangles", FEATURE_INT(veh_cam) },
+      "vehcamboomtau,vehcamguard,vehcamhullcheck,vehcamoff,vehfacing,vehhidebody,vehview",
+      "vehanchor,vehboomorder,vehcamanchor,vehcamguardspeed,vehcamhulldead,vehcamscale,vehcamsrc,"
+      "vehcamstalems,vehfacingbias,vehfacingoff,vehlog,vehseatdirect,vehseatpub,vehviewflat",
+      "blamangles", FEATURE_INT(veh_cam) },
     { "vehiclewheel", 1, Tier::Experimental, "Vehicles", "Steering wheel",
       "Hands on the steering wheel. Steering is not sent to the vehicle yet.",
-      "vehsteersign", "blamangles", FEATURE_INT(vehicle_wheel) },
+      "vehsteersign",
+      "vehwheelgrip,vehwheelhand,vehwheellock,vehwheelmarker,vehwheelpos,vehwheelrad,vehwheeltilt",
+      "blamangles", FEATURE_INT(vehicle_wheel) },
     { "roomscale",    1, Tier::Experimental, "Roomscale", "Roomscale",
       "Walk around your play space and your steps move the Spartan.",
-      "roomscalethrottleysign,roomscalethrottle,roomscalegain,roomscalemin,roomscaledz", "blamangles", FEATURE_BOOL(roomscale) },
+      "roomscaledz,roomscalegain,roomscalemin,roomscalethrottle,roomscalethrottleysign",
+      "roomscaledead,roomscaleff,roomscalelat,roomscaleleash,roomscalelog,roomscalemaxspeed,roomscalepulse,"
+      "roomscalespeed,roomscalestanddown,roomscalestick,roomscalethrottleoff,roomscalethrottleoff2,"
+      "roomscalethrprobe,roomscalethrspeed",
+      "blamangles", FEATURE_BOOL(roomscale) },
     { "heightcal",    1, Tier::Experimental, "Roomscale", "Auto height",
       "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it.",
-      "heightmode,heightsrc,heightsample,heighttrim,heightkey", "", FEATURE_INT(height_cal) },
+      "heightkey,heightmode,heightsample,heightsrc,heighttrim",
+      "heightautoseat,heightband,heightbipedfeet,heightbipedscale,heightestep,heighteye,heightholdms,"
+      "heightlog,heightpawnfeet,heightscale,heightseatbelow,heightseatdwell,heightseattarget,heightslew,"
+      "heighttracechannel,heighttracemax,heightwindow",
+      "", FEATURE_INT(height_cal) },
     { "headblock",    1, Tier::Experimental, "Roomscale", "Head block",
       "Keeps your head out of walls when you lean into them.",
-      "headblockradius", "", FEATURE_INT(head_block) },
+      "headblockradius",
+      "headblockchannel,headblocklean,headblocklog,headblockrelease",
+      "", FEATURE_INT(head_block) },
     { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
       "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate, holster marker tint and minimum throw speed.",
-      "stabilityturnlog,stabilitywidgetlog,markertint,stabilityholstermarkercolor,stabilitygrenminthrow", "", FEATURE_BOOL(stability_fixes) },
+      "",
+      "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityturnlog,stabilitywidgetlog",
+      "", FEATURE_BOOL(stability_fixes) },
 };
 
 #undef FEATURE_BOOL
 #undef FEATURE_INT
+
+// CORE KEYS: the fork keys that belong to no single feature, so every fork key has exactly one
+// owner -- a row above, or this list. A key is here when its reader is a core service that runs for
+// whichever consumer keyed it, or when more than one feature reads it:
+//   bobcancel/bobtau/boblog          core/CameraBob, the camera bob cancel
+//   cutscenegrab                     core/dev/CutsceneDump
+//   magrender                        core/WeaponObject, the drawn-magazine pass
+//   markertint                       core/MarkerFaces -- the tint gate for EVERY marker: the holster
+//                                    pouches (stabilityfixes), the reload well, the rack part and
+//                                    the placement's grab dot. FOUR features, so it is not any one
+//                                    feature's sub-setting.
+//   moveprobe / stealextra           core/fixes/HostFixes, two gates on the author's own code
+//   palettewpnlog                    read by palettewpn AND by the wrist HUD's one-shot widget log
+//   slidehook / slidenode            core/WeaponObject, the node the rack drives
+//   wpnnode*                         core/WeaponObject node probes, also read by the reload engine
+const char* const kCoreKeys =
+    "bobcancel,boblog,bobtau,cutscenegrab,magrender,markertint,moveprobe,palettewpnlog,slidehook,"
+    "slidenode,stealextra,wpnnodecopyscan,wpnnodedump,wpnnodepoke,wpnnodepokeamt";
 
 constexpr int kCount = (int)(sizeof(kFeatures) / sizeof(kFeatures[0]));
 constexpr int kTierCount = 4;
@@ -509,7 +636,10 @@ void publish_feature_list(const char* data_dir) {
         text += r.subkeys;                    text += "|";
         text += r.needs;                      text += "|";
         text += std::to_string(r.get(g_cfg)); text += "|";
-        text += source_code(i);               text += "\r\n";
+        text += source_code(i);               text += "|";
+        // Field 12, after the fields the menu reads: its dev keys. The menu draws a row for a
+        // SUB-SETTING, never for one of these, so appending them cannot add a row to anyone's menu.
+        text += r.devkeys;                    text += "\r\n";
     }
     char path[MAX_PATH] = {0};
     features_path(data_dir, path, sizeof(path));
@@ -558,7 +688,15 @@ void features_append_dev_reference(std::string& text) {
         text += "=";
         text += std::to_string(def);
         text += "\r\n";
+        // The dev keys are listed but never offered as a menu row: they are probes, dumps, logs and
+        // captured calibration, and they act only while this feature is on, exactly as its
+        // sub-settings do. Their catalog entries are in this file, under this feature's heading.
+        if (r.devkeys[0]) { text += "#   dev keys: "; text += r.devkeys; text += "\r\n"; }
     }
+    text += "# Core keys. Read by a core service, or by more than one feature, so they belong to no\r\n"
+            "# single feature and act whenever their reader runs.\r\n#   ";
+    text += kCoreKeys;
+    text += "\r\n";
     for (int t = 1; t < kTierCount; ++t) {
         sprintf_s(line, sizeof(line), "# Tier switch: every %s feature whose own key is not set.\r\n#%s=%d\r\n",
                   kTierName[t], kTierSwitch[t], kTierDefaultOn[t] ? 1 : 0);
