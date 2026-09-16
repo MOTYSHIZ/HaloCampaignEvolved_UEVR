@@ -79,6 +79,8 @@ pa::ArmTuning    s_arm_tuning;
 // The palette node treated as the CHEST for the chest route (-1 = off); see the comment above
 // palettearm_parse_key() for the measurement that made it necessary.
 int              s_pa_chest_node = -1;
+// paaimlead -- see the top of drive_palette().
+bool             s_aim_lead = false;
 
 // WHICH INDEX IS WHICH BONE, resolved rather than remembered. Rung 1 derives the map from the
 // palette the hook just handed us; rung 2 is elliotttate's measured table; rung 3 is arms stay
@@ -528,6 +530,26 @@ bool drive_palette(const pa::PaletteAccess& access) {
         s_drive_stage = "no tracking snapshot"; return false;
     }
     const TrackingSnapshot tracking = s_tracking;
+
+    // THE AIM THE PALETTE IS CORRECTED AGAINST. Default: the lock delta and camera pitch as the
+    // last render callback saw them -- so the correction trails the camera by up to a tick, which
+    // the world-space probe reads as a per-step blip (S ~0.3 on a body-locked joint). Under direct
+    // drive the camera follows the controller within a write cycle, so the aim the NEXT frame will
+    // render is, to a good approximation, the controller's desired aim right now: paaimlead=1
+    // rebuilds the gap from that (locked view yaw minus desired yaw) and takes the desired pitch,
+    // which should land the correction in the same frame the camera turns. Experiment.
+    float lock_delta_deg = ::halo::g_view_lock_delta.load();
+    float cam_pitch_deg  = ::halo::g_view_pitch.load();
+    if (s_aim_lead) {
+        float dy = 0.0f, dp = 0.0f;
+        if (::halo::desired_aim_now(&dy, &dp)) {
+            float d = ::halo::g_view_out_yaw.load() - dy;
+            while (d >  180.0f) d -= 360.0f;
+            while (d < -180.0f) d += 360.0f;
+            lock_delta_deg = d;
+            cam_pitch_deg  = dp;
+        }
+    }
     if (!tracking.valid) { s_drive_stage = "tracking snapshot invalid"; return false; }
 
     // THE DUMP FIRES BEFORE THE GUARD, deliberately: the case we most need numbers for is exactly
@@ -764,7 +786,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // Mode 3's sign was judged in-headset while BOTH the weapon and the arms were still
         // double-counting the aim, so that judgement was made through two known-broken terms and
         // is not evidence for anything.
-        const float gap = -::halo::g_view_lock_delta.load() * 0.01745329252f;
+        const float gap = -lock_delta_deg * 0.01745329252f;
         const float cg = std::cos(gap), sg = std::sin(gap);
         const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                              pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -774,7 +796,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         if (g_cfg.pa_torso_frame == 7) {
             // Same sign as pa_arm_pitch=2, the one confirmed in-headset: nose-DOWN by the camera
             // pitch, i.e. the inverse of the camera's own pitch.
-            const float gp = -::halo::g_view_pitch.load() * 0.01745329252f;
+            const float gp = -cam_pitch_deg * 0.01745329252f;
             const float cp = std::cos(gp), sp = std::sin(gp);
             const pa::Mat3 pitch_gap{ pa::Vec3{ cp, 0.0f, sp}, pa::Vec3{0.0f, 1.0f, 0.0f},
                                       pa::Vec3{-sp, 0.0f, cp} };
@@ -799,7 +821,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // the shoulders -- elliotttate's original intent ("follows the head's position and yaw but
     // never its pitch or roll"), and the reason looking down does not fold the arms into the view.
     if (g_cfg.pa_torso_frame == 5 && pa::valid_basis(head_basis)) {
-        const float gap = ::halo::g_view_lock_delta.load() * 0.01745329252f;
+        const float gap = lock_delta_deg * 0.01745329252f;
         const float cg = std::cos(gap), sg = std::sin(gap);
         const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                              pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -807,7 +829,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     }
 
     if (g_cfg.pa_torso_frame == 3 || g_cfg.pa_torso_frame == 4) {
-        float d = ::halo::g_view_lock_delta.load();
+        float d = lock_delta_deg;
         if (g_cfg.pa_torso_frame == 4) d = -d;
         const float a = d * 0.01745329252f;
         const float c = std::cos(a), sn = std::sin(a);
@@ -1022,7 +1044,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 // would lock to the VIEW's forward instead of the CAMERA's, and those differ by the
                 // lock gap -- measured at 98-125 degrees on this title, not a rounding error.
                 const float bl_gap = (g_cfg.pa_wpn_lift != 0)
-                    ? -::halo::g_view_lock_delta.load() * 0.01745329252f
+                    ? -lock_delta_deg * 0.01745329252f
                     : 0.0f;
                 const pa::Vec3 aim_stage{std::cos(bl_gap), -std::sin(bl_gap), 0.0f};
                 const pa::Vec3 barrel_stage = pa::transform_vector(wgrip_w, beta);
@@ -1105,7 +1127,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // because our own aim drive wrote that camera yaw from this same controller.
             pa::Mat3 lifted = wgrip_w;
             if (g_cfg.pa_wpn_lift != 0) {
-                const float gap = -::halo::g_view_lock_delta.load() * 0.01745329252f;  // camera-view
+                const float gap = -lock_delta_deg * 0.01745329252f;  // camera-view
                 const float cg = std::cos(gap), sg = std::sin(gap);
                 const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                                      pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1126,7 +1148,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // The arms already got both halves (see arm_gap below); the weapon only got one.
             pa::Vec3 dbl = stage_pos;
             if (g_cfg.pa_wpn_lift != 0) {
-                const float gp = -::halo::g_view_lock_delta.load() * 0.01745329252f;
+                const float gp = -lock_delta_deg * 0.01745329252f;
                 const float cp = std::cos(gp), sp = std::sin(gp);
                 const pa::Mat3 gpm{ pa::Vec3{ cp, sp, 0.0f}, pa::Vec3{-sp, cp, 0.0f},
                                     pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1224,7 +1246,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // with the gapped controller would apply the same rotation twice.
         const pa::Mat3 controller_raw = controller;
         if (g_cfg.pa_arm_lift != 0) {
-            const float g = -::halo::g_view_lock_delta.load() * 0.01745329252f;   // camera - view
+            const float g = -lock_delta_deg * 0.01745329252f;   // camera - view
             const float cg = std::cos(g), sg = std::sin(g);
             arm_gap = pa::Mat3{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                                 pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1245,7 +1267,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // The measurement that signed this off could not have caught it: that sweep was run with
             // the HMD LEVEL, where hmd_pitch is 0 and the two formulas are arithmetically identical.
             // A control that pins the suspect variable at zero does not test it.
-            float gp = ::halo::g_view_pitch.load() * 0.01745329252f;
+            float gp = cam_pitch_deg * 0.01745329252f;
             if (g_cfg.pa_arm_pitch == 2) gp = -gp;
             const float cp = std::cos(gp), sp = std::sin(gp);
             const pa::Mat3 pitch_gap{ pa::Vec3{ cp, 0.0f, sp}, pa::Vec3{0.0f, 1.0f, 0.0f},
@@ -2101,6 +2123,7 @@ bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
     else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
+    else if (_stricmp(key, "paaimlead")       == 0) s_aim_lead                        = (v != 0.0);
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;

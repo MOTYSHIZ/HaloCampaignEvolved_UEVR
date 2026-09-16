@@ -245,6 +245,7 @@ void publish_view_lock_delta() {
     while (d > 180.0f)  d -= 360.0f;
     while (d < -180.0f) d += 360.0f;
     ::halo::g_view_lock_delta.store(d);
+    ::halo::g_view_out_yaw.store(g_dbg_view_out.load());
 }
 std::atomic<bool>  g_lock_primed{false};
 // PALETTE MESH STAND-DOWN -- published from the tick for the render path. True while the palette

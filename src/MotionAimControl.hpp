@@ -148,6 +148,9 @@ extern std::atomic<float> g_turn_offset;
 // mirrored here instead -- which is the better boundary anyway: consumers want the delta, not the
 // two raw yaws.
 extern std::atomic<float> g_view_lock_delta;
+// The locked view yaw itself (g_dbg_view_out, UE degrees), published with the delta so the palette
+// route can rebuild the gap against a NEWER aim than the last render's (paaimlead).
+extern std::atomic<float> g_view_out_yaw;
 
 // The ACHIEVED render pitch of the game camera, published from the same view-lock site and at the
 // same render rate as the delta above. The palette is local to THIS camera, so the arm frame must
