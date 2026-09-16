@@ -450,7 +450,7 @@
 #scopeshowflags=1
 # Lens lighting features. The lighting features turned on in the lens image, separated by commas.
 # Takes effect on the next level load.
-#scopesfflags=LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows
+#scopesfflags=LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows,Lighting
 # Shields and glass in the lens. 0 draws see-through surfaces such as shields into the lens image, and
 # this also applies to the main view; -1 leaves the game's setting alone.
 #scopeseptrans=0

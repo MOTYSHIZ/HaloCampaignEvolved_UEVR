@@ -474,7 +474,7 @@
     // Default: the four names the tuned scope applied. Its cfg line also listed Lighting last, but the
     // name list was split on commas and spaces only, so the line ending stayed on that last name and
     // the engine never matched it.
-    char  scope_sf_names[512] = "LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows";
+    char  scope_sf_names[512] = "LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows,Lighting";
     // Default: the two scoped weapons the lens is tuned for, built in so the
     // feature needs no cfg line. A scopewpn line for the same weapon replaces its entry.
     ScopeCfg scopes[8] = {
@@ -1175,7 +1175,7 @@
     // held those bits are swallowed -- otherwise every steering input brakes. Let go of the
     // wheel and grip brakes normally again.
     int   veh_wheel_hand = 2;   // 0 left, 1 right, 2 BOTH
-    int   veh_brake_mask = 0x0000;
+    int   veh_brake_mask = 0x0300;
     // Wheel-plane tilt, degrees. POSITIVE = the top leans TOWARD the driver, NEGATIVE = away.
     // 0 = a bus wheel facing the driver, 90 = flat like a table. The hand angle is measured IN
     // this plane, which is what makes the arc feel like the drawn wheel instead of a hoop
