@@ -135,18 +135,19 @@ const FeatureRow kFeatures[] = {
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
       "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
-      "palettepubframe,paletterolltrim,palettetwohandagreefull,palettetwohandagreemin,palettetwohandlog,"
-      "palettetwohandmarker,palettetwohandmax,palettetwohandmin,palettewpncalibkey",
-      "aimboreaxis,camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,judderlog,liftyaw,"
-      "palaimcalibver,palaimfix,palaimoffpitch,palaimoffyaw,paletteaimdirectwrite,paletteaimreticulefresh,"
-      "palettebank,palettebarrellock,palettecam,palettecamsmooth,palettefinal,palettehook,palettehooktest,"
-      "palettelatch,palettelatchms,palettelerp,palettelocal,palettemeshconstgate,palettepoke,palettepokeamt,"
-      "palettepokecount,palettepokenode,paletteposelatch,palettescan,paletteslidewatch,"
-      "paletteslidezonepriority,palettesync,palettetwohandblendms,palettetwohandhaptic,"
-      "palettetwohandmarkercolor,palettetwohandmarkerscale,palettetwohandrad,palettewatch,palettewpnoffx,"
-      "palettewpnoffy,palettewpnoffz,palettewpnscale,palgripfix,palrender,palsniff,palstep,palstepctx,"
-      "palstepsrc,palwpnfix,pinuevrframe,posefilter,posefilterbeta,posefilterdcut,posefiltermin,"
-      "posefilterrbeta,posefreeze,revclamp,revclampdps,stomplog,termlog,tremor,tremorhz,tremorq,wpnerrlog",
+      "palettepubframe,paletterolltrim,palettetwohandagreefull,palettetwohandagreemin,palettetwohandmarker,"
+      "palettetwohandmax,palettetwohandmin,palettewpncalibkey",
+      "aimboreaxis,camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,"
+      "judderlog,liftyaw,palaimcalibver,palaimfix,palaimoffpitch,palaimoffyaw,paletteaimdirectwrite,"
+      "paletteaimreticulefresh,palettebank,palettebarrellock,palettecam,palettecamsmooth,palettefinal,"
+      "palettehook,palettehooktest,palettelatch,palettelatchms,palettelerp,palettelocal,"
+      "palettemeshconstgate,palettepoke,palettepokeamt,palettepokecount,palettepokenode,paletteposelatch,"
+      "palettescan,paletteslidewatch,paletteslidezonepriority,palettesync,palettetwohandblendms,"
+      "palettetwohandhaptic,palettetwohandlog,palettetwohandmarkercolor,palettetwohandmarkerscale,"
+      "palettetwohandrad,palettewatch,palettewpnoffx,palettewpnoffy,palettewpnoffz,palettewpnscale,"
+      "palgripfix,palrender,palsniff,palstep,palstepctx,palstepsrc,palwpnfix,pinuevrframe,posefilter,"
+      "posefilterbeta,posefilterdcut,posefiltermin,posefilterrbeta,posefreeze,revclamp,revclampdps,stomplog,"
+      "termlog,tremor,tremorhz,tremorq,wpnerrlog",
       "", FEATURE_BOOL(palette_weapon) },
     { "aimreticulestamp", 1, Tier::Experimental, "Weapon", "Reticule placed every frame",
       "The headset-drawn reticule is placed each frame on exactly where your shots go.",
@@ -164,18 +165,17 @@ const FeatureRow kFeatures[] = {
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
       "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
       "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagbelt,reloadmagoffw,reloadresetholds,"
-      "reloadroomanchor,reloadseat,reloadshotgunlog,reloadslidems,reloadstate,reloadstatedeath,"
-      "reloadstatedrop,reloadstatehide,reloadstatelevel,reloadstatelog,reloadstatesave,reloadstatewaitms,"
-      "reloadvrlog,reloadwellmarker",
+      "reloadroomanchor,reloadseat,reloadslidems,reloadstate,reloadstatedeath,reloadstatedrop,"
+      "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker",
       "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"
       "akmimic4event,akmutenames,akpostrva,akrtpc,akrtpcglobal,akrtpcrestore,akrtpcvalue,akstack,akvtcount,"
       "akvtdump,akvtglobal,ammoscrub,ammoseq,animdump,animobjs,animseqset,animvars,animvarset,coopauto,"
       "coopmaskms,coopstopat,magdrop,magdropms,magdump,maghide,maghidename,reloadanimms,reloadanimmscoop,"
       "reloadaudiodump,reloadframe,reloadholdstate,reloadinsert,reloadinsertdone,reloadinsertmode,"
       "reloadinsertsign,reloadmaskms,reloadmutems,reloadmutevariant,reloadpauseanim,reloadpressat,"
-      "reloadpressms,reloadpressmscoop,reloadskipweapons,reloadstepsound,reloadstepvariant,reloadstepvia,"
-      "reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,reserveoff,roundsoff,wellmarkercolor,wpnammodump,"
-      "zonehandrel",
+      "reloadpressms,reloadpressmscoop,reloadshotgunlog,reloadskipweapons,reloadstatelog,reloadstepsound,"
+      "reloadstepvariant,reloadstepvia,reloadvrlog,reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,"
+      "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
@@ -194,9 +194,9 @@ const FeatureRow kFeatures[] = {
       "", FEATURE_BOOL(slide_vr) },
     { "meleeleft",    1, Tier::Experimental, "Melee and grenades", "Punch with your other hand",
       "Your other hand can melee too, on its own swing thresholds.",
-      "meleeleftcooldown,meleeleftext,meleelefthold,meleeleftlog,meleeleftmaxreach,meleeleftmaxspeed,"
-      "meleeleftreach,meleeleftspeed,meleelefttau",
-      "meleeleftdisp,meleeleftshotdist,meleeleftshotms",
+      "meleeleftcooldown,meleeleftext,meleelefthold,meleeleftmaxreach,meleeleftmaxspeed,meleeleftreach,"
+      "meleeleftspeed,meleelefttau",
+      "meleeleftdisp,meleeleftlog,meleeleftshotdist,meleeleftshotms",
       "meleeswing", FEATURE_BOOL(melee_left) },
     { "grenadeswallow", 1, Tier::Experimental, "Melee and grenades", "Grenades from the pouches only",
       "The left face button stops throwing grenades; grenades come from your chest pouches.",
