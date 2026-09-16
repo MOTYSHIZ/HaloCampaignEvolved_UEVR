@@ -137,7 +137,7 @@ const FeatureRow kFeatures[] = {
       "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
       "palettepubframe,paletterolltrim,palettetwohandagreefull,palettetwohandagreemin,palettetwohandlog,"
       "palettetwohandmarker,palettetwohandmax,palettetwohandmin,palettewpncalibkey",
-      "camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,judderlog,liftyaw,"
+      "aimboreaxis,camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,judderlog,liftyaw,"
       "palaimcalibver,palaimfix,palaimoffpitch,palaimoffyaw,paletteaimdirectwrite,paletteaimreticulefresh,"
       "palettebank,palettebarrellock,palettecam,palettecamsmooth,palettefinal,palettehook,palettehooktest,"
       "palettelatch,palettelatchms,palettelerp,palettelocal,palettemeshconstgate,palettepoke,palettepokeamt,"
