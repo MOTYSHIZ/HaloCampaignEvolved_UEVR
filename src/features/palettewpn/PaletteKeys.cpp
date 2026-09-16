@@ -58,6 +58,13 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "twohandrad")     == 0) { g_cfg.two_hand_radius_m  = clampf((float)v, 0.01f, 1.0f); return true; }
     if (_stricmp(key, "twohandagreemin")== 0) { g_cfg.two_hand_agree_min = clampf((float)v, -1.0f, 1.0f); return true; }
     if (_stricmp(key, "twohandagreefull")==0) { g_cfg.two_hand_agree_full= clampf((float)v, -1.0f, 1.0f); return true; }
+    // The placement's own two-handed hold, parsed exactly as the author parses his (same clamps,
+    // same units). His twohand* keys keep feeding TwoHandAim.cpp, which the fork never reads.
+    if (_stricmp(key, "palettetwohandmin")      == 0) { g_cfg.palette_two_hand_min_m      = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "palettetwohandmax")      == 0) { g_cfg.palette_two_hand_max_m      = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "palettetwohandagreemin") == 0) { g_cfg.palette_two_hand_agree_min  = clampf((float)v, -1.0f, 1.0f); return true; }
+    if (_stricmp(key, "palettetwohandagreefull")== 0) { g_cfg.palette_two_hand_agree_full = clampf((float)v, -1.0f, 1.0f); return true; }
+    if (_stricmp(key, "palettetwohandlog")      == 0) { g_cfg.palette_two_hand_log = (v != 0.0); return true; }
     if (_stricmp(key, "twohandblendms") == 0) { g_cfg.two_hand_blend_ms  = clampf((float)v, 1.0f, 2000.0f); return true; }
     if (_stricmp(key, "twohandhaptic")  == 0) { g_cfg.two_hand_haptic    = (v != 0.0); return true; }
     if (_stricmp(key, "palettescan")    == 0) { g_cfg.palette_scan       = (int)v; return true; }

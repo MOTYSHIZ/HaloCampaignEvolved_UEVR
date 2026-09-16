@@ -340,5 +340,5 @@ void reload_release_all(const char* why) {
     s_rs_seen_actor = nullptr; s_rs_seen_type.clear(); s_rs_after_reset = false;
     s_reload_weapon.clear();
     s_ph_rebase = true;
-    if (g_cfg.reload_log || g_cfg.reload_state_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD released every lock and record (%s)", why);
+    if (g_cfg.reload_vr_log || g_cfg.reload_state_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD released every lock and record (%s)", why);
 }

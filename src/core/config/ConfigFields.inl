@@ -1569,6 +1569,27 @@
     // from -- the LEFT hip, the fetch hand's side. A reloadmagoffw entry for the weapon in hand
     // replaces it.
     float reload_mag_belt[3] = {-0.22f, -0.65f, 0.00f};
+
+    // ---- MORE OF THE SAME SPLIT. The author's reloadnofire, reloadlog, meleelog, holsterlog,
+    // twohandmin / twohandmax / twohandagreemin / twohandagreefull, twohandlog, mapbtnlog and
+    // cutscenedump all stay HIS, with his defaults, feeding his own readers. These are the fork's
+    // own copies, same parse and same units, shipped at the values the fork's features run with.
+    //
+    // Swallow the trigger while the magazine is out. THIS is what gives the gesture stakes: you are
+    // genuinely defenceless until you finish. Off means the reload is cosmetic.
+    bool  reload_hold_fire = true;
+    bool  reload_vr_log = false;          // the manual reload's own evidence lines
+    bool  melee_left_log = false;         // the off hand's own swing evidence lines
+    bool  holster_throw_log = false;      // the poll-rate throw's own evidence lines
+    bool  grenade_swallow_log = false;    // the grenade strip's one-shot evidence line
+    // THE PALETTE'S TWO-HANDED HOLD. His twohand* keys tune HIS two-handed aim (TwoHandAim.cpp,
+    // its own store, not this struct); these tune the hold the placement runs, in the same units.
+    float palette_two_hand_min_m      = 0.08f;   // m: nearer than this the hands are one grip
+    float palette_two_hand_max_m      = 0.80f;   // m: further than this there is no hold
+    float palette_two_hand_agree_min  = 0.35f;   // cos: below this the hands disagree outright
+    float palette_two_hand_agree_full = 0.50f;   // cos: at this the blend is full
+    bool  palette_two_hand_log = false;          // the palette hold's own evidence lines
+    int   cutscene_grab = 0;                     // the cutscene frame grab (core/dev)
     char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.00";
     // THE RELOAD WHILE RUNNING (from the headset, 2026-09-11: the mag is not keeping up, reloading on the
     // move is nearly impossible). Root cause, verified in code: the seat and rack tests map the

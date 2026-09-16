@@ -21,6 +21,7 @@ namespace halo {
 bool grenadeswallow_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "grenadeswallow") == 0) { g_cfg.grenade_swallow = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "grenadecode")    == 0) { g_cfg.grenade_code = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "grenadeswallowlog") == 0) { g_cfg.grenade_swallow_log = (v != 0.0); return true; }
     return false;
 }
 
@@ -43,7 +44,7 @@ void grenadeswallow_xinput_raw_pad(_XINPUT_STATE* state) {
             { const ULONGLONG t = GetTickCount64(); if (s_a != nullptr && t - s_gren_at >= 4) { s_gren_at = t; s_gren_down = API::VR::is_action_active(s_a, API::VR::get_left_joystick_source()); } }
             if (s_a != nullptr && s_gren_down) {
                 static bool s_said = false;
-                if (!s_said && g_cfg.map_btn_log) { s_said = true; API::get()->log_info("[Halo-CampE-UEVR] GREN: left A-face down, raw pad 0x%04X, stripping 0x%04X", (unsigned)state->Gamepad.wButtons, (unsigned)g_cfg.grenade_code); }
+                if (!s_said && g_cfg.grenade_swallow_log) { s_said = true; API::get()->log_info("[Halo-CampE-UEVR] GREN: left A-face down, raw pad 0x%04X, stripping 0x%04X", (unsigned)state->Gamepad.wButtons, (unsigned)g_cfg.grenade_code); }
                 state->Gamepad.wButtons &= (WORD)~(WORD)g_cfg.grenade_code;
             }
         }

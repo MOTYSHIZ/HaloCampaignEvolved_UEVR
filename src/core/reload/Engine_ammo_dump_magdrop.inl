@@ -101,7 +101,7 @@ void mag_drop_spawn() {
     }
     s_magdrop.set(m);
     s_magdrop_at = now_ticks();
-    if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag dropped at (%.0f %.0f %.0f), scale %.2f", loc.x, loc.y, loc.z, scl.x);
+    if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag dropped at (%.0f %.0f %.0f), scale %.2f", loc.x, loc.y, loc.z, scl.x);
 }
 void mag_drop_tick() {
     if (s_magdrop_at == 0) return;

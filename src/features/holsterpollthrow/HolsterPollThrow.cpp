@@ -339,7 +339,7 @@ void holsterpollthrow_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
             s_last_action = now_ticks();
             if (!coff && !s_unarmed) { set_weapon_hidden(false); s_unhide_ticks = 30; }
             haptic_on(coff ? off_is_right() : aim_is_right(), 0.10f, 1.0f);
-            if (g_cfg.holster_log)
+            if (g_cfg.holster_throw_log)
                 API::get()->log_info("[Halo-CampE-UEVR] HOLSTER THROW (poll-rate release, %s hand)",
                                      coff ? "off" : "aim");
         }

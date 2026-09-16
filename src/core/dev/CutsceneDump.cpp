@@ -42,7 +42,7 @@ void on_post_render_dx12(void* cmd_list_v, void* rt_resource_v, void* /*rtv_v*/)
     static D3D12_PLACED_SUBRESOURCE_FOOTPRINT s_fp{};
     static UINT64   s_rb_size = 0;
 
-    const int want = g_cfg.cutscene_dump;
+    const int want = g_cfg.cutscene_grab;
     if (want == 0) { s_seen = 0; if (s_state == 2) s_state = 0; }   // re-arm on 0
 
     if (s_state == 1) {

@@ -33,6 +33,10 @@ bool core_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "markertint")         == 0) { g_cfg.marker_tint_on = (v != 0.0); return true; }
     if (_stricmp(key, "stealextra")     == 0) { g_cfg.steal_extra_mask = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "slidehook")      == 0) { g_cfg.slide_hook = (v != 0.0); return true; }
+    // Core readers of what were the author's log switches, now the fork's own (core/UnitState's
+    // holster evidence and core/dev's cutscene frame grab).
+    if (_stricmp(key, "holsterthrowlog") == 0) { g_cfg.holster_throw_log = (v != 0.0); return true; }
+    if (_stricmp(key, "cutscenegrab")    == 0) { g_cfg.cutscene_grab = (int)v; return true; }
     // The palette weapon's diagnostic log switch, also read by the wrist HUD's one-shot widget log.
     if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
     // The reload engine's keys (core/reload).

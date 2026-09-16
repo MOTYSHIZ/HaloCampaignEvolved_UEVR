@@ -251,7 +251,7 @@ void slide_update(const Vec3& head) {
                 // The gun is empty NOW: the slide locks back and stays there until the rack after
                 // the seat (from the headset, 2026-09-06: the chambered shot did not lock the slide).
                 s_sl_empty_at_drop = true; s_sl_locked_back = true;
-                if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDE chamber empty after the shot: locked back, the seat will want a rack");
+                if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDE chamber empty after the shot: locked back, the seat will want a rack");
             }
         }
         s_sl_trig_prev = trig;
@@ -641,7 +641,7 @@ API::UObject* native_mag_mesh_impl() {
                 std::wstring lo = (*pm)->get_fname()->to_string(); for (auto& ch : lo) ch = (wchar_t)towlower(ch);
                 if (lo.find(L"magazine") == std::wstring::npos && lo.find(L"megazine") == std::wstring::npos) return true;
                 s_mesh.set(*pm);
-                if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD native magazine mesh for %s: %ls", key.c_str(), (*pm)->get_full_name().c_str());
+                if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD native magazine mesh for %s: %ls", key.c_str(), (*pm)->get_full_name().c_str());
                 return false;
             });
         }
@@ -922,7 +922,7 @@ void slide_phantom_tick() {
         reload_state_hold_begin();
         reload_anim_rate_begin();
         if (g_cfg.coop_mask_ms > 0) reload_pose_hold(g_cfg.coop_mask_ms);   // the hands too, until our gesture
-        if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] DRY (%s): last round fired, the game reloads underneath; pose frozen, muted, locked until our reload", coop ? "coop" : "solo");
+        if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] DRY (%s): last round fired, the game reloads underneath; pose frozen, muted, locked until our reload", coop ? "coop" : "solo");
         s_prev = cur;
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
@@ -932,7 +932,7 @@ void slide_phantom_tick() {
         && !weapon_in_list(g_cfg.reload_skip_weapons)) {   // every weapon with a magazine, rack or not (the SMG has no rack part)
         // The dry stop: no write, the last round stays in the counter and the trigger is dead.
         s_true_empty = true; s_coop_lock_rounds = cur;
-        if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] COOP dry stop: %d round(s) left, trigger locked and slide back until our reload", cur);
+        if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] COOP dry stop: %d round(s) left, trigger locked and slide back until our reload", cur);
         s_prev = cur;
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
@@ -940,7 +940,7 @@ void slide_phantom_tick() {
     if (reload_manual_available() && !coop && !hidden && !s_true_empty && s_prev == 1 && cur == 0 && slide_weapon_ok() && slide_chamber_ok() && slide_rack_available() && g_cfg.slide_phantom > 0) {
         *r = 1;
         s_true_empty = true;
-        if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: magazine empty; one phantom round held so the game does not auto-reload (trigger dead, slide back)");
+        if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: magazine empty; one phantom round held so the game does not auto-reload (trigger dead, slide back)");
         s_prev = 1;
         if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
         return;
@@ -948,7 +948,7 @@ void slide_phantom_tick() {
     if (s_true_empty) {
         if (cur > ((coop || hidden) ? s_coop_lock_rounds : 1) || (coop && reserve_empty)) {
             s_true_empty = false;
-            if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: rounds now %d, the gun reloaded; phantom cleared", cur);
+            if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: rounds now %d, the gun reloaded; phantom cleared", cur);
         } else {
             if (!coop && !hidden && g_cfg.slide_phantom == 2 && cur == 0) *r = 1;   // re-asserted: the sim never sees 0
             if (auto* animbp = reload_weapon_anim_instance()) {
@@ -960,13 +960,13 @@ void slide_phantom_tick() {
     // rack completes; the rack is live while the lock waits, hold or no hold.
     if (g_sl_zone_every_shot.load(std::memory_order_relaxed) && cur < s_prev && s_prev > 0 && !s_sl_lock_pending && s_reload == ReloadState::Idle) {
         s_sl_lock_pending = true; s_sl_lock_frame = 0; s_sl_rack_done = false;
-        if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDE shot fired on a pump weapon: locked until the rack");
+        if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDE shot fired on a pump weapon: locked until the rack");
     }
     {
         const int fin = (int)*r;
         if (s_prev >= 0 && fin > s_prev + 1) g_last_refill_at = now_ticks();
         if (s_prev >= 0 && fin < s_prev && s_prev - fin <= 3) s_shot_at = now_ticks();
-        if (g_cfg.reload_log && s_prev >= 0 && fin != s_prev) {
+        if (g_cfg.reload_vr_log && s_prev >= 0 && fin != s_prev) {
             int reserve = -1;
             if (obj_ok && s_reserve >= 0 && s_reserve < 0x7FE) { const auto* rs = reinterpret_cast<const uint16_t*>(obj + (uintptr_t)s_reserve); if (!IsBadReadPtr(rs, 2)) reserve = (int)*rs; }
             API::get()->log_info("[Halo-CampE-UEVR] AMMO rounds %d -> %d (reserve %d)%s", s_prev, fin, reserve, fin > s_prev ? "  <-- REFILL" : "");
@@ -983,7 +983,7 @@ void reload_press_now(const char* why) {
     if (s_true_empty) {
         s_true_empty = false;   // stop the every-tick re-assert BEFORE the 0 goes back, or the refill counts from 1
         if (!(g_cfg.coop_auto && net_is_coop()) && !reload_hidden_mode()) { if (auto* r = rounds_field()) { if (*r == 1) *r = 0; } }   // coop / hidden: the counter is never written
-        if (g_cfg.slide_log || g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: rounds set back to 0 for the reload (%s)", why);
+        if (g_cfg.slide_log || g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] PHANTOM: rounds set back to 0 for the reload (%s)", why);
     }
     g_reload_hold_until.store(nowt + ms_to_ticks(net_is_coop() ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms), std::memory_order_relaxed);
     s_sl_press_at = nowt;
@@ -992,7 +992,7 @@ void reload_press_now(const char* why) {
     reload_anim_rate_begin();
     reload_state_hold_begin();
     ak_mute_begin();
-    if (g_cfg.reload_log || g_cfg.slide_log) { const auto* r = rounds_field(); API::get()->log_info("[Halo-CampE-UEVR] RELOAD pressed (%s): %d ms, rounds %d", why, net_is_coop() ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms, r ? (int)*r : -1); }
+    if (g_cfg.reload_vr_log || g_cfg.slide_log) { const auto* r = rounds_field(); API::get()->log_info("[Halo-CampE-UEVR] RELOAD pressed (%s): %d ms, rounds %d", why, net_is_coop() ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms, r ? (int)*r : -1); }
 }
 bool reload_gestures_busy() { return s_reload != ReloadState::Idle || s_sl_lock_pending || s_sl_reload_due; }
 void slide_chamber_tick() {
@@ -1003,7 +1003,7 @@ void slide_chamber_tick() {
     if (!s_sl_reload_due) return;
     if (s_reload != ReloadState::Idle || !slide_weapon_ok() || !slide_chamber_ok()) { s_sl_reload_due = false; return; }
     if (s_sl_lock_pending || s_sf_active) return;   // not racked yet, or the slide is still moving
-    if (s_sl_pressed_early) { s_sl_pressed_early = false; s_sl_reload_due = false; if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD rack complete, the sim reloaded at the drop"); return; }
+    if (s_sl_pressed_early) { s_sl_pressed_early = false; s_sl_reload_due = false; if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD rack complete, the sim reloaded at the drop"); return; }
     reload_press_now("rack");
     s_sl_reload_due = false;
 }
@@ -2471,7 +2471,7 @@ bool slide_parts_mag_drop() {
         }
         s_sp_dropped.set(m); s_sp_dropped_at = now_ticks();
         sp.comp = TrackedObject{}; sp.dropped = true;
-        if (g_cfg.reload_log || g_cfg.slide_log)
+        if (g_cfg.reload_vr_log || g_cfg.slide_log)
             API::get()->log_info("[Halo-CampE-UEVR] SLIDEPART: magazine part dropped (mode %d, %s simulating=%d; asset collision: %d spheres %d boxes %d capsules %d convex)",
                                  mode, sim == m ? "the part" : "a box proxy", simulating, nsph, nbox, ncap, ncvx);
         return true;
@@ -2541,7 +2541,7 @@ void slide_part_tick() {
             if (part == nullptr) break;
             if (g_cfg.slide_part_mat) { if (auto* rm = sp_get_material(src, 0)) sp_set_material(part, 0, rm); }
             sp.comp.set(part); sp.dropped = false;
-            if (g_cfg.reload_log || g_cfg.slide_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDEPART: magazine part re-spawned on the seat");
+            if (g_cfg.reload_vr_log || g_cfg.slide_log) API::get()->log_info("[Halo-CampE-UEVR] SLIDEPART: magazine part re-spawned on the seat");
         }
     }
     if (s_sp_hidden) {

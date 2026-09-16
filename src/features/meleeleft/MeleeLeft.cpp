@@ -136,7 +136,7 @@ void offhand_melee_update(float dt) {
         if (disp   > s2_pk_disp)  s2_pk_disp  = disp;
     } else if (s2_in_swing) {
         s2_in_swing = false;
-        if (g_cfg.melee_log) {
+        if (g_cfg.melee_left_log) {
             const bool would = (s2_pk_spd   >= g_cfg.melee_left_speed) &&
                                (s2_pk_ext   >= g_cfg.melee_left_ext ||
                                 (g_cfg.melee_disp > 0.0f && s2_pk_disp >= g_cfg.melee_disp)) &&
@@ -179,7 +179,7 @@ void offhand_melee_update(float dt) {
     else if (holster_offhand_busy())                          job = "grenade in pouch/hand";
     else if (holster_offhand_melee_veto())                    job = "holster veto";
     if (job != nullptr) {
-        if (g_cfg.melee_log) {
+        if (g_cfg.melee_left_log) {
             API::get()->log_info("[Halo-CampE-UEVR] MELEE (OFF HAND) stood down by %s: "
                                  "speed=%.2f ext=%.2f reach=%.2f",
                                  job, speed, s2_ext, reach);
@@ -202,7 +202,7 @@ void offhand_melee_update(float dt) {
         g_melee_aim_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_aim_hold_ms),
                                      std::memory_order_relaxed);
     }
-    if (g_cfg.melee_log) {
+    if (g_cfg.melee_left_log) {
         API::get()->log_info("[Halo-CampE-UEVR] MELEE FIRED (OFF HAND): speed=%.2f ext=%.2f reach=%.2f",
                              speed, s2_ext, reach);
     }
@@ -224,6 +224,7 @@ bool meleeleft_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleelefttau")      == 0) { g_cfg.melee_left_tau_ms    = clampf((float)v, 0.0f, 200.0f); return true; }
     if (_stricmp(key, "meleeleftcooldown") == 0) { g_cfg.melee_left_cooldown_ms = (int)clampf((float)v, 0.0f, 5000.0f); return true; }
     if (_stricmp(key, "meleelefthold")     == 0) { g_cfg.melee_left_hold_ms   = (int)clampf((float)v, 8.0f, 1000.0f); return true; }
+    if (_stricmp(key, "meleeleftlog")      == 0) { g_cfg.melee_left_log = (v != 0.0); return true; }
     return false;
 }
 

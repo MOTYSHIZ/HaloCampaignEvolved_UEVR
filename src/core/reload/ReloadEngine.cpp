@@ -203,7 +203,7 @@ void reload_engine_swap_cancel() {
             WpnMem* m = wpn_mem_slot(s_reload_weapon);
             m->key = s_reload_weapon; m->mag_out = true; m->chamber_left = s_sl_chamber_left;
             m->empty = s_sl_empty_at_drop; m->lock_pending = s_sl_lock_pending; m->true_empty = s_true_empty;
-            if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD remembered %s: mag out, %d chambered", s_reload_weapon.c_str(), s_sl_chamber_left);
+            if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD remembered %s: mag out, %d chambered", s_reload_weapon.c_str(), s_sl_chamber_left);
             s_sl_lock_pending = false; s_sl_reload_due = false; s_sl_pressed_early = false; s_sl_locked_back = false; s_sl_press_pending = false; s_sl_press_due_at = 0;
             set_state(ReloadState::Idle, "weapon changed, reload cancelled");
         }
@@ -256,7 +256,7 @@ bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head
         const bool zero = std::fabs(hand_l.x) < 1e-6f && std::fabs(hand_l.y) < 1e-6f && std::fabs(hand_l.z) < 1e-6f;
         if (zero || !std::isfinite(reach2) || reach2 > 1.5f * 1.5f) {
             have_left = false;
-            if (g_cfg.reload_log) {
+            if (g_cfg.reload_vr_log) {
                 static uint32_t s_dead = 0;
                 if ((s_dead++ % 30u) == 0u)
                     API::get()->log_info("[Halo-CampE-UEVR] RELOAD: ignoring dead/implausible left pose (zero=%d reach=%.2fm)", (int)zero, std::sqrt(reach2));
@@ -270,7 +270,7 @@ bool reload_engine_press_ignored() {
     if (!weapon_in_list(g_cfg.reload_skip_weapons)) return false;
     // No magazine on this weapon (plasma rifle, plasma pistol, sentinel beam): nothing to
     // drop, nothing to seat, and the game's own reload does nothing to it either.
-    if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD ignored: %s has no magazine", weapon_key().c_str());
+    if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD ignored: %s has no magazine", weapon_key().c_str());
     return true;
 }
 
@@ -335,7 +335,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     }
     reload_well_marker_update(true, well_world);
     const bool lifted = (hand_l.y - s_grab_y) >= g_cfg.reload_lift;
-    if (g_cfg.reload_log) {
+    if (g_cfg.reload_vr_log) {
         static uint32_t s_rl = 0;
         if ((s_rl++ % 15u) == 0u)
             API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f)",
@@ -398,11 +398,11 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                 s_slide_start = nowt;
                 g_reload_slide_t.store(0.0f, std::memory_order_relaxed);
                 ak_step_sound("seat");
-                if (g_cfg.reload_log)
+                if (g_cfg.reload_vr_log)
                     API::get()->log_info("[Halo-CampE-UEVR] RELOAD slide begins at %.0fcm", join * 100.0f);
             }
         } else if (pulled_clear) {
-            if (g_cfg.reload_log)
+            if (g_cfg.reload_vr_log)
                 API::get()->log_info("[Halo-CampE-UEVR] RELOAD slide aborted, hand pulled clear (%.0fcm)", join * 100.0f);
             reload_slide_reset();
         } else {
@@ -428,7 +428,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                 g_reload_slide_y.store(well_world.y + up.y * along, std::memory_order_relaxed);
                 g_reload_slide_z.store(well_world.z + up.z * along, std::memory_order_relaxed);
                 done = (d >= -g_cfg.reload_insert_done * 100.0f);
-                if (g_cfg.reload_log) {
+                if (g_cfg.reload_vr_log) {
                     static uint32_t s_il = 0;
                     if ((s_il++ % 15u) == 0u) API::get()->log_info("[Halo-CampE-UEVR] RELOAD insert: %.1f cm below the seat (home within %.1f)", -d, g_cfg.reload_insert_done * 100.0f);
                 }
@@ -452,10 +452,10 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                     // SLIDECHAMBER: the mag is in, the chamber is not. The rack ends the reload.
                     if (s_sl_press_pending || s_sl_press_due_at != 0) { s_sl_press_pending = false; s_sl_press_due_at = 0; s_sl_pressed_early = true; reload_press_now("seat (waited)"); }
                     s_sl_reload_due = true;
-                    if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD seated on an empty gun: waiting for the rack");
+                    if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD seated on an empty gun: waiting for the rack");
                 } else if (s_sl_pressed_early) {
                     s_sl_pressed_early = false;
-                    if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD seated, the sim reloaded at the drop");
+                    if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD seated, the sim reloaded at the drop");
                 } else {
                     s_sl_press_pending = false; s_sl_press_due_at = 0;
                     reload_press_now("seat");
@@ -484,7 +484,7 @@ void reload_engine_state_set(ReloadState prev, ReloadState next) {
         if (g_cfg.reload_press_at == 1 && slide_weapon_ok()) {
             const bool empty_now = weapon_empty_now();
             if (empty_now) { s_sl_pressed_early = true; reload_press_now("mag drop"); }
-            else { s_sl_press_pending = true; if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD press waits for the chambered shot or the seat"); }
+            else { s_sl_press_pending = true; if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] RELOAD press waits for the chambered shot or the seat"); }
         }
     }
 }
@@ -494,7 +494,7 @@ int reload_engine_fire_suppressed() {
     // Slide weapons keep the trigger LIVE with the magazine out: whatever the game still has
     // loaded is the chambered round(s), and the game locks the slide back itself when they run
     // out. Everything else keeps the original suppression.
-    if (g_cfg.reload_suppress_fire && s_reload != ReloadState::Idle) {
+    if (g_cfg.reload_hold_fire && s_reload != ReloadState::Idle) {
         if (!(rack && slide_weapon_ok() && slide_chamber_ok())) return 1;
         if (s_sl_chamber_left <= 0) return 1;   // the one chambered round is spent (or never was)
     }

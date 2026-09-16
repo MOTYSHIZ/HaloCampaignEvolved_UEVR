@@ -177,7 +177,7 @@ void publish_unit_state(uintptr_t rec_base) {
     const uintptr_t obj = resolve_unit_object(rec_base, &datum);
     {
         static uint32_t s_last_datum = 0xDEADBEEFu;
-        if ((g_cfg.veh_log || g_cfg.holster_log) && datum != s_last_datum && !IsBadReadPtr((const void*)(rec_base + 0x70), 0x20)) {
+        if ((g_cfg.veh_log || g_cfg.holster_throw_log) && datum != s_last_datum && !IsBadReadPtr((const void*)(rec_base + 0x70), 0x20)) {
             s_last_datum = datum;
             const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);
             // The datum slot read zero all session while play was live, so either the offset or
@@ -213,7 +213,7 @@ void publish_unit_state(uintptr_t rec_base) {
     // on this path. Print the datum, the object, and the raw bytes -- the next session decides.
     {
         static uintptr_t s_said_obj = 0;
-        if ((g_cfg.veh_log || g_cfg.holster_log) && obj != s_said_obj && !IsBadReadPtr((const void*)(obj + 0x380), 8)) {
+        if ((g_cfg.veh_log || g_cfg.holster_throw_log) && obj != s_said_obj && !IsBadReadPtr((const void*)(obj + 0x380), 8)) {
             s_said_obj = obj;
             const uint8_t* u8 = (const uint8_t*)obj;
             const uint32_t* rw = (const uint32_t*)(rec_base + 0x70);

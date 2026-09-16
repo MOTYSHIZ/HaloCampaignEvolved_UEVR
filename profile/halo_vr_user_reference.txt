@@ -292,6 +292,17 @@
 #palpubframe=0
 # Two-handed grab dot. A dot on the barrel shows where your other hand grabs for a two-handed hold.
 #twohandmarker=0
+# Two-handed hold: nearest your other hand may come to the weapon hand before the two count as one
+# grip, in metres.
+#palettetwohandmin=0.08
+# ...and the furthest it may be and still hold, in metres.
+#palettetwohandmax=0.80
+# How closely the two hands must point the same way before the hold starts to take (1 = identical).
+#palettetwohandagreemin=0.35
+# ...and the agreement at which the hold is fully taken.
+#palettetwohandagreefull=0.50
+# Two-handed hold: write its evidence lines to the log.
+#palettetwohandlog=0
 # Weapon roll. Turns every weapon about its barrel by this many degrees (positive is clockwise seen
 # from behind the gun).
 #paletterolltrim=6
@@ -338,6 +349,8 @@
 # weapon hand, so these sit above the ones the weapon hand uses.
 # Swing speed needed, metres per second.
 #meleeleftspeed=5.00
+# Punching with your other hand: write the swing's evidence lines to the log.
+#meleeleftlog=0
 # Extension speed needed away from your head, metres per second.
 #meleeleftext=2.20
 # How far from your head the hand must be, metres.
@@ -361,6 +374,11 @@
 # magazine goes in, in metres. Hand to hand, not hand to weapon: the gun is a separate actor whose
 # grip point moves per weapon, while both controllers are always known.
 #reloadseat=0.07
+# Trigger while the magazine is out. 1 swallows it, so you are genuinely defenceless until you
+# finish the reload. 0 makes the whole gesture cosmetic.
+#reloadholdfire=1
+# Manual reload: write the gesture's evidence lines to the log.
+#reloadvrlog=0
 # Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
 # up, back). A weapon listed in the per-weapon table below uses that entry instead.
 #reloadmagbelt=-0.22,-0.65,0.00

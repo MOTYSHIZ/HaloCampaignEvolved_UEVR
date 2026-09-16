@@ -366,7 +366,7 @@ void reload_anim_rate_begin() {
     weapon_components([&](API::UObject* c) { grab(c); return s_anim_rate_n < 6; });
     grab(rig_tracked_component());
     s_anim_rate_until = now_ticks() + ms_to_ticks(g_cfg.reload_anim_ms);
-    if (g_cfg.reload_log)
+    if (g_cfg.reload_vr_log)
         API::get()->log_info("[Halo-CampE-UEVR] RELOAD anim window: %d components, rate x%.0f%s, paused %d, for %d ms",
                              s_anim_rate_n, want_rate ? g_cfg.reload_anim_rate : 1.0f,
                              want_rate ? "" : " (off)", paused, g_cfg.reload_anim_ms);
@@ -658,7 +658,7 @@ void reload_state_hold_begin() {
     if (animbp == nullptr) return;
     auto* p = animbp->get_property_data<uint8_t>(L"FirstPersonState");
     if (p == nullptr || IsBadReadPtr(p, 1)) {
-        if (g_cfg.reload_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: no FirstPersonState on %ls", class_name_of(animbp).c_str());
+        if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: no FirstPersonState on %ls", class_name_of(animbp).c_str());
         return;
     }
     s_sh_idle = *p;
@@ -678,7 +678,7 @@ void reload_state_hold_tick() {
     const bool coop_wait = g_cfg.coop_auto && net_is_coop() && g_last_refill_at < s_sh_press_at && nowt < s_sh_until + ms_to_ticks(4000);
     const bool over = nowt >= s_sh_until && !coop_wait && (!reload_gestures_busy() || nowt >= s_sh_until + ms_to_ticks(6000));
     if (animbp == nullptr || over) {
-        if (g_cfg.reload_log)
+        if (g_cfg.reload_vr_log)
             API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: held FirstPersonState=%d for %d ticks, game re-asserted %d times%s",
                                  (int)s_sh_idle, s_sh_ticks, s_sh_reasserts,
                                  animbp == nullptr ? " (instance gone)" : "");
@@ -1189,7 +1189,7 @@ void ak_id_mute_begin() {
         g_ak_win_until.store(s_akm_until, std::memory_order_relaxed);
         s_ak_log_left.store(60, std::memory_order_relaxed);
         if (g_cfg.reload_ak_mute == 4 || g_cfg.ak_log) ak_hook_install();
-        if (g_cfg.reload_log || g_cfg.reload_wwise_dump || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: no reload events known for '%s', window open for the log only", stem.c_str());
+        if (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: no reload events known for '%s', window open for the log only", stem.c_str());
         return;
     }
     std::wstring wtok(tok, tok + strlen(tok));
@@ -1256,7 +1256,7 @@ void ak_id_mute_begin() {
     if (g_cfg.reload_ak_mute == 4 || g_cfg.ak_log) ak_hook_install();
     if (g_cfg.ak_mimic != 0) ak_recipe_hooks_install();
     if (g_cfg.ak_rtpc_global) ak_set_rtpc(nullptr, g_cfg.ak_rtpc_value, "window open");
-    if (g_cfg.reload_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute mode %d: %d reload event(s) of '%s' for %d ms", g_cfg.reload_ak_mute, s_akm_n, stem.c_str(), g_cfg.reload_mute_ms);
+    if (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute mode %d: %d reload event(s) of '%s' for %d ms", g_cfg.reload_ak_mute, s_akm_n, stem.c_str(), g_cfg.reload_mute_ms);
 }
 void ak_id_mute_end() {
     for (int i = 0; i < s_akm_n; ++i) {
@@ -1266,7 +1266,7 @@ void ak_id_mute_end() {
         }
         s_akm[i] = AkMuted{};
     }
-    if (s_akm_n > 0 && (g_cfg.reload_log || g_cfg.reload_wwise_dump)) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: %d event(s) restored", s_akm_n);
+    if (s_akm_n > 0 && (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump)) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: %d event(s) restored", s_akm_n);
     if (s_ak_template_ok && g_cfg.ak_log) {
         const AkRecipe& r = s_ak_template;
         std::string l; for (uint32_t i = 0; i < r.nlisteners; ++i) { char b2[32]; snprintf(b2, sizeof(b2), " 0x%llX", (unsigned long long)r.listeners[i]); l += b2; }
@@ -1325,7 +1325,7 @@ void ak_bus_volume(float vol) {
         o->call_function(L"SetOutputBusVolume", p);
         ++n;
     }
-    if (g_cfg.reload_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: bus volume %.1f on %d AkComponent(s) of the weapon/owner", vol, n);
+    if (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] WWISE mute: bus volume %.1f on %d AkComponent(s) of the weapon/owner", vol, n);
 }
 // AKVTDUMP: the engine interface's vtable, once (see Config.hpp ak_vt_dump).
 void ak_vt_dump() {
@@ -1486,7 +1486,7 @@ void ak_set_rtpc(API::UObject* actor, float value, const char* why) {
     put(L"InterpolationTimeMs", &interp, sizeof(int32_t));
     put(L"Actor", &actor, sizeof(void*));
     cdo->call_function(L"SetRTPCValue", p);
-    if (g_cfg.reload_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] AKRTPC '%s' = %.1f on %ls (%s)", nm.c_str(), value, actor ? class_name_of(actor).c_str() : L"GLOBAL", why);
+    if (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump) API::get()->log_info("[Halo-CampE-UEVR] AKRTPC '%s' = %.1f on %ls (%s)", nm.c_str(), value, actor ? class_name_of(actor).c_str() : L"GLOBAL", why);
 }
 void ak_step_sound(const char* step) {
     std::string ev;
@@ -1505,7 +1505,7 @@ void ak_step_sound(const char* step) {
         const uint32_t evid = ak_fnv(ev);
         if (go != 0) {
             const uint32_t pl = s_ak_post_orig(evid, go, 0u, nullptr, nullptr, 0u, nullptr, 0u);
-            if (g_cfg.reload_log || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] AKMIMIC7 step %s: '%s' has no loaded object, posted by hash %u on 0x%llX -> playing %u", step, ev.c_str(), evid, (unsigned long long)go, pl);
+            if (g_cfg.reload_vr_log || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] AKMIMIC7 step %s: '%s' has no loaded object, posted by hash %u on 0x%llX -> playing %u", step, ev.c_str(), evid, (unsigned long long)go, pl);
             return;
         }
     }
@@ -1564,7 +1564,7 @@ void ak_step_sound(const char* step) {
         if (go != 0) {
             playing = s_ak_post_orig(evid, go, 0u, nullptr, nullptr, 0u, nullptr, 0u);
             posted = true;
-            if (g_cfg.reload_log || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] AKMIMIC7 step %s: event %u on the adopted emitter 0x%llX -> playing %u", step, evid, (unsigned long long)go, playing);
+            if (g_cfg.reload_vr_log || g_cfg.ak_log) API::get()->log_info("[Halo-CampE-UEVR] AKMIMIC7 step %s: event %u on the adopted emitter 0x%llX -> playing %u", step, evid, (unsigned long long)go, playing);
         } else {
             g_ak_pending_id.store(evid, std::memory_order_relaxed); g_ak_pending_at.store(now_ticks(), std::memory_order_relaxed);
             posted = true;
@@ -1662,7 +1662,7 @@ void ak_step_sound(const char* step) {
     }
     t_ak_our_post = false;
     if (idp != nullptr) *idp = 0;
-    if (g_cfg.reload_log || g_cfg.reload_wwise_dump) {
+    if (g_cfg.reload_vr_log || g_cfg.reload_wwise_dump) {
         float maxdur = -1.0f, atten = -1.0f;
         if (auto* d = evo->get_property_data<float>(L"MaximumDuration")) if (!IsBadReadPtr(d, 4)) maxdur = *d;
         if (auto* a = evo->get_property_data<float>(L"MaxAttenuationRadius")) if (!IsBadReadPtr(a, 4)) atten = *a;

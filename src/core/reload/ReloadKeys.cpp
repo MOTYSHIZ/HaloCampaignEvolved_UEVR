@@ -23,6 +23,8 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     // thing in either key: the same clamp on the one, a bare three-float read on the other.
     if (_stricmp(key, "reloadseat")     == 0) { g_cfg.reload_seat_dist = clampf((float)v, 0.05f, 1.0f); return true; }
     if (_stricmp(key, "reloadmagbelt")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_belt[0], &g_cfg.reload_mag_belt[1], &g_cfg.reload_mag_belt[2]); return true; }
+    if (_stricmp(key, "reloadholdfire") == 0) { g_cfg.reload_hold_fire = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadvrlog")    == 0) { g_cfg.reload_vr_log = (v != 0.0); return true; }
     if (_stricmp(key, "reloadhidearms") == 0) { g_cfg.reload_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
     if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }

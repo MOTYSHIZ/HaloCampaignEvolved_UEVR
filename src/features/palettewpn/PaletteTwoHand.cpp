@@ -179,8 +179,8 @@ void palette_two_hand_update(float dt) {
             const float lateral = std::sqrt(dot3(perp, perp));
 
             in_zone = std::isfinite(along) && std::isfinite(lateral) &&
-                      along   > g_cfg.two_hand_min_m &&
-                      along   < g_cfg.two_hand_max_m &&
+                      along   > g_cfg.palette_two_hand_min_m &&
+                      along   < g_cfg.palette_two_hand_max_m &&
                       lateral < g_cfg.two_hand_radius_m;
             // The rack zone wins: a hand on the slide, pump or handle is racking, not supporting
             // (Config.hpp slide_zone_priority). A hold already latched keeps going.
@@ -189,14 +189,14 @@ void palette_two_hand_update(float dt) {
             // The marker's anchor (zone middle, on the ray) and whether the off hand is close
             // enough that showing it helps -- a generous envelope around the zone, so the dot
             // appears as the hand comes up and never sits on screen all fight.
-            const float mid = 0.5f * (g_cfg.two_hand_min_m + g_cfg.two_hand_max_m);
+            const float mid = 0.5f * (g_cfg.palette_two_hand_min_m + g_cfg.palette_two_hand_max_m);
             zone_center = Vec3{aim_pos.x + aim_fwd.x * mid,
                                aim_pos.y + aim_fwd.y * mid,
                                aim_pos.z + aim_fwd.z * mid};
             have_zone_center = true;
             approaching = std::isfinite(along) && std::isfinite(lateral) &&
-                          along   > g_cfg.two_hand_min_m - 0.15f &&
-                          along   < g_cfg.two_hand_max_m + 0.15f &&
+                          along   > g_cfg.palette_two_hand_min_m - 0.15f &&
+                          along   < g_cfg.palette_two_hand_max_m + 0.15f &&
                           lateral < g_cfg.two_hand_radius_m * 4.0f;
 
             line = hand_line;
@@ -229,7 +229,7 @@ void palette_two_hand_update(float dt) {
     if (now != was) {
         g_th_latched.store(now, std::memory_order_release);
         haptic(now);
-        if (g_cfg.two_hand_log) {
+        if (g_cfg.palette_two_hand_log) {
             API::get()->log_info("[Halo-CampE-UEVR] TWOHAND %s", now ? "grabbed" : "released");
         }
     }
@@ -281,8 +281,8 @@ bool palette_two_hand_blend(Vec3* fwd) {
     // apart, in one frame. So the influence fades in across a band instead, and is smoothstepped
     // so it also leaves and arrives with zero slope.
     const float agree = dot3(line, *fwd);
-    const float lo = g_cfg.two_hand_agree_min;
-    const float hi = (g_cfg.two_hand_agree_full > lo + 1.0e-3f) ? g_cfg.two_hand_agree_full
+    const float lo = g_cfg.palette_two_hand_agree_min;
+    const float hi = (g_cfg.palette_two_hand_agree_full > lo + 1.0e-3f) ? g_cfg.palette_two_hand_agree_full
                                                                 : lo + 1.0e-3f;
     if (!(agree > lo)) return false;
 
