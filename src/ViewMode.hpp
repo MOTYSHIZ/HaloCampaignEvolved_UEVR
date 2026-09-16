@@ -54,6 +54,11 @@
 //      rendered ONE FIXED eye would still report that eye's projection, distinct from the other's,
 //      and fail this test. Residual false positive: a symmetric-FOV headset (or the SimVR rig,
 //      whose eyes are symmetric) on such a backend -- not a real configuration.
+// The same fact also OVERRIDES the alternation vote: a single view whose two projections are
+// identical is classified Mono without consulting the ring, because an alternating pair cannot
+// have identical frustums. Needed on this title, where the view position swings by several cm
+// per frame^2 with alternating sign while the player walks with the scope open -- enough to win
+// the vote for a second at a time and flicker the flattening (2026-09-15 headset report).
 //
 // The detector rather than the declaration decides how the consumers average, because the
 // declaration can be true and inert: an older backend ignores VR_RenderingMethod=3 and renders
@@ -106,6 +111,13 @@ bool viewmode_is_mono();
 // previous one" keys on it: two samples are consecutive only if this count moved by exactly one
 // between them, which is what rules out a previous sample from before the consumer was armed.
 unsigned viewmode_samples();
+
+// GAME THREAD, for the VIEWMODE line: the 8-bit alternation vote ring as of the last sample
+// (bit set = that same-index sample swung by >4 cm AND reversed direction) and the largest
+// second difference seen since the previous call, in game cm (reading resets it). Together they
+// show what the single view's position is doing frame to frame, which is how the scoped-walking
+// swing on this title was seen.
+void viewmode_diag(unsigned* ring, float* swing_max_cm);
 
 const char* viewmode_name(ViewMode m);
 const char* viewmode_method_name(int declared_method);

@@ -19,6 +19,11 @@ std::atomic<int>      g_mode{(int)ViewMode::Unknown};
 std::atomic<int>      g_declared{-1};
 std::atomic<bool>     g_shared_projection{false};
 std::atomic<unsigned> g_samples{0};
+// Diagnostics for the VIEWMODE line: the vote ring as of the last sample, and the largest
+// second difference seen since the poll last read it (in game cm). Relaxed stores; the render
+// thread never waits on them.
+std::atomic<unsigned> g_diag_ring{0};
+std::atomic<float>    g_diag_swing_max{0.0f};
 
 // Render-thread working state. Touched only inside viewmode_note_post, which runs on the one
 // thread that dispatches the stereo callbacks, so plain fields are correct here -- the atomics
@@ -106,6 +111,9 @@ void viewmode_note_post(int view_index, float x, float y, float z) {
             if (s_hist_n < 8) ++s_hist_n;
             s_prev_a[0] = a[0]; s_prev_a[1] = a[1]; s_prev_a[2] = a[2];
             s_have_prev_a = true;
+            if (len > g_diag_swing_max.load(std::memory_order_relaxed)) {
+                g_diag_swing_max.store(len, std::memory_order_relaxed);
+            }
         }
         s_prev_d[0] = d[0]; s_prev_d[1] = d[1]; s_prev_d[2] = d[2];
         s_have_prev_d = true;
@@ -117,12 +125,21 @@ void viewmode_note_post(int view_index, float x, float y, float z) {
     ViewMode m;
     if (other_fresh) {
         m = ViewMode::Stereo;
+    } else if (g_shared_projection.load(std::memory_order_relaxed)) {
+        // ONE PROJECTION FOR BOTH EYES SETTLES IT. An alternating stereo pair always carries
+        // mirrored per-eye frustums, so a single view whose two projections are identical cannot
+        // be AFR whatever its position is doing -- and on this title the position DOES swing while
+        // scoped and walking (2026-09-15 log: the ring voted Alternating for a second at a time,
+        // flattening flickered off and on, and the scope pane visibly switched between stereo and
+        // mono). The vote below is for runtimes that report a real stereo pair.
+        m = ViewMode::Mono;
     } else if (s_hist_n >= 8) {
         m = (popcount8(s_hist) >= kAltVotes) ? ViewMode::Alternating : ViewMode::Mono;
     } else {
         m = ViewMode::Unknown;
     }
     g_mode.store((int)m, std::memory_order_relaxed);
+    g_diag_ring.store(s_hist, std::memory_order_relaxed);
     g_samples.store(s_seq, std::memory_order_relaxed);
 }
 
@@ -152,6 +169,11 @@ bool viewmode_is_mono() {
 
 unsigned viewmode_samples() {
     return g_samples.load(std::memory_order_relaxed);
+}
+
+void viewmode_diag(unsigned* ring, float* swing_max_cm) {
+    if (ring != nullptr)         *ring = g_diag_ring.load(std::memory_order_relaxed);
+    if (swing_max_cm != nullptr) *swing_max_cm = g_diag_swing_max.exchange(0.0f, std::memory_order_relaxed);
 }
 
 const char* viewmode_name(ViewMode m) {
