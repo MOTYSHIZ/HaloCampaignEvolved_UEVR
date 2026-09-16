@@ -163,7 +163,7 @@ bool blam_palette_fp_live();
 // out a second reload. The weapon still rides the hand. 0 clears. Game thread.
 void blam_palette_hold_pose(int ms);
 
-// THREAD + PHASE INSTRUMENT (slidelog/slidewatch): the game thread's id, and 1 while the engine
+// THREAD + PHASE INSTRUMENT (slidelog/paletteslidewatch): the game thread's id, and 1 while the engine
 // tick is in flight (set after on_pre_engine_tick's work, cleared in on_post_engine_tick).
 // Published by Plugin.cpp; the sim hook reads them to say which thread it runs on and whether
 // it fires inside the engine tick -- the two facts that place a slide write between the sim's

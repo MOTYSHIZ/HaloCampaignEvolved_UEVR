@@ -211,9 +211,9 @@ void offhand_melee_update(float dt) {
 bool meleeleft_parse_key(const char* key, const char* val, double v) {
     (void)val;
     if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
-    if (_stricmp(key, "meleeshotms")    == 0) { g_cfg.melee_shot_ms  = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
-    if (_stricmp(key, "meleeshotdist")  == 0) { g_cfg.melee_shot_dist = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleeleftshotms")    == 0) { g_cfg.melee_shot_ms  = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeleftshotdist")  == 0) { g_cfg.melee_shot_dist = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "meleeleftdisp")      == 0) { g_cfg.melee_disp     = clampf((float)v, 0.0f, 2.0f); return true; }
     // Parsed exactly as the author parses his own melee thresholds, so a value means the same thing
     // in either key: the same clamps, the same units.
     if (_stricmp(key, "meleeleftspeed")    == 0) { g_cfg.melee_left_speed     = clampf((float)v, 0.0f, 20.0f); return true; }

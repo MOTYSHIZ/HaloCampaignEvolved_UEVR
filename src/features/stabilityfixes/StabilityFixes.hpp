@@ -9,10 +9,10 @@
 //     flat reticle sweep only until the hidden widget is found; rescan when a hidden widget dies
 //     compositor reticule tick, latch, re-assert and source tick above the early-outs
 //     stick mode exit after a death: full re-anchor instead of folding the respawn camera
-//     turn instrument (turnlog)
+//     turn instrument (stabilityturnlog)
 //     teardown order: the OpenXR layer first, and the API layer projection restore
-//     reticle mode 3/4 late re-assert after a widget move, the widget probe log gate (widgetlog)
-//     holster marker tint (markertint, holstermarkercolor) and minimum throw speed (grenminthrow)
+//     reticle mode 3/4 late re-assert after a widget move, the widget probe log gate (stabilitywidgetlog)
+//     holster marker tint (markertint, stabilityholstermarkercolor) and minimum throw speed (stabilitygrenminthrow)
 //     the two-handed hold drops on a gesture reset (stick mode, calibration, the kill switch)
 //     the menu command file: an attributes query before the open, on the tick path
 //   SVC_RIG_GUARD      fault recovery rig drop, stale rig and parent guard

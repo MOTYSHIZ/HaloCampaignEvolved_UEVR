@@ -20,6 +20,7 @@
 #include "uevr/API.hpp"
 #include "core/CameraBob.hpp"
 #include "core/CoreKeys.hpp"
+#include "core/config/KeyAlias.hpp"
 #include "core/EyeTrace.hpp"
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
@@ -90,6 +91,9 @@ const std::span<const FeatureHooks* const> kFeatureList{kFeatureListStorage, std
 } // namespace
 
 bool features_parse_key(const char* key, const char* val, double v) {
+    // A fork key renamed since it shipped arrives under its old name; translate once, here, so
+    // every parser below sees only current names (core/config/KeyAlias.hpp).
+    key = key_current_name(key);
     if (core_parse_key(key, val, v)) return true;
     for (const FeatureHooks* f : kFeatureList)
         if (f->parse_key != nullptr && f->parse_key(key, val, v)) return true;

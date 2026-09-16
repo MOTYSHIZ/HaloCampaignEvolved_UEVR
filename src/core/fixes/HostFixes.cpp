@@ -277,7 +277,7 @@ void stability_turn_gate_note(bool fp_control_now) {
     const auto& g_stick_mode  = *host::g_plugin_state.stick_mode;
     const bool  g_fp_control_now = fp_control_now;
     //
-    // WHY-NOT INSTRUMENT (turnlog): "sometimes turning works and sometimes it doesnt" cannot be
+    // WHY-NOT INSTRUMENT (stabilityturnlog): "sometimes turning works and sometimes it doesnt" cannot be
     // diagnosed from transition logs alone -- the flick that went nowhere is the evidence, and
     // only this spot knows why. Logs ONE line per deadzone crossing while any gate blocks, naming
     // every gate's state, and one line per snap that lands, so the two interleave in time.
@@ -323,14 +323,14 @@ void stability_holster_marker_tint(uevr::API::UObject* marker) {
 }
 
 bool stability_throw_too_slow(float peak_speed) {
-    // MIN THROW SPEED (grenminthrow, 0 = off): a release that never swung is a put-back wherever
+    // MIN THROW SPEED (stabilitygrenminthrow, 0 = off): a release that never swung is a put-back wherever
     // the hand is. Judged on the PEAK: every measured throw peaked at 2.04 or above and the
     // deliberate put-back at 0.16.
     return stab_on() && g_cfg.gren_min_throw > 0.0f && peak_speed < g_cfg.gren_min_throw;
 }
 
 const char* stability_putback_text(const char* his_text, bool in_pouch) {
-    return in_pouch ? his_text : "put back (below grenminthrow)";
+    return in_pouch ? his_text : "put back (below stabilitygrenminthrow)";
 }
 
 // GESTURE RESET, the two-handed hold (moved from gesture_reset):

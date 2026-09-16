@@ -19,7 +19,7 @@ bool features_asset_load_recently_failed(const char* path);
 const char* features_asset_load_suffix(uevr::API::UObject* obj);
 void features_asset_load_done(const char* path, uevr::API::UObject* obj);
 
-// bind_widget_slate_ui, in the tint probe log's condition, before the 1-in-32 counter: widgetlog.
+// bind_widget_slate_ui, in the tint probe log's condition, before the 1-in-32 counter: stabilitywidgetlog.
 bool features_widget_log();
 
 // apply_widget_tint, in the gain: the multiplier the calling host asked for (1 for every call the

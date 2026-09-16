@@ -80,7 +80,7 @@ std::atomic<unsigned> g_tick_seq{0};
 std::atomic<float> g_meshM_brk_deg{0.0f};
 std::atomic<long long> g_meshM_acc_ms{0};
 std::atomic<unsigned> g_meshM_acc{0}, g_meshM_rej{0};
-// The engine tick counter, bumped at tick start -- palbuildgate=4 keys "first build this tick"
+// The engine tick counter, bumped at tick start -- palettebuildgate=4 keys "first build this tick"
 // on it, and it costs one relaxed add whether or not anything reads it.
 std::atomic<unsigned> g_tick_id{0};
 

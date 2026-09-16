@@ -286,12 +286,12 @@
 #aimbore=0
 # Weapon pose timing. How the weapon you see is written each frame: 6 writes it before the game's
 # own pose pass, so the weapon never flickers; 0 is the original method.
-#palbuildgate=6
+#palettebuildgate=6
 # Weapon pose refresh. 1 also refreshes the weapon's pose every headset frame, 0 only on the game's
 # own update.
-#palpubframe=0
+#palettepubframe=0
 # Two-handed grab dot. A dot on the barrel shows where your other hand grabs for a two-handed hold.
-#twohandmarker=0
+#palettetwohandmarker=0
 # Two-handed hold: nearest your other hand may come to the weapon hand before the two count as one
 # grip, in metres.
 #palettetwohandmin=0.08
@@ -311,12 +311,12 @@
 #palettecamlead=0.3
 # Weapon camera sampling. 0 uses every camera sample, 1 skips samples taken while the camera moved, 2
 # pairs each with the midpoint, 3 skips and then holds a clean one.
-#meshconst=0
+#palettemeshconst=0
 # Weapon placement calibration key. Hold it, put your controller where the frozen weapon's grip is, and release:
 # the grip is saved for every weapon.
 #palettecalibkey=0x21
 # This weapon's placement calibration key. The same gesture, saved for the weapon in your hand only.
-#palwpncalibkey=0x24
+#palettewpncalibkey=0x24
 # Hide the arms while the weapon follows your hand. The standard weapon rig also turns off while this
 # feature is on. 0 leaves the arms, 1 hides both arms at the shoulder (default), 2 the same with the
 # weapon's mesh found another way, 3 hides the whole arm meshes another way, which may take the weapon
@@ -343,7 +343,7 @@
 # Manual reload: silence the game's own reload sound (4 is the default method, 0 is off).
 #reloadakmute=4
 # Manual reload: how the reload step sounds are played (7 is the default method, 0 is off).
-#akmimic=7
+#reloadakmimic=7
 # ---- Punching with your other hand. Its own thresholds: an off hand that is also holding a
 # magazine, steadying a barrel and reaching for a pouch triggers far more false punches than the
 # weapon hand, so these sit above the ones the weapon hand uses.
@@ -367,9 +367,9 @@
 #meleelefthold=80
 
 # Manual reload: in co-op the gun stays empty until you reload it yourself.
-#coophide=1
+#reloadcoophide=1
 # Manual reload: the same when playing alone.
-#hidesolo=1
+#reloadhidesolo=1
 # Magazine seating distance. How close your fetch hand must come to your weapon hand before the
 # magazine goes in, in metres. Hand to hand, not hand to weapon: the gun is a separate actor whose
 # grip point moves per weapon, while both controllers are always known.
@@ -386,7 +386,7 @@
 #reloadresetholds=1
 # Reload trace for the log. One line whenever any reload value changes, with every value as it is.
 # 1 = only while a shotgun is in hand, 2 = every weapon, 0 = off. Nothing is written to the game.
-#shotgunlog=0
+#reloadshotgunlog=0
 # Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
 # up, back). A weapon listed in the per-weapon table below uses that entry instead.
 #reloadmagbelt=-0.22,-0.65,0.00
@@ -414,7 +414,7 @@
 #reloadhidearms=1
 # Markers stay put in the room. 1 keeps the belt magazine, the grab dots and dropped magazines fixed in
 # the room when you move your head; 0 places them from your head, so they shift as it moves.
-#roomanchor=1
+#reloadroomanchor=1
 # Rack grab reach. How close your other hand must be to the slide, pump or handle to grab it, in
 # metres.
 #slideradius=0.16
@@ -469,7 +469,7 @@
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
 #wristradar=1
 # Wrist HUD: where the panels sit (0 on the wrists, 1 on the sides of the weapon).
-#hudplacement=0
+#wristhudplacement=0
 # Left wrist panels. The game's HUD panels shown on your other hand's forearm, by name, separated by
 # commas.
 #wristhudclasses=WBP_ShieldHealthBar,WBP_WeaponCradle,WBP_GrenadeCradle
@@ -492,7 +492,7 @@
 #wristradargain=1500
 # Radar colour for other contacts. Red, green and blue of the dots for a contact with no colour of its
 # own, from 0 to 1.
-#blipcolorother=0.00,1.00,1.00
+#wristblipcolorother=0.00,1.00,1.00
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
 # Your own shots only. How close to you a fired round must start to kick the gunstock, in game units
@@ -518,7 +518,7 @@
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
 # Sidestep direction. -1 or 1; flip it only if stepping sideways moves you the wrong way.
-#blamthrottleysign=-1
+#roomscalethrottleysign=-1
 # Walking response. How fast you are moved for each metre you step away from where you stand.
 #roomscalegain=4
 # Slowest stick push. When your steps go through the left stick, the smallest push sent while you

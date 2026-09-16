@@ -977,7 +977,7 @@ AkRecipe* ak_recipe_for(uint64_t go, bool create) {
 AkRecipe s_ak_template;            // the sim's reload emitter, copied at its (blocked) post
 bool     s_ak_template_ok = false;
 std::atomic<uint64_t> g_ak_our_go{0};   // our AkComponent's emitter, seen at our own post
-std::atomic<uint32_t> g_ak_pending_id{0};  // akmimic 5: a step event waiting for the sim's next emitter
+std::atomic<uint32_t> g_ak_pending_id{0};  // reloadakmimic 5: a step event waiting for the sim's next emitter
 std::atomic<long long> g_ak_pending_at{0};
 std::atomic<uint64_t> g_ak_adopted{0};          // mode 7: the sim emitter we hold
 std::atomic<uint64_t> g_ak_newest{0};           // the newest sim emitter seen posting (candidate)
@@ -1367,9 +1367,9 @@ void ak_mute_tick() {
 }
 // BOTH RELOAD FEATURES SWITCHED OFF (reload_engine_released, game thread). The Wwise detours stay
 // installed -- removing an inline hook while the audio thread may be inside it is the riskier move -- but
-// stand down: the flag above makes the akmimic 7 adoption and head-position push pass through, a mute
+// stand down: the flag above makes the reloadakmimic 7 adoption and head-position push pass through, a mute
 // window still open is closed now (restoring the events it muted, which only the engine's own tick did),
-// and the sim emitter akmimic 7 was holding goes back to the engine. A detour already past the flag test
+// and the sim emitter reloadakmimic 7 was holding goes back to the engine. A detour already past the flag test
 // on another thread can still adopt one emitter; it is released the next time reload comes on and off.
 void ak_engine_released() {
     g_ak_engine_on.store(false, std::memory_order_relaxed);

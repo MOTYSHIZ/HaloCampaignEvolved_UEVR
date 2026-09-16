@@ -26,8 +26,8 @@ bool barrel_axis(Vec3* out) {
     return true;
 }
 // RETSTAMP render placement (aimreticulestamp 1/2) draws the STAMPED hand intent, and that stamp is
-// only taken while the pose latch runs in palette weapon mode: poselatch 0 never stores it, and
-// poselatch 3 stores it from the XInput-rate law (aimrate=1) only.
+// only taken while the pose latch runs in palette weapon mode: paletteposelatch 0 never stores it, and
+// paletteposelatch 3 stores it from the XInput-rate law (aimrate=1) only.
 bool stamp_available() {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     if (g_cfg.pose_latch == 0) return false;

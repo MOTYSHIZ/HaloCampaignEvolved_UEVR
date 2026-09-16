@@ -206,7 +206,7 @@ void aim_writer_compare_direct(float yaw_deg, float pitch_deg) {
     if (now - s_last >= 10000) {
         API::get()->log_info("[Halo-CampE-UEVR] AIMWRITERS UE-direct vs Blam angle written within 8 ms: "
                              "n=%u mean |dyaw|+|dpitch| %.3f deg, max %.3f deg, %u unpaired  "
-                             "[poselatch=%d aimdirectwrite=%d; 0.000 = both writers used one hand sample]",
+                             "[paletteposelatch=%d paletteaimdirectwrite=%d; 0.000 = both writers used one hand sample]",
                              s_n, s_n ? s_sum / s_n : 0.0, s_max, s_skip, g_cfg.pose_latch, g_cfg.aim_direct_write);
         s_sum = s_max = 0.0; s_n = s_skip = 0; s_last = now;
     }

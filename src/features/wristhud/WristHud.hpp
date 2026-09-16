@@ -47,7 +47,7 @@ void wristhud_tick();
 // the player moved; the weapon rig re-applies on the render path for the same reason.
 void wristhud_place();
 
-// ---- WRIST RADAR blips (blipdump survey, 2026-08-28): unit+0x177 is the TEAM byte -- 0x0E
+// ---- WRIST RADAR blips (wristblipdump survey, 2026-08-28): unit+0x177 is the TEAM byte -- 0x0E
 // human (player + marines, armed or corpse), 0x0D covenant (the one carrier photographed held
 // PLASMA grenades). Published by the sim (slow cached table scan + per-publish position reads):
 // relative Blam-unit offsets from the player, team, and a moving flag. Consumed by the placement.

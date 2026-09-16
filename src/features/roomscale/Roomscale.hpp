@@ -6,7 +6,7 @@
 // and the origin is credited only with the travel roomscale demonstrably caused. Also the camera
 // bob measurement (bobcancel / boblog), published through core/CameraBob.hpp.
 //
-// FEATURE roomscale. Hook slots: parse_key (roomscale*, blamunitthrottleoff*, blamthrottleysign,
+// FEATURE roomscale. Hook slots: parse_key (roomscale*, roomscalethrottleoff*, roomscalethrottleysign,
 // bob*), game_tick_before_leash (camera bob and the throttle-frame probe log), leash_block_wanted,
 // leash_lateral (the walk, and the leash at roomscale's radius), xinput_before_brake (the stick
 // injection) and sim_unit_state_end (throttle mode 3). Table: kRoomscaleHooks.

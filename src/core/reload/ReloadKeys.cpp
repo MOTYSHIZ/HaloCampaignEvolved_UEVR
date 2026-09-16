@@ -26,7 +26,7 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadholdfire") == 0) { g_cfg.reload_hold_fire = (v != 0.0); return true; }
     if (_stricmp(key, "reloadvrlog")    == 0) { g_cfg.reload_vr_log = (v != 0.0); return true; }
     if (_stricmp(key, "reloadresetholds") == 0) { g_cfg.reload_reset_holds = (v != 0.0); return true; }
-    if (_stricmp(key, "shotgunlog")     == 0) { g_cfg.shotgun_log = (int)clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "reloadshotgunlog")     == 0) { g_cfg.shotgun_log = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "reloadhidearms") == 0) { g_cfg.reload_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
     if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }
@@ -54,7 +54,7 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "akrtpcvalue")    == 0) { g_cfg.ak_rtpc_value = (float)v; return true; }
     if (_stricmp(key, "akrtpcglobal")   == 0) { g_cfg.ak_rtpc_global = (v != 0.0); return true; }
     if (_stricmp(key, "akrtpcrestore")  == 0) { g_cfg.ak_rtpc_restore = (float)v; return true; }
-    if (_stricmp(key, "akmimic")        == 0) { g_cfg.ak_mimic = (int)clampf((float)v, 0.0f, 7.0f); return true; }
+    if (_stricmp(key, "reloadakmimic")        == 0) { g_cfg.ak_mimic = (int)clampf((float)v, 0.0f, 7.0f); return true; }
     if (_stricmp(key, "akmimic4event")  == 0) { strncpy_s(g_cfg.ak_mimic4_event, val, _TRUNCATE); return true; }
     if (_stricmp(key, "akfnsetlisteners") == 0) { g_cfg.ak_fn_setlisteners = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "akfnsetswitch")  == 0) { g_cfg.ak_fn_setswitch = (int)strtol(val, nullptr, 0); return true; }
@@ -105,8 +105,8 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadpressmscoop") == 0) { g_cfg.reload_press_ms_coop = (int)clampf((float)v, 30.0f, 2000.0f); return true; }
     if (_stricmp(key, "coopauto")       == 0) { g_cfg.coop_auto = (v != 0.0); return true; }
     if (_stricmp(key, "coopstopat")     == 0) { g_cfg.coop_stop_at = (int)clampf((float)v, 0.0f, 10.0f); return true; }
-    if (_stricmp(key, "coophide")       == 0) { g_cfg.coop_hide = (v != 0.0); return true; }
-    if (_stricmp(key, "hidesolo")       == 0) { g_cfg.hide_solo = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadcoophide")       == 0) { g_cfg.coop_hide = (v != 0.0); return true; }
+    if (_stricmp(key, "reloadhidesolo")       == 0) { g_cfg.hide_solo = (v != 0.0); return true; }
     if (_stricmp(key, "coopmaskms")     == 0) { g_cfg.coop_mask_ms = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
     if (_stricmp(key, "reloadanimmscoop") == 0) { g_cfg.reload_anim_ms_coop = (int)clampf((float)v, 0.0f, 8000.0f); return true; }
     if (_stricmp(key, "slidephantom")   == 0) { g_cfg.slide_phantom = (int)clampf((float)v, 0.0f, 2.0f); return true; }

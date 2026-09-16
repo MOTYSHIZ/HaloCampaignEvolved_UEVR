@@ -34,12 +34,12 @@ bool stability_move_probe_allowed();            // the author's movement PROBE: 
 unsigned short stability_steal_extra_mask();    // stealextra bits for the author's holster steal, or 0
 void stability_stick_mode_want(bool want);       // note a stick-mode entry on the death camera
 bool stability_stick_exit_after_death();         // true = the exit re-anchored after a death
-void stability_turn_gate_note(bool fp_control_now);   // turnlog: a flick a gate swallowed
-void stability_turn_snap_note(float step);             // turnlog: a snap that landed
+void stability_turn_gate_note(bool fp_control_now);   // stabilityturnlog: a flick a gate swallowed
+void stability_turn_snap_note(float step);             // stabilityturnlog: a snap that landed
 void stability_teardown_early();                 // teardown: the OpenXR layer first
 void stability_teardown_restore();               // teardown: the API layer's projection rewrite
-void stability_holster_marker_tint(uevr::API::UObject* marker);   // holstermarkercolor on a pouch marker
-bool stability_throw_too_slow(float peak_speed);  // grenminthrow
+void stability_holster_marker_tint(uevr::API::UObject* marker);   // stabilityholstermarkercolor on a pouch marker
+bool stability_throw_too_slow(float peak_speed);  // stabilitygrenminthrow
 const char* stability_putback_text(const char* his_text, bool in_pouch);
 bool stability_menu_command_file_absent(const char* path);   // the menu command file poll gate
 void stability_gesture_reset_two_hand();         // gesture_reset: the two-handed hold drops too

@@ -5,8 +5,8 @@
 // double-fire one press. The off hand's everyday reaches (a magazine fetch, a grenade pull, a brace)
 // each get an explicit, logged stand-down, and a gunstock kick needs real travel to count.
 //
-// FEATURE meleeleft (Experimental). Hook slots: parse_key (meleeleft, meleeshotms, meleeshotdist,
-// meleedisp) and gesture_melee_offhand (the detector, in the melee half of the gesture tick, before
+// FEATURE meleeleft (Experimental). Hook slots: parse_key (meleeleft, meleeleftshotms, meleeleftshotdist,
+// meleeleftdisp) and gesture_melee_offhand (the detector, in the melee half of the gesture tick, before
 // the aim hand's detector). Table: kMeleeLeftHooks.
 
 #pragma once

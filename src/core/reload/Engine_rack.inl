@@ -813,7 +813,7 @@ bool net_is_coop() {
     s_coop = coop;
     return s_coop;
 }
-// The hidden reload applies in coop (coophide) and, with hidesolo, in solo too.
+// The hidden reload applies in coop (reloadcoophide) and, with reloadhidesolo, in solo too.
 bool reload_hidden_mode() {
     if (!g_cfg.coop_hide) return false;
     if (g_cfg.hide_solo) return true;
@@ -825,8 +825,8 @@ void ad_write_zero(bool render_path);   // the anim-variable readout probe (defi
 // clears the lock): s_hide_display outlives s_true_empty through the gesture.
 bool    s_hide_display = false;
 int     s_coop_lock_rounds = 1;
-int     s_ph_reserve_seen = -1;   // the reserve offset the phantom tick is using (shotgunlog)
-int     s_rt_taps = 0, s_rt_presses = 0;   // taps the engine saw and presses it sent (shotgunlog)
+int     s_ph_reserve_seen = -1;   // the reserve offset the phantom tick is using (reloadshotgunlog)
+int     s_rt_taps = 0, s_rt_presses = 0;   // taps the engine saw and presses it sent (reloadshotgunlog)
 bool    s_ph_rebase = false;      // the weapon in hand changed identity: re-seed the counter caches
 int32_t s_rs_cur_datum = -1;      // the held weapon's datum read this tick by the reload state tracker
 void slide_phantom_tick() {

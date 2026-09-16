@@ -11,7 +11,7 @@
 #include "Rig.hpp"              // call_ret_vec3
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
 #include "Reticule.hpp"           // widget_quad_begin/finish -- THE one copy of the quad recipe
-#include "core/PalettePose.hpp"   // palette_pose_owns_aim: hudwpnanchor 3
+#include "core/PalettePose.hpp"   // palette_pose_owns_aim: wristhudwpnanchor 3
 #include "UeObject.hpp"
 #include "core/Clock.hpp"               // clock::now_ms: the radar's wall-clock cadences
 #include "core/HiddenReload.hpp"        // g_wristhud_hide_cradle
@@ -636,7 +636,7 @@ void species_resolve(uint32_t cls, const Vec3& ue) {
     e.name = best_name;
     if (!best_name.empty())
         API::get()->log_info("[Halo-CampE-UEVR] RADAR species 0x%08X = %ls (%.1f m away) "
-                             "-- colour with blipname=<substring>,r,g,b",
+                             "-- colour with wristblipname=<substring>,r,g,b",
                              cls, best_name.c_str(), std::sqrt(best) / 100.0f);
     else
         API::get()->log_info("[Halo-CampE-UEVR] RADAR species 0x%08X = no actor within 2.5 m", cls);
@@ -655,7 +655,7 @@ API::UObject* dot_rt() {
     return rt;
 }
 
-// The palette lookup: an explicit blipcolor entry, else a hue derived from the species id. Values
+// The palette lookup: an explicit wristblipcolor entry, else a hue derived from the species id. Values
 // are ordinary 0..1 -- 0,0,1 is full blue, 0,0,0.35 is a dark blue.
 void dot_color_for(uint32_t cls, float* out) {
     // NAME first -- it survives level loads, where a tag id does not.
@@ -695,7 +695,7 @@ void dot_color_for(uint32_t cls, float* out) {
     for (int i = 0; i < s_nseen; ++i) if (s_seen[i] == cls) return;
     if (s_nseen < 32) s_seen[s_nseen++] = cls;
     API::get()->log_info("[Halo-CampE-UEVR] RADAR: species 0x%08X -> derived hue %.0f "
-                         "(override with blipcolor=%08X,r,g,b)", cls, hue, cls);
+                         "(override with wristblipcolor=%08X,r,g,b)", cls, hue, cls);
 }
 
 void dot_apply(API::UObject* mid, uint32_t cls) {
@@ -918,12 +918,12 @@ BlipViz s_bv[MAX_BLIPS];
 } // namespace
 
 // ================================================================================================
-// HUD PLACEMENT ON THE WEAPON (hudplacement=1). The panels ride the drawn weapon instead of the
+// HUD PLACEMENT ON THE WEAPON (wristhudplacement=1). The panels ride the drawn weapon instead of the
 // forearms. The game tick resolves whether a first-person weapon is in hand and which actor it is
 // (class-name checks are tick work, not render work); the render thread reads the anchor transform
 // each frame, right where the wrist placement runs, and places every panel from it.
 //
-// THE ANCHOR, per hudwpnanchor (Config.hpp):
+// THE ANCHOR, per wristhudwpnanchor (Config.hpp):
 //   1  RootComponent of the FP weapon actor. Rig.cpp: the weapon actor is attached to the arms rig at
 //      socket PrimaryWeapon, so its root follows that socket under either arm driver.
 //   2  GetSocketLocation / GetSocketRotation("PrimaryWeapon") on the arms rig component: the posed
@@ -939,7 +939,7 @@ std::atomic<bool>  s_wpn_live{false};     // a first-person weapon is in hand (R
 
 struct WhWpnAnchor { Vec3 pos{}; Quat q{0.0f, 0.0f, 0.0f, 1.0f}; int how = 0; };
 
-// Game tick. Nothing while hudplacement is 0.
+// Game tick. Nothing while wristhudplacement is 0.
 void wh_weapon_anchor_tick() {
     if (g_cfg.hud_placement != 1) {
         s_wpn_live.store(false, std::memory_order_relaxed);
@@ -1058,7 +1058,7 @@ void wristhud_tick() {
     if (!g_cfg.wrist_hud) return;
     tracker_dump_probe();
     tracker_mid_probe(s_tick);
-    wh_weapon_anchor_tick();   // hudplacement=1: the weapon anchor for the render thread
+    wh_weapon_anchor_tick();   // wristhudplacement=1: the weapon anchor for the render thread
     parse_slots();
 
     auto* owner = API::get()->get_local_pawn(0);
@@ -1114,7 +1114,7 @@ void wristhud_place() {
         && get_pose(aidx, &apos, &arot, /*use_aim=*/false)
         && !(std::fabs(apos.x) < 1e-6f && std::fabs(apos.y) < 1e-6f && std::fabs(apos.z) < 1e-6f);
 
-    // ON THE WEAPON (hudplacement=1). With it 0, weapon_place and wpn_hide are false and nothing below
+    // ON THE WEAPON (wristhudplacement=1). With it 0, weapon_place and wpn_hide are false and nothing below
     // changes: every panel takes the wrist path exactly as before.
     const bool wpn_mode = g_cfg.hud_placement == 1;
     const bool in_menu = wpn_mode && g_menu_active.load(std::memory_order_relaxed);
@@ -1707,8 +1707,8 @@ void blip_scan(uintptr_t player_obj) {
 
 // ---- RADAR BLIPS, WRIST HUD / RADAR / TRACKER keys.
 bool wristhud_parse_key(const char* key, const char* val, double v) {
-    if (_stricmp(key, "blipdump")    == 0) { g_cfg.blip_dump      = (int)v; return true; }
-    if (_stricmp(key, "blipcolor") == 0) {
+    if (_stricmp(key, "wristblipdump")    == 0) { g_cfg.blip_dump      = (int)v; return true; }
+    if (_stricmp(key, "wristblipcolor") == 0) {
         // <hex class>,<r>,<g>,<b>. Repeatable; a repeat of the same class overwrites it, so a
         // live edit retunes a colour instead of exhausting the table.
         unsigned cls = 0; float c[3] = {1.0f, 1.0f, 1.0f};
@@ -1731,7 +1731,7 @@ bool wristhud_parse_key(const char* key, const char* val, double v) {
         }
         return true;
     }
-    if (_stricmp(key, "blipcolorother") == 0) {
+    if (_stricmp(key, "wristblipcolorother") == 0) {
         float c[3] = {g_cfg.blip_color_other[0], g_cfg.blip_color_other[1], g_cfg.blip_color_other[2]};
         sscanf_s(val, "%f,%f,%f", &c[0], &c[1], &c[2]);
         if (c[0] != g_cfg.blip_color_other[0] || c[1] != g_cfg.blip_color_other[1] ||
@@ -1743,7 +1743,7 @@ bool wristhud_parse_key(const char* key, const char* val, double v) {
         }
         return true;
     }
-    if (_stricmp(key, "blipname") == 0) {
+    if (_stricmp(key, "wristblipname") == 0) {
         char m[64] = {0}; float c[3] = {1.0f, 1.0f, 1.0f};
         if (sscanf_s(val, "%63[^,],%f,%f,%f", m, (unsigned)sizeof(m), &c[0], &c[1], &c[2]) >= 2) {
             int slot = -1;
@@ -1761,9 +1761,9 @@ bool wristhud_parse_key(const char* key, const char* val, double v) {
         }
         return true;
     }
-    if (_stricmp(key, "blipbytes")   == 0) { g_cfg.blip_bytes     = (int)v; return true; }
-    if (_stricmp(key, "trackerdump") == 0) { g_cfg.tracker_dump   = (int)v; return true; }
-    if (_stricmp(key, "trackermid")  == 0) { g_cfg.tracker_mid    = (int)v; return true; }
+    if (_stricmp(key, "wristblipbytes")   == 0) { g_cfg.blip_bytes     = (int)v; return true; }
+    if (_stricmp(key, "wristtrackerdump") == 0) { g_cfg.tracker_dump   = (int)v; return true; }
+    if (_stricmp(key, "wristtrackermid")  == 0) { g_cfg.tracker_mid    = (int)v; return true; }
     if (_stricmp(key, "wristradar")  == 0) { g_cfg.wrist_radar    = (v != 0.0); return true; }
     if (_stricmp(key, "wristradarblip") == 0) { g_cfg.wrist_radar_blip = clampf((float)v, 0.002f, 0.1f); return true; }
     if (_stricmp(key, "wristradargain") == 0) { g_cfg.wrist_radar_gain = clampf((float)v, 1.0f, 100000.0f); return true; }
@@ -1789,16 +1789,16 @@ bool wristhud_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "wristhudoffr")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.wrist_hud_off_r[0], &g_cfg.wrist_hud_off_r[1], &g_cfg.wrist_hud_off_r[2]); return true; }
     if (_stricmp(key, "wristhudrotr")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.wrist_hud_rot_r[0], &g_cfg.wrist_hud_rot_r[1], &g_cfg.wrist_hud_rot_r[2]); return true; }
     if (_stricmp(key, "wristhudgapr")    == 0) { g_cfg.wrist_hud_gap_r = clampf((float)v, 0.0f, 0.5f); return true; }
-    if (_stricmp(key, "hudplacement")   == 0) { g_cfg.hud_placement = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "hudwpnanchor")   == 0) { g_cfg.hud_wpn_anchor = (int)clampf((float)v, 1.0f, 3.0f); return true; }
-    if (_stricmp(key, "hudwpntracker")  == 0) { float* s = g_cfg.hud_wpn_tracker; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
-    if (_stricmp(key, "hudwpnshield")   == 0) { float* s = g_cfg.hud_wpn_shield;  sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
-    if (_stricmp(key, "hudwpnammo")     == 0) { float* s = g_cfg.hud_wpn_ammo;    sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
-    if (_stricmp(key, "hudwpngrenade")  == 0) { float* s = g_cfg.hud_wpn_grenade; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
-    if (_stricmp(key, "hudwpngap")      == 0) { g_cfg.hud_wpn_gap = clampf((float)v, 0.0f, 50.0f); return true; }
-    if (_stricmp(key, "hudwpnscale")    == 0) { g_cfg.hud_wpn_scale = clampf((float)v, 0.002f, 0.2f); return true; }
-    if (_stricmp(key, "hudwpnfallback") == 0) { g_cfg.hud_wpn_fallback = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "hudwpnlog")      == 0) { g_cfg.hud_wpn_log = (v != 0.0); return true; }
+    if (_stricmp(key, "wristhudplacement")   == 0) { g_cfg.hud_placement = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "wristhudwpnanchor")   == 0) { g_cfg.hud_wpn_anchor = (int)clampf((float)v, 1.0f, 3.0f); return true; }
+    if (_stricmp(key, "wristhudwpntracker")  == 0) { float* s = g_cfg.hud_wpn_tracker; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "wristhudwpnshield")   == 0) { float* s = g_cfg.hud_wpn_shield;  sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "wristhudwpnammo")     == 0) { float* s = g_cfg.hud_wpn_ammo;    sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "wristhudwpngrenade")  == 0) { float* s = g_cfg.hud_wpn_grenade; sscanf_s(val, "%f,%f,%f,%f,%f,%f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5]); return true; }
+    if (_stricmp(key, "wristhudwpngap")      == 0) { g_cfg.hud_wpn_gap = clampf((float)v, 0.0f, 50.0f); return true; }
+    if (_stricmp(key, "wristhudwpnscale")    == 0) { g_cfg.hud_wpn_scale = clampf((float)v, 0.002f, 0.2f); return true; }
+    if (_stricmp(key, "wristhudwpnfallback") == 0) { g_cfg.hud_wpn_fallback = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "wristhudwpnlog")      == 0) { g_cfg.hud_wpn_log = (v != 0.0); return true; }
     if (_stricmp(key, "wristhudammotext") == 0) { strncpy_s(g_cfg.wrist_hud_ammo_text, val, _TRUNCATE); return true; }
     return false;
 }

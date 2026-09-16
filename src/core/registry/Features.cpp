@@ -6,6 +6,7 @@
 #include "features/FeatureList.hpp"
 #include "features/hooks/ConfigHooks.hpp"   // features_menu_status_line
 #include "core/config/CfgRead.hpp"
+#include "core/config/KeyAlias.hpp"
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -102,7 +103,7 @@ const FeatureRow kFeatures[] = {
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
-      "aimbore,palettetwohandmin,palettetwohandmax,palettetwohandagreemin,palettetwohandagreefull,palettetwohandlog,palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst,palettecalibkey,palwpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
+      "aimbore,palettetwohandmin,palettetwohandmax,palettetwohandagreemin,palettetwohandagreefull,palettetwohandlog,palettecam,paletteposelatch,paletterolltrim,palettebuildgate,palettepubframe,palettetwohandmarker,palettecamlead,palettemeshconst,palettecalibkey,palettewpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
     { "aimreticulestamp", 1, Tier::Experimental, "Weapon", "Reticule placed every frame",
       "The headset-drawn reticule is placed each frame on exactly where your shots go.",
       "", "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
@@ -111,7 +112,7 @@ const FeatureRow kFeatures[] = {
       "scopeev,scopetint,scopetonecurve,scopeeyedist,scopesource,scopertfmt,scopeshowflags,scopesfflags,scopeseptrans,scopereticletint", "scope", FEATURE_BOOL(scope_lens) },
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
-      "reloadseat,reloadmagbelt,reloadholdfire,reloadresetholds,reloadvrlog,shotgunlog,gripexclusive,reloadakmute,akmimic,coophide,hidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,roomanchor,reloadhidearms",
+      "reloadseat,reloadmagbelt,reloadholdfire,reloadresetholds,reloadvrlog,reloadshotgunlog,gripexclusive,reloadakmute,reloadakmimic,reloadcoophide,reloadhidesolo,reloadstate,reloadstatesave,reloadstatehide,reloadstatewaitms,reloadstatedrop,reloadstatedeath,reloadstatelevel,reloadstatelog,reloadlift,reloadslidems,reloadmagoffw,reloadhandoff,reloadhandrot,reloadanimrate,reloadwellmarker,reloadroomanchor,reloadhidearms",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
@@ -125,10 +126,10 @@ const FeatureRow kFeatures[] = {
       "grenadecode,grenadeswallowlog", "", FEATURE_INT(grenade_swallow) },
     { "holsterpollthrow", 1, Tier::Experimental, "Melee and grenades", "Grenade throw on release",
       "A grenade leaves your hand the instant you open your grip, and the pouches show your real grenade counts.",
-      "holsterthrowlog", "holster,blamangles", FEATURE_BOOL(holster_poll_throw) },
+      "holsterpollthrowlog", "holster,blamangles", FEATURE_BOOL(holster_poll_throw) },
     { "wristhud",     1, Tier::Experimental, "HUD", "Wrist HUD",
       "Shield, weapon and grenade readouts on your forearm, and the motion tracker on your wrist.",
-      "wristradar,hudplacement,wristhudclasses,wristhudoff,wristhudrot,wristhudgap,wristhudclassesr,wristhudoffr,wristhudrotr,wristradarblip,wristradargain,blipcolorother", "", FEATURE_BOOL(wrist_hud) },
+      "wristradar,wristhudplacement,wristhudclasses,wristhudoff,wristhudrot,wristhudgap,wristhudclassesr,wristhudoffr,wristhudrotr,wristradarblip,wristradargain,wristblipcolorother", "", FEATURE_BOOL(wrist_hud) },
     { "forcetube",    1, Tier::Experimental, "Haptics", "ForceTube gunstock",
       "A kick in the ForceTube gunstock on every round you fire.",
       "forcetubekick,forcetuberadius", "", FEATURE_BOOL(force_tube) },
@@ -140,7 +141,7 @@ const FeatureRow kFeatures[] = {
       "vehsteersign", "blamangles", FEATURE_INT(vehicle_wheel) },
     { "roomscale",    1, Tier::Experimental, "Roomscale", "Roomscale",
       "Walk around your play space and your steps move the Spartan.",
-      "blamthrottleysign,roomscalethrottle,roomscalegain,roomscalemin,roomscaledz", "blamangles", FEATURE_BOOL(roomscale) },
+      "roomscalethrottleysign,roomscalethrottle,roomscalegain,roomscalemin,roomscaledz", "blamangles", FEATURE_BOOL(roomscale) },
     { "heightcal",    1, Tier::Experimental, "Roomscale", "Auto height",
       "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it.",
       "heightmode,heightsrc,heightsample,heighttrim,heightkey", "", FEATURE_INT(height_cal) },
@@ -149,7 +150,7 @@ const FeatureRow kFeatures[] = {
       "headblockradius", "", FEATURE_INT(head_block) },
     { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
       "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate, holster marker tint and minimum throw speed.",
-      "turnlog,widgetlog,markertint,holstermarkercolor,grenminthrow", "", FEATURE_BOOL(stability_fixes) },
+      "stabilityturnlog,stabilitywidgetlog,markertint,stabilityholstermarkercolor,stabilitygrenminthrow", "", FEATURE_BOOL(stability_fixes) },
 };
 
 #undef FEATURE_BOOL
@@ -268,6 +269,9 @@ int features_layer() { return s_layer_open ? s_layer : -1; }
 
 void features_note_key(const char* key, const char* val) {
     if (key == nullptr) return;
+    // The same translation the fork's parser does, so a retired name records its layer under the
+    // current one and the menu's source column is right whichever spelling the file used.
+    key = key_current_name(key);
     for (int i = 0; i < kCount; ++i) {
         if (_stricmp(key, kFeatures[i].key) == 0) { s_key_layer[i] = s_layer; return; }
     }
@@ -279,7 +283,7 @@ void features_note_key(const char* key, const char* val) {
         }
     }
     if (_stricmp(key, "palettehook") == 0) { s_palette_hook_layer = s_layer; return; }
-    if (_stricmp(key, "poselatch") == 0)   { s_pose_latch_layer = s_layer; return; }
+    if (_stricmp(key, "paletteposelatch") == 0)   { s_pose_latch_layer = s_layer; return; }
     if (_stricmp(key, "armhidemode") == 0) { s_arm_hide_mode_layer = s_layer; return; }
     if (_stricmp(key, "armhidebone") == 0) { s_arm_hide_bone_layer = s_layer; return; }
     if (_stricmp(key, "rig") == 0)         { s_rig_layer = s_layer; return; }
@@ -411,8 +415,8 @@ static const EffectiveKey kEffectiveKeys[] = {
     { "reloadvr",         [] { return (double)g_cfg.reload_vr; } },
     { "reloadseat",       [] { return (double)g_cfg.reload_seat_dist; } },
     { "slidevr",          [] { return (double)g_cfg.slide_vr; } },
-    { "coophide",         [] { return (double)g_cfg.coop_hide; } },
-    { "hidesolo",         [] { return (double)g_cfg.hide_solo; } },
+    { "reloadcoophide",         [] { return (double)g_cfg.coop_hide; } },
+    { "reloadhidesolo",         [] { return (double)g_cfg.hide_solo; } },
     { "meleeswing",       [] { return (double)g_cfg.melee_swing; } },
     { "meleeleft",        [] { return (double)g_cfg.melee_left; } },
     { "grenadeswallow",   [] { return (double)g_cfg.grenade_swallow; } },
@@ -560,6 +564,7 @@ void features_append_dev_reference(std::string& text) {
                   kTierName[t], kTierSwitch[t], kTierDefaultOn[t] ? 1 : 0);
         text += line;
     }
+    key_alias_append_reference(text);
 }
 
 void features_log_resolved() {

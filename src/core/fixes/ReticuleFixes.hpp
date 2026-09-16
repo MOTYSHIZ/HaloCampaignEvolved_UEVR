@@ -20,7 +20,7 @@ const char* load_asset_log_suffix(uevr::API::UObject* obj);
 // Right after the load log line: remember a null load.
 void load_asset_note_result(const char* path, uevr::API::UObject* obj);
 
-// The widget-tint probe log in bind_widget_slate_ui runs only with widgetlog on.
+// The widget-tint probe log in bind_widget_slate_ui runs only with stabilitywidgetlog on.
 bool widget_log_enabled();
 
 // Late re-assert for xrlayerhidews modes 3/4 at the end of reticule_widget_move: it runs after

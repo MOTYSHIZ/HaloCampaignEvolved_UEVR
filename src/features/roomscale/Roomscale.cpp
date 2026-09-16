@@ -70,9 +70,9 @@ bool roomscale_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "roomscalethrottle")  == 0) { g_cfg.roomscale_throttle = (int)v; return true; }
     if (_stricmp(key, "roomscalethrspeed")  == 0) { g_cfg.roomscale_thr_speed = clampf((float)v, 0.5f, 30.0f); return true; }
     if (_stricmp(key, "roomscalethrprobe")  == 0) { g_cfg.roomscale_thr_probe = (int)v; return true; }
-    if (_stricmp(key, "blamunitthrottleoff")  == 0) { g_cfg.blam_unit_throttle_off  = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "blamunitthrottleoff2") == 0) { g_cfg.blam_unit_throttle_off2 = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "blamthrottleysign")    == 0) { g_cfg.blam_throttle_ysign = (v < 0.0) ? -1 : 1; return true; }
+    if (_stricmp(key, "roomscalethrottleoff")  == 0) { g_cfg.blam_unit_throttle_off  = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "roomscalethrottleoff2") == 0) { g_cfg.blam_unit_throttle_off2 = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "roomscalethrottleysign")    == 0) { g_cfg.blam_throttle_ysign = (v < 0.0) ? -1 : 1; return true; }
     return false;
 }
 

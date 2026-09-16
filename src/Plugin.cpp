@@ -5887,7 +5887,7 @@ static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, doub
                     ray_yaw   = (double)halo::g_desired_yaw.load();
                     ray_pitch = (double)halo::g_desired_pitch.load();
                 }
-                // RETFRESH (fork, aimreticulefresh, experimental): take the ray from ControlRotation read
+                // RETFRESH (fork, paletteaimreticulefresh, experimental): take the ray from ControlRotation read
                 // back at this moment instead of the tick's early copy. Off by default.
                 if (g_cfg.aim_reticule_fresh != 0) {
                     double fr_p = 0.0, fr_y = 0.0;

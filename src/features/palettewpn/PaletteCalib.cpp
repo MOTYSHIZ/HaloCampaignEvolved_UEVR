@@ -91,7 +91,7 @@ bool palette_calib_parse_key(const char* key, const char* val, double v) {
         return true;
     }
     if (_stricmp(key, "palwpnfix") == 0) { parse_wpnfix(val); return true; }
-    if (_stricmp(key, "palwpncalibkey") == 0) { g_cfg.pal_wpn_calib_key = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "palettewpncalibkey") == 0) { g_cfg.pal_wpn_calib_key = (int)strtol(val, nullptr, 0); return true; }
     return false;
 }
 

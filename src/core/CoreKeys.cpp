@@ -24,7 +24,7 @@ bool core_parse_key(const char* key, const char* val, double v) {
     // code (core/fixes/HostFixes): moveprobe (his movement PROBE) and stealextra (extra holster steal bits).
     if (_stricmp(key, "magrender")      == 0) { g_cfg.mag_render = (int)v; return true; }
     if (_stricmp(key, "moveprobe")      == 0) { g_cfg.move_probe     = (v != 0.0); return true; }
-    if (_stricmp(key, "roomanchor")     == 0) { g_cfg.room_anchor = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "reloadroomanchor")     == 0) { g_cfg.room_anchor = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "wpnnodedump")    == 0) { g_cfg.wpn_node_dump = (v != 0.0); return true; }
     if (_stricmp(key, "wpnnodecopyscan") == 0) { g_cfg.wpn_node_copy_scan = (v != 0.0); return true; }
     if (_stricmp(key, "wpnnodepoke")    == 0) { g_cfg.wpn_node_poke = (int)clampf((float)v, -1.0f, 63.0f); return true; }
@@ -35,7 +35,7 @@ bool core_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "slidehook")      == 0) { g_cfg.slide_hook = (v != 0.0); return true; }
     // Core readers of what were the author's log switches, now the fork's own (core/UnitState's
     // holster evidence and core/dev's cutscene frame grab).
-    if (_stricmp(key, "holsterthrowlog") == 0) { g_cfg.holster_throw_log = (v != 0.0); return true; }
+    if (_stricmp(key, "holsterpollthrowlog") == 0) { g_cfg.holster_throw_log = (v != 0.0); return true; }
     if (_stricmp(key, "cutscenegrab")    == 0) { g_cfg.cutscene_grab = (int)v; return true; }
     // The palette weapon's diagnostic log switch, also read by the wrist HUD's one-shot widget log.
     if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }

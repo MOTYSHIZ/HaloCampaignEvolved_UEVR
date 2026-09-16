@@ -23,7 +23,7 @@ Vec3 holster_world_to_room(const Vec3& world, const Vec3& hmd_room);
 Vec3 holster_room_to_world_at(const Vec3& room, const Vec3& hmd_room, const Vec3& cam);
 Vec3 holster_world_to_room_at(const Vec3& world, const Vec3& hmd_room, const Vec3& cam);
 
-// THE ROOM ANCHOR (roomanchor): 0 = the HMD, the author's transform; 1 = the standing origin, what the
+// THE ROOM ANCHOR (reloadroomanchor): 0 = the HMD, the author's transform; 1 = the standing origin, what the
 // head's rendered offset is measured from. True = anchor 1, and *out holds the point.
 bool room_to_world_anchored(const Vec3& room, const Vec3& hmd_room, Vec3* out);
 

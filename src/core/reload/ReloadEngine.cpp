@@ -270,7 +270,7 @@ bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head
 bool s_reset_drop_tap = false;
 
 bool reload_engine_press_ignored() {
-    ++s_rt_taps;   // shotgunlog: every tap the engine saw, ignored or not
+    ++s_rt_taps;   // reloadshotgunlog: every tap the engine saw, ignored or not
     // A tap made while a reset's window held the tick (a death, a ride, a cutscene) is dropped once:
     // it belongs to the gun that went away with the body. reloadresetholds 0 restores the old path.
     if (s_reset_drop_tap) {

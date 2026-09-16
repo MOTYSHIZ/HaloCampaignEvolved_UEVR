@@ -40,7 +40,7 @@ std::atomic<bool>  g_pollthrow_hold{false};
 std::atomic<bool>  g_pollthrow_fired{false};
 
 // The carrier hand's position in BLAM units, for the grenade-at-hand spawn-origin experiment
-// (grenhand, doctrine in Config.hpp). Published per tick while a grenade is armed; the last value
+// (holsterpollthrowhand, doctrine in Config.hpp). Published per tick while a grenade is armed; the last value
 // deliberately survives the release, because the spawn lands ~42 ms after it.
 std::atomic<float> g_hand_blam_x{0.0f}, g_hand_blam_y{0.0f}, g_hand_blam_z{0.0f};
 std::atomic<bool>  g_hand_blam_valid{false};
@@ -57,7 +57,7 @@ uint32_t s_mk_fails = 0;   // empty surveys in a row: the sweep backs off (120 t
 // and the instant-release experiments.
 // ================================================================================================
 
-// ---- THROW WINDUP DUMP (throwdump, doctrine in Config.hpp). SIM THREAD. Statics only, no
+// ---- THROW WINDUP DUMP (holsterpollthrowdump, doctrine in Config.hpp). SIM THREAD. Statics only, no
 // allocation; the cost while idle is one memcmp-sized pass over 0x600 bytes per sim call, and the
 // log lines are capped per window. The mask is learned, not assumed: anything that churns while
 // nothing is being thrown is by definition not the throw.
@@ -89,7 +89,7 @@ void throw_dump_probe(uintptr_t obj) {
     static bool s_press_prev = false;
     static int  s_frag0 = -1, s_plas0 = -1;
 
-    // A new object or a bumped throwdump value restarts the learn from scratch.
+    // A new object or a bumped holsterpollthrowdump value restarts the learn from scratch.
     if (obj != s_obj || g_cfg.throw_dump != s_armed_as) {
         s_obj = obj; s_armed_as = g_cfg.throw_dump;
         s_have_prev = false; s_learn = 0; s_window = 0; s_press_prev = false;
@@ -274,7 +274,7 @@ void holster_note_buttons(unsigned short buttons) {
     g_pollthrow_fired.store(true, std::memory_order_relaxed);
 }
 
-// The carrier hand's last published Blam-unit position (grenhand). Safe on any thread.
+// The carrier hand's last published Blam-unit position (holsterpollthrowhand). Safe on any thread.
 bool holster_hand_blam(float* x, float* y, float* z) {
     if (!g_hand_blam_valid.load(std::memory_order_relaxed)) return false;
     *x = g_hand_blam_x.load(std::memory_order_relaxed);
@@ -287,7 +287,7 @@ bool holster_hand_blam(float* x, float* y, float* z) {
 uevr::API::UObject* holster_mesh_frag()   { TrackedObject& s_mesh_frag = *host::g_holster_state.mesh_frag; return s_mesh_frag.get(); }
 uevr::API::UObject* holster_mesh_plasma() { TrackedObject& s_mesh_plasma = *host::g_holster_state.mesh_plasma; return s_mesh_plasma.get(); }
 
-// The swing's peak direction in Blam units, normalized (greninstant). Safe on any thread.
+// The swing's peak direction in Blam units, normalized (holsterpollthrowinstant). Safe on any thread.
 bool holster_throw_blam_dir(float* x, float* y, float* z) {
     if (!g_throw_blam_valid.load(std::memory_order_relaxed)) return false;
     *x = g_throw_blam_x.load(std::memory_order_relaxed);
@@ -373,7 +373,7 @@ void holsterpollthrow_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
         g_pollthrow_mask.store(pmask, std::memory_order_relaxed);
     }
 
-    // Carrier hand in Blam units, for the grenhand spawn-origin experiment. UE world / 304.8 with
+    // Carrier hand in Blam units, for the holsterpollthrowhand spawn-origin experiment. UE world / 304.8 with
     // Y negated -- the same fit that placed the vehicle camera (BlamDrive, unit+0x20 vs camera).
     if (g_cfg.holster_poll_throw && s_grenade_armed) {
         const Vec3 cpos = s_carry_off ? gpos : pos;
@@ -495,7 +495,7 @@ void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
 }
 
 void holsterpollthrow_game_tick_after_blam_aim() {
-    blam_spawnlog_tick();   // spawn hook alone (throwdump) -- no aim ownership change
+    blam_spawnlog_tick();   // spawn hook alone (holsterpollthrowdump) -- no aim ownership change
 }
 
 #if HALO_VR_DEV
@@ -574,7 +574,7 @@ void holsterpollthrow_blam_create_after(uintptr_t params, uintptr_t cret) {
 // investigation-era law -- "aim completely off" in the headset -- and (b) stands down BlamDrive's
 // hook, killing publish_unit_state and with it the THROWDUMP probe. One session produced spawn
 // rows with frozen aim and no press marks: worthless twice over. This installs ONLY the
-// create_projectile hook, driven by the same `throwdump` key as the probe, so press timeline and
+// create_projectile hook, driven by the same `holsterpollthrowdump` key as the probe, so press timeline and
 // spawn timestamps come from one session with normal aim.
 void blam_spawnlog_tick() {
     // BlamAim.cpp's own hook state, through the bridge: the same objects under the same names.
@@ -593,7 +593,7 @@ void blam_spawnlog_tick() {
             API::get()->param()->functions->unregister_inline_hook(g_create_hook_id);
             g_create_hook_id = -1;
             g_orig_create = nullptr;
-            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: removed (throwdump off)");
+            API::get()->log_info("[Halo-CampE-UEVR] BLAMSPAWN: removed (holsterpollthrowdump off)");
         }
         return;
     }
@@ -631,13 +631,13 @@ void blam_spawnlog_tick() {
 
 bool holsterpollthrow_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "holsterpollthrow") == 0) { g_cfg.holster_poll_throw = (v != 0.0); return true; }
-    if (_stricmp(key, "gripmaskl")      == 0) { g_cfg.grip_mask_l = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "gripmaskr")      == 0) { g_cfg.grip_mask_r = (int)strtol(val, nullptr, 0); return true; }
-    if (_stricmp(key, "throwdump")   == 0) { g_cfg.throw_dump     = (int)v; return true; }
-    if (_stricmp(key, "grenhand")    == 0) { g_cfg.gren_hand_spawn = (int)v; return true; }
-    if (_stricmp(key, "greninstant") == 0) { g_cfg.gren_instant = (int)v; return true; }
-    if (_stricmp(key, "grenbackdate") == 0) { g_cfg.gren_backdate = (int)clampf((float)v, 1.0f, 60.0f); return true; }
-    if (_stricmp(key, "grenspeed")   == 0) { g_cfg.gren_speed = clampf((float)v, 1.0f, 30.0f); return true; }
+    if (_stricmp(key, "holsterpollthrowgripmaskl")      == 0) { g_cfg.grip_mask_l = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterpollthrowgripmaskr")      == 0) { g_cfg.grip_mask_r = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "holsterpollthrowdump")   == 0) { g_cfg.throw_dump     = (int)v; return true; }
+    if (_stricmp(key, "holsterpollthrowhand")    == 0) { g_cfg.gren_hand_spawn = (int)v; return true; }
+    if (_stricmp(key, "holsterpollthrowinstant") == 0) { g_cfg.gren_instant = (int)v; return true; }
+    if (_stricmp(key, "holsterpollthrowbackdate") == 0) { g_cfg.gren_backdate = (int)clampf((float)v, 1.0f, 60.0f); return true; }
+    if (_stricmp(key, "holsterpollthrowspeed")   == 0) { g_cfg.gren_speed = clampf((float)v, 1.0f, 30.0f); return true; }
     return false;
 }
 

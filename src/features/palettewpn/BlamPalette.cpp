@@ -982,7 +982,7 @@ void blam_palette_watch() {
         which, node, (unsigned long long)g_watch_addr);
 }
 
-// SLIDE ACCESSORS (slidewatch). The copy scan (2026-09-03) found no second copy of the weapon's
+// SLIDE ACCESSORS (paletteslidewatch). The copy scan (2026-09-03) found no second copy of the weapon's
 // node block in the capture region or the object, so whatever renders the slide reads THIS node;
 // yet a value written there on the sim thread after the pose and again on the game thread before
 // the engine tick never shows. A READ+WRITE hardware watch on the node's position.y traps every
@@ -1528,7 +1528,7 @@ std::atomic<uint32_t>  g_n8_seq{0};
 // moment (0.000 cm), so the socket must reflect a skeleton evaluated at a different point than
 // the palette we read: on most frames our write lands before the evaluation, on a few it does
 // not and the socket shows the pose from before our write.
-// palbuildgate=6 exists to land the write before the game's build and currently reports 318 of
+// palettebuildgate=6 exists to land the write before the game's build and currently reports 318 of
 // 320 calls landing, so about one in a hundred misses. These two make the correlation testable:
 // the age of our last write, and whether the hook that produced it got the gate-6 landing.
 std::atomic<long long> g_n8_ms{0};
@@ -2943,7 +2943,7 @@ bool resolve_world_pullback(bool render_ctx = false) {
             }
         }
     }
-    // ---- PALSTEP (2026-09-12, fitted before written). RAYGUN, per render frame, poselatch=1:
+    // ---- PALSTEP (2026-09-12, fitted before written). RAYGUN, per render frame, paletteposelatch=1:
     //   aim(t) = intent(t-2) exactly (coef 1.000, R2 1.000)
     //   barrel(t) - aim(t) = k * (aim(t-1) - aim(t-2)),  k 0.94 yaw / 0.91 pitch, corr 0.92 / 0.94
     // The drawn gun runs one previous aim step ahead of the aim ray: the overshoot, and the return
@@ -3626,7 +3626,7 @@ void apply_after_pose(int32_t local_player, int32_t weapon_slot) {
         return;
     }
 
-    // palbuildgate=6: land the PRECOMPOSED banks before anything slow. The exposure window is
+    // palettebuildgate=6: land the PRECOMPOSED banks before anything slow. The exposure window is
     // the game's build return to these memcpys; stock is snapshotted out on the way (the refresh
     // and the next precompose both feed on it).
     bool pre6_done = false;
@@ -3765,7 +3765,7 @@ void apply_after_pose(int32_t local_player, int32_t weapon_slot) {
     // about; the banks are what get drawn. Transforming one without the other is the split that
     // makes a gun render in one place and shoot from another.
     if (palette_weapon_mode()) {
-        // ---- THE STOCK REFERENCE (2026-09-12). From the headset, on palbuildgate=0: "the gun stays on my
+        // ---- THE STOCK REFERENCE (2026-09-12). From the headset, on palettebuildgate=0: "the gun stays on my
         // hand, the arm though goes between default and ours".
         //
         // The delta is a property of (stock, desired) and nothing else. It must be measured
@@ -3801,7 +3801,7 @@ void apply_after_pose(int32_t local_player, int32_t weapon_slot) {
         const bool lerp = g_cfg.palette_lerp && nbanks == 2 && (cur_bank == 0 || cur_bank == 1) &&
                           live.count > 0 && live.count <= FP_NODE_COUNT;
         int fresh_i = -1;
-        // palbuildgate=5 (doctrine at the Config key): the banks belong to the per-frame
+        // palettebuildgate=5 (doctrine at the Config key): the banks belong to the per-frame
         // refresh alone; the live palette and the stock snapshot above still happen, so the
         // refresh keeps its inputs and the sim keeps its pose.
         const bool bg_banks = !pre6_done && !(g_cfg.pal_build_gate == 5 && g_cfg.pal_render == 1);
@@ -4121,7 +4121,7 @@ void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_
             g_sniff_lp.store((uintptr_t)&lp13[8].position.x, std::memory_order_release);
         }
     }
-    // palbuildgate=6/7: everything slow runs BEFORE the game's build (doctrine at the Config key).
+    // palettebuildgate=6/7: everything slow runs BEFORE the game's build (doctrine at the Config key).
     if ((g_cfg.pal_build_gate == 6 || g_cfg.pal_build_gate == 7) && local_player == 0 && weapon_slot == 0) palette_precompose();
     // gate 7: ONE WRITER. With a valid precompose the game's builder is not called at all for
     // the local FP slot -- stock never enters the banks (doctrine at the Config key).
@@ -4177,7 +4177,7 @@ void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_
                        std::chrono::steady_clock::now().time_since_epoch()).count()
                        - g_p_pub_ms.load(std::memory_order_relaxed)));
     }
-    // THREAD + PHASE (slidelog/slidewatch): which OS thread this hook runs on, and whether it
+    // THREAD + PHASE (slidelog/paletteslidewatch): which OS thread this hook runs on, and whether it
     // fires inside the engine tick. If the sim steps on the game thread inside the tick, the
     // node's rebuild, this hook and the mesh sync's read are ORDERED, and "both writes land,
     // nothing renders" is an ordering fact, not a copy.
@@ -4236,7 +4236,7 @@ void blam_palette_hold_pose(int ms) {
 void blam_palette_publish_poses() {
     // The calibration key, polled here because this already runs on the game thread every frame and
     // the hook must not be reading input.
-    // Page Up = GLOBAL freeze-and-align (palgripfix). Home (palwpncalibkey) = the SAME gesture, but the
+    // Page Up = GLOBAL freeze-and-align (palgripfix). Home (palettewpncalibkey) = the SAME gesture, but the
     // solve lands in the held weapon's palwpnfix delta instead. Which one started the hold is latched
     // on the rising edge, because by the time the solve arrives the key is up.
     const bool held_global = g_cfg.palette_calib_key != 0 &&
@@ -4886,7 +4886,7 @@ void blam_palette_publish_poses() {
     }
 
     // SINGLE WRITER (2026-09-11 evening, the republish's third failure explained): with
-    // palpubframe on, the tick publisher and the frame republish each wrote the pose through
+    // palettepubframe on, the tick publisher and the frame republish each wrote the pose through
     // their own filter state, two slightly different streams, and the consumer flip-flopped
     // between them every frame -- a rest jerk by construction, present in every republish test.
     // When the republish owns the pose, the tick publisher writes it only ONCE to seed a fresh
@@ -7139,7 +7139,7 @@ void blam_palette_release(const char* why, char* out, size_t cap) {
 
 // PALETTEWPN SWITCHED OFF. The dev discovery instruments install things that outlive the ticks that
 // manage them (those ticks only run while the feature is on): hardware watchpoints on every thread and
-// the exception handler behind them (palettewatch, slidewatch), inline hooks on the renderer and the FP
+// the exception handler behind them (palettewatch, paletteslidewatch), inline hooks on the renderer and the FP
 // poser (palettefinal, fpanimkill), a sampler thread (palsniff) and an unwritten row buffer (termlog).
 // All of it goes here. palettescan installs nothing (a sweep per call) and needs no release. Game thread.
 void blam_palette_instruments_release() {

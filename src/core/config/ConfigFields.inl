@@ -155,13 +155,13 @@
     // windup. Bump the value (1 -> 2 -> ...) to re-arm the mask from scratch. Sim thread, dev only.
     int   throw_dump = 0;
 
-    // WRIST-RADAR SURVEY (blipdump): one-shot on value CHANGE -- walks the sim object table for
+    // WRIST-RADAR SURVEY (wristblipdump): one-shot on value CHANGE -- walks the sim object table for
     // objects near the player and dumps their headers. Run once standing near MARINES ONLY, once
     // near COVENANT ONLY (bump the value): the byte constant within each capture but different
     // across them is the TEAM field the wrist radar's own blips will be built on.
     int   blip_dump = 0;
 
-    // FACTION-FIELD SURVEY (blipbytes): one-shot on value CHANGE. Dumps a compact hex window of
+    // FACTION-FIELD SURVEY (wristblipbytes): one-shot on value CHANGE. Dumps a compact hex window of
     // every tracked contact, tagged with its id and its +0x177 byte. Run once among COVENANT ONLY
     // and once among MARINES ONLY; the offsets that are constant within each capture and differ
     // between them are faction candidates. +0x177 is NOT one: it reads 0x0E for marines AND for
@@ -169,12 +169,12 @@
     // three marines and one Grunt of coincidence.
     int   blip_bytes = 0;
 
-    // Per-species blip palette: repeatable `blipcolor=<hex species id>,<r>,<g>,<b>`, e.g.
-    // blipcolor=E1870013,0,0.6,1. The id is the object's leading dword (see g_blip_type); an
+    // Per-species blip palette: repeatable `wristblipcolor=<hex species id>,<r>,<g>,<b>`, e.g.
+    // wristblipcolor=E1870013,0,0.6,1. The id is the object's leading dword (see g_blip_type); an
     // unlisted species takes blip_color_other and logs its id once, so the palette fills in from
     // play instead of needing a survey per level.
     // Default: the species palette the wrist radar is tuned with, in the built-in
-    // order (a blipcolor line for the same species replaces its entry).
+    // order (a wristblipcolor line for the same species replaces its entry).
     BlipColor blip_color[kMaxBlipColor] = {
         { 0xE1870013u, 0.10f, 0.55f, 1.00f },
         { 0xF7A2162Au, 0.45f, 1.00f, 0.15f },
@@ -188,15 +188,15 @@
     int       blip_color_n = 8;
     float     blip_color_other[3] = {0.0f, 1.0f, 1.0f};
     // Bumped by every palette edit. The renderer builds one render target per species and caches
-    // it for the session, so without this a live blipcolor change has nothing to act on -- the
+    // it for the session, so without this a live wristblipcolor change has nothing to act on -- the
     // colour only appeared on a species' FIRST sighting, which made the palette effectively
     // write-once and looked like the edit was ignored.
     int       blip_color_gen = 0;
-    // Name-keyed palette: repeatable `blipname=<class substring>,<r>,<g>,<b>`, e.g.
-    // blipname=Grunt,1,0,0. Checked BEFORE the id palette, first match wins, and it survives
+    // Name-keyed palette: repeatable `wristblipname=<class substring>,<r>,<g>,<b>`, e.g.
+    // wristblipname=Grunt,1,0,0. Checked BEFORE the id palette, first match wins, and it survives
     // level loads where the id table does not.
     // Default: the name palette the wrist radar is tuned with, in the built-in
-    // order (first match wins, and a blipname line for the same name replaces its entry).
+    // order (first match wins, and a wristblipname line for the same name replaces its entry).
     BlipName  blip_name[kMaxBlipName] = {
         { "Flood", 1.00f, 0.85f, 0.00f },
         { "Brute", 0.60f, 0.10f, 1.00f },
@@ -211,7 +211,7 @@
     };
     int       blip_name_n = 10;
 
-    // NATIVE-BLIP INVESTIGATION (trackerdump): one-shot on value CHANGE. Finds the live
+    // NATIVE-BLIP INVESTIGATION (wristtrackerdump): one-shot on value CHANGE. Finds the live
     // WBP_MotionTracker instance and logs every UObject whose outer chain reaches it, plus every
     // live widget anywhere whose class name contains "Blip" (dynamically created widgets are
     // often outer'd to the world, not their visual parent -- the second sweep catches those).
@@ -221,7 +221,7 @@
     // them -- "the feed queries the HUD tree" has so far been theory, not measurement.
     int   tracker_dump = 0;
 
-    // NATIVE-BLIP INVESTIGATION, ROUND 2 (trackermid): one-shot on value CHANGE. The tree census
+    // NATIVE-BLIP INVESTIGATION, ROUND 2 (wristtrackermid): one-shot on value CHANGE. The tree census
     // proved blips are NEVER child widgets (19 objects, 0 blip classes, dots visibly on screen),
     // so the feed is inside HaloUIMotionTrackerImage / its MaterialInstanceDynamic. This probe
     // snapshots those objects' memory -- plus every plausible embedded TArray's payload, because
@@ -232,7 +232,7 @@
     int   tracker_mid = 0;
 
     // WRIST RADAR (wristradar): our own blips on the wrist-hosted motion tracker -- the hosted
-    // widget's native blip feed is severed (mechanism under investigation, see trackerdump), so
+    // widget's native blip feed is severed (mechanism under investigation, see wristtrackerdump), so
     // the dots come from the sim's object table instead: team byte unit+0x177
     // (0x0E human / 0x0D covenant), 25 m range, moving-only, rotating with your facing.
     bool  wrist_radar = true;
@@ -279,7 +279,7 @@
     // a knob in case a future panel really is off-plane.
     float wrist_radar_tilt = 0.0f;
 
-    // GRENADE-AT-HAND EXPERIMENT (grenhand, dev): while the synthetic throw press is active,
+    // GRENADE-AT-HAND EXPERIMENT (holsterpollthrowhand, dev): while the synthetic throw press is active,
     // overwrite the projectile spawn ORIGIN (params+0x1C) with the carrier hand's position in
     // Blam units (UE world / 304.8, Y negated -- the unit-position fit). The +0x28 DIRECTION
     // write was re-derived downstream and ignored; whether the ORIGIN takes is exactly what this
@@ -287,7 +287,7 @@
     // are never touched.
     int   gren_hand_spawn = 0;
 
-    // INSTANT GRENADE RELEASE (greninstant, dev). GRENSNAP decoded the hold: the projectile is
+    // INSTANT GRENADE RELEASE (holsterpollthrowinstant, dev). GRENSNAP decoded the hold: the projectile is
     // created ~42 ms after the press but PARENTED to the biped's throw-hand bone (+0x0C parent
     // datum, +0x18 low byte = bone 0x47) with zero velocity until the animation keyframe at
     // ~250 ms detaches it (+0x0C/+0x14 -> FFFFFFFF, +0x18 -> ..FF, +0x04 |= 0x80, +0x08 -> 4)
@@ -374,12 +374,12 @@
     // Default: the value the wrist HUD is tuned with.
     float wrist_hud_rot_r[3] = {-15.0f, 195.0f, 105.0f};
     float wrist_hud_gap_r = 0.18f;
-    // HUD PLACEMENT (hudplacement, a sub-setting of wristhud): 0 = on the wrists (everything above,
+    // HUD PLACEMENT (wristhudplacement, a sub-setting of wristhud): 0 = on the wrists (everything above,
     // unchanged), 1 = on the sides of the held weapon. On the weapon, every panel rides the drawn weapon
     // each render frame from one anchor transform; with no weapon in hand, in a menu, a seat or a
-    // cutscene it hides or falls back (hudwpnfallback). All of it lives in WristHud.cpp.
+    // cutscene it hides or falls back (wristhudwpnfallback). All of it lives in WristHud.cpp.
     int   hud_placement = 0;
-    // The anchor the weapon-mounted panels read (hudwpnanchor):
+    // The anchor the weapon-mounted panels read (wristhudwpnanchor):
     //   1 = the weapon actor's RootComponent world transform (the actor is attached to the arms rig at
     //       socket PrimaryWeapon, Rig.cpp).
     //   2 = the PrimaryWeapon socket of the first-person arms skeleton, read from the posed skeleton
@@ -401,7 +401,7 @@
     // with it.
     float hud_wpn_scale = 0.015f;
     // No usable weapon anchor (unarmed, a weapon not yet resolved): 0 = hide the panels, 1 = show them
-    // on the wrists. Menus always hide them while hudplacement is 1.
+    // on the wrists. Menus always hide them while wristhudplacement is 1.
     int   hud_wpn_fallback = 1;
     // About once a second: the anchor used, its world position, rotation and axes, and each panel.
     bool  hud_wpn_log = false;
@@ -687,7 +687,7 @@
     bool  coop_hide = true;
     // The hidden reload in SOLO as well (from the headset, 2026-09-07): the real last round is fired, the
     // game reloads, and it is hidden the same way until our gesture. Replaces the phantom round
-    // (which stays for hidesolo=0).
+    // (which stays for reloadhidesolo=0).
     bool  hide_solo = true;
     // The hands under the hidden reload: the first-person pose can be held (blam_palette_hold_pose)
     // from the last shot until our gesture takes over. OFF by default: the whole-palette hold
@@ -974,7 +974,7 @@
 
     // The global grip capture key (palgripfix, below): hold to freeze the weapon, align your hand, release to solve.
     // Repeated captures compose onto the existing offset. Page Up by default: End, Page Down and Delete are the
-    // author's calibrations, and Home is palwpncalibkey.
+    // author's calibrations, and Home is palettewpncalibkey.
     int   palette_calib_key = 0x21;
     // Report where the game puts node 8 versus where we put it. The one measurement that settles
     // whether the hand-to-Blam conversion is right.
@@ -1039,7 +1039,7 @@
     // palwpnfix=<match>,qx,qy,qz,qw,tx,ty,tz (Home): per-weapon rigid delta, UE axes. One entry per match.
     WeaponFix pal_wpnfix[kMaxWeaponAdjust];
     int   pal_wpnfix_count = 0;
-    // palwpncalibkey: the per-weapon capture key (Home).
+    // palettewpncalibkey: the per-weapon capture key (Home).
     int   pal_wpn_calib_key = 0x24;
     // (palettewpnlockgain / palettewpnlockpitch / palettewpnsweep / palettewpnbasis /
     // palettewpnfix / palettewpnfixframe are RETIRED: each was a live A/B for a question the
@@ -1348,23 +1348,23 @@
     // UE integration gives its components the UE-side listener instead, which is why every post
     // through it stayed silent. Four engine functions are hooked (prologue-gated) to CAPTURE the
     // recipe the sim applies to its reload emitter (listeners, switch, RTPCs, position), then:
-    //   akmimic=1  a fresh emitter of our own, set up from the captured recipe, posts each step
+    //   reloadakmimic=1  a fresh emitter of our own, set up from the captured recipe, posts each step
     //              (the drop post falls back to the actor until the sim has posted once);
-    //   akmimic=2  only the captured LISTENERS are set on our AkComponent emitter before a post;
-    //   akmimic=3  only the captured SWITCH and RTPCs are set on it.
-    //   akmimic=4  the sim's own reload posts are NOT blocked but re-issued by the plugin, same
+    //   reloadakmimic=2  only the captured LISTENERS are set on our AkComponent emitter before a post;
+    //   reloadakmimic=3  only the captured SWITCH and RTPCs are set on it.
+    //   reloadakmimic=4  the sim's own reload posts are NOT blocked but re-issued by the plugin, same
     //              id, same emitter, same instant, with flags 0 and no callback: if that is heard,
     //              a raw post from our code works and the emitter recipe is what fails;
-    //   akmimic=5  each step's event rides the NEXT emitter the sim posts anything on inside the
+    //   reloadakmimic=5  each step's event rides the NEXT emitter the sim posts anything on inside the
     //              window (footsteps, gear), posted by the plugin on that emitter at that instant.
     // (2026-09-06: the full recipe, 1, was silent with flags=1 and no callback; 1 now posts flags 0.)
-    //   akmimic=6  THE SIM'S OWN RELOAD EMITTER, KEPT ALIVE (2026-09-06, after mode 4 proved a raw
+    //   reloadakmimic=6  THE SIM'S OWN RELOAD EMITTER, KEPT ALIVE (2026-09-06, after mode 4 proved a raw
     //              post from the plugin is heard on it): the sim makes one emitter per reload
     //              sequence and unregisters it when its sequence ends; UnregisterGameObj is
     //              hooked and that one emitter's unregister is deferred to the window's end, and
     //              every step posts on it (flags 0). Before the sim has posted this window, the
     //              step is parked and rides the sim's next emitter (mode 5's mechanism).
-    //   akmimic=7  AN ADOPTED SIM EMITTER, ANY TIME (from the headset, 2026-09-06: a rack or a drop makes
+    //   reloadakmimic=7  AN ADOPTED SIM EMITTER, ANY TIME (from the headset, 2026-09-06: a rack or a drop makes
     //              its sound whenever it happens, reload or not): the plugin holds the NEWEST
     //              emitter the sim registers, defers its unregister, re-positions it to the sim's
     //              own listener (the head) whenever the sim positions that listener, and posts
@@ -1959,7 +1959,7 @@
     // behaviorally and names where the killing overwrite belongs. CSV beside the cfg on
     // key drop to 0. Hunt instrument, not a feature.
     int   pal_sniff = 0;
-    // palbuildgate=7 (2026-09-11, the freeze-ladder verdict): CONSTANT bytes shiver through
+    // palettebuildgate=7 (2026-09-11, the freeze-ladder verdict): CONSTANT bytes shiver through
     // every write path we own while writing nothing is smooth -- the shiver IS the existence
     // of two writers, the game's stock build and our overwrite, alternating at the renderer's
     // consumption instant. Mode 7 is ONE WRITER BY CONSTRUCTION: once a weapon's stock
