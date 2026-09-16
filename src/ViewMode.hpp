@@ -43,16 +43,23 @@
 // Warthog, so the verdict no longer depends on how fast the player is going.
 // The declared VR_RenderingMethod is read separately on the game thread's 2 s poll and kept
 // alongside, for the log line and for the one decision that must not rest on a heuristic alone
-// (flattening the compositor quads, XrLayer.cpp -- that needs the topology AND the declaration).
+// (flattening the compositor quads, XrLayer.cpp). That decision needs THREE things to agree:
+//   1. the topology reads Mono (one view per frame that does not alternate);
+//   2. UEVR declares method 3;
+//   3. BOTH EYES REPORT THE SAME PROJECTION MATRIX (get_ue_projection_matrix per eye, also read on
+//      the poll). This is the one that measures what flattening actually depends on: the monofix
+//      mono path gives every eye the union-FOV projection, so left and right come back identical,
+//      while every stereo-pair mode -- Native, AFR, Synchronized, AFW -- hands back mirror images
+//      of each other because a headset's per-eye FOV is asymmetric. A backend whose method 3
+//      rendered ONE FIXED eye would still report that eye's projection, distinct from the other's,
+//      and fail this test. Residual false positive: a symmetric-FOV headset (or the SimVR rig,
+//      whose eyes are symmetric) on such a backend -- not a real configuration.
 //
 // The detector rather than the declaration decides how the consumers average, because the
 // declaration can be true and inert: an older backend ignores VR_RenderingMethod=3 and renders
 // stereo; the PureDark AFW backend reads 3 as Alternate Frame Warping, which renders the eyes by
-// turns and therefore reads Alternating here. (A hypothetical backend whose method 3 rendered ONE
-// FIXED eye every frame would read Mono and, with the declaration, flatten the quads against a
-// scene that still has depth; no such backend is known, and the VIEWMODE log line names the
-// method so the combination is visible.) What the callbacks DO is the only fact that matters to a
-// consumer of the callbacks.
+// turns and therefore reads Alternating here. What the callbacks DO is the only fact that matters
+// to a consumer of the callbacks; the projection test above covers the one case they cannot tell.
 //
 // HEADLESS CAVEAT: under the SimVR/OpenVR harness the runtime reports no HMD, UEVR's eye offsets
 // are zero, and AFR is indistinguishable from Mono by construction -- an AFR arm reading "mono"
@@ -84,8 +91,15 @@ ViewMode viewmode_current();
 void viewmode_set_declared(int method);
 int  viewmode_declared();
 
-// True when the single rendered view is the CENTRE eye by construction: the topology reads Mono
-// AND UEVR declares the Mono method (3). Both are required -- see the header comment.
+// GAME THREAD, on the same poll: whether get_ue_projection_matrix(LEFT) == (RIGHT). Fail-closed:
+// false until the poll has looked, and false for an all-zero matrix (the runtime not ready yet,
+// which would otherwise compare equal).
+void viewmode_set_shared_projection(bool shared);
+bool viewmode_shared_projection();
+
+// True when the single rendered view is the CENTRE eye by construction: the topology reads Mono,
+// UEVR declares the Mono method (3), AND both eyes share one projection. All three are required --
+// see the header comment.
 bool viewmode_is_mono();
 
 // Number of post-callbacks counted so far. A consumer that averages "this sample with the

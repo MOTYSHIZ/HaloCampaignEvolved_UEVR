@@ -5875,22 +5875,48 @@ void update() {
             API::get()->param()->vr->get_mod_value("VR_RenderingMethod", cur, sizeof(cur));
             const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
             halo::viewmode_set_declared(declared);
+
+            // ONE PROJECTION FOR BOTH EYES? The physical test behind quad flattening (ViewMode.hpp):
+            // the monofix mono path gives every eye the union-FOV projection, so the two matrices
+            // come back identical, while every stereo-pair mode returns mirrored per-eye frustums.
+            // Two 64-byte reads and sixteen compares, here on the poll -- never per frame. An
+            // all-zero matrix (runtime not up yet) compares equal to itself and must NOT count.
+            bool shared = false;
+            {
+                UEVR_Matrix4x4f pl{}, pr{};
+                API::get()->param()->vr->get_ue_projection_matrix(UEVR_LEFT_EYE,  &pl);
+                API::get()->param()->vr->get_ue_projection_matrix(UEVR_RIGHT_EYE, &pr);
+                bool same = true, live = false;
+                for (int r = 0; r < 4 && same; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        const float a = pl.m[r][c], b = pr.m[r][c];
+                        if (!(std::fabs(a - b) <= 1.0e-5f * (1.0f + std::fabs(a)))) { same = false; break; }
+                        if (a != 0.0f) live = true;
+                    }
+                }
+                shared = same && live;
+            }
+            halo::viewmode_set_shared_projection(shared);
+
             const halo::ViewMode vm   = halo::viewmode_current();
             const bool           flat = halo::xrlayer_mono_flat_active();
             static int  s_vm_declared = -2;
             static int  s_vm_mode     = -1;
             static bool s_vm_flat     = false;
-            if (declared != s_vm_declared || (int)vm != s_vm_mode || flat != s_vm_flat) {
-                s_vm_declared = declared; s_vm_mode = (int)vm; s_vm_flat = flat;
+            static int  s_vm_shared   = -1;
+            if (declared != s_vm_declared || (int)vm != s_vm_mode || flat != s_vm_flat || (int)shared != s_vm_shared) {
+                s_vm_declared = declared; s_vm_mode = (int)vm; s_vm_flat = flat; s_vm_shared = (int)shared;
                 const char* head_from =
                     vm == halo::ViewMode::Stereo      ? "the midpoint of the two views" :
                     vm == halo::ViewMode::Alternating ? "this view averaged with the previous frame's (the other eye)" :
                     vm == halo::ViewMode::Mono        ? "the single view itself (it is the centre eye: no IPD residual)" :
                                                         "the single view seen so far";
                 API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: VR_RenderingMethod=%d (%s); the stereo callbacks "
-                                     "show %s; XR layer head and aim-convergence eye = %s; layer quads %s "
-                                     "(xrlayermonoflat=%d, %u samples)",
-                                     declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm), head_from,
+                                     "show %s; per-eye projections %s; XR layer head and aim-convergence eye = %s; "
+                                     "layer quads %s (xrlayermonoflat=%d, %u samples)",
+                                     declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm),
+                                     shared ? "IDENTICAL (one image serves both eyes)" : "differ (a stereo pair)",
+                                     head_from,
                                      flat ? "FLATTENED to infinity to match the mono image" : "at their real depth",
                                      g_cfg.xr_layer_mono_flat, halo::viewmode_samples());
             }

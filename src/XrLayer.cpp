@@ -3560,9 +3560,10 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     s_prev_have = true;
 
     // FLATTEN TO INFINITY under the Mono rendering method (compute_pose explains why). Gated on
-    // BOTH the observed topology and UEVR's declared method: an older backend ignores
-    // VR_RenderingMethod=3 and keeps rendering stereo, and flattening a stereo scene's quads would
-    // destroy the parallax the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
+    // THREE things agreeing (viewmode_is_mono): the observed topology, UEVR's declared method, and
+    // both eyes reporting one projection matrix -- an older backend ignores VR_RenderingMethod=3
+    // and keeps rendering stereo, PureDark's reads 3 as AFW, and flattening a stereo scene's quads
+    // would destroy the parallax the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
     const int   flat_mode = g_cfg.xr_layer_mono_flat;
     const float flat_m    = (flat_mode == 2 || (flat_mode == 1 && viewmode_is_mono()))
                               ? g_cfg.xr_layer_mono_far_m : 0.0f;
