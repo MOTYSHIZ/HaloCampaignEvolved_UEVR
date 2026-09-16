@@ -328,10 +328,37 @@
 #reloadakmute=4
 # Manual reload: how the reload step sounds are played (7 is the default method, 0 is off).
 #akmimic=7
+# ---- Punching with your other hand. Its own thresholds: an off hand that is also holding a
+# magazine, steadying a barrel and reaching for a pouch triggers far more false punches than the
+# weapon hand, so these sit above the ones the weapon hand uses.
+# Swing speed needed, metres per second.
+#meleeleftspeed=5.00
+# Extension speed needed away from your head, metres per second.
+#meleeleftext=2.20
+# How far from your head the hand must be, metres.
+#meleeleftreach=0.30
+# Above this speed the sample is tracking noise and is thrown away, metres per second.
+#meleeleftmaxspeed=12.0
+# Above this reach the sample is tracking noise and is thrown away, metres.
+#meleeleftmaxreach=1.20
+# Smoothing of the measured speed, milliseconds.
+#meleelefttau=20.0
+# Rest after a punch lands, milliseconds.
+#meleeleftcooldown=500
+# How long the punch is held down, milliseconds.
+#meleelefthold=80
+
 # Manual reload: in co-op the gun stays empty until you reload it yourself.
 #coophide=1
 # Manual reload: the same when playing alone.
 #hidesolo=1
+# Magazine seating distance. How close your fetch hand must come to your weapon hand before the
+# magazine goes in, in metres. Hand to hand, not hand to weapon: the gun is a separate actor whose
+# grip point moves per weapon, while both controllers are always known.
+#reloadseat=0.07
+# Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
+# up, back). A weapon listed in the per-weapon table below uses that entry instead.
+#reloadmagbelt=-0.22,-0.65,0.00
 # Magazine lift. How far the magazine must rise above where you took it from your belt before it can
 # go in, in metres.
 #reloadlift=0.08

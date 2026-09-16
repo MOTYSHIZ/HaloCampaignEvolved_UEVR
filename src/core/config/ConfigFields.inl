@@ -4,9 +4,6 @@
 
     // ---- (after the author's Config.hpp line 261)
     // AIMBORE (2026-09-13). One calibration for the gun, the shot and the reticle.
-    //   A SETTING OF THE WEAPON PLACEMENT, not a switch beside it: the placement derives this to 1
-    //   while it is on (OwnedKeyDerive.cpp) unless a cfg layer sets it, and the bore path is reached
-    //   only from the placement's own aim branch, so the default below is what runs with it off.
     //   0 = the aim is the aim-fixed hand forward. The drawn weapon also carries the global grip
     //       rotation and the held weapon's trim, so the barrel sits off the shot by that trim
     //       (measured: the AR's 2.0 deg pitch trim = barrel 2.0 deg above the aim).
