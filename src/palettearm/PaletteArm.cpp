@@ -442,6 +442,7 @@ std::atomic<uint64_t>    s_drive_ok{0};
 std::atomic<float> s_dbg_root_x{0.0f}, s_dbg_root_y{0.0f}, s_dbg_root_z{0.0f};
 std::atomic<float> s_dbg_tgt_x{0.0f},  s_dbg_tgt_y{0.0f},  s_dbg_tgt_z{0.0f};
 std::atomic<float> s_dbg_got_x{0.0f},  s_dbg_got_y{0.0f},  s_dbg_got_z{0.0f};
+std::atomic<float> s_dbg_el_x{0.0f},   s_dbg_el_y{0.0f},   s_dbg_el_z{0.0f};     // aim elbow after the solve
 std::atomic<float> s_dbg_miss_cm{0.0f};
 std::atomic<float> s_dbg_reach_cm{0.0f};
 // Where the STOCK aim wrist sat before we moved it, and the root's forward axis. Together these
@@ -1518,6 +1519,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
             s_dbg_got_x  = got.x;
             s_dbg_got_y  = got.y;
             s_dbg_got_z  = got.z;
+            s_dbg_el_x   = access.palette[plan.arm->elbow].position.x;
+            s_dbg_el_y   = access.palette[plan.arm->elbow].position.y;
+            s_dbg_el_z   = access.palette[plan.arm->elbow].position.z;
             s_dbg_miss_cm  = pa::length(got - wrist_target) * pa::kMetresPerBlamUnit * 100.0f;
             s_dbg_reach_cm = pa::length(wrist_target -
                                         access.palette[plan.arm->shoulder].position) *
@@ -2055,6 +2059,11 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]) {
+    sh[0] = s_dbg_sh_x.load(std::memory_order_relaxed);  sh[1] = s_dbg_sh_y.load(std::memory_order_relaxed);  sh[2] = s_dbg_sh_z.load(std::memory_order_relaxed);
+    el[0] = s_dbg_el_x.load(std::memory_order_relaxed);  el[1] = s_dbg_el_y.load(std::memory_order_relaxed);  el[2] = s_dbg_el_z.load(std::memory_order_relaxed);
+    wr[0] = s_dbg_got_x.load(std::memory_order_relaxed); wr[1] = s_dbg_got_y.load(std::memory_order_relaxed); wr[2] = s_dbg_got_z.load(std::memory_order_relaxed);
+}
 void palettearm_dbg_shoulder(float* x, float* y, float* z) {
     if (x) *x = s_dbg_sh_x.load(std::memory_order_relaxed);
     if (y) *y = s_dbg_sh_y.load(std::memory_order_relaxed);

@@ -40,6 +40,8 @@ const char* palettearm_status_geom();
 // Palette-space position of the AIM arm's shoulder node after anchoring (Blam units, root frame),
 // for the world-space probe to log beside the rendered bones. Zeros until the drive has run.
 void palettearm_dbg_shoulder(float* x, float* y, float* z);
+// The aim arm's shoulder / elbow / achieved wrist after the solve (palette units, root frame).
+void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

@@ -1341,6 +1341,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "patorsoab")      == 0) { g_cfg.pa_torso_ab   = (v != 0.0); return true; }
     if (_stricmp(key, "paworld")        == 0) { g_cfg.pa_world_probe = (v != 0.0); return true; }
     if (_stricmp(key, "pameshdown")     == 0) { g_cfg.pa_mesh_standdown = (v != 0.0); return true; }
+    if (_stricmp(key, "paworldraw")     == 0) { g_cfg.pa_world_raw = (int)v; return true; }
     if (_stricmp(key, "twohand")        == 0) { g_cfg.two_hand      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "twohandaim")     == 0) { g_cfg.two_hand_aim  = (v != 0.0); return true; }
     if (_stricmp(key, "twohandrig")     == 0) { g_cfg.two_hand_rig  = (v != 0.0); return true; }

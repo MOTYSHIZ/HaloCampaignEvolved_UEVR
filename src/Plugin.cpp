@@ -11840,6 +11840,8 @@ public:
                     static uint32_t      wp_push_ref_age = 0;
                     static uint32_t      wp_yaw_n = 0, wp_pitch_n = 0, wp_still_n = 0, wp_stickturn = 0;
                     static uint32_t      wp_ynext = 128, wp_pnext = 128, wp_said = 0;
+                    static uint32_t      wp_raw_n = 0;                    // raw ticks logged so far
+                    static int           wp_isho = -1, wp_iel = -1;        // aim-side Shoulder / Elbow
 
                     const bool left = g_cfg.aim_left_hand;
                     const int  key  = g_cfg.pa_torso_frame * 2 + (left ? 1 : 0);
@@ -11855,6 +11857,8 @@ public:
                         wp_prev_ok = false;
                         wp_n = 0;
                         wp_wrist = -1;
+                        wp_raw_n = 0;
+                        wp_isho = wp_iel = -1;
 
                         Vec3 origin{};
                         const bool have_origin = call_ret_vec3(rc, L"K2_GetComponentLocation", &origin);
@@ -11924,6 +11928,8 @@ public:
                             if (!(chest || (aim_side && armish) || oth_joint) || wp_n >= kMaxB) continue;
                             if (!resolves(b)) { listing += L" [" + b + L":unresolved]"; continue; }
                             if (wp_wrist < 0 && aim_side && lb.find(L"wrist") != std::wstring::npos) wp_wrist = wp_n;
+                            if (aim_side && lb == (L"shoulder" + sfx_lc)) wp_isho = wp_n;
+                            if (aim_side && lb == (L"elbow" + sfx_lc))    wp_iel  = wp_n;
                             wp_name[wp_n++] = b;
                             listing += L" " + b;
                         }
@@ -11994,6 +12000,24 @@ public:
                                 if (net > wp_push) wp_push = net;
                                 ++wp_still_n;
                             }
+                        }
+                        // RAW DUMP (paworldraw=N): the rendered joints and the palette's, tick by tick.
+                        if (g_cfg.pa_world_raw > 0 && wp_raw_n < (uint32_t)g_cfg.pa_world_raw &&
+                            wp_isho >= 0 && wp_iel >= 0 && wp_wrist >= 0) {
+                            ++wp_raw_n;
+                            float psh[3], pel[3], pwr[3];
+                            halo::palettearm_dbg_arm(psh, pel, pwr);
+                            const float k = 304.8f;                        // palette units -> cm
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] ARMWORLD raw #%u aim=%.2f p=%.2f | UE Sh=(%.1f,%.1f,%.1f) "
+                                "El=(%.1f,%.1f,%.1f) Wr=(%.1f,%.1f,%.1f) | PAL sh=(%.1f,%.1f,%.1f) el=(%.1f,%.1f,%.1f) "
+                                "wr=(%.1f,%.1f,%.1f) cm",
+                                wp_raw_n, aim, pitch,
+                                rel[wp_isho].x, rel[wp_isho].y, rel[wp_isho].z,
+                                rel[wp_iel].x,  rel[wp_iel].y,  rel[wp_iel].z,
+                                rel[wp_wrist].x, rel[wp_wrist].y, rel[wp_wrist].z,
+                                psh[0] * k, psh[1] * k, psh[2] * k, pel[0] * k, pel[1] * k, pel[2] * k,
+                                pwr[0] * k, pwr[1] * k, pwr[2] * k);
                         }
                         for (int i = 0; i < total; ++i) wp_prev_rel[i] = rel[i];
                         wp_prev_aim   = aim;

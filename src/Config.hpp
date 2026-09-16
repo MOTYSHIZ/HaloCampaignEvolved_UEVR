@@ -3757,6 +3757,10 @@ struct Config {
     // the palette's own space and was shown by its own control to be unable to answer. See its site
     // in Plugin.cpp.
     bool  pa_world_probe  = false;
+    // With paworld=1: log this many consecutive ticks of RAW rendered joint positions (camera-
+    // relative, cm) beside the palette's own joints -- to see with the eye whether the rendered
+    // pose alternates between ours and the stock pose. 0 = off. DEV KEY paworldraw.
+    int   pa_world_raw    = 0;
     // PALETTE ROUTE: STAND THE UE MESH PLACEMENT DOWN (2026-09-16). The UeRig driver's component
     // placement (Plugin.cpp rig block: world rotation + relative location, plus the render-rate
     // re-apply) was gated only on the weapon drives, so it kept running under armdriver=2 and
