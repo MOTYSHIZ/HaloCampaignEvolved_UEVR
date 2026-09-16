@@ -1545,6 +1545,15 @@
     int   reload_state_hide    = 1;
     int   reload_state_wait_ms = 1500;
     int   reload_state_drop    = 2;
+    // RESET RELEASES THE HOLDS (reloadresetholds). A gesture reset -- stick mode, a vehicle, a
+    // cutscene, the death camera -- already puts the reload state and every lock back. What it did
+    // NOT put back were the WINDOWS a press opens: the synthesized reload press still on its way to
+    // the game, the FirstPersonState hold, the animation rate clamp, the Wwise mute and the
+    // first-person pose hold. Dying mid-reload respawned you under all five, with the gun's
+    // animation state pinned and its reload sound muted until each timed out. 1 = the reset ends
+    // them, and a reload tap made while the reset's window held the tick is dropped rather than
+    // fired on the frame control comes back (default, the play build's behaviour); 0 = the old.
+    bool  reload_reset_holds = true;
     int   reload_state_death   = 1;
     int   reload_state_level   = 1;
     bool  reload_state_log     = false;

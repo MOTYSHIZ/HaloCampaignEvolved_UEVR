@@ -266,7 +266,18 @@ bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head
     return have_left;
 }
 
+// A reload tap made while a reset's window held the tick, dropped at the next press test.
+bool s_reset_drop_tap = false;
+
 bool reload_engine_press_ignored() {
+    // A tap made while a reset's window held the tick (a death, a ride, a cutscene) is dropped once:
+    // it belongs to the gun that went away with the body. reloadresetholds 0 restores the old path.
+    if (s_reset_drop_tap) {
+        s_reset_drop_tap = false;
+        if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
+            API::get()->log_info("[Halo-CampE-UEVR] RELOAD dropped a reload tap made during the reset's window");
+        return true;
+    }
     if (!weapon_in_list(g_cfg.reload_skip_weapons)) return false;
     // No magazine on this weapon (plasma rifle, plasma pistol, sentinel beam): nothing to
     // drop, nothing to seat, and the game's own reload does nothing to it either.
@@ -521,6 +532,23 @@ void reload_engine_gesture_reset() {
     // here and slide_part_tick only re-finds it on a weapon or component change: after a ride or a
     // cutscene the held gun read "no rack" (no lock-back at the seat, no phantom) until a swap.
     if (s_np_have && s_np_slide.get() != nullptr) g_slide_rack_found = true;
+    // ...and the WINDOWS a press opens, which the state reset above does not touch: the synthesized
+    // reload press on its way to the game, the FirstPersonState hold, the animation rate clamp, the
+    // Wwise mute window and the first-person pose hold. Dying mid-reload left all five running on
+    // the respawned gun. reloadresetholds 0 restores the old behaviour.
+    if (g_cfg.reload_reset_holds) {
+        g_reload_hold_until.store(0, std::memory_order_relaxed);
+        s_sl_press_at = 0;
+        s_sh_until = 0; s_sh_inst = TrackedObject{};
+        if (s_anim_rate_until != 0) s_anim_rate_until = 1;   // the next tick hands rate and pause back
+        if (s_akm_until != 0) ak_id_mute_end();
+        reload_pose_hold(0);
+        // A tap made while the window held the tick belongs to the body that died: the first frame
+        // control comes back must not fire it.
+        s_reset_drop_tap = true;
+        if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
+            API::get()->log_info("[Halo-CampE-UEVR] RELOAD reset released the press, the state hold, the rate clamp, the sound mute and the pose hold");
+    }
 }
 
 void reload_engine_ticks(bool poses_ok, const Vec3& hpos) {

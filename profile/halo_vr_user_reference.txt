@@ -379,6 +379,11 @@
 #reloadholdfire=1
 # Manual reload: write the gesture's evidence lines to the log.
 #reloadvrlog=0
+# Clear the reload's holds on a reset. A death, a ride or a cutscene already puts the reload state
+# back; 1 also ends the reload press on its way to the game, the weapon animation hold, the
+# animation speed-up, the reload sound mute and the hand pose hold, and drops a reload press made
+# while you had no control.
+#reloadresetholds=1
 # Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
 # up, back). A weapon listed in the per-weapon table below uses that entry instead.
 #reloadmagbelt=-0.22,-0.65,0.00
