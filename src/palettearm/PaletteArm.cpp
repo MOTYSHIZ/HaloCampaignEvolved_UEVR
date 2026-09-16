@@ -81,6 +81,13 @@ pa::ArmTuning    s_arm_tuning;
 int              s_pa_chest_node = -1;
 // paaimlead -- see the top of drive_palette().
 bool             s_aim_lead = false;
+// WORLD SCALE (paworldscale, 2026-09-16). The hand offset off the head and the shoulder offsets are
+// real-world METRES, and the world is rendered at UEVR's world scale: the UeRig route was calibrated
+// to rig_scale = 131.2 UE cm per metre so the gun sits on the hand IN THE HEADSET. The palette route
+// mapped metres at 100 cm/m -- the probe's HAND-CTRL readout put the rendered wrist exactly 8.3 cm
+// (the wrist-behind-grip offset) from the controller at 100 cm/m and 18.7 cm from it at the rig
+// scale: the rendered hand fell short of the real controller by ~24 %. 0 = rig_scale / 100.
+float            s_pa_world_scale = 0.0f;
 
 // WHICH INDEX IS WHICH BONE, resolved rather than remembered. Rung 1 derives the map from the
 // palette the hook just handed us; rung 2 is elliotttate's measured table; rung 3 is arms stay
@@ -540,6 +547,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // which should land the correction in the same frame the camera turns. Experiment.
     float lock_delta_deg = ::halo::g_view_lock_delta.load();
     float cam_pitch_deg  = ::halo::g_view_pitch.load();
+    // Metres of real-world reach -> world metres (see s_pa_world_scale).
+    const float wscale = (s_pa_world_scale > 0.0f) ? s_pa_world_scale : (g_cfg.rig_scale / 100.0f);
+    pa::ArmTuning tuning_w = s_arm_tuning;             // body offsets in WORLD metres for this drive
+    tuning_w.shoulder_back_m    *= wscale;
+    tuning_w.shoulder_down_m    *= wscale;
+    tuning_w.shoulder_lateral_m *= wscale;
+    tuning_w.clavicle_assist_m  *= wscale;
     if (s_aim_lead) {
         float dy = 0.0f, dp = 0.0f;
         if (::halo::desired_aim_now(&dy, &dp)) {
@@ -1203,7 +1217,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // (basis + offset) to act on in the same frame, before either gap rotates it. The lift is
         // re-applied at the original site and nothing about the aim hand changes.
         pa::Vec3 stage_off =
-            xr_to_blam(pa::rotate(composition, plan.grip_position - tracking.hmd_position)) /
+            xr_to_blam(pa::rotate(composition, plan.grip_position - tracking.hmd_position)) * wscale /
             pa::kMetresPerBlamUnit;
 
         // ---- THE SUPPORT-HAND RIGID FIX, and its capture freeze. SUPPORT HAND ONLY.
@@ -1363,7 +1377,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
                                   plan.arm->shoulder_count, torso_basis, chest_pivot);
         } else if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
-                                                 plan.left_side, s_arm_tuning)) {
+                                                 plan.left_side, tuning_w)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[6];);
             continue;
         }
@@ -1475,7 +1489,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             pole_dir = torso_basis.left * out - torso_basis.up * s_arm_tuning.pole_down;
         }
         if (!pa::solve_arm_for_tracked_wrist(access.palette, *plan.arm, wrist_target,
-                                             desired_wrist, pole_dir, s_arm_tuning)) {
+                                             desired_wrist, pole_dir, tuning_w)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[5];);
             continue;
         }
@@ -2124,6 +2138,7 @@ bool palettearm_parse_key(const char* key, double v) {
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
     else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
     else if (_stricmp(key, "paaimlead")       == 0) s_aim_lead                        = (v != 0.0);
+    else if (_stricmp(key, "paworldscale")    == 0) s_pa_world_scale                  = (float)v;
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;
