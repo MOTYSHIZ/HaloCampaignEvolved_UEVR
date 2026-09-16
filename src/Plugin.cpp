@@ -12677,9 +12677,16 @@ public:
         // TwoHand came with the palette positioning hook and is deliberately left out of this
         // extraction, so the grip keeps its native meaning here.
         //
-        // Gated on g_stick_mode rather than his g_unit_mounted (which belongs to his vehicle work
-        // and does not exist in this tree). Stick mode already covers vehicles, cutscenes and death.
+        // Mounted in a vehicle or a turret the steal stands down: those buttons are the game's own
+        // controls there, and taking them reads as "the controllers stopped working". Stick mode is
+        // NOT a substitute for that term -- it needs stickmode on at all, and then enters on a 0.75 s
+        // debounce, so the first three quarters of a second in every seat would steal anyway.
+        //
+        // The answer comes from the fork's unit-state service through a hook, because whether the
+        // biped has a parent object is what that service publishes. With no feature of ours enabled
+        // the service is inactive and the hook is false, so this line is the line above it.
         if (g_cfg.holster_steal_buttons != 0 && g_cfg.holster_enabled
+            && !features_holster_steal_mounted()
             && !g_in_menu.load(std::memory_order_relaxed)
             && !g_stick_mode.load(std::memory_order_relaxed)) {
             // SWAP IS DELIBERATELY NOT STOLEN. holster_swap_mask is Y, the game's own weapon

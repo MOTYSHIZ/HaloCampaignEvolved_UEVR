@@ -383,6 +383,19 @@ bool features_xrlayer_latch_released() { return stability_xrlayer_latch_released
 bool features_xrsource_wanted() { return stability_xrsource_wanted(); }
 bool features_move_probe_allowed() { return stability_move_probe_allowed(); }
 unsigned short features_steal_extra_mask() { return stability_steal_extra_mask(); }
+// THE SEAT STAND-DOWN ON THE HOLSTER STEAL. The steal takes the throw and grenade-switch buttons
+// off the pad so the holster gestures own them; mounted in a Warthog or a turret those are the
+// game's own controls and taking them reads as "the controllers stopped working".
+//
+// Whether the biped has a parent object is the fork's unit-state service to answer, so the answer
+// is given here rather than by his code. It is gated on the SERVICE, not on the atomic alone: with
+// no consumer enabled publish_unit_state is never called and the flag keeps whatever it last held,
+// so a cfg reload that switches the last consumer off WHILE MOUNTED would otherwise latch a stale
+// "mounted" for the rest of the session and stand the steal down for good. Inactive service = not
+// mounted = his line behaves exactly as it does with every feature of ours off.
+bool features_holster_steal_mounted() {
+    return service_active(SVC_UNIT_STATE) && g_unit_mounted.load(std::memory_order_relaxed);
+}
 void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
 bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }

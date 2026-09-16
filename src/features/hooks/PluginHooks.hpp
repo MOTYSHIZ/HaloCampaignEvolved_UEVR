@@ -39,6 +39,10 @@ void features_xinput_before_brake(_XINPUT_STATE* state);
 // on_xinput_get_state (the XInput hook's thread), the holster steal: extra pad bits OR-ed into the
 // author's steal mask (0 = none).
 unsigned short features_steal_extra_mask();
+// on_xinput_get_state (the XInput hook's thread), the holster steal's gate: true = the player is
+// mounted in a vehicle or turret, so the steal stands down. Only the fork's unit-state service
+// knows this, and only while it is publishing, so with our features off it is always false.
+bool features_holster_steal_mounted();
 
 // update() (game thread), right after scope_frame_end(tick).
 void features_game_tick_late();
