@@ -11841,6 +11841,8 @@ public:
                     static uint32_t      wp_yaw_n = 0, wp_pitch_n = 0, wp_still_n = 0, wp_stickturn = 0;
                     static uint32_t      wp_ynext = 128, wp_pnext = 128, wp_said = 0;
                     static uint32_t      wp_raw_n = 0;                    // raw ticks logged so far
+                    static double        wp_hc_sum = 0.0, wp_hc_sum100 = 0.0;   // rendered wrist vs controller
+                    static uint32_t      wp_hc_n = 0;
                     static Vec3          wp_win_rel[kMaxB + kSyn]{};       // 8-tick window start
                     static float         wp_win_aim = 0.0f, wp_win_pitch = 0.0f;
                     static uint32_t      wp_win_n = 0;
@@ -11863,6 +11865,7 @@ public:
                         wp_wrist = -1;
                         wp_raw_n = 0;
                         wp_isho = wp_iel = -1;
+                        wp_hc_sum = wp_hc_sum100 = 0.0; wp_hc_n = 0;
                         wp_win_n = 0;
 
                         Vec3 origin{};
@@ -11955,7 +11958,11 @@ public:
                         const float ar = aim * 0.01745329252f;
                         Vec3 rel[kMaxB + kSyn]{};
                         for (int i = 0; i < wp_n; ++i) rel[i] = Vec3{pj[i].x - cam.x, pj[i].y - cam.y, pj[i].z - cam.z};
-                        rel[wp_n]     = Vec3{50.0f * std::cos(ar), 50.0f * std::sin(ar), 0.0f};   // synthetic: aim-locked
+                        // Synthetic aim-locked point: 50 cm along the FULL aim (yaw and pitch), so it
+                        // reads 1.00 on both the yaw and the pitch line.
+                        const float pr = pitch * 0.01745329252f;
+                        rel[wp_n]     = Vec3{50.0f * std::cos(pr) * std::cos(ar), 50.0f * std::cos(pr) * std::sin(ar),
+                                             50.0f * std::sin(pr)};
                         rel[wp_n + 1] = Vec3{50.0f, 0.0f, 0.0f};                                  // synthetic: world-fixed
                         const int total = wp_n + kSyn;
                         if (wp_prev_ok) {
@@ -11984,6 +11991,37 @@ public:
                                 ++wp_still_n;
                             }
                         }
+                        // DOES THE RENDERED HAND SIT ON THE CONTROLLER? The controller's displacement
+                        // from the camera, in world cm, built exactly as the UeRig route builds it
+                        // (standing origin as the body anchor, recentre offset, VR->UE swizzle, the
+                        // turn/calibration yaw), at the rig scale the UeRig route was calibrated at and
+                        // at 100 cm/m -- against the rendered wrist. The palette places the wrist
+                        // 8 cm behind and 2 cm below the grip, so ~8 cm is "on the controller".
+                        if (wp_wrist >= 0) {
+                            const auto ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                                  : API::VR::get_right_controller_index();
+                            Vec3 gpos{}; Quat gq{};
+                            if (get_pose(ridx, &gpos, &gq, false)) {
+                                const auto so = API::VR::get_standing_origin();
+                                const Vec3 hand{gpos.x - so.x, gpos.y - so.y, gpos.z - so.z};
+                                Quat q_ro{0.0f, 0.0f, 0.0f, 1.0f};
+                                if (g_cfg.rig_view_yaw != 0.0f) {
+                                    const auto ro = API::VR::get_rotation_offset();
+                                    q_ro = Quat{ro.x, ro.y, ro.z, ro.w};
+                                    if (g_cfg.rig_view_yaw < 0.0f) q_ro = quat_conj(q_ro);
+                                }
+                                const Quat q_turn = rotator_to_quat(
+                                    0.0f, g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use(), 0.0f);
+                                const Vec3 r = quat_rotate(q_ro, hand);
+                                const Vec3 c_rig = quat_rotate(q_turn, Vec3{-r.z * g_cfg.rig_scale, r.x * g_cfg.rig_scale, r.y * g_cfg.rig_scale});
+                                const Vec3 c_100 = quat_rotate(q_turn, Vec3{-r.z * 100.0f, r.x * 100.0f, r.y * 100.0f});
+                                const Vec3& w = rel[wp_wrist];
+                                wp_hc_sum    += std::sqrt((w.x - c_rig.x) * (w.x - c_rig.x) + (w.y - c_rig.y) * (w.y - c_rig.y) + (w.z - c_rig.z) * (w.z - c_rig.z));
+                                wp_hc_sum100 += std::sqrt((w.x - c_100.x) * (w.x - c_100.x) + (w.y - c_100.y) * (w.y - c_100.y) + (w.z - c_100.z) * (w.z - c_100.z));
+                                ++wp_hc_n;
+                            }
+                        }
+
                         // RAW DUMP (paworldraw=N): the rendered joints and the palette's, tick by tick.
                         if (g_cfg.pa_world_raw > 0 && wp_raw_n < (uint32_t)g_cfg.pa_world_raw &&
                             wp_isho >= 0 && wp_iel >= 0 && wp_wrist >= 0) {
@@ -12037,10 +12075,8 @@ public:
                                         const float dz = rel[i].z - wp_win_rel[i].z;
                                         wp_ppath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
                                         // Pitch about the camera's LEFT axis: full radius from the
-                                        // camera. The synthetic aim-locked point lies in the horizontal
-                                        // plane, so it reads ~0 here by construction -- the pitch
-                                        // line's METRIC is expected to say FAILED for it; read the
-                                        // world-fixed control (0) and the bones only.
+                                        // camera. The synthetic aim-locked point follows the full aim
+                                        // (yaw and pitch), so it reads 1 here too.
                                         wp_pref[i]  += dp * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y + rel[i].z * rel[i].z);
                                     }
                                     wp_pitch_n += 8;
@@ -12085,7 +12121,8 @@ public:
                             "[Halo-CampE-UEVR] ARMWORLD %s patorsoframe=%d meshdown=%d | METRIC %s (aim-locked=%.2f "
                             "want 1, world-fixed=%.2f want 0) | IK-VISIBLE %s (max net wrist push %.1f cm over %u still "
                             "ticks, want >20) | S:%s | over %u ticks, stickturn=%u | PALSH=(%.4f,%.4f,%.4f) "
-                            "mesh-cam=(%.1f,%.1f,%.1f) meshrot=(p%.1f,y%.1f,r%.1f) aim=(y%.1f,p%.1f) body=%.1f",
+                            "mesh-cam=(%.1f,%.1f,%.1f) meshrot=(p%.1f,y%.1f,r%.1f) aim=(y%.1f,p%.1f) body=%.1f "
+                            "| HAND-CTRL mean dist %.1f cm at rigscale, %.1f cm at 100/m (want ~8)",
                             yaw_due ? "YAW" : "PITCH", g_cfg.pa_torso_frame,
                             (int)g_mesh_standdown.load(std::memory_order_relaxed),
                             metric_ok ? "ok" : "FAILED", s_lock, s_fix,
@@ -12094,7 +12131,8 @@ public:
                             psx, psy, psz,
                             have_m ? mloc.x - cam.x : 0.0f, have_m ? mloc.y - cam.y : 0.0f, have_m ? mloc.z - cam.z : 0.0f,
                             have_m ? mrot.x : 0.0f, have_m ? mrot.y : 0.0f, have_m ? mrot.z : 0.0f,
-                            aim, pitch, body);
+                            aim, pitch, body,
+                            wp_hc_n ? wp_hc_sum / wp_hc_n : -1.0, wp_hc_n ? wp_hc_sum100 / wp_hc_n : -1.0);
                     }
                 }
             }

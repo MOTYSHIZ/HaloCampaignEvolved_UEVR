@@ -61,7 +61,10 @@ struct ArmTuning {
     // elbow UPWARD -- a raised chicken-wing). ON: pancreations MCC VR's direction, OUT and DOWN in
     // the torso frame -- left*outSign - pole_down*up, outSign +1 for the left arm and -1 for the
     // right -- which is where a held-rifle elbow actually hangs (game.cpp:4618-4628).
-    bool  pole_out_down = false;
+    // DEFAULT ON (2026-09-16): with the pole pointing up, the raw probe dump put the rendered elbow
+    // 18 cm ABOVE the shoulder-to-wrist midpoint on a pistol held at chest height -- the raised
+    // chicken-wing. Out-and-down is where a held-weapon elbow hangs, and it is what MCC VR ships.
+    bool  pole_out_down = true;
     float pole_down     = 0.6f;
 
     // OVER-REACH: stretch instead of clamping. 1.0 = off (clamp at the reach sphere, hand snapped

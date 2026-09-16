@@ -3730,7 +3730,7 @@ struct Config {
     //       palette space is already view-relative it double-counts the head and the arms rotate
     //       EXTRA as you yaw -- which is what was observed.
     //   2 = root composed with the inverse HEAD, i.e. actively removing head yaw.
-    int   pa_torso_frame  = 6;
+    int   pa_torso_frame  = 7;   // 7 since 2026-09-16: mode 6 plus the camera pitch. Measured (SimVR, world-space probe): yaw S 0.35 like mode 4, pitch S 0.1-0.4 vs 0.85-1.0 for modes 4/6.
 
     // TORSO FRAME A/B INSTRUMENT. Off by default; costs one atomic load and a branch per tick.
     //
@@ -3784,7 +3784,7 @@ struct Config {
     // drive yaws the camera by t both terms counter-rotate by -t and the torso stays world-fixed.
     // That makes this construction aim-independent BY CONSTRUCTION rather than by subtracting a
     // correction -- which is why it needs no view-lock term, unlike modes 3/4/5.
-    float pa_head_shoulders_yaw_influence = 0.5f;
+    float pa_head_shoulders_yaw_influence = 1.0f;   // 1 = the torso faces where the HEAD faces (MCC VR); 0 = the hands. Was 0.5 until 2026-09-16.
 
     // PALETTE WEAPON DRIVE -- carry the weapon branch (nodes 7, 8, 22) onto the aim controller with
     // ONE rigid transform, so the stock animation inside the branch survives.
