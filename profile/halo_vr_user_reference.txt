@@ -267,18 +267,15 @@
 # How far the trigger must be squeezed to toggle the scope.
 #scopethresh=0.55
 
-# ================================= WORLD DETAIL & PERFORMANCE ===================================
-# Distant detail the game culls for a flat screen.
-#
-# 1 = keep distant objects drawn at VR view distances.
-#cullfix=1
-# How far objects stay drawn, cm.
-#culldist=40000
-
 # ===================================== FEATURE SETTINGS =========================================
-# Settings of the switchable features. The menu shows each one under its feature, in the feature's
-# tier section, and they only act while that feature is on.
+# Settings of the switchable features, grouped by the feature that owns them. The menu shows each
+# one under its feature, in the feature's tier section, and they only act while that feature is on.
 #
+# Each feature also has DEV KEYS -- probes, dumps, logs and captured calibration. Those are not
+# here: they are in halo_vr_dev.cfg, under the same feature headings, and the menu never draws a
+# row for one.
+
+# ----------------------------------------------------------- WEAPON FOLLOWS YOUR HAND (palettewpn)
 # Aim along the barrel. Where your shots go while the weapon is placed on your hand: 1 follows the
 # barrel of the weapon you see, 0 aims by your hand alone. The weapon placement sets this to 1 for
 # you, so a value here is only needed to aim by the hand instead. Nothing reads it with the
@@ -301,8 +298,6 @@
 #palettetwohandagreemin=0.35
 # ...and the agreement at which the hold is fully taken.
 #palettetwohandagreefull=0.50
-# Two-handed hold: write its evidence lines to the log.
-#palettetwohandlog=0
 # Weapon roll. Turns every weapon about its barrel by this many degrees (positive is clockwise seen
 # from behind the gun).
 #paletterolltrim=6
@@ -322,6 +317,35 @@
 # weapon's mesh found another way, 3 hides the whole arm meshes another way, which may take the weapon
 # with them. A choice of your own for Hide the stock arms, or for the weapon rig, wins.
 #palettehidearms=1
+
+# ------------------------------------------------------------ SCOPE LENS ON THE WEAPON (scopelens)
+# Lens brightness. Exposure of the image in the lens; higher is brighter.
+#scopeev=0.5
+# Lens image strength. A multiplier on the image shown in the lens.
+#scopetint=11
+# Lens tone curve. How much of the game's tone curve the lens image keeps, from 0 to 1; below 0 leaves
+# the game's own setting.
+#scopetonecurve=0.5
+# Lens update distance. The lens image only updates while the lens is within this many centimetres of
+# your eye, which saves performance with the weapon lowered; 0 always updates it.
+#scopeeyedist=15
+# Lens image source. Which stage of the game's rendering the lens shows.
+#scopesource=9
+# Lens image format. 6 is high dynamic range, 2 is standard.
+#scopertfmt=6
+# Lens lighting detail. 1 renders the lens with the lighting features listed below. Takes effect on the
+# next level load.
+#scopeshowflags=1
+# Lens lighting features. The lighting features turned on in the lens image, separated by commas.
+# Takes effect on the next level load.
+#scopesfflags=LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows,Lighting
+# Shields and glass in the lens. 0 draws see-through surfaces such as shields into the lens image, and
+# this also applies to the main view; -1 leaves the game's setting alone.
+#scopeseptrans=0
+# Lens reticle colour. Red, green and blue of the etched reticle in the lens, from 0 to 1.
+#scopereticletint=0.02,0.02,0.02
+
+# ------------------------------------------------------------------------ MANUAL RELOAD (reloadvr)
 # Manual reload: each weapon keeps its own reload state (0 the old memory, 1 per weapon type, 2 per weapon, 3 per weapon across a level load).
 #reloadstate=1
 # Manual reload: when a weapon's state is saved (1 every tick, 2 only when it leaves your hand).
@@ -336,36 +360,10 @@
 #reloadstatedeath=1
 # Manual reload: keep weapon states across a level load.
 #reloadstatelevel=1
-# Manual reload: log every save and restore of a weapon's state.
-#reloadstatelog=0
-# Manual reload: the grip belongs to your hand gestures, so it never throws a grenade.
-#gripexclusive=1
 # Manual reload: silence the game's own reload sound (4 is the default method, 0 is off).
 #reloadakmute=4
 # Manual reload: how the reload step sounds are played (7 is the default method, 0 is off).
 #reloadakmimic=7
-# ---- Punching with your other hand. Its own thresholds: an off hand that is also holding a
-# magazine, steadying a barrel and reaching for a pouch triggers far more false punches than the
-# weapon hand, so these sit above the ones the weapon hand uses.
-# Swing speed needed, metres per second.
-#meleeleftspeed=5.00
-# Punching with your other hand: write the swing's evidence lines to the log.
-#meleeleftlog=0
-# Extension speed needed away from your head, metres per second.
-#meleeleftext=2.20
-# How far from your head the hand must be, metres.
-#meleeleftreach=0.30
-# Above this speed the sample is tracking noise and is thrown away, metres per second.
-#meleeleftmaxspeed=12.0
-# Above this reach the sample is tracking noise and is thrown away, metres.
-#meleeleftmaxreach=1.20
-# Smoothing of the measured speed, milliseconds.
-#meleelefttau=20.0
-# Rest after a punch lands, milliseconds.
-#meleeleftcooldown=500
-# How long the punch is held down, milliseconds.
-#meleelefthold=80
-
 # Manual reload: in co-op the gun stays empty until you reload it yourself.
 #reloadcoophide=1
 # Manual reload: the same when playing alone.
@@ -377,16 +375,11 @@
 # Trigger while the magazine is out. 1 swallows it, so you are genuinely defenceless until you
 # finish the reload. 0 makes the whole gesture cosmetic.
 #reloadholdfire=1
-# Manual reload: write the gesture's evidence lines to the log.
-#reloadvrlog=0
 # Clear the reload's holds on a reset. A death, a ride or a cutscene already puts the reload state
 # back; 1 also ends the reload press on its way to the game, the weapon animation hold, the
 # animation speed-up, the reload sound mute and the hand pose hold, and drops a reload press made
 # while you had no control.
 #reloadresetholds=1
-# Reload trace for the log. One line whenever any reload value changes, with every value as it is.
-# 1 = only while a shotgun is in hand, 2 = every weapon, 0 = off. Nothing is written to the game.
-#reloadshotgunlog=0
 # Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
 # up, back). A weapon listed in the per-weapon table below uses that entry instead.
 #reloadmagbelt=-0.22,-0.65,0.00
@@ -415,6 +408,8 @@
 # Markers stay put in the room. 1 keeps the belt magazine, the grab dots and dropped magazines fixed in
 # the room when you move your head; 0 places them from your head, so they shift as it moves.
 #reloadroomanchor=1
+
+# ------------------------------------------------------------------------ RACK THE SLIDE (slidevr)
 # Rack grab reach. How close your other hand must be to the slide, pump or handle to grab it, in
 # metres.
 #slideradius=0.16
@@ -439,33 +434,29 @@
 # Fire-animation rack start. With the older rack method on, how long the firing animation runs at
 # normal speed before your hand takes it over, in seconds.
 #slidefireentry=0
-# Lens brightness. Exposure of the image in the lens; higher is brighter.
-#scopeev=0.5
-# Lens image strength. A multiplier on the image shown in the lens.
-#scopetint=11
-# Lens tone curve. How much of the game's tone curve the lens image keeps, from 0 to 1; below 0 leaves
-# the game's own setting.
-#scopetonecurve=0.5
-# Lens update distance. The lens image only updates while the lens is within this many centimetres of
-# your eye, which saves performance with the weapon lowered; 0 always updates it.
-#scopeeyedist=15
-# Lens image source. Which stage of the game's rendering the lens shows.
-#scopesource=9
-# Lens image format. 6 is high dynamic range, 2 is standard.
-#scopertfmt=6
-# Lens lighting detail. 1 renders the lens with the lighting features listed below. Takes effect on the
-# next level load.
-#scopeshowflags=1
-# Lens lighting features. The lighting features turned on in the lens image, separated by commas.
-# Takes effect on the next level load.
-#scopesfflags=LumenGlobalIllumination,LumenReflections,GlobalIllumination,DynamicShadows,Lighting
-# Shields and glass in the lens. 0 draws see-through surfaces such as shields into the lens image, and
-# this also applies to the main view; -1 leaves the game's setting alone.
-#scopeseptrans=0
-# Lens reticle colour. Red, green and blue of the etched reticle in the lens, from 0 to 1.
-#scopereticletint=0.02,0.02,0.02
-# Melee by swinging: your other hand can punch too.
-#meleeleft=1
+
+# ---------------------------------------------------------- PUNCH WITH YOUR OTHER HAND (meleeleft)
+# ---- Punching with your other hand. Its own thresholds: an off hand that is also holding a
+# magazine, steadying a barrel and reaching for a pouch triggers far more false punches than the
+# weapon hand, so these sit above the ones the weapon hand uses.
+# Swing speed needed, metres per second.
+#meleeleftspeed=5.00
+# Extension speed needed away from your head, metres per second.
+#meleeleftext=2.20
+# How far from your head the hand must be, metres.
+#meleeleftreach=0.30
+# Above this speed the sample is tracking noise and is thrown away, metres per second.
+#meleeleftmaxspeed=12.0
+# Above this reach the sample is tracking noise and is thrown away, metres.
+#meleeleftmaxreach=1.20
+# Smoothing of the measured speed, milliseconds.
+#meleelefttau=20.0
+# Rest after a punch lands, milliseconds.
+#meleeleftcooldown=500
+# How long the punch is held down, milliseconds.
+#meleelefthold=80
+
+# ---------------------------------------------------------------------------- WRIST HUD (wristhud)
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
 #wristradar=1
 # Wrist HUD: where the panels sit (0 on the wrists, 1 on the sides of the weapon).
@@ -493,11 +484,15 @@
 # Radar colour for other contacts. Red, green and blue of the dots for a contact with no colour of its
 # own, from 0 to 1.
 #wristblipcolorother=0.00,1.00,1.00
+
+# ------------------------------------------------------------------ FORCETUBE GUNSTOCK (forcetube)
 # ForceTube gunstock: kick strength.
 #forcetubekick=200
 # Your own shots only. How close to you a fired round must start to kick the gunstock, in game units
 # (1 is about 3 m).
 #forcetuberadius=0.5
+
+# -------------------------------------------------------------------- VEHICLE SEAT CAMERA (vehcam)
 # Vehicle seat camera: the view turns with the vehicle and stays level.
 #vehview=1
 # Vehicle seat camera: hide your own body while seated (0 off, 1 hide, 2 hide and shrink).
@@ -513,8 +508,12 @@
 #vehcamboomtau=0.12
 # Vehicle facing. 1 reads which way the vehicle really points, 0 works it out from how it moves.
 #vehfacing=1
+
+# ------------------------------------------------------------------- STEERING WHEEL (vehiclewheel)
 # Steering direction. -1 or 1; flip it if the vehicle steers the wrong way.
 #vehsteersign=-1
+
+# --------------------------------------------------------------------------- ROOMSCALE (roomscale)
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
 # Sidestep direction. -1 or 1; flip it only if stepping sideways moves you the wrong way.
@@ -527,6 +526,8 @@
 # Game stick dead zone. When your steps go through the left stick, the game's own dead zone on the
 # stick, from 0 to 0.9.
 #roomscaledz=0.30
+
+# ------------------------------------------------------------------------- AUTO HEIGHT (heightcal)
 # Auto height: what the measured height is fitted to.
 #heightmode=absolute
 # Auto height: where the height comes from.
@@ -538,10 +539,10 @@
 # Auto height: an optional keyboard key that re-measures your height. The Calibrate height button is
 # the intended way.
 #heightkey=0x00
+
+# -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Head block: how far your head is kept from a surface, in centimetres.
 #headblockradius=12
-
-
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 
