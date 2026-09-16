@@ -153,6 +153,7 @@
 #include "AimWatch.hpp"
 #include "AimDirect.hpp"
 #include "AimConverge.hpp"
+#include "ViewMode.hpp"
 #include "GameSettings.hpp"
 
 // View-consumer fixes: the audio listener drive and the dev exec harness. The navpoint half
@@ -5862,6 +5863,37 @@ void update() {
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
                                  menu_applied);
+        }
+
+        // VIEW TOPOLOGY: which VR_RenderingMethod UEVR declares, which one the stereo callbacks
+        // actually exhibit, and what the per-eye consumers are doing about it (ViewMode.hpp).
+        // Read HERE, on the poll, because the render thread must not log and get_mod_value is
+        // not for a hot path. The value is a decimal string ("0".."3"); an older backend that
+        // lacks the key answers nothing.
+        {
+            char cur[16]{};
+            API::get()->param()->vr->get_mod_value("VR_RenderingMethod", cur, sizeof(cur));
+            const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
+            halo::viewmode_set_declared(declared);
+            const halo::ViewMode vm   = halo::viewmode_current();
+            const bool           flat = halo::xrlayer_mono_flat_active();
+            static int  s_vm_declared = -2;
+            static int  s_vm_mode     = -1;
+            static bool s_vm_flat     = false;
+            if (declared != s_vm_declared || (int)vm != s_vm_mode || flat != s_vm_flat) {
+                s_vm_declared = declared; s_vm_mode = (int)vm; s_vm_flat = flat;
+                const char* head_from =
+                    vm == halo::ViewMode::Stereo      ? "the midpoint of the two views" :
+                    vm == halo::ViewMode::Alternating ? "this view averaged with the previous frame's (the other eye)" :
+                    vm == halo::ViewMode::Mono        ? "the single view itself (it is the centre eye: no IPD residual)" :
+                                                        "the single view seen so far";
+                API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: VR_RenderingMethod=%d (%s); the stereo callbacks "
+                                     "show %s; XR layer head and aim-convergence eye = %s; layer quads %s "
+                                     "(xrlayermonoflat=%d, %u samples)",
+                                     declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm), head_from,
+                                     flat ? "FLATTENED to infinity to match the mono image" : "at their real depth",
+                                     g_cfg.xr_layer_mono_flat, halo::viewmode_samples());
+            }
         }
 
         // Re-apply hotkey overrides on top of what was just parsed (see g_kill_override). Each is
@@ -11957,6 +11989,10 @@ public:
             } else {
                 ex = position->x; ey = position->y; ez = position->z;
             }
+            // FIRST: classify which eyes UEVR is rendering this frame (ViewMode.hpp). Both
+            // consumers below read the verdict inside this same callback, so this sample has to
+            // be counted before either of them runs.
+            halo::viewmode_note_post(index, ex, ey, ez);
             halo::aim_converge_note_post(index, ex, ey, ez);
             // PUBLISHED FOR WORLD-SPACE MARKERS. This is the RENDERED EYE, which the pre-hook
             // position is not: any marker placed along a ray cast from the game camera appears

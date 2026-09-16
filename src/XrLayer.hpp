@@ -447,6 +447,10 @@ int xrlayer_cell_dim(int slot);
 void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_pos,
                       float view_yaw, float view_pitch, float view_roll);
 
+// True while the quads are being flattened to infinity for the Mono rendering method
+// (xrlayermonoflat; ViewMode.hpp). Any thread; for the log line on the poll.
+bool xrlayer_mono_flat_active();
+
 // Per-tick housekeeping on the GAME THREAD: config changes, lazy init, the liveness watchdog, and
 // the state logging. Never blocks. Does nothing but one bool test when the feature is off.
 void xrlayer_tick();
