@@ -358,8 +358,10 @@
 #reloadstatedrop=2
 # Manual reload: forget every weapon's state at death (0 never, 1 at the death camera, 2 when the next weapon differs).
 #reloadstatedeath=1
-# Manual reload: keep weapon states across a level load.
-#reloadstatelevel=1
+# Manual reload: what a level load does to the weapon states. 0 forgets every one of them, so each
+# level starts with nothing in progress; 1 keeps them, and a weapon of the same type in your hands
+# afterwards picks its state back up.
+#reloadstatelevel=0
 # Manual reload: silence the game's own reload sound (4 is the default method, 0 is off).
 #reloadakmute=4
 # Manual reload: how the reload step sounds are played (7 is the default method, 0 is off).

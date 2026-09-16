@@ -1520,8 +1520,10 @@
     // reload_state_death (reloadstatedeath): 0 = records survive a death; 1 = every record is
     //   forgotten when the death camera shows (raw perspective 2 during stick mode); 2 = forgotten
     //   when the first weapon in hand after a gesture reset is a different object than its record.
-    // reload_state_level (reloadstatelevel): 1 = records survive a level change (the same type
-    //   in hand afterwards gets its state back); 0 = a level change forgets every record.
+    // reload_state_level (reloadstatelevel): 0 = a level change forgets every record (DEFAULT, the
+    //   play build's behaviour); 1 = records survive it, and the same type in hand afterwards gets
+    //   its state back. A map change hands you a fresh loadout, so carrying a mag-out or a
+    //   locked-back slide into it is a gun that starts the level dead for no reason you can see.
     // reload_state_log (reloadstatelog): one line for every save, restore, identity change and
     //   re-hide, with the weapon identity and the full state.
     int   reload_state_id      = 1;
@@ -1546,7 +1548,7 @@
     // guard's verdict). 1 = only while a shotgun is in hand; 2 = every weapon. Nothing is written.
     int   shotgun_log = 0;
     int   reload_state_death   = 1;
-    int   reload_state_level   = 1;
+    int   reload_state_level   = 0;
     bool  reload_state_log     = false;
     // PER WEAPON (from the headset, 2026-09-10: "the magnum mag offset needs to be up higher"). One belt
     // point does not suit every magazine: the assets have their own pivots, so a pistol mag hangs
