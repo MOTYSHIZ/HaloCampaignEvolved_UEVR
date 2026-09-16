@@ -5911,14 +5911,16 @@ void update() {
                     vm == halo::ViewMode::Alternating ? "this view averaged with the previous frame's (the other eye)" :
                     vm == halo::ViewMode::Mono        ? "the single view itself (it is the centre eye: no IPD residual)" :
                                                         "the single view seen so far";
+                unsigned ring = 0; float swing = 0.0f;
+                halo::viewmode_diag(&ring, &swing);
                 API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: VR_RenderingMethod=%d (%s); the stereo callbacks "
                                      "show %s; per-eye projections %s; XR layer head and aim-convergence eye = %s; "
-                                     "layer quads %s (xrlayermonoflat=%d, %u samples)",
+                                     "layer quads %s (xrlayermonoflat=%d, %u samples, swing ring=0x%02X max=%.1f cm)",
                                      declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm),
                                      shared ? "IDENTICAL (one image serves both eyes)" : "differ (a stereo pair)",
                                      head_from,
                                      flat ? "FLATTENED to infinity to match the mono image" : "at their real depth",
-                                     g_cfg.xr_layer_mono_flat, halo::viewmode_samples());
+                                     g_cfg.xr_layer_mono_flat, halo::viewmode_samples(), ring, swing);
             }
         }
 
