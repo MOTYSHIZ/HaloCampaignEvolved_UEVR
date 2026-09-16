@@ -3757,6 +3757,18 @@ struct Config {
     // the palette's own space and was shown by its own control to be unable to answer. See its site
     // in Plugin.cpp.
     bool  pa_world_probe  = false;
+    // PALETTE ROUTE: STAND THE UE MESH PLACEMENT DOWN (2026-09-16). The UeRig driver's component
+    // placement (Plugin.cpp rig block: world rotation + relative location, plus the render-rate
+    // re-apply) was gated only on the weapon drives, so it kept running under armdriver=2 and
+    // pinned the whole mesh so its PrimaryWeapon socket sat on the controller. The palette records
+    // are camera-local and assume the mesh sits where the game puts it -- so every palette node
+    // swung about the controller by the socket lever whatever the torso frame did. With this ON
+    // the palette route owns the component too: no UeRig writes, and the rig's stock relative
+    // transform (captured at acquisition) is restored on entry.
+    // Measured 2026-09-16 with the world-space probe: the shoulder-armour bone read S=1.2-1.7 in
+    // every torso mode with the writes on, 1.02 (the mode-0 control's expected value) with them off.
+    // DEV KEY pameshdown. 0 = legacy (both drivers write; for A/B only).
+    bool  pa_mesh_standdown = true;
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends

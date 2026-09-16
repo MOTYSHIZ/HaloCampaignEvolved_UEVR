@@ -56,6 +56,20 @@ struct ArmTuning {
     // source instead of filtering the symptom. A filter here would add lag to the hand for a problem
     // that is not noise.
     float pole_body_fraction = 0.75f;
+
+    // WHICH WAY the body-anchored pole points. OFF: torso up (the port's original, which bends the
+    // elbow UPWARD -- a raised chicken-wing). ON: pancreations MCC VR's direction, OUT and DOWN in
+    // the torso frame -- left*outSign - pole_down*up, outSign +1 for the left arm and -1 for the
+    // right -- which is where a held-rifle elbow actually hangs (game.cpp:4618-4628).
+    bool  pole_out_down = false;
+    float pole_down     = 0.6f;
+
+    // OVER-REACH: stretch instead of clamping. 1.0 = off (clamp at the reach sphere, hand snapped
+    // the rest of the way so the forearm end stops short of the hand). pancreations use 1.8:
+    // both bone lengths scale by k = min(dist/reach, stretch_max) and the elbow subtree is moved
+    // onto the stretched elbow, so skinning stretches the mesh with the bones instead of the hand
+    // visibly detaching from the forearm. Applied AFTER the clavicle assist.
+    float stretch_max = 1.0f;
 };
 
 // ---- PRIMITIVES --------------------------------------------------------------------------------

@@ -236,8 +236,9 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     // Left undone on purpose: with pa_target_frame=1 the target no longer flies out of reach (hand
     // excursion 102 cm -> 0.002 cm), so over-reach went from constant to rare, and a half-built
     // stretch is worse than an honest clamp.
-    const float minimum_reach    = std::fabs(upper_length - lower_length) + 1.0e-4f;
-    const float maximum_reach    = upper_length + lower_length - 1.0e-4f;
+    float minimum_reach = std::fabs(upper_length - lower_length) + 1.0e-4f;
+    float maximum_reach = upper_length + lower_length - 1.0e-4f;
+    float solve_upper = upper_length, solve_lower = lower_length, stretch_k = 1.0f;
 
     // Clavicle assist: rather than stopping the hand at the reach sphere, slide the whole arm root
     // toward an out-of-reach target the way a real shoulder rolls into an overreach. Whatever is
@@ -251,6 +252,18 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
         shoulder_position = shoulder_position + offset;
         elbow_position    = elbow_position + offset;
         target_distance  -= assist;
+    }
+
+    // STRETCH, DONE PROPERLY (2026-09-16): pancreations' rule, with the POSITION move the 2026-08-31
+    // attempt lacked. Whatever the clavicle assist could not absorb scales BOTH solve lengths by
+    // k <= stretch_max, and after the shoulder rotation below the elbow subtree is TRANSLATED onto
+    // the stretched elbow, so the forearm's end lands on the hand instead of short of it.
+    if (tuning.stretch_max > 1.0f && target_distance > maximum_reach) {
+        stretch_k     = std::min(target_distance / (upper_length + lower_length), tuning.stretch_max);
+        solve_upper   = upper_length * stretch_k;
+        solve_lower   = lower_length * stretch_k;
+        minimum_reach = std::fabs(solve_upper - solve_lower) + 1.0e-4f;
+        maximum_reach = solve_upper + solve_lower - 1.0e-4f;
     }
 
     target_distance = std::clamp(target_distance, minimum_reach, maximum_reach);
@@ -302,9 +315,9 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
 
     // Law of cosines: distance along the target line to the elbow's projection, and its height
     // off that line.
-    const float along = (target_distance * target_distance + upper_length * upper_length -
-                         lower_length * lower_length) / (2.0f * target_distance);
-    const float height_squared = std::max(upper_length * upper_length - along * along, 0.0f);
+    const float along = (target_distance * target_distance + solve_upper * solve_upper -
+                         solve_lower * solve_lower) / (2.0f * target_distance);
+    const float height_squared = std::max(solve_upper * solve_upper - along * along, 0.0f);
     const Vec3  elbow_target =
         shoulder_position + target_direction * along + pole * std::sqrt(height_squared);
 
@@ -313,6 +326,12 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     if (!valid_basis(shoulder_rotation)) return false;
     apply_rigid_delta(palette, arm.shoulder_subtree, arm.shoulder_count,
                       shoulder_rotation, shoulder_position);
+    if (stretch_k > 1.0f) {
+        // The rotation above put the elbow at its AUTHORED length along the solved direction;
+        // slide everything from the elbow down onto the stretched elbow.
+        const Vec3 stretch_shift = elbow_target - palette[arm.elbow].position;
+        apply_rigid_offset(palette, arm.elbow_subtree, arm.elbow_count, stretch_shift);
+    }
 
     const Vec3 moved_elbow = palette[arm.elbow].position;
     const Vec3 moved_wrist = palette[arm.wrist].position;

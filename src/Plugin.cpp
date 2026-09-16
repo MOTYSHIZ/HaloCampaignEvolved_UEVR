@@ -1,4 +1,4 @@
-﻿// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
+// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
 //
 // Ships as halo_vr.dll, reading halo_vr.cfg from the profile root. Motion-controller aim is the
 // centrepiece, but the scope is the whole VR feel of the game, not just aim.
@@ -247,6 +247,16 @@ void publish_view_lock_delta() {
     ::halo::g_view_lock_delta.store(d);
 }
 std::atomic<bool>  g_lock_primed{false};
+// PALETTE MESH STAND-DOWN -- published from the tick for the render path. True while the palette
+// route owns the arms and pa_mesh_standdown is set: the UeRig component placement (the tick writes
+// and the render re-apply) makes NO writes, so the mesh sits where the GAME puts it -- the frame
+// the palette records are authored in. See the rig block for the measurement behind this.
+std::atomic<bool>  g_mesh_standdown{false};
+// The rig's relative transform as found at acquisition, BEFORE this plugin's first write -- what
+// stand-down restores. Zeros when the fields could not be read (zeros are also the expected value).
+static double g_rig_stock_loc[3] = {0.0, 0.0, 0.0};
+static double g_rig_stock_rot[3] = {0.0, 0.0, 0.0};
+static bool   g_rig_stock_valid  = false;
 // False until the very first prime. Distinguishes "adopt the camera as the base" (session start)
 // from a RE-prime after stick mode, which must fold the difference into the turn offset instead
 // -- see the prime site for why those are different operations.
@@ -8069,6 +8079,25 @@ void update() {
                                      g_rig_parent != nullptr
                                         ? narrow(class_name_of(g_rig_parent)).c_str()
                                         : "<none - falling back to ControlRotation yaw>");
+
+                // THE STOCK RELATIVE TRANSFORM, read before anything here writes the component.
+                // Standing the mesh placement down (palette route) restores exactly this, so the
+                // palette records render in the frame the game authored them for.
+                {
+                    const double* rl = found->get_property_data<double>(L"RelativeLocation");
+                    const double* rr = found->get_property_data<double>(L"RelativeRotation");
+                    g_rig_stock_valid = (rl != nullptr && rr != nullptr);
+                    for (int k = 0; k < 3; ++k) {
+                        g_rig_stock_loc[k] = (rl != nullptr) ? rl[k] : 0.0;
+                        g_rig_stock_rot[k] = (rr != nullptr) ? rr[k] : 0.0;
+                    }
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR]   stock relative transform: loc=(%.2f,%.2f,%.2f) "
+                        "rot=(p%.2f,y%.2f,r%.2f)%s",
+                        g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2],
+                        g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2],
+                        g_rig_stock_valid ? "" : " (UNREADABLE -- zeros assumed)");
+                }
             }
 
             // ---- THE GRIP PIVOT -- derived ONCE, then latched, and only ONCE THERE IS A WEAPON.
@@ -8441,6 +8470,75 @@ void update() {
         // stickforce=1 on foot, freezing the arms is the honest picture of the stack being down.
         // RESOLUTION (above) keeps running either way; the route reviving is how stick mode ends.
         if (rig != nullptr && !g_stick_mode.load()) {
+            // ---- PALETTE MESH STAND-DOWN. Two arm drivers must never fight over one component
+            // (ArmDriver.hpp), and this block IS the UeRig driver's component placement -- yet its
+            // writes were gated only on the weapon drives, so under armdriver=2 it kept pinning the
+            // mesh so its PrimaryWeapon socket sat on the controller. The palette records are
+            // camera-local and that route assumes the mesh sits where the game puts it; with this
+            // block still writing, the mesh ORIGIN swung about the controller by the socket lever,
+            // and every palette node swung with it, whatever torso frame the palette solved in.
+            // Measured 2026-09-16 (SimVR, head still, aim swept +/-40 deg, world-space socket
+            // reads): the shoulder-armour bone read S=1.2-1.7 in EVERY torso mode with these
+            // writes on, and 1.02 -- the mode-0 control's expected value -- with them off.
+            const bool mesh_standdown =
+                g_cfg.pa_mesh_standdown && halo::arm_driver_owns(halo::ArmDriverMode::Palette);
+            {
+                static bool s_standdown_prev = false;
+                if (mesh_standdown && !s_standdown_prev) {
+                    // ENTRY: put the component back where the game had it. The relative location
+                    // demonstrably takes; the relative rotation write is measured as ignored on
+                    // this mesh (Rig.cpp), so the WORLD rotation is also written as parent o stock
+                    // -- once, here; from then on the engine composes it with the parent itself
+                    // (the mode-0 control above rode the camera at 1.02 with no writes at all).
+                    for_each_rig([&](API::UObject* r) {
+                        rig_set_location(r, g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2]);
+                        rig_set_rotation(r, g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2]);
+                    });
+                    Vec3 prot{};
+                    if (g_rig_parent != nullptr &&
+                        call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot)) {
+                        const Quat q_par   = rotator_to_quat(prot.x, prot.y, prot.z);
+                        const Quat q_stock = rotator_to_quat((float)g_rig_stock_rot[0],
+                                                             (float)g_rig_stock_rot[1],
+                                                             (float)g_rig_stock_rot[2]);
+                        const Quat q_w = quat_mul(q_par, q_stock);
+                        float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+                        quat_to_rotator(q_w.x, q_w.y, q_w.z, q_w.w, &wp, &wy, &wr);
+                        for_each_rig([&](API::UObject* r) {
+                            rig_set_world_rotation(r, (double)wp, (double)wy, (double)wr);
+                        });
+                    }
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MESH STAND-DOWN: UeRig placement stopped; rig "
+                        "relative transform reset to stock loc=(%.2f,%.2f,%.2f) rot=(p%.2f,y%.2f,r%.2f)",
+                        g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2],
+                        g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2]);
+                } else if (!mesh_standdown && s_standdown_prev) {
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MESH STAND-DOWN released: UeRig placement resumes");
+                }
+                s_standdown_prev = mesh_standdown;
+                g_mesh_standdown.store(mesh_standdown, std::memory_order_relaxed);
+            }
+#if HALO_VR_DEV
+            // Does the mesh keep following its parent with no writes from us? Read, never assume.
+            if (mesh_standdown && (tick % 64u) == 0u && g_rig_parent != nullptr) {
+                Vec3 prot{}, rrot{}, ploc{}, rloc{};
+                if (call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot) &&
+                    call_ret_vec3(rig, L"K2_GetComponentRotation", &rrot) &&
+                    call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &ploc) &&
+                    call_ret_vec3(rig, L"K2_GetComponentLocation", &rloc)) {
+                    const double* rl = rig->get_property_data<double>(L"RelativeLocation");
+                    const float dx = rloc.x - ploc.x, dy = rloc.y - ploc.y, dz = rloc.z - ploc.z;
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] MESHDOWN: rig-parent yaw=%.2f pitch=%.2f | rig-parent "
+                        "dist=%.1f cm | RelativeLocation=(%.2f,%.2f,%.2f)",
+                        wrap180(rrot.y - prot.y), rrot.x - prot.x,
+                        std::sqrt(dx * dx + dy * dy + dz * dz),
+                        rl ? rl[0] : 0.0, rl ? rl[1] : 0.0, rl ? rl[2] : 0.0);
+                }
+            }
+#endif
             // ROTATION -- must be RELATIVE TO THE PARENT, which is the aim.
             //
             // A scene component's relative transform COMPOSES on top of its parent, and the parent
@@ -8758,7 +8856,7 @@ void update() {
                 // q_gun below is still computed from the same inputs -- it is the INTENDED world
                 // rotation that the pivot arm and freeze snapshot consume, and it stays correct
                 // whether the mesh or the weapon root is the thing carrying it.
-                if (!halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
+                if (!mesh_standdown && !halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
                     for_each_rig([&](API::UObject* r) {
                         if (world_mode) rig_set_world_rotation(r, (double)wp, (double)wy, (double)wr);
                         else            rig_set_rotation(r, (double)rig_pitch, (double)rig_yaw, (double)c_roll);
@@ -9006,7 +9104,7 @@ void update() {
                     s_hold_prev = hold_rig_at_origin;
                 }
 
-                if (hold_rig_at_origin) {
+                if (hold_rig_at_origin && !mesh_standdown) {
                     xrlayer_note_publish_gate(5);
                     for_each_rig([&](API::UObject* r) { rig_set_location(r, 0.0, 0.0, 0.0); });
                 }
@@ -10576,7 +10674,7 @@ void update() {
                 // `hand`, so with the controller position dead they are exactly the wrong offset the
                 // protective branch exists to avoid writing. Everything else in this block --
                 // the trace, the widget, the compositor publish -- is unaffected and has already run.
-                if (!hold_rig_at_origin
+                if (!hold_rig_at_origin && !mesh_standdown
                     && !halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
                     for_each_rig([&](API::UObject* r) {
                         rig_set_location(r, (double)ex, (double)ey, (double)ez);
@@ -11689,54 +11787,59 @@ public:
 
             // ---- ARM WORLD PROBE (paworld=1): WHICH PART OF THE ARM SWINGS WITH THE AIM?
             //
-            // WHY. The torso A/B above measured in the palette's own space and failed its control;
-            // the tester then SAW modes 3 and 4 both swing, which falsified "pick the right sign".
-            // With the shoulder anchor, wrist target and rest lift all already in the body frame, the
-            // arm still swings -- and reading the frame algebra produced two wrong guesses in a row.
-            // So this does not reason about frames. It measures in the one the player sees.
+            // WHY. The torso A/B measured in the palette's own space and failed its control; the
+            // tester then SAW every torso mode swing. This does not reason about frames: it measures
+            // in the one the player sees, per BONE, so the answer names the bones that ride the aim
+            // and the ones that do not -- which is also how the palette-node -> UE-bone mapping
+            // gets established instead of assumed (v1 sampled 'ShoulderArmor_R' as "the shoulder"
+            // and it read identically in every mode: 2026-09-16).
             //
             // THE FRAME: UE WORLD, from the RENDERED skeleton. GetSocketLocation on the rig mesh
-            // returns world positions -- the renderer's own numbers, no Blam conversion, no
-            // handedness to get wrong. Each point is taken RELATIVE TO THE CAMERA'S POSITION
-            // (translation only), so head bob and any camera orbit cancel while orientation stays
-            // world-fixed. A joint that ignores the aim barely moves in that frame; one glued to the
-            // aim-rotating camera sweeps an arc.
+            // returns world positions -- the renderer's own numbers, no Blam conversion. Each point
+            // is taken RELATIVE TO THE CAMERA'S POSITION (translation only), so head bob and any
+            // camera orbit cancel while orientation stays world-fixed.
             //
             //     S = sum|d(P - cam)| / sum(|d aim| in rad * horizontal distance of P from cam)
             //     S ~ 0  world-fixed (body-locked)            S ~ 1  rotates rigidly with the aim
             //
-            // Placed AFTER both arm-driver branches, so it measures whichever driver owns the arms,
-            // and after the per-tick liveness guard, so the rig pointers are validated this tick.
+            // Two sweeps are scored separately: aim YAW ticks (yaw moves, pitch still) and aim PITCH
+            // ticks (pitch moves, yaw still); a tick where both move counts for neither.
             //
-            // THREE CONTROLS, each able to FAIL -- the last two instruments had none that could:
+            // CONTROLS, each able to FAIL:
             //   * METRIC -- two synthetic points from the same inputs: one locked to the aim (must
-            //     read 1.00), one fixed in the world (must read 0.00). Off => the arithmetic is wrong
-            //     and nothing else on the line counts.
-            //   * IK-VISIBLE -- GetSocketLocation might return the game's own camera-glued animation
-            //     instead of the palette IK, and that pose ALSO rotates with the aim, so S ~ 1
-            //     everywhere would be the wrong answer for the wrong reason. On ticks where the aim
-            //     does NOT rotate, nothing glued to the camera can move; only IK following the
-            //     controller can. Pushing the gun forward and back must move the wrist well over
-            //     20 cm on those ticks, or the reads are not seeing the IK at all.
-            //   * BONES -- a socket name that does not exist makes GetSocketLocation quietly return
-            //     the COMPONENT's own origin. A candidate within 0.05 cm of it is unresolved, never
-            //     a joint.
+            //     read 1.00), one fixed in the world (must read 0.00).
+            //   * IK-VISIBLE -- reads might be the game's own camera-glued animation, which also
+            //     rotates with the aim. On ticks where the aim does not move, only IK following the
+            //     controller can move the wrist: pushing the gun forward and back must move it well
+            //     over 20 cm on those ticks.
+            //   * BONES -- a name that does not exist makes GetSocketLocation return the COMPONENT's
+            //     own origin; a candidate within 0.05 cm of it is rejected.
+            //
+            // Beside the bones, each report carries the PALETTE shoulder (the aim arm's node 5 after
+            // anchoring, in palette units) and the mesh component's world transform, so the
+            // palette -> rendered-bone relation can be checked offline instead of assumed.
             //
             // The aim side follows aim_left_hand -- never assume the right controller aims.
             if (g_cfg.pa_world_probe && !g_in_menu.load() && !g_stick_mode.load()) {
                 auto* rc = reinterpret_cast<API::UObject*>(g_rig_component.load(std::memory_order_relaxed));
                 if (rc != nullptr && g_rig_parent != nullptr) {
+                    constexpr int kMaxB = 16;             // tracked bones
+                    constexpr int kSyn  = 2;              // synthetic controls
                     static API::UObject* wp_rc = nullptr;
                     static int           wp_key = -1;
-                    static std::wstring  wp_name[3];                        // shoulder, elbow, wrist
-                    static bool          wp_have[3] = {false, false, false};
+                    static std::wstring  wp_name[kMaxB];
+                    static int           wp_n = 0;
+                    static int           wp_wrist = -1;
                     static bool          wp_prev_ok = false;
-                    static Vec3          wp_prev_rel[5]{};                  // 3 joints + 2 synthetic
-                    static float         wp_prev_aim = 0.0f, wp_prev_body = 0.0f;
-                    static double        wp_path[5]{}, wp_ref[5]{};
-                    static double        wp_push = 0.0;
-                    static uint32_t      wp_turn_n = 0, wp_still_n = 0, wp_stickturn = 0;
-                    static uint32_t      wp_next = 128, wp_said = 0;
+                    static Vec3          wp_prev_rel[kMaxB + kSyn]{};
+                    static float         wp_prev_aim = 0.0f, wp_prev_body = 0.0f, wp_prev_pitch = 0.0f;
+                    static double        wp_ypath[kMaxB + kSyn]{}, wp_yref[kMaxB + kSyn]{};
+                    static double        wp_ppath[kMaxB + kSyn]{}, wp_pref[kMaxB + kSyn]{};
+                    static double        wp_push = 0.0;          // max NET wrist displacement vs a slow reference
+                    static Vec3          wp_push_ref{};
+                    static uint32_t      wp_push_ref_age = 0;
+                    static uint32_t      wp_yaw_n = 0, wp_pitch_n = 0, wp_still_n = 0, wp_stickturn = 0;
+                    static uint32_t      wp_ynext = 128, wp_pnext = 128, wp_said = 0;
 
                     const bool left = g_cfg.aim_left_hand;
                     const int  key  = g_cfg.pa_torso_frame * 2 + (left ? 1 : 0);
@@ -11745,11 +11848,13 @@ public:
                     if (rc != wp_rc || key != wp_key) {
                         wp_rc = rc;
                         wp_key = key;
-                        for (int i = 0; i < 5; ++i) { wp_path[i] = 0.0; wp_ref[i] = 0.0; }
+                        for (int i = 0; i < kMaxB + kSyn; ++i) { wp_ypath[i] = wp_yref[i] = wp_ppath[i] = wp_pref[i] = 0.0; }
                         wp_push = 0.0;
-                        wp_turn_n = wp_still_n = wp_stickturn = wp_said = 0;
-                        wp_next = 128;
+                        wp_yaw_n = wp_pitch_n = wp_still_n = wp_stickturn = wp_said = 0;
+                        wp_ynext = wp_pnext = 128;
                         wp_prev_ok = false;
+                        wp_n = 0;
+                        wp_wrist = -1;
 
                         Vec3 origin{};
                         const bool have_origin = call_ret_vec3(rc, L"K2_GetComponentLocation", &origin);
@@ -11764,7 +11869,7 @@ public:
                             return s;
                         };
 
-                        // The real skeleton, once per rig -- so the next session has names, not guesses.
+                        // The real skeleton, once per rig.
                         std::vector<std::wstring> bones;
                         {
                             alignas(16) uint8_t pn[RIG_PARAM_BUF] = {0};
@@ -11780,116 +11885,163 @@ public:
                                 }
                             }
                         }
-                        int logged = 0;
+                        // THE WHOLE UE HIERARCHY, once per rig: which bone hangs off which. The
+                        // palette's node parents are not the same fact, and whether a palette node
+                        // TRANSLATION reaches the rendered bone depends on exactly this.
+                        {
+                            std::wstring tree;
+                            for (const auto& b : bones) {
+                                alignas(16) uint8_t pp[RIG_PARAM_BUF] = {0};
+                                const API::FName bn = make_fname(b.c_str());
+                                std::memcpy(pp, &bn, sizeof(int32_t) * 2);       // GetParentBone(FName@0) -> FName@8
+                                rc->call_function(L"GetParentBone", pp);
+                                const std::wstring par = reinterpret_cast<API::FName*>(pp + 8)->to_string();
+                                tree += L" " + b + L"<" + par;
+                                if (tree.size() > 1800) {
+                                    API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD tree:%ls", tree.c_str());
+                                    tree.clear();
+                                }
+                            }
+                            if (!tree.empty()) API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD tree:%ls", tree.c_str());
+                        }
+                        // Every arm-ish bone on the AIM side in skeleton order, plus the chest and
+                        // the OTHER side's three joints (the chest route must move both shoulders).
+                        const std::wstring sfx_lc = left ? L"_l" : L"_r";
+                        const std::wstring oth_lc = left ? L"_r" : L"_l";
+                        std::wstring listing;
                         for (const auto& b : bones) {
                             const std::wstring lb = lower(b);
+                            const bool chest = lb.find(L"chest") != std::wstring::npos;
+                            const bool aim_side = lb.size() >= 2 && lb.compare(lb.size() - 2, 2, sfx_lc) == 0;
+                            const bool oth_joint = lb == (L"shoulder" + oth_lc) || lb == (L"elbow" + oth_lc) ||
+                                                   lb == (L"wrist" + oth_lc);
                             const bool armish = lb.find(L"shoulder") != std::wstring::npos ||
                                                 lb.find(L"clavicle") != std::wstring::npos ||
                                                 lb.find(L"arm")      != std::wstring::npos ||
                                                 lb.find(L"elbow")    != std::wstring::npos ||
                                                 lb.find(L"wrist")    != std::wstring::npos ||
                                                 lb.find(L"hand")     != std::wstring::npos;
-                            if (armish && logged < 48) {
-                                ++logged;
-                                API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD bone: '%ls'", b.c_str());
-                            }
-                        }
-
-                        // Known rig socket names first; then skeleton bones on the aim side by keyword.
-                        const std::wstring sfx = left ? L"_L" : L"_R";
-                        const std::wstring sfx_lc = left ? L"_l" : L"_r";
-                        const std::wstring known[3] = { L"ShoulderArmor" + sfx, L"ElbowPart2" + sfx, L"Wrist" + sfx };
-                        static const wchar_t* const kKeys[3][3] = {
-                            { L"clavicle", L"upperarm", L"shoulder" },
-                            { L"forearm",  L"lowerarm", L"elbow"    },
-                            { L"wrist",    L"hand",     L"wrist"    } };
-                        for (int i = 0; i < 3; ++i) {
-                            wp_have[i] = false;
-                            wp_name[i].clear();
-                            if (resolves(known[i])) { wp_name[i] = known[i]; wp_have[i] = true; continue; }
-                            for (const auto& b : bones) {
-                                const std::wstring lb = lower(b);
-                                if (lb.size() < 2 || lb.compare(lb.size() - 2, 2, sfx_lc) != 0) continue;
-                                bool hit = false;
-                                for (int k = 0; k < 3; ++k) if (lb.find(kKeys[i][k]) != std::wstring::npos) { hit = true; break; }
-                                if (hit && resolves(b)) { wp_name[i] = b; wp_have[i] = true; break; }
-                            }
+                            if (!(chest || (aim_side && armish) || oth_joint) || wp_n >= kMaxB) continue;
+                            if (!resolves(b)) { listing += L" [" + b + L":unresolved]"; continue; }
+                            if (wp_wrist < 0 && aim_side && lb.find(L"wrist") != std::wstring::npos) wp_wrist = wp_n;
+                            wp_name[wp_n++] = b;
+                            listing += L" " + b;
                         }
                         API::get()->log_info(
-                            "[Halo-CampE-UEVR] ARMWORLD resolved (aim=%s, %u bones): shoulder='%ls' elbow='%ls' wrist='%ls'",
-                            left ? "L" : "R", (unsigned)bones.size(),
-                            wp_have[0] ? wp_name[0].c_str() : L"UNRESOLVED",
-                            wp_have[1] ? wp_name[1].c_str() : L"UNRESOLVED",
-                            wp_have[2] ? wp_name[2].c_str() : L"UNRESOLVED");
+                            "[Halo-CampE-UEVR] ARMWORLD resolved (aim=%s, %u bones in skeleton, %d tracked, wrist=%d):%ls",
+                            left ? "L" : "R", (unsigned)bones.size(), wp_n, wp_wrist, listing.c_str());
                     }
 
                     // ---- Sample.
                     Vec3 cam{};
-                    Vec3 pj[3]{};
-                    bool ok = call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &cam);
-                    for (int i = 0; i < 3 && ok; ++i) {
-                        if (wp_have[i]) ok = call_socket_location(rc, wp_name[i].c_str(), &pj[i]);
-                    }
-                    const float aim  = g_dbg_view_in.load();
-                    const float body = g_dbg_view_out.load();
+                    Vec3 pj[kMaxB]{};
+                    bool ok = wp_n > 0 && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &cam);
+                    for (int i = 0; i < wp_n && ok; ++i) ok = call_socket_location(rc, wp_name[i].c_str(), &pj[i]);
+                    const float aim   = g_dbg_view_in.load();
+                    const float body  = g_dbg_view_out.load();
+                    const float pitch = ::halo::g_view_pitch.load();
                     if (ok) {
                         const float ar = aim * 0.01745329252f;
-                        Vec3 rel[5]{};
-                        for (int i = 0; i < 3; ++i) rel[i] = Vec3{pj[i].x - cam.x, pj[i].y - cam.y, pj[i].z - cam.z};
-                        rel[3] = Vec3{50.0f * std::cos(ar), 50.0f * std::sin(ar), 0.0f};   // synthetic: aim-locked
-                        rel[4] = Vec3{50.0f, 0.0f, 0.0f};                                  // synthetic: world-fixed
+                        Vec3 rel[kMaxB + kSyn]{};
+                        for (int i = 0; i < wp_n; ++i) rel[i] = Vec3{pj[i].x - cam.x, pj[i].y - cam.y, pj[i].z - cam.z};
+                        rel[wp_n]     = Vec3{50.0f * std::cos(ar), 50.0f * std::sin(ar), 0.0f};   // synthetic: aim-locked
+                        rel[wp_n + 1] = Vec3{50.0f, 0.0f, 0.0f};                                  // synthetic: world-fixed
+                        const int total = wp_n + kSyn;
                         if (wp_prev_ok) {
-                            const float d_aim  = std::fabs(wrap180(aim  - wp_prev_aim));
-                            const float d_body = std::fabs(wrap180(body - wp_prev_body));
+                            const float d_aim   = std::fabs(wrap180(aim  - wp_prev_aim));
+                            const float d_body  = std::fabs(wrap180(body - wp_prev_body));
+                            const float d_pitch = std::fabs(pitch - wp_prev_pitch);
                             if (d_body > 0.15f) {
                                 ++wp_stickturn;                                // the body moved: not this test
-                            } else if (d_aim > 0.3f) {
+                            } else if (d_aim > 0.3f && d_pitch < 0.1f) {
                                 const double da = (double)d_aim * 0.01745329252;
-                                for (int i = 0; i < 5; ++i) {
-                                    if (i < 3 && !wp_have[i]) continue;
+                                for (int i = 0; i < total; ++i) {
                                     const float dx = rel[i].x - wp_prev_rel[i].x;
                                     const float dy = rel[i].y - wp_prev_rel[i].y;
                                     const float dz = rel[i].z - wp_prev_rel[i].z;
-                                    wp_path[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
-                                    wp_ref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
+                                    wp_ypath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                    wp_yref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
                                 }
-                                ++wp_turn_n;
-                            } else if (d_aim < 0.1f && wp_have[2]) {
-                                const float dx = rel[2].x - wp_prev_rel[2].x;
-                                const float dy = rel[2].y - wp_prev_rel[2].y;
-                                const float dz = rel[2].z - wp_prev_rel[2].z;
-                                wp_push += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                ++wp_yaw_n;
+                            } else if (d_pitch > 0.3f && d_aim < 0.1f) {
+                                const double dp = (double)d_pitch * 0.01745329252;
+                                for (int i = 0; i < total; ++i) {
+                                    const float dx = rel[i].x - wp_prev_rel[i].x;
+                                    const float dy = rel[i].y - wp_prev_rel[i].y;
+                                    const float dz = rel[i].z - wp_prev_rel[i].z;
+                                    wp_ppath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                    // Pitch about the camera's LEFT axis: the arm's radius in the
+                                    // vertical plane through the aim. The synthetic controls sit in
+                                    // that plane (aim-locked) and off it (world-fixed, along +X).
+                                    wp_pref[i]  += dp * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y + rel[i].z * rel[i].z);
+                                }
+                                ++wp_pitch_n;
+                            } else if (d_aim < 0.1f && d_pitch < 0.1f && wp_wrist >= 0) {
+                                // NET displacement against a reference refreshed every 32 still
+                                // ticks (~1 s): a 30 cm push in under a second reads ~30 cm, while
+                                // per-tick jitter (0.2 cm/tick, random) barely accumulates. The
+                                // first version summed per-tick path and jitter alone cleared the
+                                // 20 cm bar in 100 ticks -- a control that could not fail.
+                                if (wp_still_n == 0 || wp_push_ref_age >= 32) {
+                                    wp_push_ref = rel[wp_wrist];
+                                    wp_push_ref_age = 0;
+                                }
+                                ++wp_push_ref_age;
+                                const float dx = rel[wp_wrist].x - wp_push_ref.x;
+                                const float dy = rel[wp_wrist].y - wp_push_ref.y;
+                                const float dz = rel[wp_wrist].z - wp_push_ref.z;
+                                const double net = std::sqrt(dx * dx + dy * dy + dz * dz);   // (std::max is shadowed by the Windows macro here)
+                                if (net > wp_push) wp_push = net;
                                 ++wp_still_n;
                             }
                         }
-                        for (int i = 0; i < 5; ++i) wp_prev_rel[i] = rel[i];
-                        wp_prev_aim  = aim;
-                        wp_prev_body = body;
-                        wp_prev_ok   = true;
+                        for (int i = 0; i < total; ++i) wp_prev_rel[i] = rel[i];
+                        wp_prev_aim   = aim;
+                        wp_prev_body  = body;
+                        wp_prev_pitch = pitch;
+                        wp_prev_ok    = true;
                     } else {
                         wp_prev_ok = false;                                    // a failed read breaks the chain
                     }
 
-                    // ---- Report on a COUNT, not a modulo, so a count that stalls on a boundary cannot
-                    // print the same line on every tick (the torso A/B above did exactly that).
-                    if (wp_turn_n >= wp_next && wp_said < 40) {
-                        wp_next = wp_turn_n + 128;
+                    // ---- Report on a COUNT, not a modulo (a stalled count must not repeat a line).
+                    const bool yaw_due   = (wp_yaw_n   >= wp_ynext);
+                    const bool pitch_due = (wp_pitch_n >= wp_pnext);
+                    if ((yaw_due || pitch_due) && wp_said < 60) {
                         ++wp_said;
-                        auto S = [&](int i) -> double { return (wp_ref[i] > 1e-6) ? wp_path[i] / wp_ref[i] : -1.0; };
-                        const double s_sh = S(0), s_el = S(1), s_wr = S(2), s_lock = S(3), s_fix = S(4);
+                        if (yaw_due)   wp_ynext = wp_yaw_n   + 128;
+                        if (pitch_due) wp_pnext = wp_pitch_n + 128;
+                        const double* path = yaw_due ? wp_ypath : wp_ppath;
+                        const double* ref  = yaw_due ? wp_yref  : wp_pref;
+                        auto S = [&](int i) -> double { return (ref[i] > 1e-6) ? path[i] / ref[i] : -1.0; };
+                        const double s_lock = S(wp_n), s_fix = S(wp_n + 1);
                         const bool metric_ok = std::fabs(s_lock - 1.0) < 0.05 && s_fix >= 0.0 && s_fix < 0.02;
                         const bool ik_seen   = wp_push > 20.0;
-                        auto joint = [](double s) {
-                            return s < 0.0 ? "n/a" : s < 0.25 ? "WORLD-FIXED" : s > 0.6 ? "SWINGS WITH AIM" : "PARTIAL";
-                        };
+                        std::string bl;
+                        char tmp[96];
+                        for (int i = 0; i < wp_n; ++i) {
+                            std::snprintf(tmp, sizeof(tmp), " %ls=%.2f", wp_name[i].c_str(), S(i));
+                            bl += tmp;
+                        }
+                        float psx = 0.0f, psy = 0.0f, psz = 0.0f;
+                        halo::palettearm_dbg_shoulder(&psx, &psy, &psz);
+                        Vec3 mloc{}, mrot{};
+                        const bool have_m = call_ret_vec3(rc, L"K2_GetComponentLocation", &mloc) &&
+                                            call_ret_vec3(rc, L"K2_GetComponentRotation", &mrot);
                         API::get()->log_info(
-                            "[Halo-CampE-UEVR] ARMWORLD patorsoframe=%d | METRIC %s (aim-locked=%.2f want 1, "
-                            "world-fixed=%.2f want 0) | IK-VISIBLE %s (wrist moved %.1f cm over %u still-aim "
-                            "ticks, want >20) | S shoulder=%.2f %s | elbow=%.2f %s | wrist=%.2f %s | over %u "
-                            "turning ticks, stickturn=%u",
-                            g_cfg.pa_torso_frame, metric_ok ? "ok" : "FAILED", s_lock, s_fix,
+                            "[Halo-CampE-UEVR] ARMWORLD %s patorsoframe=%d meshdown=%d | METRIC %s (aim-locked=%.2f "
+                            "want 1, world-fixed=%.2f want 0) | IK-VISIBLE %s (max net wrist push %.1f cm over %u still "
+                            "ticks, want >20) | S:%s | over %u ticks, stickturn=%u | PALSH=(%.4f,%.4f,%.4f) "
+                            "mesh-cam=(%.1f,%.1f,%.1f) meshrot=(p%.1f,y%.1f,r%.1f) aim=(y%.1f,p%.1f) body=%.1f",
+                            yaw_due ? "YAW" : "PITCH", g_cfg.pa_torso_frame,
+                            (int)g_mesh_standdown.load(std::memory_order_relaxed),
+                            metric_ok ? "ok" : "FAILED", s_lock, s_fix,
                             ik_seen ? "ok" : "NOT YET -- push the gun forward and back", wp_push, wp_still_n,
-                            s_sh, joint(s_sh), s_el, joint(s_el), s_wr, joint(s_wr), wp_turn_n, wp_stickturn);
+                            bl.c_str(), yaw_due ? wp_yaw_n : wp_pitch_n, wp_stickturn,
+                            psx, psy, psz,
+                            have_m ? mloc.x - cam.x : 0.0f, have_m ? mloc.y - cam.y : 0.0f, have_m ? mloc.z - cam.z : 0.0f,
+                            have_m ? mrot.x : 0.0f, have_m ? mrot.y : 0.0f, have_m ? mrot.z : 0.0f,
+                            aim, pitch, body);
                     }
                 }
             }
@@ -11969,7 +12121,8 @@ public:
                 API::get()->log_info("[Halo-CampE-UEVR] stereo view index observed = %d", index); }
         }
         if (g_cfg.rig_render && g_cfg.attach_mode == 0
-            && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()) {
+            && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()
+            && !g_mesh_standdown.load(std::memory_order_relaxed)) {   // palette route: the mesh is the game's
             auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
             auto* par = g_rig_parent;
             if (rig != nullptr && par != nullptr) {

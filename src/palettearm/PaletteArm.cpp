@@ -76,6 +76,9 @@ pa::Quat from_math(const ::halo::Quat& q) { return {q.x, q.y, q.z, q.w}; }
 // module now CONSUMES the swing that owner publishes, the same one the aim path and the
 // rendered weapon use. If you are about to add a second TwoHandHold here, you want that one.
 pa::ArmTuning    s_arm_tuning;
+// The palette node treated as the CHEST for the chest route (-1 = off); see the comment above
+// palettearm_parse_key() for the measurement that made it necessary.
+int              s_pa_chest_node = -1;
 
 // WHICH INDEX IS WHICH BONE, resolved rather than remembered. Rung 1 derives the map from the
 // palette the hook just handed us; rung 2 is elliotttate's measured table; rung 3 is arms stay
@@ -662,7 +665,22 @@ bool drive_palette(const pa::PaletteAccess& access) {
     //
     // Shortest-arc, not a raw lerp: blending 179 and -179 the naive way sweeps the torso the long
     // way round through zero.
-    if (g_cfg.pa_torso_frame == 6) {
+    // ---- 7: MODE 6 PLUS THE CAMERA PITCH -- the FULL camera -> body map. ---------------------
+    //
+    // The camera pitches 1:1 with the aim (measured 2026-08-30) and the palette is camera-local,
+    // so a yaw-only torso still tilts with the aim: torso_basis_from_root() takes "up" from the
+    // palette's +Z, which IS the pitched camera's up. Every consumer of torso_basis -- the
+    // shoulder's 22 cm drop, the hand offset off the head, the elbow pole -- then rides the aim
+    // pitch. pancreations avoid this by building their torso about a MEASURED world up; here the
+    // camera pitch is known exactly (g_view_pitch), so the map is composed directly:
+    //
+    //     torso = root o pitch(-p) o yaw(camera - view) o yaw(head/hands blend)
+    //
+    // which is the inverse camera rotation (yaw a, pitch p) followed by the body heading -- the
+    // same construction arm_gap already uses for the rest lift, now carrying the head term too and
+    // used for EVERYTHING. It is a rotation, so it is used as the torso basis directly rather than
+    // flattened (flattening is what threw the pitch term away).
+    if (g_cfg.pa_torso_frame == 6 || g_cfg.pa_torso_frame == 7) {
         float yaw_head = 0.0f;
         bool  have_head = false;
         if (pa::valid_basis(head_basis)) {
@@ -718,7 +736,18 @@ bool drive_palette(const pa::PaletteAccess& access) {
         const float cy = std::cos(yaw), sy = std::sin(yaw);
         const pa::Mat3 blendm{ pa::Vec3{ cy, sy, 0.0f}, pa::Vec3{-sy, cy, 0.0f},
                                pa::Vec3{0.0f, 0.0f, 1.0f} };
-        torso_source = pa::multiply(root_basis, pa::multiply(gapm, blendm));
+        if (g_cfg.pa_torso_frame == 7) {
+            // Same sign as pa_arm_pitch=2, the one confirmed in-headset: nose-DOWN by the camera
+            // pitch, i.e. the inverse of the camera's own pitch.
+            const float gp = -::halo::g_view_pitch.load() * 0.01745329252f;
+            const float cp = std::cos(gp), sp = std::sin(gp);
+            const pa::Mat3 pitch_gap{ pa::Vec3{ cp, 0.0f, sp}, pa::Vec3{0.0f, 1.0f, 0.0f},
+                                      pa::Vec3{-sp, 0.0f, cp} };
+            torso_source = pa::multiply(root_basis,
+                                        pa::multiply(pitch_gap, pa::multiply(gapm, blendm)));
+        } else {
+            torso_source = pa::multiply(root_basis, pa::multiply(gapm, blendm));
+        }
         s_dbg_yaw_hands = yaw * 57.2957795f;
         s_dbg_yaw_head  = yaw_head * 57.2957795f;
     }
@@ -753,7 +782,10 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                  pa::Vec3{0.0f, 0.0f, 1.0f} };
         torso_source = pa::multiply(root_basis, yaw_only);
     }
-    const pa::Mat3 torso_basis = pa::torso_basis_from_root(torso_source);
+    // Mode 7 is a full rotation and must NOT be flattened -- that would discard its pitch term.
+    const pa::Mat3 torso_basis = (g_cfg.pa_torso_frame == 7)
+                                     ? torso_source
+                                     : pa::torso_basis_from_root(torso_source);
     if (!pa::valid_basis(torso_basis)) {
         s_drive_stage = "torso basis invalid";
         return false;
@@ -779,6 +811,26 @@ bool drive_palette(const pa::PaletteAccess& access) {
     g_pa_torso_yaw.store(std::atan2(torso_basis.forward.y, torso_basis.forward.x) * 57.2957795f,
                          std::memory_order_relaxed);
     g_pa_torso_seq.fetch_add(1, std::memory_order_relaxed);
+
+    // ---- THE CHEST ROUTE: rotate the chest node by the torso frame (see s_pa_chest_node).
+    // Position untouched (it sits at the root); only its basis turns, so every UE bone that hangs
+    // off it -- both shoulders, through their reference offsets -- swings into the body frame.
+    // The arms themselves are rotated about this same pivot in the per-hand loop below.
+    const bool     chest_route = (s_pa_chest_node >= 0 && s_pa_chest_node < (int)access.node_count &&
+                                  s_pa_chest_node != (int)map->root);
+    const pa::Vec3 chest_pivot = chest_route ? access.palette[s_pa_chest_node].position
+                                             : root_position;
+    if (chest_route) {
+        const std::uint8_t chest_idx = (std::uint8_t)s_pa_chest_node;
+        pa::apply_rigid_delta(access.palette, &chest_idx, 1, torso_basis, chest_pivot);
+        static bool s_chest_said = false;
+        if (!s_chest_said) {
+            s_chest_said = true;
+            API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: chest route ON -- node %d rotated "
+                                 "by the torso frame; arms rotated about it (translation anchor off)",
+                                 s_pa_chest_node);
+        }
+    }
 
     // Which physical hand aims. Asked once, so left-handed play needs no second code path.
     const bool aim_is_right = !g_cfg.aim_left_hand;
@@ -1246,8 +1298,15 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 : (root_position + pa::transform_vector(root_basis, delta_blam) +
                    pa::transform_vector(pa::multiply(root_basis, controller), wrist_local));
 
-        if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
-                                          plan.left_side, s_arm_tuning)) {
+        if (chest_route) {
+            // pancreations' armRoot o unmod: the authored rest arm, re-expressed in the torso
+            // frame, pivoting on the chest. One rigid rotation places the shoulder where the UE
+            // hierarchy will put it anyway (chest o reference offset) AND carries the rest pose
+            // into the body frame -- so no translation anchor and no separate rest lift.
+            pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
+                                  plan.arm->shoulder_count, torso_basis, chest_pivot);
+        } else if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
+                                                 plan.left_side, s_arm_tuning)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[6];);
             continue;
         }
@@ -1275,9 +1334,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // body-anchored (ArmTuning::pole_body_fraction), so it may no longer be earning the
         // mismatch it causes. pa_arm_rest_lift gates ONLY this, leaving the target lift alone --
         // pa_arm_lift=0 would disable both and bring back the arms-follow-the-aim problem.
-        if (g_cfg.pa_arm_lift != 0 && g_cfg.pa_arm_rest_lift != 0) {
+        if (!chest_route && g_cfg.pa_arm_lift != 0 && g_cfg.pa_arm_rest_lift != 0) {
+            // Mode 7: the torso basis IS the full camera -> body map (pitch, lock gap AND the
+            // head heading), so the authored rest pose is carried into that frame by it directly;
+            // arm_gap lacks the head term and would leave the rest pose facing the base yaw.
             pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
-                                  plan.arm->shoulder_count, arm_gap,
+                                  plan.arm->shoulder_count,
+                                  (g_cfg.pa_torso_frame == 7) ? torso_basis : arm_gap,
                                   access.palette[plan.arm->shoulder].position);
         }
         if (!plan.is_aim && !access.is_capture_bank) {
@@ -1347,8 +1410,15 @@ bool drive_palette(const pa::PaletteAccess& access) {
             }
         }
 
+        // The body-anchored pole direction: torso up (the port's original) or pancreations'
+        // out-and-down in the torso frame -- see ArmTuning::pole_out_down.
+        pa::Vec3 pole_dir = torso_basis.up;
+        if (s_arm_tuning.pole_out_down) {
+            const float out = plan.left_side ? 1.0f : -1.0f;
+            pole_dir = torso_basis.left * out - torso_basis.up * s_arm_tuning.pole_down;
+        }
         if (!pa::solve_arm_for_tracked_wrist(access.palette, *plan.arm, wrist_target,
-                                             desired_wrist, torso_basis.up, s_arm_tuning)) {
+                                             desired_wrist, pole_dir, s_arm_tuning)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[5];);
             continue;
         }
@@ -1957,19 +2027,39 @@ void hand_fix_tick() {
 std::atomic<float>    g_pa_torso_yaw{0.0f};
 std::atomic<uint32_t> g_pa_torso_seq{0};
 
+// THE CHEST NODE (2026-09-16). The rendered UE skeleton takes the palette's ROTATIONS but not its
+// node TRANSLATIONS (measured: with the mesh at the camera, the palette shoulder node rotated with
+// the lock delta while the rendered Shoulder_R bone stayed rigid with the camera at S=0.95-0.98,
+// exactly as in the uncorrected control -- UE-style translation retargeting from the reference
+// pose). So anchor_shoulder_to_torso() can never show, and the only lever that moves a shoulder
+// JOINT is the rotation of its PARENT: in the UE hierarchy both shoulders, the weapon and the camera
+// control hang off Chest_M (probe 'ARMWORLD tree'). Rotating that node by the torso frame swings
+// both shoulders about the chest through their reference offsets -- pancreations' armRoot o unmod,
+// carried out through the hierarchy instead of by writing positions. Which PALETTE index is the
+// chest is not written anywhere (nodes 1-4 are the candidates; 2-4 sit at the root), so it is a key,
+// found by sweeping it against the world-space probe. -1 = off (the translation anchor, for A/B).
 bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
+    else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;
     else if (_stricmp(key, "pawristback")     == 0) s_arm_tuning.grip_to_wrist_back_m = (float)v;
     else if (_stricmp(key, "pawristdown")     == 0) s_arm_tuning.grip_to_wrist_down_m = (float)v;
+    else if (_stricmp(key, "papoleout")       == 0) s_arm_tuning.pole_out_down        = (v != 0.0);
+    else if (_stricmp(key, "papoledown")      == 0) s_arm_tuning.pole_down            = (float)v;
+    else if (_stricmp(key, "pastretch")       == 0) s_arm_tuning.stretch_max          = (float)v;
     else return false;
     return true;
 }
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+void palettearm_dbg_shoulder(float* x, float* y, float* z) {
+    if (x) *x = s_dbg_sh_x.load(std::memory_order_relaxed);
+    if (y) *y = s_dbg_sh_y.load(std::memory_order_relaxed);
+    if (z) *z = s_dbg_sh_z.load(std::memory_order_relaxed);
+}
 
 // Formats AND resets, so each emitted line is one clean window rather than a running total.
 const char* palettearm_status_jitter() {

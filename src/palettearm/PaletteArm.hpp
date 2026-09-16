@@ -37,6 +37,9 @@ const char* palettearm_status();
 // Second status line: the last drive's geometry -- root, wrist target, achieved wrist, and
 // how far the solver missed by. For diagnosing a pose that is WRONG rather than absent.
 const char* palettearm_status_geom();
+// Palette-space position of the AIM arm's shoulder node after anchoring (Blam units, root frame),
+// for the world-space probe to log beside the rendered bones. Zeros until the drive has run.
+void palettearm_dbg_shoulder(float* x, float* y, float* z);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?
