@@ -1260,6 +1260,8 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "holstermarkers") == 0) { g_cfg.holster_markers = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "holstermarkerscale") == 0) { g_cfg.holster_marker_scale = clampf((float)v, 0.02f, 0.5f); return true; }
     if (_stricmp(key, "holsteraimhold") == 0) { g_cfg.holster_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimhold") == 0) { g_cfg.melee_aim_hold_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "meleeaimramp") == 0) { g_cfg.melee_aim_ramp_ms = (int)clampf((float)v, 1.0f, 2000.0f); return true; }
     if (_stricmp(key, "holsteryawdead") == 0) { g_cfg.holster_yaw_dead = clampf((float)v, 0.0f, 180.0f); return true; }
     if (_stricmp(key, "holsteryawrate") == 0) { g_cfg.holster_yaw_rate = clampf((float)v, 0.0f, 360.0f); return true; }
     if (_stricmp(key, "holsterneckdown") == 0) { g_cfg.holster_neck_down = clampf((float)v, 0.0f, 0.5f); return true; }
