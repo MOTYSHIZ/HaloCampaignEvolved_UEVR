@@ -172,7 +172,6 @@ local HINTS = {
     heightsrc      = { t = "enum", items = { "automatic", "OpenXR stage", "OpenVR standing", "headset pose only" }, values = { 0, 1, 2, 3 } },
     heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 } },
     heighttrim     = { t = "drag", min = -50, max = 50 },
-    heightmin      = { t = "drag", min = 50, max = 200 },
     heightkey      = { t = "key" },
     headblockradius = { t = "drag", min = 1, max = 50 },
     aimbore        = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
@@ -263,7 +262,7 @@ local LABELS = {
     vehcamguard = "Hold the seat while the vehicle moves", vehcamhullcheck = "Check the vehicle body",
     roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",
     heightsample = "When your height is measured", heighttrim = "Height nudge",
-    heightmin = "Lowest accepted height", heightkey = "Height keyboard key", headblockradius = "Head clearance",
+    heightkey = "Height keyboard key", headblockradius = "Head clearance",
 }
 -- Prerequisites that are not player features.
 local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }

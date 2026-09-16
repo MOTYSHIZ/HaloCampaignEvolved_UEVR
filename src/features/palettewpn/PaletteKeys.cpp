@@ -51,13 +51,9 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "stomplog")       == 0) { g_cfg.stomp_log = (int)v; return true; }
     if (_stricmp(key, "termlog")        == 0) { g_cfg.term_log = (int)v; return true; }
     if (_stricmp(key, "wpnerrlog")      == 0) { g_cfg.wpn_err_log = (int)v; return true; }
-    if (_stricmp(key, "twohandmin")     == 0) { g_cfg.two_hand_min_m     = clampf((float)v, 0.0f, 2.0f); return true; }
-    if (_stricmp(key, "twohandmax")     == 0) { g_cfg.two_hand_max_m     = clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "twohandmarker")  == 0) { g_cfg.two_hand_marker    = (v != 0.0); return true; }
     if (_stricmp(key, "twohandmarkerscale") == 0) { g_cfg.two_hand_marker_scale = clampf((float)v, 0.01f, 0.5f); return true; }
     if (_stricmp(key, "twohandrad")     == 0) { g_cfg.two_hand_radius_m  = clampf((float)v, 0.01f, 1.0f); return true; }
-    if (_stricmp(key, "twohandagreemin")== 0) { g_cfg.two_hand_agree_min = clampf((float)v, -1.0f, 1.0f); return true; }
-    if (_stricmp(key, "twohandagreefull")==0) { g_cfg.two_hand_agree_full= clampf((float)v, -1.0f, 1.0f); return true; }
     // The placement's own two-handed hold, parsed exactly as the author parses his (same clamps,
     // same units). His twohand* keys keep feeding TwoHandAim.cpp, which the fork never reads.
     if (_stricmp(key, "palettetwohandmin")      == 0) { g_cfg.palette_two_hand_min_m      = clampf((float)v, 0.0f, 2.0f); return true; }
@@ -113,12 +109,6 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paletterolltrim")   == 0) { g_cfg.palette_roll_trim = clampf((float)v, -180.0f, 180.0f); return true; }
     if (_stricmp(key, "fpscalefix")         == 0) { g_cfg.fp_scale_fix = (v != 0.0); return true; }
     if (_stricmp(key, "pinuevrframe")       == 0) { g_cfg.pin_uevr_frame = (v != 0.0); return true; }
-    if (_stricmp(key, "palettewpnlockgain")  == 0) return true;
-    if (_stricmp(key, "palettewpnlockpitch") == 0) return true;
-    if (_stricmp(key, "palettewpnlockcorr")  == 0) return true;
-    if (_stricmp(key, "palettewpnsweep")     == 0) return true;
-    if (_stricmp(key, "palettewpnfix")       == 0) return true;
-    if (_stricmp(key, "palettewpnfixframe")  == 0) return true;
     // The palette weapon's calibration keys (palgripfix, palaimfix, palaimoff*, palaimcalibver, palwpnfix,
     // palwpncalibkey). The author's gripfixaim, aimfix and wpnfix stay his and are not parsed here.
     if (palette_calib_parse_key(key, val, v)) return true;

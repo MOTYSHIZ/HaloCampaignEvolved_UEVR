@@ -861,7 +861,6 @@ bool heightcal_parse_key(const char* key, const char* val, double v) {
         return true;
     }
     if (_stricmp(key, "heightlog")        == 0) { g_cfg.height_log      = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
-    if (_stricmp(key, "heightmin")        == 0) { g_cfg.height_min_abs  = clampf((float)v, 0.0f, 250.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightsample")     == 0) { g_cfg.height_sample   = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "heightslew")       == 0) { g_cfg.height_slew     = clampf((float)v, 0.0f, 500.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightsrc")        == 0) { g_cfg.height_src      = (int)clampf((float)v, 0.0f, 3.0f); return true; }

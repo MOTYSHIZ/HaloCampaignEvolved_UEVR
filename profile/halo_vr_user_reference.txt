@@ -535,8 +535,6 @@
 #heightsample=0
 # Auto height: nudge the view up or down, in centimetres.
 #heighttrim=0
-# Auto height: ignore a measurement lower than this above the floor, in centimetres.
-#heightmin=120
 # Auto height: an optional keyboard key that re-measures your height. The Calibrate height button is
 # the intended way.
 #heightkey=0x00

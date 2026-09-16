@@ -104,7 +104,6 @@
     float height_window_s = 5.0f;    // heightwindow (eyes): seconds of still, on-foot samples per window
     int   height_key      = 0;       // heightkey: VK code of the recalibrate key (0 = none; 0x2D is refused, UEVR's menu)
     float height_trim     = 0.0f;    // heighttrim (eyes, cm): + raises the view
-    float height_min_abs  = 1.20f;   // heightmin (cm): retained key, unused by the absolute and seated modes
     float height_band     = 0.10f;   // heightband (eyes, cm): continuous mode, drops larger than this are crouches
     float height_slew     = 0.5f;    // heightslew (cm/s): how fast a mode switch or new calibration is walked in (0 = snap)
     int   height_log      = 0;       // heightlog: 0 silent, 1 events, 2+ events + a HEIGHT line once a second
@@ -540,11 +539,13 @@
     // weapon's rear hand. Along the ray this is roughly where a forestock is; across it, a hand's
     // width. Metres.
     //
+    // ALONG the ray the bounds are the placement's own palette_two_hand_min_m / _max_m below, not a
+    // second copy here: the author's twohandmin / twohandmax keep feeding his TwoHandAim.cpp. Only
+    // the cylinder's RADIUS is the fork's, and it is read nowhere else.
+    //
     // Reusing reload_grip_mask for the button is deliberate -- it is the same physical grip. The
     // one overlap worth knowing about is the magazine fetch, which is the same button in the BELT
     // zone; the two zones only collide if you aim steeply down at your own hip.
-    float two_hand_min_m    = 0.08f;
-    float two_hand_max_m    = 0.80f;
     float two_hand_radius_m = 0.09f;
     // GRAB-ZONE DOT (2026-09-01, from a tester video: testers could not find the grip). A small
     // dot at the zone middle while the off hand approaches unlatched; gone once held or withdrawn.
@@ -552,14 +553,8 @@
     bool  two_hand_marker = false;
     float two_hand_marker_scale = 0.05f;
 
-    // AGREEMENT BAND, as a dot product between the hand-to-hand line and where the weapon already
-    // points. Below the minimum the line has no authority; at the full value it has all of it.
-    //
-    // A band rather than a threshold, because the hold is LATCHED: a latched support hand crossing
-    // a hard cutoff flips the weapon between two headings in a single frame, and those headings can
-    // be most of a right angle apart. Smoothstepped between the two.
-    float two_hand_agree_min  = 0.35f;
-    float two_hand_agree_full = 0.50f;
+    // THE AGREEMENT BAND is the placement's own palette_two_hand_agree_min / _agree_full below, for
+    // the same reason as the zone bounds above.
 
     // Ramp for the latch itself, milliseconds. Short enough to feel immediate, long enough that
     // grabbing the barrel sweeps the aim instead of cutting it.
@@ -1171,11 +1166,7 @@
     // Default: the value the vehicle features are tuned with.
     int   veh_steer_sign = -1;       // flip if the hog steers the wrong way
     int   veh_wheel_grip = 1;        // 1 = grip holds the wheel (the natural gesture); 0 = hands-in-zone alone
-    // Grip is ALSO the Warthog's brake (measured 0x0200 RB, 2026-08-20), so while the wheel is
-    // held those bits are swallowed -- otherwise every steering input brakes. Let go of the
-    // wheel and grip brakes normally again.
     int   veh_wheel_hand = 2;   // 0 left, 1 right, 2 BOTH
-    int   veh_brake_mask = 0x0300;
     // Wheel-plane tilt, degrees. POSITIVE = the top leans TOWARD the driver, NEGATIVE = away.
     // 0 = a bus wheel facing the driver, 90 = flat like a table. The hand angle is measured IN
     // this plane, which is what makes the arc feel like the drawn wheel instead of a hoop
@@ -1204,13 +1195,6 @@
     // seat offset learned as a slow EMA of a constant. No boom, no crossover -- normal VR
     // driving. Falls back to 1 when no VehicleActor .Body resolves.
     int   veh_cam_anchor = 2;
-    // One-shot dump of the local pawn and its components while SEATED, on the rising edge.
-    bool  veh_body_dump = false;
-    // One-shot on mount: every component named for a vehicle plus everything within 20 m of the
-    // eye. Finds the transform the hog is DRAWN from.
-    bool  veh_hog_dump = false;
-    // One-shot skeleton dump of the resolved hull: bone names + which bone functions exist.
-    bool  veh_hog_bones = false;
     // Hide the driver's third-person body while seated (the camera sits inside it). 0 = off,
     // 1 = SetHiddenInGame + SetVisibility (measured insufficient on this build), 2 = the above
     // plus scale to 0.001, which the draw demonstrably honours.
