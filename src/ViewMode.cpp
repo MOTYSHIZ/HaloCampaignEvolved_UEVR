@@ -17,6 +17,7 @@ namespace {
 // Published state.
 std::atomic<int>      g_mode{(int)ViewMode::Unknown};
 std::atomic<int>      g_declared{-1};
+std::atomic<bool>     g_shared_projection{false};
 std::atomic<unsigned> g_samples{0};
 
 // Render-thread working state. Touched only inside viewmode_note_post, which runs on the one
@@ -137,8 +138,16 @@ int viewmode_declared() {
     return g_declared.load(std::memory_order_relaxed);
 }
 
+void viewmode_set_shared_projection(bool shared) {
+    g_shared_projection.store(shared, std::memory_order_relaxed);
+}
+
+bool viewmode_shared_projection() {
+    return g_shared_projection.load(std::memory_order_relaxed);
+}
+
 bool viewmode_is_mono() {
-    return viewmode_current() == ViewMode::Mono && viewmode_declared() == 3;
+    return viewmode_current() == ViewMode::Mono && viewmode_declared() == 3 && viewmode_shared_projection();
 }
 
 unsigned viewmode_samples() {
