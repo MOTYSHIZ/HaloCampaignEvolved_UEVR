@@ -270,6 +270,7 @@ bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head
 bool s_reset_drop_tap = false;
 
 bool reload_engine_press_ignored() {
+    ++s_rt_taps;   // shotgunlog: every tap the engine saw, ignored or not
     // A tap made while a reset's window held the tick (a death, a ride, a cutscene) is dropped once:
     // it belongs to the gun that went away with the body. reloadresetholds 0 restores the old path.
     if (s_reset_drop_tap) {
@@ -522,6 +523,102 @@ int reload_engine_fire_suppressed() {
     return 0;
 }
 
+// ---- SHOTGUNLOG (shotgun_log). Every reload value is sampled each tick and ONE line is printed on
+// any tick where one of them changed, naming what changed. Read-only: it writes nothing to the game
+// and touches no state but its own. Ported from the owner's play build, where it is what found the
+// stale rounds pointer, the empty judge and the trigger verdict.
+namespace {
+struct RtSnap {
+    std::string key;
+    int state = -1, rounds = -1, reserve = -1, fps = -1, frame = -1;
+    int lock = 0, lockedback = 0, due = 0, early = 0, presspend = 0, pressdue = 0, chamber = 0, emptydrop = 0, trueempty = 0, hidedisp = 0;
+    int held = 0, racked = 0, pullmm = 0, hot = 0, pressact = 0, statehold = 0, akwin = 0;
+    int everyshot = 0, pump = 0, reloadonly = 0, rack = 0, hidden = 0, coop = 0, taps = 0, presses = 0, mem = 0;
+    int guard = 0, emptynow = -1, nofire = 0, reloadvr = 1;
+};
+RtSnap s_rt_prev;
+bool   s_rt_have = false;
+int    s_rt_inserts = 0, s_rt_shots = 0;
+}  // namespace
+void reload_trace_tick() {
+    if (g_cfg.shotgun_log == 0 || (g_cfg.shotgun_log == 1 && !weapon_in_list("Shotgun"))) { s_rt_have = false; return; }
+    RtSnap n;
+    n.key = weapon_key();
+    n.state = (int)s_reload;
+    if (auto* r = rounds_field()) n.rounds = (int)*r;
+    {
+        const uintptr_t obj = g_wpn_obj_ptr.load(std::memory_order_relaxed);
+        const int off = s_ph_reserve_seen;
+        if (obj != 0 && off >= 0 && off < 0x7FE && !IsBadReadPtr((const void*)(obj + (uintptr_t)off), 2))
+            n.reserve = (int)*reinterpret_cast<const uint16_t*>(obj + (uintptr_t)off);
+    }
+    if (auto* animbp = reload_weapon_anim_instance()) {
+        if (auto* p = animbp->get_property_data<uint8_t>(L"FirstPersonState")) if (!IsBadReadPtr(p, 1)) n.fps = (int)*p;
+        if (auto* p = animbp->get_property_data<int32_t>(L"PrimaryAmmunition_ExplicitFrame")) if (!IsBadReadPtr(p, sizeof(int32_t))) n.frame = *p;
+    }
+    n.lock = s_sl_lock_pending; n.lockedback = s_sl_locked_back; n.due = s_sl_reload_due; n.early = s_sl_pressed_early;
+    n.presspend = s_sl_press_pending; n.pressdue = (s_sl_press_due_at != 0); n.chamber = s_sl_chamber_left;
+    n.emptydrop = s_sl_empty_at_drop; n.trueempty = s_true_empty;
+    n.hidedisp = g_wristhud_hide_cradle.load(std::memory_order_relaxed);
+    n.held = s_sl_held; n.racked = s_sl_racked;
+    n.pullmm = ((int)(g_slide_pull.load(std::memory_order_relaxed) * 3048.0f) / 5) * 5;   // 5 mm steps
+    n.hot = g_slide_zone_hot.load(std::memory_order_relaxed);
+    n.pressact = reload_press_active();
+    n.statehold = (s_sh_until != 0); n.akwin = (s_akm_until != 0);
+    n.everyshot = g_sl_zone_every_shot.load(std::memory_order_relaxed); n.pump = g_sl_zone_pump.load(std::memory_order_relaxed);
+    n.reloadonly = g_sl_zone_reload_only.load(std::memory_order_relaxed); n.rack = g_slide_rack_found;
+    n.hidden = reload_hidden_mode(); n.coop = (g_cfg.coop_auto && net_is_coop());
+    n.taps = s_rt_taps; n.presses = s_rt_presses;
+    for (auto& m : s_wpn_mem) if (!m.key.empty()) ++n.mem;
+    // The object guard refusing a stale pointer, the empty judge the drop would use now, the trigger
+    // verdict and the manual reload switch.
+    const int32_t sg_idx = g_wpn_obj_index.load(std::memory_order_relaxed);
+    const int32_t sg_ptr = g_wpn_obj_ptr_datum.load(std::memory_order_relaxed);
+    n.guard = (sg_idx != -1 && sg_ptr != sg_idx) ? 1 : 0;
+    n.emptynow = (int)weapon_empty_now();
+    n.nofire = reload_engine_fire_suppressed();
+    n.reloadvr = g_cfg.reload_vr;
+    if (s_rt_have && n.presses != s_rt_prev.presses) { s_rt_inserts = 0; s_rt_shots = 0; }
+    if (s_rt_have && n.key == s_rt_prev.key && n.rounds >= 0 && s_rt_prev.rounds >= 0) {
+        if (n.rounds == s_rt_prev.rounds + 1) ++s_rt_inserts;
+        else if (n.rounds < s_rt_prev.rounds) ++s_rt_shots;
+    }
+    std::string ch;
+    auto cmp = [&](const char* nm, int a, int b) { if (a != b) { if (!ch.empty()) ch += ','; ch += nm; } };
+    if (!s_rt_have) ch = "first";
+    else {
+        if (n.key != s_rt_prev.key) ch = "weapon";
+        cmp("state", n.state, s_rt_prev.state); cmp("rounds", n.rounds, s_rt_prev.rounds); cmp("reserve", n.reserve, s_rt_prev.reserve);
+        cmp("fps", n.fps, s_rt_prev.fps); cmp("frame", n.frame, s_rt_prev.frame);
+        cmp("lock", n.lock, s_rt_prev.lock); cmp("lockedback", n.lockedback, s_rt_prev.lockedback); cmp("due", n.due, s_rt_prev.due);
+        cmp("early", n.early, s_rt_prev.early); cmp("presspend", n.presspend, s_rt_prev.presspend); cmp("pressdue", n.pressdue, s_rt_prev.pressdue);
+        cmp("chamber", n.chamber, s_rt_prev.chamber); cmp("emptyatdrop", n.emptydrop, s_rt_prev.emptydrop); cmp("trueempty", n.trueempty, s_rt_prev.trueempty);
+        cmp("hidedisp", n.hidedisp, s_rt_prev.hidedisp); cmp("held", n.held, s_rt_prev.held); cmp("racked", n.racked, s_rt_prev.racked);
+        cmp("pull", n.pullmm, s_rt_prev.pullmm); cmp("hot", n.hot, s_rt_prev.hot); cmp("press", n.pressact, s_rt_prev.pressact);
+        cmp("statehold", n.statehold, s_rt_prev.statehold); cmp("akwin", n.akwin, s_rt_prev.akwin);
+        cmp("everyshot", n.everyshot, s_rt_prev.everyshot); cmp("pump", n.pump, s_rt_prev.pump); cmp("reloadonly", n.reloadonly, s_rt_prev.reloadonly);
+        cmp("rack", n.rack, s_rt_prev.rack); cmp("hidden", n.hidden, s_rt_prev.hidden); cmp("coop", n.coop, s_rt_prev.coop);
+        cmp("tap", n.taps, s_rt_prev.taps); cmp("presssent", n.presses, s_rt_prev.presses); cmp("wpnmem", n.mem, s_rt_prev.mem);
+        cmp("guard", n.guard, s_rt_prev.guard); cmp("emptynow", n.emptynow, s_rt_prev.emptynow);
+        cmp("nofire", n.nofire, s_rt_prev.nofire); cmp("reloadvr", n.reloadvr, s_rt_prev.reloadvr);
+    }
+    if (!ch.empty()) {
+        const long long nowt = now_ticks();
+        const long long since = (s_sl_press_at != 0)
+            ? (long long)std::chrono::duration_cast<std::chrono::milliseconds>(clock_t_::duration(nowt - s_sl_press_at)).count() : -1;
+        API::get()->log_info("[Halo-CampE-UEVR] SGLOG %s [%s] state=%s rounds=%d reserve=%d fps=%d frame=%d | lock=%d lockedback=%d due=%d early=%d presspend=%d pressdue=%d "
+                             "chamber=%d emptyatdrop=%d trueempty=%d hidedisp=%d | held=%d racked=%d pull=%dmm hot=%d | press=%d since=%lldms pressms=%d taps=%d presses=%d "
+                             "inserts=%d shots=%d | statehold=%d akwin=%d | everyshot=%d pump=%d reloadonly=%d rack=%d always=%d chamberok=%d | hidden=%d coop=%d wpnmem=%d "
+                             "| guard=%d idx=0x%08X ptrdatum=0x%08X emptynow=%d nofire=%d reloadvr=%d",
+                             n.key.c_str(), ch.c_str(), state_name(s_reload), n.rounds, n.reserve, n.fps, n.frame, n.lock, n.lockedback, n.due, n.early, n.presspend, n.pressdue,
+                             n.chamber, n.emptydrop, n.trueempty, n.hidedisp, n.held, n.racked, n.pullmm, n.hot, n.pressact, since,
+                             n.coop ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms, n.taps, n.presses, s_rt_inserts, s_rt_shots, n.statehold, n.akwin,
+                             n.everyshot, n.pump, n.reloadonly, n.rack, (int)weapon_in_list(g_cfg.slide_always_weapons), (int)slide_chamber_ok(), n.hidden, n.coop, n.mem,
+                             n.guard, (unsigned)sg_idx, (unsigned)sg_ptr, n.emptynow, n.nofire, n.reloadvr);
+    }
+    s_rt_prev = n; s_rt_have = true;
+}
+
 void reload_engine_gesture_reset() {
     reload_state_on_reset();   // before anything below clears it: the state goes to its weapon
     s_sl_reload_due = false; s_sl_pressed_early = false; s_sl_locked_back = false; s_sl_press_pending = false; s_sl_press_due_at = 0;
@@ -564,6 +661,7 @@ void reload_engine_ticks(bool poses_ok, const Vec3& hpos) {
         slide_copy_tick();
         slide_part_tick();
         slide_node_write_tick();
+        reload_trace_tick();
     }
     // Per-weapon reload state: re-hide a magazine that is out on whichever actor renders the weapon
     // now, and mirror the live state into its record. Before the melee-off return, so switching melee

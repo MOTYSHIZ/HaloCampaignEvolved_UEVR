@@ -384,6 +384,9 @@
 # animation speed-up, the reload sound mute and the hand pose hold, and drops a reload press made
 # while you had no control.
 #reloadresetholds=1
+# Reload trace for the log. One line whenever any reload value changes, with every value as it is.
+# 1 = only while a shotgun is in hand, 2 = every weapon, 0 = off. Nothing is written to the game.
+#shotgunlog=0
 # Belt magazine spot. Where your spare magazine hangs on your belt, in metres from your body (right,
 # up, back). A weapon listed in the per-weapon table below uses that entry instead.
 #reloadmagbelt=-0.22,-0.65,0.00

@@ -825,6 +825,8 @@ void ad_write_zero(bool render_path);   // the anim-variable readout probe (defi
 // clears the lock): s_hide_display outlives s_true_empty through the gesture.
 bool    s_hide_display = false;
 int     s_coop_lock_rounds = 1;
+int     s_ph_reserve_seen = -1;   // the reserve offset the phantom tick is using (shotgunlog)
+int     s_rt_taps = 0, s_rt_presses = 0;   // taps the engine saw and presses it sent (shotgunlog)
 bool    s_ph_rebase = false;      // the weapon in hand changed identity: re-seed the counter caches
 int32_t s_rs_cur_datum = -1;      // the held weapon's datum read this tick by the reload state tracker
 void slide_phantom_tick() {
@@ -974,12 +976,14 @@ void slide_phantom_tick() {
         s_prev = fin;
     }
     if (obj_ok) { memcpy(s_snap, reinterpret_cast<const void*>(obj), sizeof(s_snap)); s_have_snap = true; }
+    s_ph_reserve_seen = s_reserve;
 }
 
 // The game's reload press with everything that rides it: the honest 0 first so the refill
 // accounts from empty, the hold, the animation clamp, the sound mute.
 void reload_press_now(const char* why) {
     const long long nowt = now_ticks();
+    ++s_rt_presses;
     if (s_true_empty) {
         s_true_empty = false;   // stop the every-tick re-assert BEFORE the 0 goes back, or the refill counts from 1
         if (!(g_cfg.coop_auto && net_is_coop()) && !reload_hidden_mode()) { if (auto* r = rounds_field()) { if (*r == 1) *r = 0; } }   // coop / hidden: the counter is never written

@@ -1554,6 +1554,13 @@
     // them, and a reload tap made while the reset's window held the tick is dropped rather than
     // fired on the frame control comes back (default, the play build's behaviour); 0 = the old.
     bool  reload_reset_holds = true;
+    // SHOTGUNLOG (diagnostic, default off). One line per EVENT: printed on the tick any reload value
+    // changes, naming the fields that changed and printing every value as it is (state, rounds,
+    // reserve, the weapon AnimBP's FirstPersonState and ammo frame, every lock and flag, the rack
+    // hand and pull, the synthesized press and its age, the state hold and mute window, per-weapon
+    // rack options, taps, presses, shells inserted and shots since the last press, and the object
+    // guard's verdict). 1 = only while a shotgun is in hand; 2 = every weapon. Nothing is written.
+    int   shotgun_log = 0;
     int   reload_state_death   = 1;
     int   reload_state_level   = 1;
     bool  reload_state_log     = false;
