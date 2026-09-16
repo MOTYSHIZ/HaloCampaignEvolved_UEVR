@@ -233,7 +233,7 @@ const FeatureRow kFeatures[] = {
       "blamangles", FEATURE_INT(veh_cam) },
     { "vehiclewheel", 1, Tier::Experimental, "Vehicles", "Steering wheel",
       "Hands on the steering wheel. Steering is not sent to the vehicle yet.",
-      "vehsteersign",
+      "vehwheelsteersign",
       "vehwheelgrip,vehwheelhand,vehwheellock,vehwheelmarker,vehwheelpos,vehwheelrad,vehwheeltilt",
       "blamangles", FEATURE_INT(vehicle_wheel) },
     { "roomscale",    1, Tier::Experimental, "Roomscale", "Roomscale",
@@ -669,6 +669,11 @@ void features_append_dev_reference(std::string& text) {
             "# A master key set in any cfg file beats its tier; a tier switch turns a whole tier on or off,\r\n"
             "# and a single master key still beats its tier switch. Sub-settings act only while the master\r\n"
             "# is on.\r\n"
+            "#\r\n"
+            "# Each feature's keys are listed twice over: its SUB-SETTINGS are the ones a player chooses,\r\n"
+            "# one entry each in halo_vr_user_reference.txt and one row each in the settings menu; its DEV\r\n"
+            "# KEYS are probes, dumps, logs and captured calibration, listed here only. Both act only while\r\n"
+            "# the feature is on. Every fork key is under exactly one feature, or in the core list at the end.\r\n"
             "#\r\n";
     char line[512];
     for (int i = 0; i < kCount; ++i) {

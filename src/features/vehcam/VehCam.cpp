@@ -799,7 +799,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehwheelpos")    == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_wheel_pos[0], &g_cfg.veh_wheel_pos[1], &g_cfg.veh_wheel_pos[2]); return true; }
     if (_stricmp(key, "vehwheelrad")    == 0) { g_cfg.veh_wheel_radius = clampf((float)v, 0.05f, 1.0f); return true; }
     if (_stricmp(key, "vehwheellock")   == 0) { g_cfg.veh_wheel_lock = clampf((float)v, 10.0f, 360.0f); return true; }
-    if (_stricmp(key, "vehsteersign")   == 0) { g_cfg.veh_steer_sign = (v < 0.0) ? -1 : 1; return true; }
+    if (_stricmp(key, "vehwheelsteersign")   == 0) { g_cfg.veh_steer_sign = (v < 0.0) ? -1 : 1; return true; }
     if (_stricmp(key, "vehwheelgrip")   == 0) { g_cfg.veh_wheel_grip = (int)v; return true; }
     if (_stricmp(key, "vehwheelhand")   == 0) { g_cfg.veh_wheel_hand = (int)v; return true; }
     if (_stricmp(key, "vehwheeltilt")   == 0) { g_cfg.veh_wheel_tilt = clampf((float)v, -80.0f, 80.0f); return true; }

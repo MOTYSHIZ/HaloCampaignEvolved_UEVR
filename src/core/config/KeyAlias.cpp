@@ -67,6 +67,8 @@ const KeyAliasRow kAliases[] = {
     { "widgetlog",            "stabilitywidgetlog" },
     { "holstermarkercolor",   "stabilityholstermarkercolor" },
     { "grenminthrow",         "stabilitygrenminthrow" },
+    // vehiclewheel -- stem "vehwheel". veh* alone is the seat camera's.
+    { "vehsteersign",         "vehwheelsteersign" },
     // reloadvr -- stem "reload".
     { "roomanchor",           "reloadroomanchor" },
     { "coophide",             "reloadcoophide" },

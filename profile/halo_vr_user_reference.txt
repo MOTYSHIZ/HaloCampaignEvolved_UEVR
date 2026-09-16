@@ -513,7 +513,7 @@
 
 # ------------------------------------------------------------------- STEERING WHEEL (vehiclewheel)
 # Steering direction. -1 or 1; flip it if the vehicle steers the wrong way.
-#vehsteersign=-1
+#vehwheelsteersign=-1
 
 # --------------------------------------------------------------------------- ROOMSCALE (roomscale)
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
