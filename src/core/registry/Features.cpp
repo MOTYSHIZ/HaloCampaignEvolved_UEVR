@@ -1,5 +1,6 @@
 #include "core/registry/Features.hpp"
 #include "core/registry/ArmHideDerive.hpp"
+#include "core/registry/OwnedKeyDerive.hpp"
 
 #include "Config.hpp"
 #include "features/FeatureList.hpp"
@@ -101,10 +102,7 @@ const FeatureRow kFeatures[] = {
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
-      "palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst,palettecalibkey,palwpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
-    { "aimbore",      1, Tier::Experimental, "Weapon", "Aim along the drawn barrel",
-      "Shots follow the barrel of the weapon you see, not only your hand.",
-      "", "palettewpn", FEATURE_INT(aim_bore) },
+      "aimbore,palettecam,poselatch,paletterolltrim,palbuildgate,palpubframe,twohandmarker,palettecamlead,meshconst,palettecalibkey,palwpncalibkey,palettehidearms", "", FEATURE_BOOL(palette_weapon) },
     { "aimreticulestamp", 1, Tier::Experimental, "Weapon", "Reticule placed every frame",
       "The headset-drawn reticule is placed each frame on exactly where your shots go.",
       "", "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
@@ -178,6 +176,10 @@ int  s_pose_latch_layer   = -1;
 int  s_arm_hide_mode_layer = -1;
 int  s_arm_hide_bone_layer = -1;
 int  s_rig_layer = -1;
+// The author's keys a fork feature owns while it is on (OwnedKeyDerive.cpp): which cfg layer set each
+// one, and the resolution each was last logged with (OWNED_UNRESOLVED before the first load).
+int  s_owned_layer[OWNED_KEY_COUNT];
+int  s_owned_logged[OWNED_KEY_COUNT] = {};
 // The reloadhidearms resolution last logged (approach * 16 + reason), -1 before the first load.
 int  s_hide_arms_logged = -1;
 // The palette weapon's rig and arm hide resolution last logged, -1 before the first load.
@@ -255,6 +257,7 @@ void features_begin_load() {
     s_arm_hide_mode_layer = -1;
     s_arm_hide_bone_layer = -1;
     s_rig_layer = -1;
+    for (int i = 0; i < OWNED_KEY_COUNT; ++i) s_owned_layer[i] = -1;
 }
 
 void features_config_reload_begin() { cfg_reload_begin(); }
@@ -280,6 +283,9 @@ void features_note_key(const char* key, const char* val) {
     if (_stricmp(key, "armhidemode") == 0) { s_arm_hide_mode_layer = s_layer; return; }
     if (_stricmp(key, "armhidebone") == 0) { s_arm_hide_bone_layer = s_layer; return; }
     if (_stricmp(key, "rig") == 0)         { s_rig_layer = s_layer; return; }
+    for (int i = 0; i < OWNED_KEY_COUNT; ++i) {
+        if (_stricmp(key, owned_key_name(i)) == 0) { s_owned_layer[i] = s_layer; return; }
+    }
 }
 
 void features_apply() {
@@ -345,6 +351,29 @@ void features_apply() {
                     arm_hide_reload_reason_text(r.reload_active, r.reload_reason), r.reload_active,
                     g_cfg.arm_hide ? 1 : 0, g_cfg.arm_hide_mode);
             }
+        }
+    }
+
+    // A FORK SETTING THAT FOLLOWS ITS FEATURE'S MASTER KEY (OwnedKeyDerive.cpp). Fork keys only:
+    // the author's keys are never written here. A key a cfg layer sets is the player's and is left
+    // alone, and load_config rebuilds the Config before this, so a feature switched off gives back
+    // exactly the layered values.
+    {
+        OwnedKeyLayers set;
+        for (int i = 0; i < OWNED_KEY_COUNT; ++i) set.set[i] = s_owned_layer[i] >= 0;
+        const OwnedKeyResolution r = owned_keys_derive(g_cfg, set);
+
+        // ONE LINE PER DERIVE OR REVERT, with the feature, the key, the value and the reason.
+        for (int i = 0; i < OWNED_KEY_COUNT; ++i) {
+            if (r.state[i] == s_owned_logged[i]) continue;
+            const bool was_derived = (s_owned_logged[i] == OWNED_DERIVED);
+            const bool quiet = (s_owned_logged[i] == OWNED_UNRESOLVED && r.state[i] == OWNED_FEATURE_OFF);
+            s_owned_logged[i] = r.state[i];
+            if (quiet) continue;   // startup with the owning feature simply off
+            uevr::API::get()->log_info("[Halo-CampE-UEVR] OWNEDKEY %s %s = %s, %s: %s",
+                owned_key_feature(i), owned_key_name(i), r.value[i],
+                (r.state[i] == OWNED_DERIVED) ? "derived" : (was_derived ? "reverts" : "not derived"),
+                owned_key_reason(i, r.state[i]));
         }
     }
 

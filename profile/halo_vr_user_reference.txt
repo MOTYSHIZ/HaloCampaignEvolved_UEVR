@@ -279,6 +279,11 @@
 # Settings of the switchable features. The menu shows each one under its feature, in the feature's
 # tier section, and they only act while that feature is on.
 #
+# Aim along the barrel. Where your shots go while the weapon is placed on your hand: 1 follows the
+# barrel of the weapon you see, 0 aims by your hand alone. The weapon placement sets this to 1 for
+# you, so a value here is only needed to aim by the hand instead. Nothing reads it with the
+# placement off.
+#aimbore=0
 # Weapon pose timing. How the weapon you see is written each frame: 6 writes it before the game's
 # own pose pass, so the weapon never flickers; 0 is the original method.
 #palbuildgate=6
