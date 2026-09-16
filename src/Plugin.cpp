@@ -11841,6 +11841,10 @@ public:
                     static uint32_t      wp_yaw_n = 0, wp_pitch_n = 0, wp_still_n = 0, wp_stickturn = 0;
                     static uint32_t      wp_ynext = 128, wp_pnext = 128, wp_said = 0;
                     static uint32_t      wp_raw_n = 0;                    // raw ticks logged so far
+                    static Vec3          wp_win_rel[kMaxB + kSyn]{};       // 8-tick window start
+                    static float         wp_win_aim = 0.0f, wp_win_pitch = 0.0f;
+                    static uint32_t      wp_win_n = 0;
+                    static bool          wp_win_bad = false;
                     static int           wp_isho = -1, wp_iel = -1;        // aim-side Shoulder / Elbow
 
                     const bool left = g_cfg.aim_left_hand;
@@ -11859,6 +11863,7 @@ public:
                         wp_wrist = -1;
                         wp_raw_n = 0;
                         wp_isho = wp_iel = -1;
+                        wp_win_n = 0;
 
                         Vec3 origin{};
                         const bool have_origin = call_ret_vec3(rc, L"K2_GetComponentLocation", &origin);
@@ -11959,29 +11964,7 @@ public:
                             const float d_pitch = std::fabs(pitch - wp_prev_pitch);
                             if (d_body > 0.15f) {
                                 ++wp_stickturn;                                // the body moved: not this test
-                            } else if (d_aim > 0.3f && d_pitch < 0.1f) {
-                                const double da = (double)d_aim * 0.01745329252;
-                                for (int i = 0; i < total; ++i) {
-                                    const float dx = rel[i].x - wp_prev_rel[i].x;
-                                    const float dy = rel[i].y - wp_prev_rel[i].y;
-                                    const float dz = rel[i].z - wp_prev_rel[i].z;
-                                    wp_ypath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
-                                    wp_yref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
-                                }
-                                ++wp_yaw_n;
-                            } else if (d_pitch > 0.3f && d_aim < 0.1f) {
-                                const double dp = (double)d_pitch * 0.01745329252;
-                                for (int i = 0; i < total; ++i) {
-                                    const float dx = rel[i].x - wp_prev_rel[i].x;
-                                    const float dy = rel[i].y - wp_prev_rel[i].y;
-                                    const float dz = rel[i].z - wp_prev_rel[i].z;
-                                    wp_ppath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
-                                    // Pitch about the camera's LEFT axis: the arm's radius in the
-                                    // vertical plane through the aim. The synthetic controls sit in
-                                    // that plane (aim-locked) and off it (world-fixed, along +X).
-                                    wp_pref[i]  += dp * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y + rel[i].z * rel[i].z);
-                                }
-                                ++wp_pitch_n;
+                                wp_win_bad = true;
                             } else if (d_aim < 0.1f && d_pitch < 0.1f && wp_wrist >= 0) {
                                 // NET displacement against a reference refreshed every 32 still
                                 // ticks (~1 s): a 30 cm push in under a second reads ~30 cm, while
@@ -12018,6 +12001,52 @@ public:
                                 rel[wp_wrist].x, rel[wp_wrist].y, rel[wp_wrist].z,
                                 psh[0] * k, psh[1] * k, psh[2] * k, pel[0] * k, pel[1] * k, pel[2] * k,
                                 pwr[0] * k, pwr[1] * k, pwr[2] * k);
+                        }
+                        // ---- 8-TICK WINDOWS, not per-tick steps. The palette's correction lands one
+                        // tick AFTER the camera turn (two clocks), so scoring only the ticks where the
+                        // aim moved saw a body-locked joint step WITH the camera on the scored tick and
+                        // step back on the unscored one -- it read exactly like a camera-locked joint
+                        // (2026-09-16: the day 'translations do not render' was wrongly concluded from
+                        // it). Displacement across 8 ticks against the aim change across the same 8
+                        // ticks bounds the lag's share at 1/8; a window with a body move or with both
+                        // yaw and pitch moving is dropped.
+                        if (!wp_prev_ok || wp_win_n == 0) {
+                            for (int i = 0; i < total; ++i) wp_win_rel[i] = rel[i];
+                            wp_win_aim = aim; wp_win_pitch = pitch; wp_win_bad = false; wp_win_n = 0;
+                        }
+                        ++wp_win_n;
+                        if (wp_win_n >= 8) {
+                            const float D_aim   = std::fabs(wrap180(aim - wp_win_aim));
+                            const float D_pitch = std::fabs(pitch - wp_win_pitch);
+                            if (!wp_win_bad) {
+                                if (D_aim > 0.6f && D_pitch < 0.3f) {
+                                    const double da = (double)D_aim * 0.01745329252;
+                                    for (int i = 0; i < total; ++i) {
+                                        const float dx = rel[i].x - wp_win_rel[i].x;
+                                        const float dy = rel[i].y - wp_win_rel[i].y;
+                                        const float dz = rel[i].z - wp_win_rel[i].z;
+                                        wp_ypath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                        wp_yref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
+                                    }
+                                    wp_yaw_n += 8;
+                                } else if (D_pitch > 0.6f && D_aim < 0.3f) {
+                                    const double dp = (double)D_pitch * 0.01745329252;
+                                    for (int i = 0; i < total; ++i) {
+                                        const float dx = rel[i].x - wp_win_rel[i].x;
+                                        const float dy = rel[i].y - wp_win_rel[i].y;
+                                        const float dz = rel[i].z - wp_win_rel[i].z;
+                                        wp_ppath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                        // Pitch about the camera's LEFT axis: full radius from the
+                                        // camera. The synthetic aim-locked point lies in the horizontal
+                                        // plane, so it reads ~0 here by construction -- the pitch
+                                        // line's METRIC is expected to say FAILED for it; read the
+                                        // world-fixed control (0) and the bones only.
+                                        wp_pref[i]  += dp * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y + rel[i].z * rel[i].z);
+                                    }
+                                    wp_pitch_n += 8;
+                                }
+                            }
+                            wp_win_n = 0;                                   // next tick opens a fresh window
                         }
                         for (int i = 0; i < total; ++i) wp_prev_rel[i] = rel[i];
                         wp_prev_aim   = aim;

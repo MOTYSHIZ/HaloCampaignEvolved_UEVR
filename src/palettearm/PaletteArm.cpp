@@ -336,6 +336,24 @@ addrcascade::TierReporter s_map_reporter;
 // WristConvention already takes this precaution one level down, sampling the stock wrist "BEFORE
 // this arm is touched" -- this is the same rule applied to the map itself.
 const pa::NodeMap* s_map_cached    = nullptr;
+
+// ONE SOLVE, MIRRORED INTO BOTH CAPTURE BANKS (pabankmirror, default on). The hook drives the live
+// slot and then each capture bank the renderer interpolates between. Re-solving per bank was not
+// deterministic: the 25 percent stock-pose share of the elbow pole reads each bank's OWN stock
+// pose, and the two banks hold different animation ticks, so the two interpolation endpoints
+// disagreed at the elbow -- measured 2026-09-16 as the rendered elbow wobbling +/-2 cm every tick
+// while the palette elbow (live slot) sat still and the stock arms with no driver did not wobble at
+// all. The shoulder and wrist, which depend only on the tracking snapshot, did not wobble. So the
+// live solve is captured here and the DRIVEN records are copied into each bank verbatim -- the
+// same idea as pancreations' stereo cache: pose once, view twice. Stock nodes in the banks are left
+// to interpolate as before. Invalidated at every live entry so a bank can never take a stale pose.
+bool           s_bank_mirror_on  = true;
+bool           s_mirror_valid    = false;
+std::int32_t   s_mirror_tag      = 0;
+std::uint32_t  s_mirror_count    = 0;
+std::uint32_t  s_mirror_n        = 0;
+std::uint8_t   s_mirror_idx[pa::kMaxPaletteNodes];
+pa::BlamMatrix4x3 s_mirror_rec[pa::kMaxPaletteNodes];
 std::int32_t       s_map_key_tag   = -1;
 std::uint32_t      s_map_key_nodes = 0;
 
@@ -567,6 +585,22 @@ bool drive_palette(const pa::PaletteAccess& access) {
             "%u nodes left stock as unattributable).",
             pa::nodemap_tier_name(s_node_map.tier()), access.node_count,
             map->right.wrist, map->left.wrist, (unsigned)s_node_map.unattributed());
+    }
+
+    // ---- ONE SOLVE, BOTH BANKS -- see s_bank_mirror_on. A bank drive copies the live solve.
+    if (access.is_capture_bank) {
+        if (s_bank_mirror_on && s_mirror_valid && s_mirror_tag == access.model_tag &&
+            s_mirror_count == access.node_count) {
+            for (std::uint32_t k = 0; k < s_mirror_n; ++k) {
+                const std::uint8_t i = s_mirror_idx[k];
+                if (i < access.node_count) access.palette[i] = s_mirror_rec[i];
+            }
+            s_drive_ok.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        // No live solve to mirror this call (it bailed): fall through to the per-bank solve.
+    } else {
+        s_mirror_valid = false;                                  // the live solve decides below
     }
 
     // ---- SMOKE TEST. Shove everything but the root straight up and see whether the screen cares.
@@ -1555,6 +1589,29 @@ bool drive_palette(const pa::PaletteAccess& access) {
         HALO_VR_DEV_ONLY(if (hid) ++s_hands_applied;);
     }
 
+    // ---- Capture the live solve for the banks (see s_bank_mirror_on): the driven nodes only --
+    // both arms' subtrees, the chest node when that route is on, and everything but the root when
+    // hands-only has scaled the rest. Fingers sit inside the wrist subtrees already.
+    if (!access.is_capture_bank && s_bank_mirror_on) {
+        s_mirror_n = 0;
+        auto add = [&](std::uint8_t i) {
+            if (i == 0 || i >= access.node_count || s_mirror_n >= pa::kMaxPaletteNodes) return;
+            for (std::uint32_t k = 0; k < s_mirror_n; ++k) if (s_mirror_idx[k] == i) return;
+            s_mirror_idx[s_mirror_n++] = i;
+            s_mirror_rec[i] = access.palette[i];
+        };
+        if (g_cfg.pa_hands_only != 0) {
+            for (std::uint32_t i = 1; i < access.node_count; ++i) add((std::uint8_t)i);
+        } else {
+            for (std::size_t k = 0; k < map->right.shoulder_count; ++k) add(map->right.shoulder_subtree[k]);
+            for (std::size_t k = 0; k < map->left.shoulder_count;  ++k) add(map->left.shoulder_subtree[k]);
+            if (chest_route) add((std::uint8_t)s_pa_chest_node);
+        }
+        s_mirror_tag   = access.model_tag;
+        s_mirror_count = access.node_count;
+        s_mirror_valid = (s_mirror_n > 0);
+    }
+
     s_drive_stage = "DRIVING";
     s_drive_ok.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -2031,20 +2088,19 @@ void hand_fix_tick() {
 std::atomic<float>    g_pa_torso_yaw{0.0f};
 std::atomic<uint32_t> g_pa_torso_seq{0};
 
-// THE CHEST NODE (2026-09-16). The rendered UE skeleton takes the palette's ROTATIONS but not its
-// node TRANSLATIONS (measured: with the mesh at the camera, the palette shoulder node rotated with
-// the lock delta while the rendered Shoulder_R bone stayed rigid with the camera at S=0.95-0.98,
-// exactly as in the uncorrected control -- UE-style translation retargeting from the reference
-// pose). So anchor_shoulder_to_torso() can never show, and the only lever that moves a shoulder
-// JOINT is the rotation of its PARENT: in the UE hierarchy both shoulders, the weapon and the camera
-// control hang off Chest_M (probe 'ARMWORLD tree'). Rotating that node by the torso frame swings
-// both shoulders about the chest through their reference offsets -- pancreations' armRoot o unmod,
-// carried out through the hierarchy instead of by writing positions. Which PALETTE index is the
-// chest is not written anywhere (nodes 1-4 are the candidates; 2-4 sit at the root), so it is a key,
-// found by sweeping it against the world-space probe. -1 = off (the translation anchor, for A/B).
+// THE CHEST NODE (2026-09-16) -- an experiment that turned out UNNECESSARY, kept for A/B only.
+// It was built on a reading that the rendered skeleton ignores palette node TRANSLATIONS (the
+// rendered Shoulder_R read S=0.95 in mode 4, same as the uncorrected control). A raw per-tick dump
+// the same day retracted that: the rendered joints track the palette's, translations included,
+// within ~1 cm every tick; the S came from a metric that scored only ticks where the aim moved,
+// while the palette's correction lands one tick after the camera turn. Rotating palette node N by
+// the torso frame and rotating each authored arm about it (pancreations' armRoot o unmod through
+// the hierarchy) does reach both rendered shoulders (node 4), but the translation anchor already
+// does the job. -1 = off.
 bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
+    else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;

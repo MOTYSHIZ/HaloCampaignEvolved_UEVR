@@ -3761,7 +3761,9 @@ struct Config {
     // relative, cm) beside the palette's own joints -- to see with the eye whether the rendered
     // pose alternates between ours and the stock pose. 0 = off. DEV KEY paworldraw.
     int   pa_world_raw    = 0;
-    // PALETTE ROUTE: STAND THE UE MESH PLACEMENT DOWN (2026-09-16). The UeRig driver's component
+    // PALETTE ROUTE: STAND THE UE MESH PLACEMENT DOWN (2026-09-16). This is the fix that made the
+    // palette route's body-locked shoulders finally RENDER (raw per-tick dump: rendered joints
+    // track the palette's within ~1 cm, shoulder world-fixed across a sweep). The UeRig driver's component
     // placement (Plugin.cpp rig block: world rotation + relative location, plus the render-rate
     // re-apply) was gated only on the weapon drives, so it kept running under armdriver=2 and
     // pinned the whole mesh so its PrimaryWeapon socket sat on the controller. The palette records
