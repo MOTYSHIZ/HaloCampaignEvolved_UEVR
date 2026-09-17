@@ -72,7 +72,12 @@ struct ArmTuning {
     // both bone lengths scale by k = min(dist/reach, stretch_max) and the elbow subtree is moved
     // onto the stretched elbow, so skinning stretches the mesh with the bones instead of the hand
     // visibly detaching from the forearm. Applied AFTER the clavicle assist.
+    // BOTH bones really lengthen (2026-09-17): every helper node between two joints slides out by
+    // its station along the bone, and the hand is carried to the stretched forearm's end.
     float stretch_max = 1.0f;
+    // How much of the extension the target asks for the BONES take; the rest still opens at the
+    // wrist when the hand is snapped onto the controller. 1 = all of it, up to stretch_max.
+    float stretch_share = 1.0f;
 };
 
 // ---- PRIMITIVES --------------------------------------------------------------------------------

@@ -726,6 +726,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
     tuning_w.shoulder_down_m    *= wscale;
     tuning_w.shoulder_lateral_m *= wscale;
     tuning_w.clavicle_assist_m  *= wscale;
+    tuning_w.stretch_max   = g_cfg.pa_stretch;          // live, not sticky -- see Config.hpp
+    tuning_w.stretch_share = g_cfg.pa_stretch_share;
     if (s_aim_lead) {
         float dy = 0.0f, dp = 0.0f;
         if (::halo::desired_aim_now(&dy, &dp)) {
@@ -2682,7 +2684,6 @@ bool palettearm_parse_key(const char* key, double v) {
     else if (_stricmp(key, "pawristdown")     == 0) s_arm_tuning.grip_to_wrist_down_m = (float)v;
     else if (_stricmp(key, "papoleout")       == 0) s_arm_tuning.pole_out_down        = (v != 0.0);
     else if (_stricmp(key, "papoledown")      == 0) s_arm_tuning.pole_down            = (float)v;
-    else if (_stricmp(key, "pastretch")       == 0) s_arm_tuning.stretch_max          = (float)v;
     else return false;
     return true;
 }

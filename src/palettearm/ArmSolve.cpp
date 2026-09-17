@@ -5,6 +5,32 @@
 namespace halo::palettearm {
 namespace {
 
+bool in_list(const std::uint8_t* list, std::size_t count, std::uint8_t node) {
+    for (std::size_t i = 0; i < count; ++i) if (list[i] == node) return true;
+    return false;
+}
+
+// STRETCH A BONE, NOT A JOINT. Slides every node that hangs BETWEEN two joints out along the bone
+// in proportion to its station: a node a third of the way down a bone stretched by k moves a third
+// of the extra length. `nodes` is the upper joint's subtree, `below` the lower joint's (left alone
+// here -- the caller moves it as one piece), `joint` the upper joint itself.
+//
+// Without this a stretched bone keeps every helper node at its authored distance and opens the
+// whole extension as ONE gap in front of the lower joint, which is exactly the "the hand stretches
+// from the wrist" look one joint further up. This rig has helper bones at 1/3 and 2/3 of both the
+// upper arm and the forearm (measured), so the skin is asked to stretch evenly along each.
+void spread_along_bone(BlamMatrix4x3* palette, const std::uint8_t* nodes, std::size_t count,
+                       const std::uint8_t* below, std::size_t below_count, std::uint8_t joint,
+                       const Vec3& origin, const Vec3& dir, float bone_length, float k) {
+    if (!(k > 1.0f) || !(bone_length > 1.0e-5f)) return;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::uint8_t node = nodes[i];
+        if (node == joint || in_list(below, below_count, node)) continue;
+        const float t = std::clamp(dot(palette[node].position - origin, dir) / bone_length, 0.0f, 1.0f);
+        palette[node].position = palette[node].position + dir * (t * bone_length * (k - 1.0f));
+    }
+}
+
 // Turn `rotation` down to `scale` of its angle. Used to rotate a finger joint PART of the way onto
 // the open line: the open pose is derived, so the in-between poses have to be too.
 Quat scaled_rotation(const Quat& rotation, float scale) {
@@ -357,8 +383,14 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     // attempt lacked. Whatever the clavicle assist could not absorb scales BOTH solve lengths by
     // k <= stretch_max, and after the shoulder rotation below the elbow subtree is TRANSLATED onto
     // the stretched elbow, so the forearm's end lands on the hand instead of short of it.
-    if (tuning.stretch_max > 1.0f && target_distance > maximum_reach) {
-        stretch_k     = std::min(target_distance / (upper_length + lower_length), tuning.stretch_max);
+    //
+    // SHARED WITH THE WRIST (stretch_share). The bones take `share` of the extension the target
+    // asks for, up to the cap; whatever is left still opens at the wrist when the hand is snapped
+    // onto the controller. 1 = the arm takes all of it until the cap, 0 = the old clamp.
+    if (tuning.stretch_max > 1.0f && tuning.stretch_share > 0.0f && target_distance > maximum_reach) {
+        const float needed = target_distance / (upper_length + lower_length);
+        stretch_k     = std::min(1.0f + (needed - 1.0f) * std::min(tuning.stretch_share, 1.0f),
+                                 tuning.stretch_max);
         solve_upper   = upper_length * stretch_k;
         solve_lower   = lower_length * stretch_k;
         minimum_reach = std::fabs(solve_upper - solve_lower) + 1.0e-4f;
@@ -427,7 +459,14 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
                       shoulder_rotation, shoulder_position);
     if (stretch_k > 1.0f) {
         // The rotation above put the elbow at its AUTHORED length along the solved direction;
-        // slide everything from the elbow down onto the stretched elbow.
+        // slide everything from the elbow down onto the stretched elbow -- and the upper arm's own
+        // helper nodes out along the bone with it, each by its station.
+        const Vec3 upper_dir = normalized(palette[arm.elbow].position - shoulder_position);
+        if (length_squared(upper_dir) > 0.8f) {
+            spread_along_bone(palette, arm.shoulder_subtree, arm.shoulder_count,
+                              arm.elbow_subtree, arm.elbow_count, arm.shoulder,
+                              shoulder_position, upper_dir, upper_length, stretch_k);
+        }
         const Vec3 stretch_shift = elbow_target - palette[arm.elbow].position;
         apply_rigid_offset(palette, arm.elbow_subtree, arm.elbow_count, stretch_shift);
     }
@@ -438,6 +477,20 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
         rotation_between(moved_wrist - moved_elbow, wrist_target - moved_elbow);
     if (!valid_basis(elbow_rotation)) return false;
     apply_rigid_delta(palette, arm.elbow_subtree, arm.elbow_count, elbow_rotation, moved_elbow);
+    if (stretch_k > 1.0f) {
+        // THE FOREARM'S HALF, which the 2026-09-16 stretch left out: the solve above used a
+        // stretched forearm LENGTH, but a rotation cannot lengthen anything, so the wrist still
+        // sat at its authored distance and the whole forearm extension opened at the wrist. Carry
+        // the hand out to the stretched length and spread the forearm's nodes behind it.
+        const Vec3 fore_dir = normalized(palette[arm.wrist].position - moved_elbow);
+        if (length_squared(fore_dir) > 0.8f) {
+            spread_along_bone(palette, arm.elbow_subtree, arm.elbow_count,
+                              arm.wrist_subtree, arm.wrist_count, arm.elbow,
+                              moved_elbow, fore_dir, lower_length, stretch_k);
+            apply_rigid_offset(palette, arm.wrist_subtree, arm.wrist_count,
+                               fore_dir * (lower_length * (stretch_k - 1.0f)));
+        }
+    }
 
     const Vec3 final_wrist_position = palette[arm.wrist].position;
     const Mat3 current_wrist_basis  = orthonormal_basis(palette[arm.wrist]);
@@ -547,11 +600,6 @@ float twist_follow(float from_neutral_deg) {
     if (a <= kTwistFull) return from_neutral_deg;
     const float back = kTwistFull * (180.0f - a) / (180.0f - kTwistFull);
     return from_neutral_deg < 0.0f ? -back : back;
-}
-
-bool in_list(const std::uint8_t* list, std::size_t count, std::uint8_t node) {
-    for (std::size_t i = 0; i < count; ++i) if (list[i] == node) return true;
-    return false;
 }
 
 } // namespace

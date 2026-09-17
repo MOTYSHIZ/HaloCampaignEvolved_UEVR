@@ -4005,6 +4005,21 @@ struct Config {
     //   0 = rigid with the elbow (the game's way) .. 1 = with the forearm beside it (DEFAULT) ..
     //   3 = cap (2.3 puts the gauntlet on the wrist-end twist bone's roll)
     float pa_forearm_armor = 1.0f;    // DEV KEY paforearmarmor
+    // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
+    // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
+    // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the
+    // authored arm is 63.5 cm, so a real arm at full stretch asks for ~85 cm. In the round-5 headset
+    // log the support hand's target was past the authored reach in 26% of samples (max 1.42x); the
+    // shoulder's 12 cm slide absorbed most, and everything beyond it opened as one gap at the wrist.
+    // Now both bones lengthen by up to pastretch, every helper node between the joints sliding out
+    // by its station (this rig has them at 1/3 and 2/3 of both bones, so the skin stretches evenly),
+    // and pastretchshare says how much of the extension the bones take before the wrist gets the
+    // rest. Both live (pastretch used to be a sticky key with a default of 1.0 = off).
+    //   pastretch       1 = off (all of it at the wrist, the behaviour to date) .. 1.5 (DEFAULT)
+    //   pastretchshare  0 = wrist only .. 0.85 (DEFAULT: about the same strain along the arm as
+    //                   across the hand) .. 1 = the arm takes everything up to pastretch
+    float pa_stretch       = 1.5f;    // DEV KEY pastretch
+    float pa_stretch_share = 0.85f;   // DEV KEY pastretchshare
     // RECOIL TRANSLATION (2026-09-17, headset: "the main one we are losing is the direct backwards
     // recoil translation ... when shooting the AR, the weapon barely moves"). The rig carry lands the
     // weapon's authored marker ON the rig's target every frame, which cancels every translation the
