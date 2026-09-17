@@ -10671,9 +10671,12 @@ void update() {
                             API::get()->log_info(
                                 "[Halo-CampE-UEVR] PALETTE RIG CARRY check: drawn weapon is %.1f cm from the "
                                 "rig-mode target | target body-frame=(%.1f,%.1f,%.1f) cm mount=(%.1f,%.1f,%.1f) "
-                                "calibrating=%d",
+                                "calibrating=%d | gun fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) "
+                                "trim=(%.2f,%.2f,%.2f)",
                                 std::sqrt(ex * ex + ey * ey + ez * ez), w.x, w.y, w.z,
-                                mount_local.x, mount_local.y, mount_local.z, (int)calibrating);
+                                mount_local.x, mount_local.y, mount_local.z, (int)calibrating,
+                                f.x, f.y, f.z, u.x, u.y, u.z,
+                                g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
                         }
                     }
 #endif
@@ -12290,6 +12293,24 @@ public:
                         rig_set_world_rotation(sh, 0.0, (double)body_yaw, 0.0);
                 }
                 ::halo::g_mesh_body_active.store(true, std::memory_order_relaxed);
+                // ...AND THE RIG FRAME, AT RENDER RATE, for anything anchored to the rig. The scope's
+                // compositor pane decomposes its target against the rig component's transform as
+                // read on the tick (Scope.cpp), and rebuilds it here against a fresh one -- the
+                // two-clocks rule. The UeRig re-apply below is what publishes that fresh frame, and
+                // it stands down with the mesh, which left the pane with NO render-rate anchor under
+                // this route (it also switches head-relative off for rig-anchored slots), so it
+                // trailed every step and turn. The component IS where we just put it: the parent's
+                // location, level, at the body yaw. One reflected call, same as the path it replaces.
+                if (g_cfg.rig_render) {
+                    Vec3 rloc{};
+                    if (call_ret_vec3(brig, L"K2_GetComponentLocation", &rloc) &&
+                        std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
+                        const float yr = body_yaw * DEG2RAD;
+                        const float cyw = std::cos(yr), syw = std::sin(yr);
+                        halo::xrlayer_note_rig(rloc, Vec3{cyw, syw, 0.0f}, Vec3{-syw, cyw, 0.0f},
+                                               Vec3{0.0f, 0.0f, 1.0f});
+                    }
+                }
                 if (!s_body_prev) {
                     API::get()->log_info("[Halo-CampE-UEVR] PALETTE MESH BODY FRAME: mesh held at "
                                          "(pitch 0, yaw %.2f, roll 0) at render rate; the palette "
