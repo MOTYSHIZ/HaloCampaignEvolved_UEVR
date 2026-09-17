@@ -647,4 +647,67 @@ bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const
     return true;
 }
 
+// ---- RECOIL PASS-THROUGH ------------------------------------------------------------------------
+
+void RecoilPass::reset() { *this = RecoilPass{}; }
+
+Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m,
+                        bool learn) {
+    last_back_m = 0.0f;
+    if (!finite(marker_pos) || !valid_basis(marker_basis)) { if (learn) stable = 0; return {}; }
+
+    if (learn) {
+        // "Holding still" is judged frame to frame, so a slow idle sway still counts as rest and the
+        // reference follows it; a burst never does -- the Assault Rifle's kick cycle moves the
+        // marker 0.6-2 cm on four frames of every six.
+        bool still = false;
+        if (have_prev) {
+            const float step_m = length(marker_pos - prev_pos) * kMetresPerBlamUnit;
+            float align = dot(prev_basis.forward, marker_basis.forward);
+            align = std::min(align, dot(prev_basis.left, marker_basis.left));
+            align = std::min(align, dot(prev_basis.up, marker_basis.up));
+            still = step_m < 0.0006f && align > 0.999986f;          // 0.6 mm, 0.3 degrees
+        }
+        prev_pos = marker_pos; prev_basis = marker_basis; have_prev = true;
+        stable = still ? std::min(stable + 1, 1000000) : 0;
+        if (stable >= 20) {
+            if (!have_ref) { ref_pos = marker_pos; ref_basis = marker_basis; have_ref = true; ++latches; }
+            else {
+                ref_pos   = ref_pos + (marker_pos - ref_pos) * 0.2f;
+                ref_basis = blend_basis(ref_basis, marker_basis, 0.2f);
+                if (!valid_basis(ref_basis)) ref_basis = marker_basis;
+            }
+        }
+    }
+    if (!have_ref || !(gain > 0.0f) || !(max_m > 0.0f) || !std::isfinite(gain) || !std::isfinite(max_m))
+        return {};
+
+    // BACK ALONG THE BARREL, and nothing else. The authored marker carries the gun's long axis as
+    // its LEFT axis (measured on the Assault Rifle and the Magnum: left = +X, the view's forward),
+    // so "back" is its negative; a marker authored some other way falls back to the view's own
+    // backward, which is where every first-person gun points to within a few degrees.
+    Vec3 back_axis = ref_basis.left * -1.0f;
+    if (back_axis.x > -0.7f) back_axis = Vec3{-1.0f, 0.0f, 0.0f};
+
+    const Vec3  moved  = marker_pos - ref_pos;
+    const float back   = dot(moved, back_axis);
+    if (!(back > 0.0f)) return {};
+
+    // A KICK IS A TRANSLATION. Every other animation that moves the marker turns it as well --
+    // measured: the rifle's burst stays within 0.64 degrees of rest, while the draw, reload, melee,
+    // grenade and swap animations turn it 24 to 177 degrees -- and travels several times further.
+    // Both fades are smooth so an animation passing through the band eases the gun rather than
+    // popping it.
+    float align = dot(ref_basis.forward, marker_basis.forward);
+    align = std::min(align, dot(ref_basis.left, marker_basis.left));
+    align = std::min(align, dot(ref_basis.up, marker_basis.up));
+    const float turned_deg = std::acos(std::clamp(align, -1.0f, 1.0f)) * 57.2957795131f;
+    const float weight = (1.0f - smoothstep(8.0f, 20.0f, turned_deg)) *
+                         (1.0f - smoothstep(max_m, 2.0f * max_m, length(moved) * kMetresPerBlamUnit));
+    const float out_m = std::min(back * kMetresPerBlamUnit, max_m) * weight * std::min(gain, 2.0f);
+    if (!(out_m > 0.0f) || !std::isfinite(out_m)) return {};
+    last_back_m = out_m;
+    return back_axis * (out_m / kMetresPerBlamUnit);
+}
+
 } // namespace halo::palettearm

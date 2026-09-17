@@ -480,6 +480,13 @@ struct GripRelation {
 GripRelation s_aim_relation;
 std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
 float s_sup_curl = 0.0f;                        // the support hand's current curl, eased (0 = relaxed)
+// ---- THE KICK THE RIG CARRY LEAVES IN (parecoil; see Config.hpp and pa::RecoilPass). Learned off the
+// live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
+// new weapon has rested.
+pa::RecoilPass     s_recoil;
+std::int32_t       s_recoil_tag = 0;
+bool               s_recoil_have_tag = false;
+std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
 // dev: what the forearm twist saw on the last live drive, per hand (aim, support)
 std::atomic<float> s_dbg_twist_hand[2]{}, s_dbg_twist_neutral[2]{}, s_dbg_twist_follow[2]{};
 std::atomic<int>   s_dbg_twist_nodes[2]{};
@@ -1184,8 +1191,49 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // zero), and that is the palette's own origin -- whatever the root NODE happens to hold.
             const pa::Mat3 delta_basis = pa::multiply(stage_basis, rt.basis);
             const pa::Vec3 desired_pos = pa::transform_vector(stage_basis, rt.position);
+            // THE KICK STAYS IN (parecoil). Landing the LIVE marker on the target would cancel the
+            // game's recoil translation along with everything else; landing the marker LESS ITS KICK
+            // there leaves the kick standing, in the gun's own carried frame. Not while a calibration
+            // hold pins the gun, and only the live slot teaches the rest pose.
+            const pa::Vec3 marker_now = access.palette[map->weapon_marker].position;
+            pa::Vec3 kick{};
+            {
+                const bool live = !access.is_capture_bank;
+                if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
+                    s_recoil.reset();
+                    s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
+                }
+                const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
+                const bool had    = s_recoil.have_ref;
+                kick = s_recoil.update(marker_now, stock_w, frozen ? 0.0f : g_cfg.pa_recoil,
+                                       g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen);
+#if HALO_VR_DEV
+                if (live) {
+                    const float cmk = pa::kMetresPerBlamUnit * 100.0f;
+                    if (!had && s_recoil.have_ref) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE RECOIL: rest pose learned for model "
+                                             "%d: marker at (%.1f,%.1f,%.1f) cm; kicks back along the barrel "
+                                             "now ride through the carry (parecoil=%.2f, max %.1f cm)",
+                                             (int)access.model_tag, s_recoil.ref_pos.x * cmk,
+                                             s_recoil.ref_pos.y * cmk, s_recoil.ref_pos.z * cmk,
+                                             g_cfg.pa_recoil, g_cfg.pa_recoil_max_cm);
+                    }
+                    const float out_cm = s_recoil.last_back_m * 100.0f;
+                    if (out_cm > s_dbg_recoil_peak_cm.load(std::memory_order_relaxed))
+                        s_dbg_recoil_peak_cm.store(out_cm, std::memory_order_relaxed);
+                    static std::uint32_t s_rn = 0;
+                    if (((++s_rn) % 180u) == 0u) {
+                        const float peak = s_dbg_recoil_peak_cm.exchange(0.0f, std::memory_order_relaxed);
+                        if (peak > 0.2f)
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE RECOIL: up to %.1f cm let through "
+                                                 "in the last 3 s (parecoil=%.2f, max %.1f cm)",
+                                                 peak, g_cfg.pa_recoil, g_cfg.pa_recoil_max_cm);
+                    }
+                }
+#endif
+            }
             const pa::Vec3 carried =
-                pa::transform_vector(delta_basis, access.palette[map->weapon_marker].position);
+                pa::transform_vector(delta_basis, marker_now - kick);
             const pa::Vec3 delta_pos{desired_pos.x - carried.x, desired_pos.y - carried.y,
                                      desired_pos.z - carried.z};
             const float reach = pa::length(desired_pos - root_position);

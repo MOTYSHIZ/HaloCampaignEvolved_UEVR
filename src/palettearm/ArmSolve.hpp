@@ -229,4 +229,30 @@ bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const
                               const Vec3& thumb_up_hint, float gain,
                               ForearmTwistResult* result = nullptr);
 
+// ---- RECOIL PASS-THROUGH ----------------------------------------------------------------------
+//
+// A carry that lands the weapon's authored marker ON a target cancels every translation the game
+// animates into that marker -- including the straight-back kick that is ALL the recoil some weapons
+// have (the Assault Rifle: 2-4 cm back per shot, under a degree of rotation). This watches the
+// STOCK marker, learns where it rests, and hands back the part of its displacement that is a kick,
+// in the stock frame, for the carry to leave in.
+//
+//   gain   0 = cancel everything (the behaviour to date) .. 1 = the authored kick
+//   max_m  the most that is ever let through; displacement beyond it fades out by twice this
+//   learn  false on a frame that must not teach the rest pose (a mirror bank, a calibration hold)
+struct RecoilPass {
+    bool  have_ref{false};
+    Vec3  ref_pos{};
+    Mat3  ref_basis{};
+    bool  have_prev{false};
+    Vec3  prev_pos{};
+    Mat3  prev_basis{};
+    int   stable{0};
+    int   latches{0};            // times a rest pose was first learned (diagnostics)
+    float last_back_m{0.0f};     // what the last update let through, metres (diagnostics)
+
+    void reset();
+    Vec3 update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m, bool learn);
+};
+
 } // namespace halo::palettearm

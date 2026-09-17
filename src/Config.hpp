@@ -3995,6 +3995,21 @@ struct Config {
     // pose on the gun looks exactly as it did. Both arms. Live.
     //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 1.5 = cap
     float pa_forearm_roll  = 1.0f;    // DEV KEY paforearmroll
+    // RECOIL TRANSLATION (2026-09-17, headset: "the main one we are losing is the direct backwards
+    // recoil translation ... when shooting the AR, the weapon barely moves"). The rig carry lands the
+    // weapon's authored marker ON the rig's target every frame, which cancels every translation the
+    // game animates into that marker while leaving its rotation -- so the Magnum's flip survives and
+    // the Assault Rifle's kick, which is 2-4 cm straight back and under a degree of rotation
+    // (measured), does not. The carry now leaves in the part of the marker's displacement from its
+    // learned rest pose that is a KICK: the component back along the barrel, while the marker has
+    // turned less than 8-20 degrees from rest and moved less than parecoilmax..2x that. Everything
+    // else (draw, reload, melee, swap) still cancels, to within a 1-3 cm brush at its start and end;
+    // the grenade throw pulls the gun hand back with little rotation and shows most of that pull.
+    // The hands ride the same transform, so they kick with the gun. Both live.
+    //   parecoil     0 = cancel everything (the behaviour to date) .. 1 = the authored kick .. 2 = cap
+    //   parecoilmax  the most that is ever let through, cm
+    float pa_recoil        = 1.0f;    // DEV KEY parecoil
+    float pa_recoil_max_cm = 8.0f;    // DEV KEY parecoilmax
     // THE FREE SUPPORT HAND MIRRORS THE AIM HAND. The aim hand's pose relative to ITS controller is
     // the product of the player's own weapon calibration and the artist's grip -- and the player
     // confirmed it in a headset. Controllers are mirror images held mirror-image, so the free support
