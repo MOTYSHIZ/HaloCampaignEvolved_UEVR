@@ -196,4 +196,37 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
 // Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
 
+// ---- FOREARM TWIST --------------------------------------------------------------------------
+//
+// The solve turns the HAND to the controller and leaves the forearm exactly as the elbow carries
+// it, so every degree of controller roll is taken at the wrist joint: "the hand can twist
+// unnaturally in its socket". This rig has twist bones for exactly that -- two per forearm, on the
+// bone's axis a third and two thirds of the way down -- and the game's own animations drive them
+// at 0.31 and 0.72 of the hand's twist (see twist_share in the .cpp for the measurement). This
+// spreads the roll the SOLVE ADDED over them by the same rule.
+//
+// THE BASELINE IS THE AUTHORED POSE: capture_forearm_stock() before the arm is touched, and a hand
+// that ends up in its authored relation to the forearm adds nothing, whatever that relation is.
+// `gain` scales the game's own distribution: 0 = the forearm as the elbow carries it (the behaviour
+// to date), 1 = what the rig's animations would do for this much roll.
+//
+// `thumb_up_hint` is any direction that reads as "up for a thumb" in the palette's frame (torso up,
+// leaning back); it only decides WHERE the roll's 180-degree seam sits, never how much is applied.
+struct ForearmStock {
+    Mat3 elbow_basis{};
+    Mat3 wrist_basis{};
+    Vec3 axis_local{};       // elbow -> wrist, unit, in the elbow's own frame
+    bool valid{false};
+};
+struct ForearmTwistResult {
+    float hand_deg{};        // the roll the solve added at the wrist, about the forearm
+    float neutral_deg{};     // the authored hand's roll short of thumb-up
+    float follow_deg{};      // what the forearm is asked to follow (before gain and per-bone share)
+    int   nodes{};           // twist bones turned
+};
+ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm);
+bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
+                              const Vec3& thumb_up_hint, float gain,
+                              ForearmTwistResult* result = nullptr);
+
 } // namespace halo::palettearm

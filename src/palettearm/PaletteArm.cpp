@@ -480,6 +480,9 @@ struct GripRelation {
 GripRelation s_aim_relation;
 std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
 float s_sup_curl = 0.0f;                        // the support hand's current curl, eased (0 = relaxed)
+// dev: what the forearm twist saw on the last live drive, per hand (aim, support)
+std::atomic<float> s_dbg_twist_hand[2]{}, s_dbg_twist_neutral[2]{}, s_dbg_twist_follow[2]{};
+std::atomic<int>   s_dbg_twist_nodes[2]{};
 std::atomic<float> s_dbg_grab_w{0.0f};          // the support hand's ride-the-gun weight, last drive
 std::atomic<float> s_dbg_stockhg_x{0.0f}, s_dbg_stockhg_y{0.0f}, s_dbg_stockhg_z{0.0f};
 bool s_fresh_poses  = true;
@@ -1570,6 +1573,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // target turns "the hand is in the wrong place" into a measured error vector.
         const pa::Vec3 stock_wrist_pos = access.palette[plan.arm->wrist].position;
         const pa::Mat3 stock_wrist_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
+        // ...and the authored hand-to-forearm relation with it: the zero the forearm twist is
+        // measured from (paforearmroll).
+        const pa::ForearmStock forearm_stock = pa::capture_forearm_stock(access.palette, *plan.arm);
         if (plan.is_aim) { aim_stock_wrist = stock_wrist_pos; have_aim_stock = true; }
         if (!plan.is_aim && !access.is_capture_bank) {
             const pa::Vec3 sh0 = access.palette[plan.arm->shoulder].position;
@@ -1858,6 +1864,24 @@ bool drive_palette(const pa::PaletteAccess& access) {
         }
         any_posed = true;
         if (!plan.is_aim) support_posed = true;
+
+        // ---- THE FOREARM TAKES ITS SHARE OF THE ROLL (paforearmroll; see Config.hpp). After the
+        // solve and the exact wrist placement, because it reads the hand the player will see. The
+        // hint is "up for a thumb" in the body frame, leaning back so an arm raised straight up
+        // still has one. Twist bones only: the wrist and everything below it do not move.
+        {
+            pa::ForearmTwistResult tw{};
+            const pa::Vec3 thumb_up = torso_basis.up - torso_basis.forward * 0.5f;
+            pa::distribute_forearm_twist(access.palette, *plan.arm, forearm_stock, thumb_up,
+                                         g_cfg.pa_forearm_roll, &tw);
+            if (!access.is_capture_bank) {
+                const int h = plan.is_aim ? 0 : 1;
+                s_dbg_twist_hand[h].store(tw.hand_deg, std::memory_order_relaxed);
+                s_dbg_twist_neutral[h].store(tw.neutral_deg, std::memory_order_relaxed);
+                s_dbg_twist_follow[h].store(tw.follow_deg, std::memory_order_relaxed);
+                s_dbg_twist_nodes[h].store(tw.nodes, std::memory_order_relaxed);
+            }
+        }
         HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_posed;);
 
         if (!plan.is_aim && !access.is_capture_bank && map->weapon_marker != pa::kNoNode) {
@@ -2041,12 +2065,19 @@ bool drive_palette(const pa::PaletteAccess& access) {
             API::get()->log_info(
                 "[Halo-CampE-UEVR] PALETTE MIRROR: support wrist vs the mirror image of the aim wrist: "
                 "%.1f cm, %.1f deg | relation latched=%d stable=%d | curl=%.2f grabw=%.2f | support "
-                "wrist stage pos=(%.2f,%.2f,%.2f)cm fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f)",
+                "wrist stage pos=(%.2f,%.2f,%.2f)cm fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) | forearm "
+                "roll x%.2f: aim hand %.0f deg added (authored is %.0f short of thumb-up) -> follows %.0f on "
+                "%d bones; support %.0f (%.0f) -> %.0f on %d",
                 pa::length(dpos) * cm, std::acos(ca) * 57.2957795f,
                 (int)s_aim_relation.have, s_aim_relation.stable, s_sup_curl,
                 s_dbg_grab_w.load(std::memory_order_relaxed),
                 pl.x * cm, pl.y * cm, pl.z * cm,
-                bl.forward.x, bl.forward.y, bl.forward.z, bl.up.x, bl.up.y, bl.up.z);
+                bl.forward.x, bl.forward.y, bl.forward.z, bl.up.x, bl.up.y, bl.up.z,
+                g_cfg.pa_forearm_roll,
+                s_dbg_twist_hand[0].load(), s_dbg_twist_neutral[0].load(), s_dbg_twist_follow[0].load(),
+                s_dbg_twist_nodes[0].load(),
+                s_dbg_twist_hand[1].load(), s_dbg_twist_neutral[1].load(), s_dbg_twist_follow[1].load(),
+                s_dbg_twist_nodes[1].load());
         }
     }
 #endif

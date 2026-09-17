@@ -1339,6 +1339,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pahandrec")     == 0) { g_cfg.pa_hand_rec       = (int)v; return true; }
     if (_stricmp(key, "pahandpose")    == 0) { g_cfg.pa_hand_pose      = (v != 0.0); return true; }
     if (_stricmp(key, "pahandrest")    == 0) { g_cfg.pa_hand_rest      = (float)v; return true; }
+    if (_stricmp(key, "paforearmroll") == 0) { g_cfg.pa_forearm_roll   = (float)v; return true; }
     if (_stricmp(key, "pasupmirror")   == 0) { g_cfg.pa_support_mirror = (v != 0.0); return true; }
     if (_stricmp(key, "pawpnlift")     == 0) { g_cfg.pa_wpn_lift      = (int)v; return true; }
     if (_stricmp(key, "pawpnyaw")      == 0) { g_cfg.pa_wpn_yaw       = (float)v; return true; }

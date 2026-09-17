@@ -497,4 +497,154 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
            apply_finger_openness(palette, arm.wrist, arm.thumb,  curl.thumb);
 }
 
+// ---- FOREARM TWIST ------------------------------------------------------------------------------
+
+namespace {
+
+float wrap_degrees(float d) {
+    if (!std::isfinite(d)) return 0.0f;
+    d = std::fmod(d + 180.0f, 360.0f);
+    if (d < 0.0f) d += 360.0f;
+    return d - 180.0f;
+}
+
+// The signed angle, about `axis`, from `u` to `v` once both are flattened against it. False when
+// either has too little left after flattening for the angle to mean anything.
+bool signed_angle_about(const Vec3& u, const Vec3& v, const Vec3& axis, float& out_deg) {
+    const Vec3 uf = u - axis * dot(u, axis);
+    const Vec3 vf = v - axis * dot(v, axis);
+    if (length_squared(uf) < 0.04f * length_squared(u) || length_squared(vf) < 0.04f * length_squared(v))
+        return false;
+    const Vec3 un = normalized(uf), vn = normalized(vf);
+    if (length_squared(un) < 0.8f || length_squared(vn) < 0.8f) return false;
+    out_deg = std::atan2(dot(cross(un, vn), axis), dot(un, vn)) * 57.2957795131f;
+    return std::isfinite(out_deg);
+}
+
+// How much of the hand's roll a bone at fraction `t` of the way from the elbow to the wrist takes.
+// MEASURED off this rig's own animations (5149 recorded frames, both arms): the bone a third of
+// the way down carries 0.308 of the hand's twist and the one two thirds down carries 0.718-0.720,
+// with a worst-case fit error of 2.2 degrees on the right arm and 5.0 on the left. Piecewise-linear
+// through those points, so a derived node map with differently placed twist bones still gets a
+// sensible share.
+float twist_share(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    constexpr float kT[4] = {0.0f, 0.3333f, 0.6667f, 1.0f};
+    constexpr float kS[4] = {0.0f, 0.308f,  0.719f,  1.0f};
+    for (int i = 0; i < 3; ++i) {
+        if (t <= kT[i + 1]) return kS[i] + (kS[i + 1] - kS[i]) * (t - kT[i]) / (kT[i + 1] - kT[i]);
+    }
+    return 1.0f;
+}
+
+// Roll the forearm follows 1:1 out to `kTwistFull` degrees either side of the thumb-up neutral,
+// then hands back by the time the hand is thumb-DOWN -- the one roll no forearm reaches. Periodic
+// and continuous, so the 180-degree seam of the twist angle lands where this is already zero.
+constexpr float kTwistFull = 135.0f;
+float twist_follow(float from_neutral_deg) {
+    const float a = std::fabs(from_neutral_deg);
+    if (a <= kTwistFull) return from_neutral_deg;
+    const float back = kTwistFull * (180.0f - a) / (180.0f - kTwistFull);
+    return from_neutral_deg < 0.0f ? -back : back;
+}
+
+bool in_list(const std::uint8_t* list, std::size_t count, std::uint8_t node) {
+    for (std::size_t i = 0; i < count; ++i) if (list[i] == node) return true;
+    return false;
+}
+
+} // namespace
+
+ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm) {
+    ForearmStock s{};
+    if (palette == nullptr) return s;
+    s.elbow_basis = orthonormal_basis(palette[arm.elbow]);
+    s.wrist_basis = orthonormal_basis(palette[arm.wrist]);
+    const Vec3 along = normalized(palette[arm.wrist].position - palette[arm.elbow].position);
+    if (!valid_basis(s.elbow_basis) || !valid_basis(s.wrist_basis) || length_squared(along) < 0.8f)
+        return s;
+    s.axis_local = transform_vector(transpose(s.elbow_basis), along);
+    s.valid = true;
+    return s;
+}
+
+bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
+                              const Vec3& thumb_up_hint, float gain, ForearmTwistResult* result) {
+    if (result != nullptr) *result = ForearmTwistResult{};
+    if (palette == nullptr || !stock.valid || !std::isfinite(gain)) return false;
+    gain = std::clamp(gain, 0.0f, 1.5f);
+
+    const Mat3 elbow_now = orthonormal_basis(palette[arm.elbow]);
+    const Mat3 wrist_now = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(elbow_now) || !valid_basis(wrist_now)) return false;
+
+    // The forearm's own long axis, carried by the elbow -- NOT elbow-to-wrist as drawn. The twist
+    // bones sit on the first by construction; the second bends away from it whenever the reach
+    // clamp or the stretch lets the placed wrist leave the solved one.
+    const Vec3 axis = normalized(transform_vector(elbow_now, stock.axis_local));
+    if (length_squared(axis) < 0.8f) return false;
+
+    // Where the hand WOULD be had it kept its authored relation to this forearm, and the rotation
+    // from there to where it is. Its twist about the forearm is the roll the solve added.
+    const Mat3 wrist_ref = multiply(elbow_now, multiply(transpose(stock.elbow_basis), stock.wrist_basis));
+    const Mat3 added     = multiply(wrist_now, transpose(wrist_ref));
+    if (!valid_basis(wrist_ref) || !valid_basis(added)) return false;
+    Quat q = rotation_from_basis(added);
+    if (q.w < 0.0f) q = Quat{-q.x, -q.y, -q.z, -q.w};
+    const float hand_deg =
+        2.0f * std::atan2(q.x * axis.x + q.y * axis.y + q.z * axis.z, q.w) * 57.2957795131f;
+
+    // ...measured from the AUTHORED roll, but followed from the THUMB-UP NEUTRAL. The authored
+    // support hand is a palm-up hold about 100 degrees of supination from neutral (measured on the
+    // Assault Rifle), so a free hand turned palm-DOWN is ~190 degrees from it -- past the seam of
+    // any twist angle, where a forearm that simply followed would snap a third of a turn. Putting
+    // the seam at thumb-down instead moves it to a pose no arm makes, and twist_follow() is already
+    // zero there. Subtracting the authored pose's own term keeps "authored hand = no added twist"
+    // exact wherever that pose sits.
+    float neutral_deg = 0.0f;
+    {
+        const Vec3 radial_now = palette[arm.index[0]].position - palette[arm.pinky[0]].position;
+        const Vec3 radial_ref = transform_vector(transpose(added), radial_now);
+        float c = 0.0f;
+        if (length_squared(radial_now) > 1.0e-10f && signed_angle_about(radial_ref, thumb_up_hint, axis, c))
+            neutral_deg = c;
+    }
+    const float follow_deg = twist_follow(wrap_degrees(hand_deg - neutral_deg)) -
+                             twist_follow(wrap_degrees(-neutral_deg));
+
+    if (result != nullptr) {
+        result->hand_deg    = wrap_degrees(hand_deg);
+        result->neutral_deg = neutral_deg;
+        result->follow_deg  = follow_deg;
+    }
+    if (gain <= 0.0f || std::fabs(follow_deg) < 0.01f) return true;
+
+    const Vec3  elbow_pos = palette[arm.elbow].position;
+    const float fore_len  = length(palette[arm.wrist].position - elbow_pos);
+    if (!std::isfinite(fore_len) || fore_len < 1.0e-4f) return false;
+
+    int turned = 0;
+    for (std::size_t i = 0; i < arm.elbow_count; ++i) {
+        const std::uint8_t node = arm.elbow_subtree[i];
+        if (node == arm.elbow || in_list(arm.wrist_subtree, arm.wrist_count, node)) continue;
+        // A twist bone lies ON the forearm's axis, between the joints. Everything else hanging off
+        // the elbow (the gauntlet plates, 10-13 cm out on this rig) is rigid with it and stays so:
+        // the game never rolls them either.
+        const Vec3  rel    = palette[node].position - elbow_pos;
+        const float t      = dot(rel, axis) / fore_len;
+        const float radial = length(rel - axis * dot(rel, axis)) * kMetresPerBlamUnit;
+        if (!(t > 0.08f && t < 0.95f) || !(radial < 0.015f)) continue;
+
+        const float half = gain * twist_share(t) * follow_deg * 0.00872664626f;   // half angle, rad
+        const float s    = std::sin(half);
+        const Mat3  roll = rotation_basis(Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)});
+        if (!valid_basis(roll)) continue;
+        apply_rigid_delta(palette, &node, 1, roll, elbow_pos);
+        ++turned;
+    }
+    if (result != nullptr) result->nodes = turned;
+    return true;
+}
+
 } // namespace halo::palettearm

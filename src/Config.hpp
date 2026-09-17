@@ -3985,6 +3985,16 @@ struct Config {
     // gently curved -- and pahandrest moves AWAY from it: -1 = the stretched open hand (the old
     // look is about -0.8) .. 0 = the relaxed hand .. 1 = the fist. Live.
     float pa_hand_rest     = 0.0f;    // DEV KEY pahandrest
+    // FOREARM ROLL (2026-09-17, headset: "the hand can twist unnaturally in its socket ... a live
+    // tunable for the forearm roll influence"). The solve turns the hand to the controller and leaves
+    // the forearm as the elbow carries it, so all of a controller roll lands on the wrist joint. This
+    // rig has two twist bones per forearm and the game's own animations drive them at 0.31 and 0.72
+    // of the hand's twist (measured over 5149 recorded frames, both arms, fit error 2-5 degrees), so
+    // the roll THE SOLVE ADDED is spread over them by that same rule, times this gain. The authored
+    // hand-to-forearm relation is the zero: a hand in its authored pose adds nothing, so the support
+    // pose on the gun looks exactly as it did. Both arms. Live.
+    //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 1.5 = cap
+    float pa_forearm_roll  = 1.0f;    // DEV KEY paforearmroll
     // THE FREE SUPPORT HAND MIRRORS THE AIM HAND. The aim hand's pose relative to ITS controller is
     // the product of the player's own weapon calibration and the artist's grip -- and the player
     // confirmed it in a headset. Controllers are mirror images held mirror-image, so the free support
