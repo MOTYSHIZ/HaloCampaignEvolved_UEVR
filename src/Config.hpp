@@ -3775,6 +3775,17 @@ struct Config {
     // every torso mode with the writes on, 1.02 (the mode-0 control's expected value) with them off.
     // DEV KEY pameshdown. 0 = legacy (both drivers write; for A/B only).
     bool  pa_mesh_standdown = true;
+    // HOLD THE ARM MESH IN THE BODY FRAME AT RENDER RATE (2026-09-16, from the first headset run).
+    // The mesh hangs off the aim-driven camera, so the palette had to subtract the aim (lock gap +
+    // camera pitch) -- but the palette is rebuilt at ~35-45 Hz while the camera turns every rendered
+    // frame, so between rebuilds the arms rode the camera and were then corrected back: reported as
+    // "the hands are jittery when I move my controllers" and "the left hand jitters when I move the
+    // right, like it wants to follow and gets corrected". This is the project's two-clocks rule:
+    // recompose against a frame the render path can rebuild. With this ON the render callback
+    // writes the mesh's world rotation = (pitch 0, locked view yaw, roll 0) every frame, and the
+    // palette solves with NO gap and NO pitch term -- the aim never enters the arm chain at all.
+    // Needs pameshdown. DEV KEY pameshbody. 0 = mesh rides the camera, palette subtracts the aim.
+    bool  pa_mesh_body    = true;
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends

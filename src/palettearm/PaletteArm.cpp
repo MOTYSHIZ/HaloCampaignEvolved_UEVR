@@ -380,12 +380,28 @@ struct TrackingSnapshot {
     pa::Quat aim_aim_rotation{};
     pa::Vec3 support_grip_position{};
     pa::Quat support_grip_rotation{};
+    pa::Quat support_aim_rotation{};  // the support controller's POINTING pose, like the aim hand uses
     bool     valid = false;
     bool     support_valid = false;
 };
 
 TrackingSnapshot s_tracking{};
 std::atomic_bool s_tracking_ready{false};
+bool capture_tracking_into(TrackingSnapshot& snap);   // defined with capture_tracking()
+
+// From the first headset run (2026-09-16). All three are STICKY like the other palettearm keys.
+//   pafreshpose  sample the poses INSIDE the drive instead of using the game tick's snapshot: the
+//                builder runs ~1.1-1.4x per tick, so a tick-latched pose gave it uneven steps.
+//   patgthead    0 = the hand targets live in the BODY-BASE frame (stage frame, no head yaw). The
+//                hand offset is already a stage-frame vector; putting it through the head-facing
+//                torso basis rotated it by the head yaw a second time -- "the IK hand targets yaw
+//                with my head". 1 = the old behaviour.
+//   pasupaim     1 = the support hand takes its ORIENTATION from its controller's aim (pointing)
+//                pose, as the aim hand does; the grip pose is tilted against it, which is why the
+//                left hand "does not feel proper like the right hand". 0 = grip pose (old).
+bool s_fresh_poses  = true;
+bool s_target_head  = false;
+bool s_support_aim  = true;
 
 char s_status[256] = "palettearm: off";
 // 512, not 256: this line has grown field by field and snprintf TRUNCATES SILENTLY -- a sweep
@@ -536,7 +552,11 @@ bool drive_palette(const pa::PaletteAccess& access) {
     if (!s_tracking_ready.load(std::memory_order_acquire)) {
         s_drive_stage = "no tracking snapshot"; return false;
     }
-    const TrackingSnapshot tracking = s_tracking;
+    TrackingSnapshot tracking = s_tracking;
+    if (s_fresh_poses && !access.is_capture_bank) {
+        TrackingSnapshot fresh{};
+        if (capture_tracking_into(fresh)) tracking = fresh;
+    }
 
     // THE AIM THE PALETTE IS CORRECTED AGAINST. Default: the lock delta and camera pitch as the
     // last render callback saw them -- so the correction trails the camera by up to a tick, which
@@ -563,6 +583,17 @@ bool drive_palette(const pa::PaletteAccess& access) {
             lock_delta_deg = d;
             cam_pitch_deg  = dp;
         }
+    }
+    // The render path is holding the mesh in the BODY frame (pameshbody): the palette's frame then
+    // carries neither the aim yaw nor the aim pitch, so the frame maps below subtract nothing. The
+    // TRUE aim is kept for the one consumer that needs the aim itself -- the barrel lock.
+    const float aim_delta_deg = lock_delta_deg;
+    const float aim_pitch_deg = cam_pitch_deg;
+    const bool  mesh_body = g_cfg.pa_mesh_body &&
+                            ::halo::g_mesh_body_active.load(std::memory_order_relaxed);
+    if (mesh_body) {
+        lock_delta_deg = 0.0f;
+        cam_pitch_deg  = 0.0f;
     }
     if (!tracking.valid) { s_drive_stage = "tracking snapshot invalid"; return false; }
 
@@ -751,6 +782,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // same construction arm_gap already uses for the rest lift, now carrying the head term too and
     // used for EVERYTHING. It is a rotation, so it is used as the torso basis directly rather than
     // flattened (flattening is what threw the pitch term away).
+    pa::Mat3 stage_source = root_basis;      // the BODY-BASE frame: aim removed, NO head/hands yaw
+    bool     have_stage_source = false;
     if (g_cfg.pa_torso_frame == 6 || g_cfg.pa_torso_frame == 7) {
         float yaw_head = 0.0f;
         bool  have_head = false;
@@ -816,9 +849,12 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                       pa::Vec3{-sp, 0.0f, cp} };
             torso_source = pa::multiply(root_basis,
                                         pa::multiply(pitch_gap, pa::multiply(gapm, blendm)));
+            stage_source = pa::multiply(root_basis, pa::multiply(pitch_gap, gapm));
         } else {
             torso_source = pa::multiply(root_basis, pa::multiply(gapm, blendm));
+            stage_source = pa::multiply(root_basis, gapm);
         }
+        have_stage_source = true;
         s_dbg_yaw_hands = yaw * 57.2957795f;
         s_dbg_yaw_head  = yaw_head * 57.2957795f;
     }
@@ -860,6 +896,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
     if (!pa::valid_basis(torso_basis)) {
         s_drive_stage = "torso basis invalid";
         return false;
+    }
+    // Where the HAND TARGETS live. The shoulders hang off the head-facing torso; the hands do not:
+    // their offsets and orientations are stage-frame quantities already (see s_target_head).
+    pa::Mat3 stage_basis = torso_basis;
+    if (have_stage_source && !s_target_head) {
+        const pa::Mat3 sb = (g_cfg.pa_torso_frame == 7) ? stage_source
+                                                        : pa::torso_basis_from_root(stage_source);
+        if (pa::valid_basis(sb)) stage_basis = sb;
     }
 
     // PUBLISH THE TORSO YAW SO THE A/B CAN BE MEASURED RATHER THAN FELT.
@@ -937,7 +981,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         { &aim_arm,     pa::Quat{aim_q.x, aim_q.y, aim_q.z, aim_q.w},
           tracking.aim_grip_position,
           aim_is_right ? &s_conv_right : &s_conv_left, !aim_is_right, true },
-        { &support_arm, tracking.support_grip_rotation,
+        { &support_arm, s_support_aim ? tracking.support_aim_rotation : tracking.support_grip_rotation,
           tracking.support_grip_position,
           aim_is_right ? &s_conv_left : &s_conv_right, aim_is_right, false },
     };
@@ -1060,7 +1104,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const float bl_gap = (g_cfg.pa_wpn_lift != 0)
                     ? -lock_delta_deg * 0.01745329252f
                     : 0.0f;
-                const pa::Vec3 aim_stage{std::cos(bl_gap), -std::sin(bl_gap), 0.0f};
+                pa::Vec3 aim_stage{std::cos(bl_gap), -std::sin(bl_gap), 0.0f};
+                if (mesh_body) {
+                    // BODY-FRAME PALETTE: the stage frame is the palette frame, level, so the aim
+                    // ray is the camera's own direction in it -- the lock gap as a yaw AND the
+                    // camera pitch, neither of which the frame carries any more.
+                    const float ay = aim_delta_deg * 0.01745329252f;
+                    const float ap = aim_pitch_deg * 0.01745329252f;
+                    aim_stage = pa::Vec3{std::cos(ap) * std::cos(ay), std::cos(ap) * std::sin(ay),
+                                         std::sin(ap)};
+                }
                 const pa::Vec3 barrel_stage = pa::transform_vector(wgrip_w, beta);
                 const pa::Mat3 locked = pa::multiply(
                     pa::barrel_lock_correction(barrel_stage, aim_stage,
@@ -1329,7 +1382,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // it needs a human's eyes before it can become the default.
         pa::Mat3 desired_wrist =
             (g_cfg.pa_target_frame >= 2)
-                ? pa::multiply(pa::multiply(torso_basis, controller_raw), plan.conv->latched)
+                ? pa::multiply(pa::multiply(stage_basis, controller_raw), plan.conv->latched)
                 : pa::multiply(pa::multiply(root_basis, controller), plan.conv->latched);
         if (!pa::valid_basis(desired_wrist)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[4];); continue; }
 
@@ -1364,8 +1417,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // game-yaw refs) precisely so a live camera cannot throw the hand.
         pa::Vec3 wrist_target =
             (g_cfg.pa_target_frame >= 1)
-                ? (root_position + pa::transform_vector(torso_basis, stage_off) +
-                   pa::transform_vector(pa::multiply(torso_basis, controller_raw), wrist_local))
+                ? (root_position + pa::transform_vector(stage_basis, stage_off) +
+                   pa::transform_vector(pa::multiply(stage_basis, controller_raw), wrist_local))
                 : (root_position + pa::transform_vector(root_basis, delta_blam) +
                    pa::transform_vector(pa::multiply(root_basis, controller), wrist_local));
 
@@ -1658,15 +1711,10 @@ bool drive_palette(const pa::PaletteAccess& access) {
 
 // ---- POSE CAPTURE, on the tick -----------------------------------------------------------------
 
-void capture_tracking() {
-    TrackingSnapshot snap{};
-
+bool capture_tracking_into(TrackingSnapshot& snap) {
     const auto hmd = API::VR::get_hmd_index();
     ::halo::Vec3 p{}; ::halo::Quat q{};
-    if (hmd < 0 || !get_pose(hmd, &p, &q, /*use_aim=*/false)) {
-        s_tracking_ready.store(false, std::memory_order_release);
-        return;
-    }
+    if (hmd < 0 || !get_pose(hmd, &p, &q, /*use_aim=*/false)) return false;
     snap.hmd_position = from_math(p);
     snap.hmd_rotation = from_math(q);
 
@@ -1689,12 +1737,9 @@ void capture_tracking() {
                                                     : API::VR::get_right_controller_index();
     const int32_t support_idx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
                                                     : API::VR::get_left_controller_index();
-    if (aim_idx < 0) { s_tracking_ready.store(false, std::memory_order_release); return; }
+    if (aim_idx < 0) return false;
 
-    if (!get_pose(aim_idx, &p, &q, /*use_aim=*/false)) {
-        s_tracking_ready.store(false, std::memory_order_release);
-        return;
-    }
+    if (!get_pose(aim_idx, &p, &q, /*use_aim=*/false)) return false;
     snap.aim_grip_position = from_math(p);
     snap.aim_grip_rotation = from_math(q);
     if (get_pose(aim_idx, &p, &q, /*use_aim=*/true)) snap.aim_aim_rotation = from_math(q);
@@ -1703,10 +1748,21 @@ void capture_tracking() {
     if (get_pose(support_idx, &p, &q, /*use_aim=*/false)) {
         snap.support_grip_position = from_math(p);
         snap.support_grip_rotation = from_math(q);
+        snap.support_aim_rotation  = snap.support_grip_rotation;
+        if (get_pose(support_idx, &p, &q, /*use_aim=*/true)) snap.support_aim_rotation = from_math(q);
         snap.support_valid = true;
     }
 
     snap.valid = true;
+    return true;
+}
+
+void capture_tracking() {
+    TrackingSnapshot snap{};
+    if (!capture_tracking_into(snap)) {
+        s_tracking_ready.store(false, std::memory_order_release);
+        return;
+    }
     s_tracking = snap;
     s_tracking_ready.store(true, std::memory_order_release);
 }
@@ -2142,6 +2198,9 @@ bool palettearm_parse_key(const char* key, double v) {
     else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
     else if (_stricmp(key, "paaimlead")       == 0) s_aim_lead                        = (v != 0.0);
     else if (_stricmp(key, "paworldscale")    == 0) s_pa_world_scale                  = (float)v;
+    else if (_stricmp(key, "pafreshpose")     == 0) s_fresh_poses                     = (v != 0.0);
+    else if (_stricmp(key, "patgthead")       == 0) s_target_head                     = (v != 0.0);
+    else if (_stricmp(key, "pasupaim")        == 0) s_support_aim                     = (v != 0.0);
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;

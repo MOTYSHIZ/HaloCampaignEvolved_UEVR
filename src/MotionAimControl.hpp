@@ -151,6 +151,9 @@ extern std::atomic<float> g_view_lock_delta;
 // The locked view yaw itself (g_dbg_view_out, UE degrees), published with the delta so the palette
 // route can rebuild the gap against a NEWER aim than the last render's (paaimlead).
 extern std::atomic<float> g_view_out_yaw;
+// True while the render path is holding the arm mesh in the BODY frame (pameshbody): the palette then
+// solves with no lock gap and no camera pitch, because the mesh it is composed with carries neither.
+extern std::atomic<bool>  g_mesh_body_active;
 
 // The ACHIEVED render pitch of the game camera, published from the same view-lock site and at the
 // same render rate as the delta above. The palette is local to THIS camera, so the arm frame must

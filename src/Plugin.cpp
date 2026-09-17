@@ -12212,6 +12212,47 @@ public:
             if (!logged) { logged = true;
                 API::get()->log_info("[Halo-CampE-UEVR] stereo view index observed = %d", index); }
         }
+        // ---- PALETTE ROUTE: HOLD THE ARM MESH IN THE BODY FRAME (pameshbody; see Config.hpp).
+        // Render rate, same call the UeRig re-apply below makes. Rotation only: the relative
+        // location stays zero, so the mesh still rides the camera's POSITION. The body frame is
+        // exactly what the lock below hands the eyes: level, yaw = locked base + turn offset.
+        {
+            static bool s_body_prev = false;
+            const bool want = g_mesh_standdown.load(std::memory_order_relaxed) && g_cfg.pa_mesh_body
+                              && g_cfg.view_lock && rotation != nullptr
+                              && !g_in_menu.load() && !g_stick_mode.load() && g_lock_primed.load();
+            auto* brig = reinterpret_cast<API::UObject*>(g_rig_component.load());
+            if (want && brig != nullptr) {
+                const float body_yaw = g_locked_view_yaw.load() + g_turn_offset.load();
+                rig_set_world_rotation(brig, 0.0, (double)body_yaw, 0.0);
+                if (g_cfg.shell_drive) {
+                    if (auto* sh = reinterpret_cast<API::UObject*>(g_shell_component.load()))
+                        rig_set_world_rotation(sh, 0.0, (double)body_yaw, 0.0);
+                }
+                ::halo::g_mesh_body_active.store(true, std::memory_order_relaxed);
+                if (!s_body_prev) {
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MESH BODY FRAME: mesh held at "
+                                         "(pitch 0, yaw %.2f, roll 0) at render rate; the palette "
+                                         "solves with no lock gap and no camera pitch", body_yaw);
+                }
+                s_body_prev = true;
+            } else {
+                ::halo::g_mesh_body_active.store(false, std::memory_order_relaxed);
+                if (s_body_prev && brig != nullptr && g_rig_parent != nullptr && !g_stick_mode.load()) {
+                    Vec3 prot{};                                   // hand the mesh back to its parent
+                    if (call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot)) {
+                        rig_set_world_rotation(brig, (double)prot.x, (double)prot.y, (double)prot.z);
+                        if (g_cfg.shell_drive) {
+                            if (auto* sh = reinterpret_cast<API::UObject*>(g_shell_component.load()))
+                                rig_set_world_rotation(sh, (double)prot.x, (double)prot.y, (double)prot.z);
+                        }
+                    }
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MESH BODY FRAME released: the "
+                                         "mesh rides the camera again");
+                }
+                s_body_prev = false;
+            }
+        }
         if (g_cfg.rig_render && g_cfg.attach_mode == 0
             && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()
             && !g_mesh_standdown.load(std::memory_order_relaxed)) {   // palette route: the mesh is the game's
