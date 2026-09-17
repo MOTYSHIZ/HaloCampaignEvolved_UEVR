@@ -625,12 +625,14 @@ ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes&
 }
 
 bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
-                              const Vec3& thumb_up_hint, float gain, float plate_gain,
+                              const Vec3& thumb_up_hint, float gain, float plate_gain, float bone_gain,
                               ForearmTwistResult* result) {
     if (result != nullptr) *result = ForearmTwistResult{};
-    if (palette == nullptr || !stock.valid || !std::isfinite(gain) || !std::isfinite(plate_gain)) return false;
+    if (palette == nullptr || !stock.valid || !std::isfinite(gain) || !std::isfinite(plate_gain) ||
+        !std::isfinite(bone_gain)) return false;
     gain       = std::clamp(gain, 0.0f, 2.0f);
     plate_gain = std::clamp(plate_gain, 0.0f, 3.0f);
+    bone_gain  = std::clamp(bone_gain, 0.0f, 3.0f);
 
     const Mat3 elbow_now = orthonormal_basis(palette[arm.elbow]);
     const Mat3 wrist_now = orthonormal_basis(palette[arm.wrist]);
@@ -707,6 +709,22 @@ bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const
         if (!valid_basis(roll)) continue;
         apply_rigid_delta(palette, &node, 1, roll, elbow_pos);
         if (plate) ++plates; else ++turned;
+    }
+    // THE FOREARM BONE ITSELF. Everything above turns nodes that hang OFF the elbow; whatever is
+    // skinned to the elbow node proper -- on this rig, by elimination, the big forearm armour: the
+    // twist bones visibly roll the sleeve, the armour nodes turned out to carry nothing visible, and
+    // the plate the player watches did not move -- still rides the elbow rigidly. It takes the near
+    // twist bone's share (so the roll stays monotonic elbow -> wrist at bone_gain <= 1), about its
+    // own origin, which is on the axis: the joint does not move, the twist bones and the hand are
+    // model-space nodes of their own and are not carried along.
+    if (bone_gain > 0.0f) {
+        const float half = gain * bone_gain * twist_share(1.0f / 3.0f) * follow_deg * 0.00872664626f;
+        const float s    = std::sin(half);
+        const Mat3  roll = rotation_basis(Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)});
+        if (valid_basis(roll)) {
+            apply_rigid_delta(palette, &arm.elbow, 1, roll, elbow_pos);
+            if (result != nullptr) result->bone_deg = gain * bone_gain * twist_share(1.0f / 3.0f) * follow_deg;
+        }
     }
     if (result != nullptr) { result->nodes = turned; result->plates = plates; }
     return true;

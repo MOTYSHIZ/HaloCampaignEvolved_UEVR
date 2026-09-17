@@ -4005,6 +4005,18 @@ struct Config {
     //   0 = rigid with the elbow (the game's way) .. 1 = with the forearm beside it (DEFAULT) ..
     //   3 = cap (2.3 puts the gauntlet on the wrist-end twist bone's roll)
     float pa_forearm_armor = 1.0f;    // DEV KEY paforearmarmor
+    // ...WHICH TURNED OUT TO CARRY NOTHING VISIBLE (headset, next run, at paforearmarmor=3 with the
+    // roll at 2: "I did not notice any change in behavior there"). The skeleton tag names them:
+    // 20/24 = elbowarmor_r/l, 34/35 = elbowarmorend_r/l, and the first-person armour is not skinned
+    // to them at all -- it is six separate static meshes on the sockets ElbowPart2_L/R,
+    // ShoulderArmor_L/R and Wrist_L/R, and ElbowPart2 is the FAR twist bone, which has rolled since
+    // the twist went in. What is left that does not roll is whatever is skinned to the forearm bone
+    // proper (elbow_r/l), and by elimination that is the plate the player is watching. So the elbow
+    // node itself now takes the near twist bone's share of the roll, about its own origin (the joint
+    // does not move; twist bones, plates and hand are model-space nodes and are not dragged along).
+    //   0 = the forearm bone never rolls (the game's way) .. 1 = as much as the near twist bone
+    //   (DEFAULT, keeps the roll monotonic elbow -> wrist) .. 3 = cap. Live.
+    float pa_forearm_bone  = 1.0f;    // DEV KEY paforearmbone
     // THE FREE SUPPORT HAND JOINS THE GAME'S ACTIONS (2026-09-17, headset: "the reload animations
     // worked great when my left hand was gripping the weapon ... can you make it so that the
     // animation plays regardless of whether or not I am gripping the weapon with my left hand? Same

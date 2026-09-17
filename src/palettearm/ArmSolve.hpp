@@ -227,6 +227,8 @@ Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight);
 // `plate_gain` is the ARMOUR's share: the off-axis nodes hanging off the elbow (gauntlet plates),
 // which the game never rolls. 1 = a plate turns with the forearm at its own station along the bone,
 // 0 = rigid with the elbow as the game has it.
+// `bone_gain` is the ELBOW NODE's own share -- whatever is skinned to the forearm bone proper. 1 = it
+// rolls as much as the near twist bone, 0 = not at all (the game's way, and ours until 2026-09-17).
 //
 // `thumb_up_hint` is any direction that reads as "up for a thumb" in the palette's frame (torso up,
 // leaning back); it only decides WHERE the roll's 180-degree seam sits, never how much is applied.
@@ -242,10 +244,11 @@ struct ForearmTwistResult {
     float follow_deg{};      // what the forearm is asked to follow (before gain and per-bone share)
     int   nodes{};           // twist bones turned
     int   plates{};          // armour nodes carried round with them
+    float bone_deg{};        // how far the elbow node itself was rolled
 };
 ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm);
 bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
-                              const Vec3& thumb_up_hint, float gain, float plate_gain,
+                              const Vec3& thumb_up_hint, float gain, float plate_gain, float bone_gain,
                               ForearmTwistResult* result = nullptr);
 
 // ---- RECOIL PASS-THROUGH ----------------------------------------------------------------------
