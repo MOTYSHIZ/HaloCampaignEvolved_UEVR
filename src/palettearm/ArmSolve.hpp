@@ -208,7 +208,10 @@ bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, f
 // THE BASELINE IS THE AUTHORED POSE: capture_forearm_stock() before the arm is touched, and a hand
 // that ends up in its authored relation to the forearm adds nothing, whatever that relation is.
 // `gain` scales the game's own distribution: 0 = the forearm as the elbow carries it (the behaviour
-// to date), 1 = what the rig's animations would do for this much roll.
+// to date), 1 = what the rig's animations would do for this much roll, 2 = the cap.
+// `plate_gain` is the ARMOUR's share: the off-axis nodes hanging off the elbow (gauntlet plates),
+// which the game never rolls. 1 = a plate turns with the forearm at its own station along the bone,
+// 0 = rigid with the elbow as the game has it.
 //
 // `thumb_up_hint` is any direction that reads as "up for a thumb" in the palette's frame (torso up,
 // leaning back); it only decides WHERE the roll's 180-degree seam sits, never how much is applied.
@@ -223,10 +226,11 @@ struct ForearmTwistResult {
     float neutral_deg{};     // the authored hand's roll short of thumb-up
     float follow_deg{};      // what the forearm is asked to follow (before gain and per-bone share)
     int   nodes{};           // twist bones turned
+    int   plates{};          // armour nodes carried round with them
 };
 ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm);
 bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
-                              const Vec3& thumb_up_hint, float gain,
+                              const Vec3& thumb_up_hint, float gain, float plate_gain,
                               ForearmTwistResult* result = nullptr);
 
 // ---- RECOIL PASS-THROUGH ----------------------------------------------------------------------

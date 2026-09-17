@@ -1921,7 +1921,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             pa::ForearmTwistResult tw{};
             const pa::Vec3 thumb_up = torso_basis.up - torso_basis.forward * 0.5f;
             pa::distribute_forearm_twist(access.palette, *plan.arm, forearm_stock, thumb_up,
-                                         g_cfg.pa_forearm_roll, &tw);
+                                         g_cfg.pa_forearm_roll, g_cfg.pa_forearm_armor, &tw);
             if (!access.is_capture_bank) {
                 const int h = plan.is_aim ? 0 : 1;
                 s_dbg_twist_hand[h].store(tw.hand_deg, std::memory_order_relaxed);

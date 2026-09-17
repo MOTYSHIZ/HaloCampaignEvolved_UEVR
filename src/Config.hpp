@@ -3993,8 +3993,18 @@ struct Config {
     // the roll THE SOLVE ADDED is spread over them by that same rule, times this gain. The authored
     // hand-to-forearm relation is the zero: a hand in its authored pose adds nothing, so the support
     // pose on the gun looks exactly as it did. Both arms. Live.
-    //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 1.5 = cap
+    //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 2 = cap
+    //       (raised from 1.5 on request after the first headset run)
     float pa_forearm_roll  = 1.0f;    // DEV KEY paforearmroll
+    // ...AND THE FOREARM ARMOUR GOES ROUND WITH IT (headset, same run: "make it so that the forearm
+    // armor piece follows the rotation of the forearm"). The gauntlet nodes hang 10-13 cm off the
+    // bone and the game carries them rigidly with the elbow -- fine for its own animations, wrong
+    // under a tracked hand, where the sleeve visibly turns inside a plate that does not. Each plate
+    // now takes the forearm's roll AT ITS OWN STATION along the bone (the gauntlet sits at t = 0.33,
+    // beside the near twist bone, so it turns with that bone) and orbits the axis with it. Live.
+    //   0 = rigid with the elbow (the game's way) .. 1 = with the forearm beside it (DEFAULT) ..
+    //   3 = cap (2.3 puts the gauntlet on the wrist-end twist bone's roll)
+    float pa_forearm_armor = 1.0f;    // DEV KEY paforearmarmor
     // RECOIL TRANSLATION (2026-09-17, headset: "the main one we are losing is the direct backwards
     // recoil translation ... when shooting the AR, the weapon barely moves"). The rig carry lands the
     // weapon's authored marker ON the rig's target every frame, which cancels every translation the

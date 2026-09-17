@@ -570,10 +570,12 @@ ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes&
 }
 
 bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
-                              const Vec3& thumb_up_hint, float gain, ForearmTwistResult* result) {
+                              const Vec3& thumb_up_hint, float gain, float plate_gain,
+                              ForearmTwistResult* result) {
     if (result != nullptr) *result = ForearmTwistResult{};
-    if (palette == nullptr || !stock.valid || !std::isfinite(gain)) return false;
-    gain = std::clamp(gain, 0.0f, 1.5f);
+    if (palette == nullptr || !stock.valid || !std::isfinite(gain) || !std::isfinite(plate_gain)) return false;
+    gain       = std::clamp(gain, 0.0f, 2.0f);
+    plate_gain = std::clamp(plate_gain, 0.0f, 3.0f);
 
     const Mat3 elbow_now = orthonormal_basis(palette[arm.elbow]);
     const Mat3 wrist_now = orthonormal_basis(palette[arm.wrist]);
@@ -624,26 +626,34 @@ bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const
     const float fore_len  = length(palette[arm.wrist].position - elbow_pos);
     if (!std::isfinite(fore_len) || fore_len < 1.0e-4f) return false;
 
-    int turned = 0;
+    int turned = 0, plates = 0;
     for (std::size_t i = 0; i < arm.elbow_count; ++i) {
         const std::uint8_t node = arm.elbow_subtree[i];
         if (node == arm.elbow || in_list(arm.wrist_subtree, arm.wrist_count, node)) continue;
         // A twist bone lies ON the forearm's axis, between the joints. Everything else hanging off
-        // the elbow (the gauntlet plates, 10-13 cm out on this rig) is rigid with it and stays so:
-        // the game never rolls them either.
+        // the elbow is ARMOUR (the gauntlet plates, 10-13 cm out on this rig). The game carries those
+        // rigidly with the elbow and never rolls them -- which reads fine under its own animations,
+        // where the forearm seldom rolls far, and wrong under a tracked hand: the sleeve turns
+        // inside a plate that does not ("make the forearm armor piece follow the rotation of the
+        // forearm"). So a plate takes the roll of the forearm AT ITS OWN STATION along the bone --
+        // the gauntlet sits at t = 0.33, beside the near twist bone, and turns with it -- orbiting
+        // the axis as it goes, times plate_gain.
         const Vec3  rel    = palette[node].position - elbow_pos;
         const float t      = dot(rel, axis) / fore_len;
         const float radial = length(rel - axis * dot(rel, axis)) * kMetresPerBlamUnit;
-        if (!(t > 0.08f && t < 0.95f) || !(radial < 0.015f)) continue;
+        const bool  bone   = (t > 0.08f && t < 0.95f) && (radial < 0.015f);
+        const bool  plate  = !bone && (t > 0.0f && t < 1.0f) && (radial >= 0.015f) && plate_gain > 0.0f;
+        if (!bone && !plate) continue;
 
-        const float half = gain * twist_share(t) * follow_deg * 0.00872664626f;   // half angle, rad
+        const float half = gain * (plate ? plate_gain : 1.0f) * twist_share(t) * follow_deg *
+                           0.00872664626f;                                        // half angle, rad
         const float s    = std::sin(half);
         const Mat3  roll = rotation_basis(Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)});
         if (!valid_basis(roll)) continue;
         apply_rigid_delta(palette, &node, 1, roll, elbow_pos);
-        ++turned;
+        if (plate) ++plates; else ++turned;
     }
-    if (result != nullptr) result->nodes = turned;
+    if (result != nullptr) { result->nodes = turned; result->plates = plates; }
     return true;
 }
 
