@@ -4030,15 +4030,47 @@ struct Config {
     // support wrist is handed to the authored pose exactly as for a two-hand hold -- same carry,
     // shoulder still on the body, authored fingers -- in over ~0.06 s, out over ~0.12 s. Aim is not
     // touched: no hold is latched. On every weapon, deny-listed or not. Right-handed aim only.
-    //   pasupanim      0 = off (the hand stays on its controller, as before)
-    //                  1 = actions seen from rest: reload, melee, grenade, a weapon's put-away
-    //                  2 = DEFAULT: as 1, and held through the DRAW after a weapon change until the
-    //                      new weapon rests (3 s at most), so a swap plays as one piece
+    //   pasupanim      0 = off (the hand stays on its controller, as before) .. 1 = on (DEFAULT)
     //   pasupanimgate  scales every threshold. 1 = as measured. Raise it (1.5, 2) if plain SHOTS tug
     //                  the free hand on some weapon -- the dev line 'PALETTE ANIM' says what tripped.
-    // Both live.
-    int   pa_sup_anim      = 2;       // DEV KEY pasupanim
+    // RETUNED after the first headset run with it (2026-09-17 evening, 54 hand-overs logged): the
+    // action signal is now the OFF HAND alone -- above all its TURN relative to the gun, which
+    // separates every action (44-176 deg) from a weapon's put-away (1-5 deg) -- and the gun leaving
+    // rest on its own is the EQUIP half below. Both live.
+    int   pa_sup_anim      = 1;       // DEV KEY pasupanim
     float pa_sup_anim_gate = 1.0f;    // DEV KEY pasupanimgate
+    // EQUIP ANIMATIONS ON THE FREE SUPPORT HAND -- OFF BY DEFAULT (headset, same run: "switching
+    // weapons over the shoulder currently causes the left hand to snap to its position, which ends
+    // up awkward when combined with motion tracking"). With it on, the gun leaving its rest pose
+    // counts as an action (the put-away) and the hand-over is held through the DRAW after a weapon
+    // change until the new weapon rests (3 s at most), so a swap plays as one piece. With it off, a
+    // swap the player ASKED for (the Y press, or the holster gesture that presses it) also keeps the
+    // hand on the controller outright for 2.5 s, whatever the off hand does on the way down. Live.
+    int   pa_sup_equip     = 0;       // DEV KEY pasupequip
+    // THE GRENADE THROW'S TAIL (headset, same run: "a live tunable for how many seconds to trim off
+    // the end of the grenade throw anim. It has a notify or something that tells the left hand to go
+    // back to the support grip, and that might confuse some players"). The authored throw is
+    // 1.35-1.40 s: release at ~0.15 s, the arm out to ~0.75 s, the hand back on the forestock by
+    // ~1.0 s. A hand-over that began within 0.6 s of a throw being asked for (the trigger gesture or
+    // the button the game reads as throw) is cut this many seconds before the authored end, and not
+    // taken again until the authored hand is home. 0.6 = let go as the return begins. 0 = off. Live.
+    float pa_grenade_trim_s = 0.6f;   // DEV KEY pagrenadetrim
+    // THE MELEE PREFERENCE (headset, same run: "I think the melee animation playing is actually a
+    // preference when it comes to physical melee ... 3 settings. Melee plays, Melee doesn't play,
+    // and melee doesn't play only on left hand"). A melee is always ASKED for -- the swing gesture
+    // presses the melee mask, and so does a thumb -- so the press (as the game receives it) opens a
+    // gate a few frames AHEAD of the animation, and the gate stays up until the pose is back at
+    // rest (pa::MeleeGate; 4 s at most).
+    //   0 = melee does not play: the gun and the aim hand are held to their REST pose (the weapon
+    //       nodes moved onto the eased rest marker before the carry, the aim wrist to its rest
+    //       relation on it, the kick faded) and the support hand stays off the animation. What you
+    //       see is your own swing.
+    //   1 = DEFAULT: plays on the gun hand only. The gun and the aim hand swing with the animation
+    //       as they always have; the free support hand stays on its controller, and a gripping one
+    //       stays at its rest relation on the (swinging) gun instead of punching or bracing.
+    //   2 = plays on both hands, the free support hand joining as for any other action.
+    // Live.
+    int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
     // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
     // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
     // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the

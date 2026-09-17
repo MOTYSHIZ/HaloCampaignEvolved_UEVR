@@ -813,7 +813,47 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
     return back_axis * (out_m / kMetresPerBlamUnit);
 }
 
-// ---- THE AUTHORED ACTION WATCH ------------------------------------------------------------------
+// ---- REST RELATIONS, THE ACTION WATCH, THE MELEE GATE ------------------------------------------
+
+bool RecoilPass::at_rest() const {
+    return have_ref && stable >= 20 && last_moved_m < 0.005f && last_turned_deg < 2.0f;
+}
+
+void RestRelation::reset() { *this = RestRelation{}; }
+
+void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
+    dev_m = 0.0f; dev_deg = 0.0f;
+    if (!finite(p) || !valid_basis(b)) { stable = 0; have_prev = false; return; }
+
+    bool still = false;
+    if (have_prev) {
+        float a = dot(prev_basis.forward, b.forward);
+        a = std::min(a, dot(prev_basis.left, b.left));
+        a = std::min(a, dot(prev_basis.up, b.up));
+        still = length(p - prev_pos) * kMetresPerBlamUnit < 0.0006f && a > 0.999986f;
+    }
+    prev_pos = p; prev_basis = b; have_prev = true;
+    stable = still ? std::min(stable + 1, 1000000) : 0;
+
+    if (have) {
+        float a = dot(basis.forward, b.forward);
+        a = std::min(a, dot(basis.left, b.left));
+        a = std::min(a, dot(basis.up, b.up));
+        dev_m   = length(p - pos) * kMetresPerBlamUnit;
+        dev_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
+    }
+    // Only ever learned while the GUN is at rest, and -- like the gun's own rest pose -- a relation
+    // far from the known one has to hold for 1.5 s before it is believed.
+    if (!gun_at_rest) return;
+    const bool near_rest = !have || (dev_m < 0.015f && dev_deg < 5.0f);
+    if (stable < (near_rest ? 20 : 90)) return;
+    if (!have) { pos = p; basis = b; have = true; }
+    else {
+        pos   = pos + (p - pos) * 0.2f;
+        basis = blend_basis(basis, b, 0.2f);
+        if (!valid_basis(basis)) basis = b;
+    }
+}
 
 void ActionWatch::reset(float hold_seconds) {
     const float keep = weight;                 // the hand must not pop because the weapon changed
@@ -823,68 +863,65 @@ void ActionWatch::reset(float hold_seconds) {
 }
 
 float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis,
-                          float gate, float dt) {
+                          float gate, float dt, bool equip, float swap_age_s, float grenade_age_s,
+                          float grenade_trim_s) {
     if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
     gate = std::isfinite(gate) ? std::clamp(gate, 0.25f, 4.0f) : 1.0f;
-    last_hand_m = 0.0f; last_hand_deg = 0.0f;
+    hand.learn(gun.at_rest(), hand_pos, hand_basis);
 
-    const bool ok = finite(hand_pos) && valid_basis(hand_basis);
-    if (ok) {
-        bool still = false;
-        if (have_prev) {
-            float a = dot(prev_basis.forward, hand_basis.forward);
-            a = std::min(a, dot(prev_basis.left, hand_basis.left));
-            a = std::min(a, dot(prev_basis.up, hand_basis.up));
-            still = length(hand_pos - prev_pos) * kMetresPerBlamUnit < 0.0006f && a > 0.999986f;
-        }
-        prev_pos = hand_pos; prev_basis = hand_basis; have_prev = true;
-        stable = still ? std::min(stable + 1, 1000000) : 0;
-
-        if (have_rest) {
-            float a = dot(rest_basis.forward, hand_basis.forward);
-            a = std::min(a, dot(rest_basis.left, hand_basis.left));
-            a = std::min(a, dot(rest_basis.up, hand_basis.up));
-            last_hand_m   = length(hand_pos - rest_pos) * kMetresPerBlamUnit;
-            last_hand_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
-        }
-        // The hand's rest relation is only ever learned while the GUN is at rest, and -- like the
-        // gun's own -- a relation far from the known one has to hold for 1.5 s before it is believed.
-        const bool gun_rest = gun.have_ref && gun.stable >= 20 && gun.last_moved_m < 0.005f &&
-                              gun.last_turned_deg < 2.0f;
-        if (gun_rest) {
-            const bool near_rest = !have_rest || (last_hand_m < 0.015f && last_hand_deg < 5.0f);
-            if (stable >= (near_rest ? 20 : 90)) {
-                if (!have_rest) { rest_pos = hand_pos; rest_basis = hand_basis; have_rest = true; }
-                else {
-                    rest_pos   = rest_pos + (hand_pos - rest_pos) * 0.2f;
-                    rest_basis = blend_basis(rest_basis, hand_basis, 0.2f);
-                    if (!valid_basis(rest_basis)) rest_basis = hand_basis;
-                }
-            }
-        }
-    } else {
-        stable = 0; have_prev = false;
-    }
-
-    // WHAT COUNTS AS AN ACTION, from the recording (Magnum + Assault Rifle, 5149 frames): melee,
-    // both reloads and both grenade throws carry the gun 16-87 cm and turn it 24-178 deg, and move
-    // the off hand 18-108 cm / 80-176 deg RELATIVE TO THE GUN -- the hand signal leads, 12-19 cm by
-    // the second frame of a punch or a reload. Everything that is not an action stays far below
-    // every band: the rifle's burst is 4 cm / 0.6 deg with the hand 0.1 cm off, and the largest
-    // idle drift is 4.6 cm / 5.8 deg / 0.7 cm. The bands are smoothsteps so a borderline kick tugs
-    // the hand a little rather than throwing it, and `gate` scales them all.
+    // WHAT COUNTS AS AN ACTION. Two bodies of evidence: the recording (Magnum + Assault Rifle, 5149
+    // frames) and a headset session's PALETTE ANIM lines (54 hand-overs across the whole arsenal).
+    //
+    //                               gun from rest          off hand RELATIVE TO THE GUN
+    //   melee / reload / grenade    13-87 cm, 19-178 deg   14-108 cm,  44-176 deg
+    //   a weapon's PUT-AWAY         25-46 cm, 27-55 deg    0.6-10.4 cm, 1-5 deg
+    //   a big kick (one weapon)     16-17 cm,  5-6 deg     0.9-1.4 cm,  1-3 deg
+    //   the rifle's burst, idle     <= 4.6 cm, <= 5.8 deg  <= 0.7 cm,   <= 4 deg
+    //
+    // So the OFF HAND is the action signal -- above all its TURN, which separates an action from a
+    // put-away by 44 against 5 degrees -- and the gun leaving rest on its own means only "this
+    // weapon is going away" (or kicked hard). The gun signal and the hold through the draw are
+    // therefore the EQUIP half, and are off unless asked for: with motion controls the player is
+    // already reaching over a shoulder when the animation would snap the hand to the gun.
+    // The bands are smoothsteps so a borderline case tugs rather than throws; `gate` scales them.
     float target = 0.0f;
     if (!gun.have_ref) {
-        target = hold_s > 0.0f ? 1.0f : 0.0f;          // a weapon on its way up: see reset()
+        target = (equip && hold_s > 0.0f) ? 1.0f : 0.0f;      // a weapon on its way up: see reset()
         hold_s = std::max(0.0f, hold_s - dt);
     } else {
         hold_s = 0.0f;
-        target = std::max(smoothstep(0.08f * gate, 0.16f * gate, gun.last_moved_m),
-                          smoothstep(20.0f * gate, 35.0f * gate, gun.last_turned_deg));
-        if (have_rest && ok) {
-            target = std::max(target, smoothstep(0.03f * gate, 0.08f * gate, last_hand_m));
-            target = std::max(target, smoothstep(12.0f * gate, 30.0f * gate, last_hand_deg));
+        if (hand.have) {
+            target = std::max(smoothstep(0.12f * gate, 0.20f * gate, hand.dev_m),
+                              smoothstep(12.0f * gate, 30.0f * gate, hand.dev_deg));
         }
+        if (equip) {
+            target = std::max(target, smoothstep(0.08f * gate, 0.16f * gate, gun.last_moved_m));
+            target = std::max(target, smoothstep(20.0f * gate, 35.0f * gate, gun.last_turned_deg));
+        }
+    }
+    // With equip off, a swap the player ASKED for (the button, or the holster gesture that presses
+    // it) keeps the hand on the controller outright until the new weapon has had time to come up,
+    // whatever the off hand does on the way down.
+    if (!equip && swap_age_s >= 0.0f && swap_age_s < 2.5f) target = 0.0f;
+
+    // THE GRENADE THROW'S TAIL. The authored throw (1.35-1.40 s on both recorded weapons) releases
+    // the grenade at ~0.15 s, hangs the arm out to ~0.75 s, then brings the hand back onto the
+    // forestock by ~1.0 s. Played on a free hand, that last part carries the player's hand onto the
+    // gun and drops it back at the controller from there -- "it has a notify or something that tells
+    // the left hand to go back to the support grip, and that might confuse some players". A throw
+    // is always asked for (the trigger gesture or the button press the game reads as throw), so an
+    // action that starts within 0.6 s of one is a throw, and its hand-over is cut `grenade_trim_s`
+    // before the authored end and NOT re-taken until the authored hand is back at rest.
+    if (target > 0.0f && !engaged) {
+        engaged = true; since_onset_s = 0.0f;
+        grenade = grenade_age_s >= 0.0f && grenade_age_s < 0.6f;
+    }
+    if (engaged) since_onset_s += dt;
+    if (engaged && grenade && grenade_trim_s > 0.0f && since_onset_s > kThrowSeconds - grenade_trim_s)
+        grenade_cut = true;
+    if (grenade_cut) {
+        if (target <= 0.0f) grenade_cut = false;                // the authored hand is home again
+        target = 0.0f;
     }
     last_target = target;
 
@@ -894,6 +931,37 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
     if (!std::isfinite(weight)) weight = 0.0f;
     weight = std::clamp(weight, 0.0f, 1.0f);
     if (weight < 0.001f && target <= 0.0f) weight = 0.0f;
+    if (weight <= 0.0f && target <= 0.0f) { engaged = false; grenade = false; }
+    return weight;
+}
+
+void MeleeGate::reset() { *this = MeleeGate{}; }
+
+float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg,
+                        float dt) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    const bool pressed = press_age_s >= 0.0f && press_age_s < 0.4f;
+    // "Still going" is read off the same two signals the action watch uses, at a much lower bar:
+    // this is not deciding WHETHER something is an action, only whether the one a melee press
+    // started has come back to rest. Without a rest pose to measure from (a melee straight after a
+    // swap) it is a plain timer.
+    const bool busy = gun.have_ref
+        ? (gun.last_moved_m > 0.02f || gun.last_turned_deg > 3.0f || hand_dev_m > 0.02f || hand_dev_deg > 5.0f)
+        : (since_s < 1.2f);
+    if (!active) {
+        if (pressed) { active = true; since_s = 0.0f; }
+    } else {
+        since_s += dt;
+        if ((!pressed && !busy && since_s > 0.15f) || since_s > 4.0f) active = false;
+    }
+    const float target = active ? 1.0f : 0.0f;
+    // In AHEAD of the animation -- the press leads it by a few frames, which is the whole point of
+    // keying this off the press rather than off the pose -- and out at the hand-over's own pace.
+    const float tau = target > weight ? 0.03f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
     return weight;
 }
 

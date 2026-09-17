@@ -277,41 +277,81 @@ struct RecoilPass {
 
     void reset();
     Vec3 update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m, bool learn);
+    // Known, holding still, and where it was learned: the only state rest RELATIONS are learned in.
+    bool at_rest() const;
 };
 
-// ---- THE AUTHORED ACTION WATCH ----------------------------------------------------------------
+// ---- REST RELATIONS, THE ACTION WATCH, THE MELEE GATE ----------------------------------------
 //
-// While the support hand grips the gun it rides the rigid transform that carries the gun, so it
-// performs whatever the game animates -- the magazine swap, the butt stroke, the pump. A FREE
-// support hand follows its controller, and then a reload swaps a magazine with nobody holding it.
-// This says WHEN the game is playing such an action, from the stock palette alone (there is no
-// reload or melee event to subscribe to): how far the gun has left its learned rest pose (from
-// RecoilPass), and how far the authored off hand has moved RELATIVE TO THE GUN from its own rest
-// relation. The result is an eased 0..1 weight for the caller to hand the wrist to the animation
-// by, exactly as it does for a two-hand hold.
-//
-// reset(hold_seconds) on a weapon change: with a hold, the weight is driven to 1 until the new
-// weapon has come to rest (or the hold runs out), so a swap plays as one piece -- the put-away is
-// seen as the old gun leaving rest, the draw is covered by the hold. 0 = the draw is not covered.
-// The weight itself survives a reset, so nothing pops.
-struct ActionWatch {
-    bool  have_rest{false};
-    Vec3  rest_pos{};            // the support wrist in the marker's frame, at rest
-    Mat3  rest_basis{};
+// Where one stock node sits in the STOCK weapon marker's frame while the gun is at rest: learned
+// the same way RecoilPass learns the marker's own rest pose (still for a third of a second; a
+// relation far from the known one has to hold for 1.5 s), and only while RecoilPass::at_rest().
+// `dev_*` say how far the node is from that relation as of the last learn().
+struct RestRelation {
+    bool  have{false};
+    Vec3  pos{};
+    Mat3  basis{};
     bool  have_prev{false};
     Vec3  prev_pos{};
     Mat3  prev_basis{};
     int   stable{0};
+    float dev_m{0.0f};
+    float dev_deg{0.0f};
+
+    void reset();
+    void learn(bool gun_at_rest, const Vec3& p, const Mat3& b);
+};
+
+// While the support hand grips the gun it rides the rigid transform that carries the gun, so it
+// performs whatever the game animates -- the magazine swap, the pump. A FREE support hand follows
+// its controller, and then a reload swaps a magazine with nobody holding it. This says WHEN the
+// game is playing such an action, from the stock palette alone (there is no reload event to
+// subscribe to), as an eased 0..1 weight for the caller to hand the wrist to the animation by,
+// exactly as it does for a two-hand hold.
+//
+//   the ACTION half   the authored off hand moving RELATIVE TO THE GUN from its rest relation
+//   the EQUIP half    the gun leaving its own rest pose (a put-away), plus -- via reset()'s hold --
+//                     the draw after a weapon change, until the new weapon rests. `equip` = false
+//                     leaves both out, and `swap_age_s` (seconds since the player asked for a swap,
+//                     negative = never) then keeps the weight at zero for 2.5 s outright.
+//
+// The weight itself survives a reset, so nothing pops.
+// The authored grenade throw's length, seconds (1.37 / 1.40 measured on the Magnum and the rifle),
+// the reference `grenade_trim_s` counts back from.
+constexpr float kThrowSeconds = 1.35f;
+
+struct ActionWatch {
+    RestRelation hand;           // the support wrist in the marker's frame
     float hold_s{0.0f};
     float weight{0.0f};
     float last_target{0.0f};     // diagnostics, as of the last update
-    float last_hand_m{0.0f};
-    float last_hand_deg{0.0f};
+    bool  engaged{false};        // a hand-over is in progress (weight above zero)
+    float since_onset_s{0.0f};
+    bool  grenade{false};        // ...and it began within 0.6 s of a throw being asked for
+    bool  grenade_cut{false};    // ...and has been cut short; stays so until the authored hand is home
 
     void  reset(float hold_seconds);
     // `hand_*` = the STOCK support wrist expressed in the STOCK marker's frame. `gate` scales every
-    // threshold (1 = as measured; raise it if shots tug the hand). Live frames only.
-    float update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis, float gate, float dt);
+    // threshold (1 = as measured). `*_age_s` = seconds since that button was last seen going to the
+    // game, negative = never. `grenade_trim_s` cuts a throw's hand-over that long before its end.
+    // Live frames only.
+    float update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis, float gate, float dt,
+                 bool equip = false, float swap_age_s = -1.0f, float grenade_age_s = -1.0f,
+                 float grenade_trim_s = 0.0f);
+};
+
+// IS A MELEE PLAYING? Which animation an action is cannot be read off the pose -- a butt stroke and
+// a reload overlap in every magnitude -- but a melee is always ASKED for: the swing gesture presses
+// the melee button, and so does a thumb. So this is keyed off the press (`press_age_s`: seconds
+// since the melee mask was last seen going to the game, negative = never), which also leads the
+// animation by a few frames, and stays up until the pose is back at rest (4 s at most).
+struct MeleeGate {
+    bool  active{false};
+    float since_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg, float dt);
 };
 
 } // namespace halo::palettearm

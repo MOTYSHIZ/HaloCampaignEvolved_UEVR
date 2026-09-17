@@ -486,6 +486,19 @@ float s_sup_curl = 0.0f;                        // the support hand's current cu
 pa::RecoilPass     s_recoil;
 // ---- ...AND THE ACTION THE FREE SUPPORT HAND JOINS (pasupanim; see Config.hpp and pa::ActionWatch).
 pa::ActionWatch    s_action;
+// ---- ...THE MELEE GATE (pameleeanim) and the AIM wrist's rest relation to the gun, which the
+// "melee does not play" mode holds the right hand and the gun to while a swing plays out.
+pa::MeleeGate      s_melee;
+pa::RestRelation   s_aim_rest;
+// The pad, as the game is about to receive it (palettearm_note_pad): steady_clock ticks of the last
+// poll each mask was seen down, 0 = never. Written by the XInput hook, read by the live drive.
+std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0};
+float pad_age_s(const std::atomic<long long>& t) {
+    const long long v = t.load(std::memory_order_relaxed);
+    if (v == 0) return -1.0f;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::chrono::duration<float>(std::chrono::steady_clock::duration(now - v)).count();
+}
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -1151,6 +1164,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
     pa::Mat3 wpn_delta_basis{};
     pa::Vec3 wpn_delta_pos{};
     bool     wpn_delta_valid = false;
+    // THE MELEE PREFERENCE (pameleeanim; see Config.hpp). While a swing plays out: how much the GUN
+    // (and with it the aim hand) is held to its rest pose, and how much the SUPPORT hand is kept
+    // off the animation. The marker the hands are placed against is the effective one -- the live
+    // marker, or the live marker eased toward its rest pose.
+    float    melee_gun_w  = 0.0f;
+    float    melee_left_w = 0.0f;
+    pa::Vec3 gun_eff_pos{};
+    pa::Mat3 gun_eff_basis{};
 
     // ---- THE WEAPON BRANCH, carried onto the aim controller. ROUTE (c).
     //
@@ -1205,7 +1226,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const bool live = !access.is_capture_bank;
                 if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
                     s_recoil.reset();
-                    s_action.reset(g_cfg.pa_sup_anim >= 2 ? 3.0f : 0.0f);
+                    s_action.reset(g_cfg.pa_sup_equip != 0 ? 3.0f : 0.0f);
+                    s_aim_rest.reset();
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
@@ -1224,7 +1246,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     [[maybe_unused]] const float was = s_action.weight;
                     s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
                                     pa::multiply(minv, pa::orthonormal_basis(swn)),
-                                    g_cfg.pa_sup_anim_gate, adt);
+                                    g_cfg.pa_sup_anim_gate, adt, g_cfg.pa_sup_equip != 0,
+                                    pad_age_s(s_pad_swap_ticks), pad_age_s(s_pad_throw_ticks),
+                                    g_cfg.pa_grenade_trim_s);
+                    // ...the AIM wrist's rest relation, for the melee mode that holds it to the gun...
+                    const auto& awn = access.palette[aim_arm.wrist];
+                    s_aim_rest.learn(s_recoil.at_rest(), pa::transform_vector(minv, awn.position - marker_now),
+                                     pa::multiply(minv, pa::orthonormal_basis(awn)));
+                    // ...and the gate itself, off the melee press the game is being handed.
+                    s_melee.update(pad_age_s(s_pad_melee_ticks), s_recoil, s_action.hand.dev_m,
+                                   s_action.hand.dev_deg, adt);
 #if HALO_VR_DEV
                     // One line as the hand is taken and one as it is given back, with what tripped
                     // it -- the way to tell, from a headset log, whether plain SHOTS tug the hand.
@@ -1233,17 +1264,19 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     if (s_action.weight > 0.0f) {
                         s_act_peak_m   = (std::max)(s_act_peak_m,   s_recoil.last_moved_m);
                         s_act_peak_deg = (std::max)(s_act_peak_deg, s_recoil.last_turned_deg);
-                        s_act_peak_hm  = (std::max)(s_act_peak_hm,  s_action.last_hand_m);
-                        s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.last_hand_deg);
+                        s_act_peak_hm  = (std::max)(s_act_peak_hm,  s_action.hand.dev_m);
+                        s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.hand.dev_deg);
                     }
                     if (was <= 0.0f && s_action.weight > 0.0f) s_act_since = tnow;
                     if (was > 0.0f && s_action.weight <= 0.0f && g_cfg.pa_sup_anim != 0) {
                         API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
                                              "action for %.2f s (gun up to %.1f cm / %.0f deg from rest, off hand up "
-                                             "to %.1f cm / %.0f deg from its hold; gate x%.2f, mode %d)",
+                                             "to %.1f cm / %.0f deg from its hold; gate x%.2f, equip %d, melee mode %d, "
+                                             "melee gate %.2f)",
                                              std::chrono::duration<float>(tnow - s_act_since).count(),
                                              s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
-                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, g_cfg.pa_sup_anim);
+                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, g_cfg.pa_sup_equip,
+                                             g_cfg.pa_melee_anim, s_melee.weight);
                         s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
                     }
 #endif
@@ -1273,8 +1306,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 }
 #endif
             }
+            // THE MELEE PREFERENCE, applied. Mode 0 holds the gun to its rest pose while the swing
+            // plays: the weapon nodes are moved from the live marker onto the eased one BEFORE the
+            // carry (a rigid transform, so whatever animates inside the gun keeps doing so), and the
+            // kick is faded with it. Modes 0 and 1 keep the support hand off the animation.
+            gun_eff_pos   = marker_now;
+            gun_eff_basis = stock_w;
+            melee_gun_w   = (g_cfg.pa_melee_anim <= 0 && s_recoil.have_ref) ? s_melee.weight : 0.0f;
+            melee_left_w  = (g_cfg.pa_melee_anim <= 1) ? s_melee.weight : 0.0f;
+            if (melee_gun_w > 0.001f) {
+                gun_eff_pos   = marker_now + (s_recoil.ref_pos - marker_now) * melee_gun_w;
+                gun_eff_basis = pa::slerp_basis(stock_w, s_recoil.ref_basis, melee_gun_w);
+                const pa::Mat3 tb = pa::multiply(gun_eff_basis, pa::transpose(stock_w));
+                const pa::Vec3 tp = gun_eff_pos - pa::transform_vector(tb, marker_now);
+                if (pa::valid_basis(tb) && pa::finite(tp)) {
+                    pa::apply_rigid_transform(access.palette, map->weapon_nodes, map->weapon_count, tb, tp);
+                    kick = kick * (1.0f - melee_gun_w);
+                } else {
+                    gun_eff_pos = marker_now; gun_eff_basis = stock_w; melee_gun_w = 0.0f;
+                }
+            }
             const pa::Vec3 carried =
-                pa::transform_vector(delta_basis, marker_now - kick);
+                pa::transform_vector(delta_basis, gun_eff_pos - kick);
             const pa::Vec3 delta_pos{desired_pos.x - carried.x, desired_pos.y - carried.y,
                                      desired_pos.z - carried.z};
             const float reach = pa::length(desired_pos - root_position);
@@ -1665,6 +1718,24 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // ...and the authored hand-to-forearm relation with it: the zero the forearm twist is
         // measured from (paforearmroll).
         const pa::ForearmStock forearm_stock = pa::capture_forearm_stock(access.palette, *plan.arm);
+        // THE AUTHORED WRIST THE GUN PLACEMENTS USE. Normally the stock one; under the melee
+        // preference a hand held to its REST relation on the effective marker instead -- the aim
+        // hand in mode 0 (the gun is held too), the support hand in modes 0 and 1 (a gripping left
+        // hand stays on the gun where it was, rather than punching or bracing with the animation).
+        pa::Vec3 gun_wrist_pos   = stock_wrist_pos;
+        pa::Mat3 gun_wrist_basis = stock_wrist_basis;
+        {
+            const float hw = plan.is_aim ? melee_gun_w : melee_left_w;
+            const pa::RestRelation& rr = plan.is_aim ? s_aim_rest : s_action.hand;
+            if (hw > 0.001f && rr.have && wpn_delta_valid) {
+                const pa::Vec3 rp = gun_eff_pos + pa::transform_vector(gun_eff_basis, rr.pos);
+                const pa::Mat3 rb = pa::multiply(gun_eff_basis, rr.basis);
+                if (pa::finite(rp) && pa::valid_basis(rb)) {
+                    gun_wrist_pos   = stock_wrist_pos + (rp - stock_wrist_pos) * hw;
+                    gun_wrist_basis = pa::slerp_basis(stock_wrist_basis, rb, hw);
+                }
+            }
+        }
         if (plan.is_aim) { aim_stock_wrist = stock_wrist_pos; have_aim_stock = true; }
         if (!plan.is_aim && !access.is_capture_bank) {
             const pa::Vec3 sh0 = access.palette[plan.arm->shoulder].position;
@@ -1869,9 +1940,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // (measured headless, aimhand=1). Until the authored pair is mirrored across the gun for
         // that case, a left-handed aim hand stays on its controller.
         if (g_cfg.pa_hand_on_gun && aim_is_right && plan.is_aim && wpn_delta_valid) {
-            const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
+            const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
             if (pa::valid_basis(on_gun_basis)) {
-                wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
+                wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
                 desired_wrist = on_gun_basis;
 
                 // ...and MEASURE how that hand sits on its controller, for the other hand to mirror.
@@ -1930,11 +2001,12 @@ bool drive_palette(const pa::PaletteAccess& access) {
         if (aim_is_right && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire)) {
             float w = (g_cfg.pa_grab_weapon != 0 && grab_allowed) ? ::halo::two_hand_hold_weight() : 0.0f;
-            if (g_cfg.pa_sup_anim != 0) w = (std::max)(w, s_action.weight);
+            // ...the action hand-over, less whatever the melee preference keeps off it.
+            if (g_cfg.pa_sup_anim != 0) w = (std::max)(w, s_action.weight * (1.0f - melee_left_w));
             if (w > 0.0f) {
                 const pa::Vec3 on_gun_pos =
-                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
-                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
+                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
+                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
                 if (pa::valid_basis(on_gun_basis)) {
                     wrist_target  = wrist_target + (on_gun_pos - wrist_target) * w;
                     // Short-arc, not a normalised lerp: a free hand handed to an action can start
@@ -2736,6 +2808,14 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down) {
+    if (!melee_down && !swap_down && !throw_down) return;
+    const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (melee_down) s_pad_melee_ticks.store(now, std::memory_order_relaxed);
+    if (swap_down)  s_pad_swap_ticks.store(now, std::memory_order_relaxed);
+    if (throw_down) s_pad_throw_ticks.store(now, std::memory_order_relaxed);
+}
+
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
                                 const float up[3], const float wpn_cm[3], bool frozen) {
     s_rigw_frozen.store(frozen, std::memory_order_relaxed);

@@ -13578,6 +13578,13 @@ public:
             }
         }
 
+        // ---- ...and what the PALETTE ARMS need to know about it: melee, swap and throw as the game
+        // is about to see them, gesture-injected or thumbed. The animation preferences key off these
+        // because a butt stroke and a reload cannot be told apart from the pose.
+        halo::palettearm_note_pad(g_cfg.melee_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.melee_mask) != 0,
+                                  g_cfg.holster_swap_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.holster_swap_mask) != 0,
+                                  g_cfg.grenade_action != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.grenade_action) != 0);
+
         // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the
         // whole reason it needed one.
         //

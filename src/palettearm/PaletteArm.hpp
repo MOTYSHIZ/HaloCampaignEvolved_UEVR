@@ -100,6 +100,12 @@ bool palettearm_weapon_owns();
 // ONE predicate for both sides of the hand-over, for the reason palettearm_weapon_owns() gives.
 bool palettearm_weapon_calib_owns();
 
+// What the game is about to be TOLD on the pad, after every remap and injection of ours: is the
+// melee / swap-weapon / throw-grenade mask down? Called from the XInput hook each poll; any thread.
+// The palette arms key the melee-animation preference, the equip hand-over and the grenade tail
+// off these, because none of those actions can be told apart from the pose alone.
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down);
+
 // Can the SUPPORT-HAND calibration gesture do anything?
 //
 //   0 = NOT CONFIGURED -- this driver is not posing the support hand at all (a different armdriver,
