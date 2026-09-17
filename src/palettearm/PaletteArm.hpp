@@ -42,6 +42,16 @@ const char* palettearm_status_geom();
 void palettearm_dbg_shoulder(float* x, float* y, float* z);
 // The aim arm's shoulder / elbow / achieved wrist after the solve (palette units, root frame).
 void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]);
+
+// THE UeRig WEAPON SOLUTION, handed to the palette route (pawpnrig). Game thread, once per tick,
+// from the rig block. Everything is in the BODY frame -- level, yaw = locked view yaw + turn, origin
+// at the rig's attach parent (the camera) -- in UE axes (+X forward, +Y right, +Z up) and UE cm:
+//   fwd/right/up  the images of the mesh's axes under rig mode's mesh rotation q_gun
+//   wpn_cm        where rig mode puts the weapon (the PrimaryWeapon attach point)
+// valid=false whenever rig mode itself would not place the gun (origin hold, a rig mode other than
+// 3). Ages out on its own if the rig block stops running.
+void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
+                                const float up[3], const float wpn_cm[3]);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

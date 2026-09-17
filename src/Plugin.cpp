@@ -10622,6 +10622,63 @@ void update() {
                 g_rigw_off_valid = (g_cfg.rig_mode == 2 || g_cfg.rig_mode == 3)
                                 && (!hold_rig_at_origin || g_cfg.rigw_off_hold == 0);
 
+                // ---- THE SAME SOLUTION, FOR THE PALETTE ROUTE (pawpnrig; see Config.hpp).
+                //
+                // Under the stand-down nothing above is written to the mesh, but it is still where
+                // rig mode WOULD put the gun, calibrations and all. Published in the BODY frame --
+                // the frame the mesh is held in (pameshbody) -- so it never carries the aim.
+                //
+                // The WEAPON point, not the mesh offset: `off` subtracts the arm q_gun*sock_local,
+                // and sock_local is MEASURED off the rendered weapon -- which the palette route
+                // moves, so consuming it would feed the output back into the input. The identity
+                // above gives the weapon directly: parent + pose_off + mount. While calibrating the
+                // frozen mesh offset and the socket latched AT the freeze rebuild the frozen weapon
+                // point, which is what makes the End hold (and its solve, whose arm term cancels)
+                // work under this route too.
+                if (mesh_standdown) {
+                    const bool rw_ok = (g_cfg.rig_mode == 3) && !hold_rig_at_origin && !g_cfg.piv_viz;
+                    const Vec3 wpn_w = calibrating
+                        ? Vec3{calib_off_held.x, calib_off_held.y, calib_off_held.z}
+                        : Vec3{pose_off.x + mount.x, pose_off.y + mount.y, pose_off.z + mount.z};
+                    Vec3 wpn_t = wpn_w;
+                    if (calibrating) {
+                        const Vec3 arm_f = quat_rotate(q_gun, sep_live ? g_calib_sock_local : G);
+                        wpn_t = Vec3{wpn_w.x + arm_f.x, wpn_w.y + arm_f.y, wpn_w.z + arm_f.z};
+                    }
+                    const float body_yaw = g_locked_view_yaw.load() + g_turn_offset.load();
+                    const Quat  q_body_inv = quat_conj(rotator_to_quat(0.0f, body_yaw, 0.0f));
+                    const Quat  q_rel = quat_mul(q_body_inv, q_gun);
+                    const Vec3  f = quat_rotate(q_rel, Vec3{1.0f, 0.0f, 0.0f});
+                    const Vec3  r = quat_rotate(q_rel, Vec3{0.0f, 1.0f, 0.0f});
+                    const Vec3  u = quat_rotate(q_rel, Vec3{0.0f, 0.0f, 1.0f});
+                    const Vec3  w = quat_rotate(q_body_inv, wpn_t);
+                    const float fa[3] = {f.x, f.y, f.z}, ra[3] = {r.x, r.y, r.z};
+                    const float ua[3] = {u.x, u.y, u.z}, wa[3] = {w.x, w.y, w.z};
+                    const bool finite_ok = std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)
+                                        && std::isfinite(f.x) && std::isfinite(r.x) && std::isfinite(u.x);
+                    halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa);
+#if HALO_VR_DEV
+                    // GROUND TRUTH, read not predicted: how far the drawn weapon actually sits from
+                    // where rig mode would have put it. Independent of everything the palette did.
+                    if ((tick % 128u) == 0u && g_rig_parent != nullptr && rw_ok) {
+                        Vec3 pw{}, ww{};
+                        auto* wa2 = fp_weapon_actor();
+                        if (wa2 != nullptr
+                            && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pw)
+                            && call_ret_vec3(wa2,          L"K2_GetActorLocation",     &ww)) {
+                            const float ex = ww.x - (pw.x + wpn_t.x), ey = ww.y - (pw.y + wpn_t.y),
+                                        ez = ww.z - (pw.z + wpn_t.z);
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] PALETTE RIG CARRY check: drawn weapon is %.1f cm from the "
+                                "rig-mode target | target body-frame=(%.1f,%.1f,%.1f) cm mount=(%.1f,%.1f,%.1f) "
+                                "calibrating=%d",
+                                std::sqrt(ex * ex + ey * ey + ez * ez), w.x, w.y, w.z,
+                                mount_local.x, mount_local.y, mount_local.z, (int)calibrating);
+                        }
+                    }
+#endif
+                }
+
                 // WHILE THE OUTAGE IS LIVE, SAY WHAT IS BEING WRITTEN. The player can feel that the
                 // arms moved; only this says HOW FAR and in which direction, which is the number
                 // that decides whether the guard is worth having. Rate-limited, and it only prints

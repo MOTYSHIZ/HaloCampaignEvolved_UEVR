@@ -3786,6 +3786,24 @@ struct Config {
     // palette solves with NO gap and NO pitch term -- the aim never enters the arm chain at all.
     // Needs pameshdown. DEV KEY pameshbody. 0 = mesh rides the camera, palette subtracts the aim.
     bool  pa_mesh_body    = true;
+    // THE WEAPON IS CARRIED BY THE UeRig SOLUTION (2026-09-16, second headset run: "make the weapon
+    // track the same way relative to my controller as it does in rig mode ... that would respect my
+    // calibrations"). The rig block still solves where rig mode would put the gun every tick -- the
+    // mesh world rotation q_gun and the weapon target parent + pose_off + R_ctrl*mount -- it just
+    // does not write them under the stand-down. This hands that solution to the palette: the weapon
+    // nodes get the ONE rigid transform that lands the authored PrimaryWeapon node on the rig's
+    // target with the rig's orientation, so grip trim, mount offset, per-weapon offsets, the
+    // two-hand swing and the End calibration hold all apply exactly as they do in rig mode, and the
+    // shot-point aim (which reconstructs the bore on the same q_gun) points down the drawn barrel.
+    // The palette route's own trims (pawpnyaw/pitch/roll, wpnfix, the barrel lock) are bypassed.
+    // Needs rigmode=3 (the shipped default). DEV KEY pawpnrig. 0 = the old controller carry.
+    bool  pa_wpn_rig      = true;
+    // THE AIM HAND RIDES THE GUN. With the gun placed by the rig calibration, the hand that holds it
+    // takes the AUTHORED wrist carried by the same rigid transform -- the hand sits on the grip the
+    // way the artist posed it, exactly as it does in rig mode -- and the arm is IK'd from the body
+    // shoulder to it. 0 = the aim hand IKs to the controller (it then only sits on the gun as well
+    // as the two calibrations happen to agree). The support hand is unaffected. DEV KEY pahandgun.
+    bool  pa_hand_on_gun  = true;
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends

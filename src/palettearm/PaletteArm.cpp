@@ -399,6 +399,17 @@ bool capture_tracking_into(TrackingSnapshot& snap);   // defined with capture_tr
 //   pasupaim     1 = the support hand takes its ORIENTATION from its controller's aim (pointing)
 //                pose, as the aim hand does; the grip pose is tilted against it, which is why the
 //                left hand "does not feel proper like the right hand". 0 = grip pose (old).
+// ---- THE UeRig WEAPON SOLUTION (see palettearm_note_rig_weapon). Written on the tick, read in the
+// detour -- the same thread in practice; the seq guards the one case where it is not.
+struct RigWeaponTarget {
+    pa::Mat3 basis{};      // Blam axes, body frame: the rig's mesh rotation
+    pa::Vec3 position{};   // Blam units, body frame, from the mesh origin: the weapon attach point
+};
+RigWeaponTarget            s_rigw{};
+std::atomic<std::uint32_t> s_rigw_seq{0};       // odd while being written
+std::atomic_bool           s_rigw_valid{false};
+std::atomic<int>           s_rigw_age{1000};    // ticks since the last note; aged by palettearm_update
+std::atomic_bool           s_rigw_used{false};  // the last live drive carried the gun this way
 bool s_fresh_poses  = true;
 bool s_target_head  = false;
 bool s_support_aim  = true;
@@ -1004,7 +1015,78 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // half of the design, and it is why this path needs no grip calibration of its own.
     //
     // Done BEFORE the arms below, so the aim hand IKs to a weapon that has already moved.
-    if (g_cfg.pa_weapon && map->weapon_count > 0 && map->weapon_marker != pa::kNoNode) {
+    // ---- ROUTE (d): THE UeRig SOLUTION (pawpnrig; see Config.hpp). One rigid transform again, but
+    // its target is where RIG MODE would put the gun, not a second calibration of our own. The rig
+    // publishes its mesh rotation and weapon point in the BODY frame; stage_basis is the map from
+    // that frame into the palette (identity while the mesh is held in the body frame, the inverse
+    // camera rotation otherwise), so both mesh modes land the gun in the same place in the world.
+    bool rig_carry_done = false;
+    if (g_cfg.pa_weapon && g_cfg.pa_wpn_rig && map->weapon_count > 0 &&
+        map->weapon_marker != pa::kNoNode) {
+        rig_carry_done = true;          // this route OWNS the gun: no fallback to a different fit,
+        s_wpn_driven   = false;         // or the gun would hop between two calibrations
+        s_wcarry_valid.store(false, std::memory_order_release);   // wpnfix has nothing to capture here
+        RigWeaponTarget rt{};
+        bool have_rt = false;
+        if (s_rigw_valid.load(std::memory_order_acquire) &&
+            s_rigw_age.load(std::memory_order_relaxed) <= 4) {
+            for (int attempt = 0; attempt < 3 && !have_rt; ++attempt) {
+                const std::uint32_t s0 = s_rigw_seq.load(std::memory_order_acquire);
+                if (s0 & 1u) continue;
+                rt = s_rigw;
+                have_rt = (s_rigw_seq.load(std::memory_order_acquire) == s0);
+            }
+        }
+        const pa::Mat3 stock_w = pa::orthonormal_basis(access.palette[map->weapon_marker]);
+        if (have_rt && pa::valid_basis(rt.basis) && pa::valid_basis(stock_w)) {
+            // Rig mode rotates the whole MESH by q_gun and lets the engine put the attach point's
+            // own authored rotation on top; rotating every weapon node by the same delta is that.
+            //
+            // FROM THE MESH ORIGIN, not from root_position: the rig measures its weapon point from
+            // the attach parent, which is where the mesh origin sits (stock relative location is
+            // zero), and that is the palette's own origin -- whatever the root NODE happens to hold.
+            const pa::Mat3 delta_basis = pa::multiply(stage_basis, rt.basis);
+            const pa::Vec3 desired_pos = pa::transform_vector(stage_basis, rt.position);
+            const pa::Vec3 carried =
+                pa::transform_vector(delta_basis, access.palette[map->weapon_marker].position);
+            const pa::Vec3 delta_pos{desired_pos.x - carried.x, desired_pos.y - carried.y,
+                                     desired_pos.z - carried.z};
+            const float reach = pa::length(desired_pos - root_position);
+            if (pa::valid_basis(delta_basis) && std::isfinite(reach) && reach < kWeaponReachMax) {
+                pa::apply_rigid_transform(access.palette, map->weapon_nodes, map->weapon_count,
+                                          delta_basis, delta_pos);
+                s_dbg_wpn_x = desired_pos.x; s_dbg_wpn_y = desired_pos.y;
+                s_dbg_wpn_z = desired_pos.z; s_dbg_wpn_ok = true;
+                wpn_delta_basis = delta_basis;
+                wpn_delta_pos   = delta_pos;
+                wpn_delta_valid = true;
+                s_wpn_driven = true;
+                s_dbg_wpn_reach = reach * pa::kMetresPerBlamUnit * 100.0f;
+            }
+        }
+        if (!access.is_capture_bank) {
+            const bool now = wpn_delta_valid;
+            if (now != s_rigw_used.exchange(now, std::memory_order_relaxed)) {
+                if (now) {
+                    const pa::Vec3& am = access.palette[map->weapon_marker].position;   // already carried
+                    const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE RIG CARRY: attach node now at "
+                                         "(%.1f,%.1f,%.1f) cm, rig target (%.1f,%.1f,%.1f) cm, palette "
+                                         "root node at (%.1f,%.1f,%.1f) cm  [Blam axes: +Y is LEFT]",
+                                         am.x * cm, am.y * cm, am.z * cm,
+                                         rt.position.x * cm, rt.position.y * cm, rt.position.z * cm,
+                                         root_position.x * cm, root_position.y * cm, root_position.z * cm);
+                }
+                API::get()->log_info(now
+                    ? "[Halo-CampE-UEVR] PALETTE RIG CARRY: the weapon is placed by the UeRig solution "
+                      "(grip trim, mount and per-weapon offsets apply as in rig mode)"
+                    : "[Halo-CampE-UEVR] PALETTE RIG CARRY: no rig weapon target (origin hold, rigmode "
+                      "!= 3, or the rig block is not running) -- the gun stays at its stock pose");
+            }
+        }
+    }
+    if (!rig_carry_done &&
+        g_cfg.pa_weapon && map->weapon_count > 0 && map->weapon_marker != pa::kNoNode) {
         const pa::Mat3 wctrl = xr_rotation_to_blam_basis(
             pa::normalized(composition * pa::Quat{aim_q.x, aim_q.y, aim_q.z, aim_q.w}));
         const pa::Mat3 stock_w = pa::orthonormal_basis(access.palette[map->weapon_marker]);
@@ -1350,6 +1432,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // so where it sits is where our target OUGHT to land. Recording it next to the computed
         // target turns "the hand is in the wrong place" into a measured error vector.
         const pa::Vec3 stock_wrist_pos = access.palette[plan.arm->wrist].position;
+        const pa::Mat3 stock_wrist_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
         if (!plan.is_aim && !access.is_capture_bank) {
             const pa::Vec3 sh0 = access.palette[plan.arm->shoulder].position;
             const pa::Vec3 srel{stock_wrist_pos.x - sh0.x, stock_wrist_pos.y - sh0.y,
@@ -1518,6 +1601,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // controller, and the only coupling between the hands runs one-way through the aim basis.
         // That is the cleaner dependency, and it matches the report that grabbing behaves as a
         // separate concern from the arm itself.
+        // ---- THE AIM HAND RIDES THE GUN (pahandgun; see Config.hpp). The AUTHORED wrist -- read
+        // before this arm was anchored or lifted -- carried by the very transform that placed the
+        // gun, so the hand sits on the grip exactly as it does when rig mode moves the whole mesh.
+        if (g_cfg.pa_hand_on_gun && plan.is_aim && wpn_delta_valid) {
+            const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
+            if (pa::valid_basis(on_gun_basis)) {
+                wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
+                desired_wrist = on_gun_basis;
+            }
+        }
         if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire)) {
             const float w = ::halo::two_hand_blend_weight();
@@ -2215,6 +2308,27 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
+                                const float up[3], const float wpn_cm[3]) {
+    if (!valid || fwd == nullptr || right == nullptr || up == nullptr || wpn_cm == nullptr) {
+        s_rigw_valid.store(false, std::memory_order_release);
+        return;
+    }
+    // UE (+Y right) -> Blam (+Y left) is a mirror in Y, applied to every vector; a rotation's LEFT
+    // column is the image of UE's -Y axis, hence the extra sign on `right`. 304.8 cm per Blam unit.
+    RigWeaponTarget t{};
+    t.basis.forward = pa::Vec3{ fwd[0],   -fwd[1],    fwd[2]};
+    t.basis.left    = pa::Vec3{-right[0],  right[1], -right[2]};
+    t.basis.up      = pa::Vec3{ up[0],    -up[1],     up[2]};
+    const float k = 1.0f / (pa::kMetresPerBlamUnit * 100.0f);
+    t.position = pa::Vec3{wpn_cm[0] * k, -wpn_cm[1] * k, wpn_cm[2] * k};
+    s_rigw_seq.fetch_add(1, std::memory_order_release);
+    s_rigw = t;
+    s_rigw_seq.fetch_add(1, std::memory_order_release);
+    s_rigw_age.store(0, std::memory_order_relaxed);
+    s_rigw_valid.store(true, std::memory_order_release);
+}
+
 void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]) {
     sh[0] = s_dbg_sh_x.load(std::memory_order_relaxed);  sh[1] = s_dbg_sh_y.load(std::memory_order_relaxed);  sh[2] = s_dbg_sh_z.load(std::memory_order_relaxed);
     el[0] = s_dbg_el_x.load(std::memory_order_relaxed);  el[1] = s_dbg_el_y.load(std::memory_order_relaxed);  el[2] = s_dbg_el_z.load(std::memory_order_relaxed);
@@ -2343,6 +2457,10 @@ void palettearm_update(float delta_seconds) {
     }
 
     capture_tracking();
+    {   // age the rig weapon target: a rig block that stopped running must not leave a stale gun
+        const int a = s_rigw_age.load(std::memory_order_relaxed);
+        if (a < 1000) s_rigw_age.store(a + 1, std::memory_order_relaxed);
+    }
 
     // Per-weapon rigid delta + its capture gesture. AFTER capture_tracking() and BEFORE the drive
     // runs, so a freeze latched this tick is in place for the very next build rather than a frame
