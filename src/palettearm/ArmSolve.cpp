@@ -102,6 +102,18 @@ constexpr float kHandPoseFist[5][4][4] = {   // index, middle, ring, pinky, thum
     {{0.390557f, -0.579899f, 0.080174f, 0.710461f}, {-0.022431f, -0.034395f, 0.162879f, 0.985791f}, {-0.021149f, 0.028138f, 0.519217f, 0.853917f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
 };
 
+// The RELAXED hand, recorded the same way: a frame of the weapon-draw animation where the left hand
+// hangs free -- every finger gently curved (about 20 / 35 / 5 degrees down the joints), no splay, the
+// thumb lying alongside. The grenade-release pose above is a hand at full stretch, and a rest pose
+// blended from it toward the fist kept that stretch's splay: "more tense than I was expecting".
+constexpr float kHandPoseRest[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{0.053774f, -0.011139f, 0.123295f, 0.990849f}, {-0.012482f, -0.043886f, 0.273359f, 0.960829f}, {0.000000f, -0.000000f, 0.056704f, 0.998391f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.002167f, -0.037356f, 0.167307f, 0.985195f}, {0.015076f, 0.054812f, 0.264876f, 0.962605f}, {-0.000000f, -0.000000f, 0.000122f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.122442f, 0.045046f, 0.139990f, 0.981520f}, {0.003266f, 0.008026f, 0.378679f, 0.925487f}, {-0.000000f, -0.000000f, -0.058871f, 0.998266f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.183623f, 0.000775f, 0.254334f, 0.949524f}, {0.023652f, 0.060061f, 0.365522f, 0.928562f}, {0.000000f, 0.000000f, -0.021089f, 0.999778f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.413511f, -0.588510f, -0.112556f, 0.685563f}, {-0.020540f, -0.034212f, 0.134255f, 0.990143f}, {0.008271f, 0.037203f, 0.004822f, 0.999262f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+
 Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
     Quat b = b_in;
     float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
@@ -121,7 +133,7 @@ Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
 
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored) {
     if (palette == nullptr) return false;
-    curl     = std::clamp(curl, 0.0f, 1.0f);
+    curl     = std::clamp(curl, -1.0f, 1.0f);
     authored = std::clamp(authored, 0.0f, 1.0f);
     if (authored >= 0.999f) return true;               // the game's own fingers, untouched
 
@@ -154,7 +166,11 @@ bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, f
                           kHandPoseOpen[f][j][2], kHandPoseOpen[f][j][3]};
             const Quat qf{kHandPoseFist[f][j][0], kHandPoseFist[f][j][1],
                           kHandPoseFist[f][j][2], kHandPoseFist[f][j][3]};
-            Quat q = slerp_short(qo, qf, curl);
+            const Quat qr{kHandPoseRest[f][j][0], kHandPoseRest[f][j][1],
+                          kHandPoseRest[f][j][2], kHandPoseRest[f][j][3]};
+            // Three key poses on one axis, the relaxed hand in the middle: a grip press travels
+            // rest -> fist and never passes through the stretched hand on the way.
+            Quat q = (curl >= 0.0f) ? slerp_short(qr, qf, curl) : slerp_short(qr, qo, -curl);
             if (authored > 0.001f) q = slerp_short(q, rotation_from_basis(stock_rel[j]), authored);
             const Mat3 rel = rotation_basis(q);
             if (!valid_basis(rel)) return false;

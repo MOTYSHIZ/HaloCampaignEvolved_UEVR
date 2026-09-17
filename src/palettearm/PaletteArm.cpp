@@ -479,7 +479,7 @@ struct GripRelation {
 };
 GripRelation s_aim_relation;
 std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
-float s_sup_curl = 0.22f;                       // the support hand's current curl, eased
+float s_sup_curl = 0.0f;                        // the support hand's current curl, eased (0 = relaxed)
 std::atomic<float> s_dbg_grab_w{0.0f};          // the support hand's ride-the-gun weight, last drive
 std::atomic<float> s_dbg_stockhg_x{0.0f}, s_dbg_stockhg_y{0.0f}, s_dbg_stockhg_z{0.0f};
 bool s_fresh_poses  = true;
@@ -2010,7 +2010,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             float dt = std::chrono::duration<float>(now - s_shape_t).count();
             s_shape_t = now;
             if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
-            const float rest   = g_cfg.pa_hand_rest < 0.0f ? 0.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
+            const float rest   = g_cfg.pa_hand_rest < -1.0f ? -1.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
             const float target = ::halo::two_hand_support_grip_held() ? 1.0f : rest;
             const float k      = 1.0f - std::exp(-dt / 0.045f);
             s_sup_curl += (target - s_sup_curl) * k;

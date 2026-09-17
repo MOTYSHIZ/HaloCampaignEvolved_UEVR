@@ -3972,13 +3972,19 @@ struct Config {
     // weapon, close into a fist ... the fist from the Magnum left arm punch, the open hand near the
     // end of the grenade throw"). Both were recorded off the stock palette (pahandrec) and are stored
     // as parent-relative joint rotations, which this rig shares between its two hands.
-    //   free support hand  -> the open hand, relaxed by pahandrest toward the fist
+    //   free support hand  -> the RELAXED hand (pahandrest moves it: see below)
     //   grip held, no gun  -> the fist
     //   riding the gun     -> the AUTHORED fingers (eased by the two-hand hold's own ramp)
     // The aim hand is always on the gun and keeps its authored grip. DEV KEY pahandpose. 0 = the
     // authored grip on both hands always (the behaviour to date).
     bool  pa_hand_pose     = true;
-    float pa_hand_rest     = 0.22f;   // DEV KEY pahandrest: 0 = the flat open hand .. 1 = the fist
+    // THE REST POSE IS ITS OWN RECORDED HAND (2026-09-17, headset: "the open palm pose is a bit more
+    // tense than I was expecting"). The first rest pose was the grenade-release hand blended 22 percent
+    // toward the fist, and a hand at full stretch stays splayed however far it is curled. The rest
+    // pose is now a third recording -- the free left hand of the weapon-draw animation, every finger
+    // gently curved -- and pahandrest moves AWAY from it: -1 = the stretched open hand (the old
+    // look is about -0.8) .. 0 = the relaxed hand .. 1 = the fist. Live.
+    float pa_hand_rest     = 0.0f;    // DEV KEY pahandrest
     // THE FREE SUPPORT HAND MIRRORS THE AIM HAND. The aim hand's pose relative to ITS controller is
     // the product of the player's own weapon calibration and the artist's grip -- and the player
     // confirmed it in a headset. Controllers are mirror images held mirror-image, so the free support
