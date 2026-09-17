@@ -89,6 +89,17 @@ extern std::atomic<uint32_t> g_pa_torso_seq;
 // Ownership is a decision about configuration; success is a decision about a frame.
 bool palettearm_weapon_owns();
 
+// Does the palette route keep its OWN weapon calibration (wpnfix, captured by its own freeze)?
+//
+// NOT under pawpnrig. There the gun is placed by the RIG's solution, so the rig's fitted grip and
+// mount ARE the weapon's chain, and the rig's gestures -- the menu/End pose match, the per-weapon
+// wpnoff capture -- are the ones that move it. Found headless 2026-09-17, and reported from a headset
+// the same night as "it tends to snap back and not save the value": WeaponCalib claimed every release
+// for the palette driver on the old premise that the rig's calibration was not in the chain, so the
+// solve ran, nothing was written or adopted, and WeaponOffset put the old fit back on the next tick.
+// ONE predicate for both sides of the hand-over, for the reason palettearm_weapon_owns() gives.
+bool palettearm_weapon_calib_owns();
+
 // Can the SUPPORT-HAND calibration gesture do anything?
 //
 //   0 = NOT CONFIGURED -- this driver is not posing the support hand at all (a different armdriver,

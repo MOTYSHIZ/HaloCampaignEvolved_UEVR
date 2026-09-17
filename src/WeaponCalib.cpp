@@ -324,7 +324,11 @@ bool wpn_calib_capture() {
     //
     // Writing a wpnoff delta here as well would not be harmless: it is invisible while the palette
     // drives, and then moves the weapon the moment the player switches back to the rig driver.
-    if (palettearm_weapon_owns()) return true;
+    //
+    // ...UNLESS THE PALETTE IS CARRYING THE GUN ON THE RIG'S SOLUTION (pawpnrig). Then the fitted
+    // grip and mount ARE the weapon's chain and this gesture is the one that moves it, so it has to
+    // save and adopt exactly as it does in rig mode -- see palettearm_weapon_calib_owns().
+    if (palettearm_weapon_calib_owns()) return true;
 
     if (!s_pending.exchange(false, std::memory_order_relaxed)) return false;
 

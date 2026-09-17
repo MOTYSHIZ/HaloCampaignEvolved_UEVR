@@ -2220,7 +2220,7 @@ void weapon_fix_tick() {
     // armdriver=2 with pawpn=0 is arms-here, gun-on-the-rig. Draining unconditionally there would
     // eat the latch belonging to the rig's own capture, and INSERT would silently stop working for
     // the exact configuration that still needs it. Same predicate WeaponCalib.cpp stands down on.
-    if (palettearm_weapon_owns()) (void)::halo::wpn_calib_take_pending();
+    if (palettearm_weapon_calib_owns()) (void)::halo::wpn_calib_take_pending();
 
     static bool     s_held = false;
     static bool     s_armed = false;
@@ -2238,7 +2238,7 @@ void weapon_fix_tick() {
     // down on, so exactly one of the two capture paths can ever claim a press. Two nearly-identical
     // conditions in two files is how a press ends up writing both destinations, or neither.
     const bool focused = ::halo::game_window_focused();
-    const bool held = palettearm_weapon_owns() && focused && ::halo::wpn_calib_held();
+    const bool held = palettearm_weapon_calib_owns() && focused && ::halo::wpn_calib_held();
     const bool was  = s_held;
     s_held = held;
 
@@ -2681,6 +2681,10 @@ const char* palettearm_status_jitter() {
 
 bool palettearm_weapon_owns() {
     return g_cfg.pa_weapon && g_cfg.arm_driver == 2 && !palettearm_unavailable();
+}
+
+bool palettearm_weapon_calib_owns() {
+    return palettearm_weapon_owns() && !g_cfg.pa_wpn_rig;
 }
 
 bool palettearm_unavailable() { return s_unavailable; }
