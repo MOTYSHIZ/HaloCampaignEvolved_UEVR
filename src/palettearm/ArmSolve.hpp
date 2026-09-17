@@ -259,9 +259,46 @@ struct RecoilPass {
     int   stable{0};
     int   latches{0};            // times a rest pose was first learned (diagnostics)
     float last_back_m{0.0f};     // what the last update let through, metres (diagnostics)
+    float last_moved_m{0.0f};    // how far the marker is from its rest pose, metres...
+    float last_turned_deg{0.0f}; // ...and how far it has turned (both 0 until a rest pose is known)
 
     void reset();
     Vec3 update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m, bool learn);
+};
+
+// ---- THE AUTHORED ACTION WATCH ----------------------------------------------------------------
+//
+// While the support hand grips the gun it rides the rigid transform that carries the gun, so it
+// performs whatever the game animates -- the magazine swap, the butt stroke, the pump. A FREE
+// support hand follows its controller, and then a reload swaps a magazine with nobody holding it.
+// This says WHEN the game is playing such an action, from the stock palette alone (there is no
+// reload or melee event to subscribe to): how far the gun has left its learned rest pose (from
+// RecoilPass), and how far the authored off hand has moved RELATIVE TO THE GUN from its own rest
+// relation. The result is an eased 0..1 weight for the caller to hand the wrist to the animation
+// by, exactly as it does for a two-hand hold.
+//
+// reset(hold_seconds) on a weapon change: with a hold, the weight is driven to 1 until the new
+// weapon has come to rest (or the hold runs out), so a swap plays as one piece -- the put-away is
+// seen as the old gun leaving rest, the draw is covered by the hold. 0 = the draw is not covered.
+// The weight itself survives a reset, so nothing pops.
+struct ActionWatch {
+    bool  have_rest{false};
+    Vec3  rest_pos{};            // the support wrist in the marker's frame, at rest
+    Mat3  rest_basis{};
+    bool  have_prev{false};
+    Vec3  prev_pos{};
+    Mat3  prev_basis{};
+    int   stable{0};
+    float hold_s{0.0f};
+    float weight{0.0f};
+    float last_target{0.0f};     // diagnostics, as of the last update
+    float last_hand_m{0.0f};
+    float last_hand_deg{0.0f};
+
+    void  reset(float hold_seconds);
+    // `hand_*` = the STOCK support wrist expressed in the STOCK marker's frame. `gate` scales every
+    // threshold (1 = as measured; raise it if shots tug the hand). Live frames only.
+    float update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis, float gate, float dt);
 };
 
 } // namespace halo::palettearm

@@ -728,7 +728,20 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
         }
         prev_pos = marker_pos; prev_basis = marker_basis; have_prev = true;
         stable = still ? std::min(stable + 1, 1000000) : 0;
-        if (stable >= 20) {
+        // A pose FAR from the known rest has to hold for a second and a half before it is believed,
+        // not a third of one: an animation that pauses (a shell-by-shell reload holds the gun tilted
+        // between shells) must not teach its pause as the rest pose, or everything measured from
+        // rest -- the kick below, and the action watch -- would read zero in the middle of it.
+        int need = 20;
+        if (have_ref) {
+            float near_align = dot(ref_basis.forward, marker_basis.forward);
+            near_align = std::min(near_align, dot(ref_basis.left, marker_basis.left));
+            near_align = std::min(near_align, dot(ref_basis.up, marker_basis.up));
+            const bool near_rest = length(marker_pos - ref_pos) * kMetresPerBlamUnit < 0.015f &&
+                                   near_align > 0.99619f;                      // 1.5 cm, 5 degrees
+            if (!near_rest) need = 90;
+        }
+        if (stable >= need) {
             if (!have_ref) { ref_pos = marker_pos; ref_basis = marker_basis; have_ref = true; ++latches; }
             else {
                 ref_pos   = ref_pos + (marker_pos - ref_pos) * 0.2f;
@@ -737,7 +750,18 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
             }
         }
     }
-    if (!have_ref || !(gain > 0.0f) || !(max_m > 0.0f) || !std::isfinite(gain) || !std::isfinite(max_m))
+    // HOW FAR THE GUN IS FROM REST, for anyone who asks (the action watch does) -- whatever the
+    // recoil gain is, so switching the kick off does not blind it.
+    last_moved_m = 0.0f; last_turned_deg = 0.0f;
+    if (!have_ref) return {};
+    {
+        float a = dot(ref_basis.forward, marker_basis.forward);
+        a = std::min(a, dot(ref_basis.left, marker_basis.left));
+        a = std::min(a, dot(ref_basis.up, marker_basis.up));
+        last_moved_m    = length(marker_pos - ref_pos) * kMetresPerBlamUnit;
+        last_turned_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
+    }
+    if (!(gain > 0.0f) || !(max_m > 0.0f) || !std::isfinite(gain) || !std::isfinite(max_m))
         return {};
 
     // BACK ALONG THE BARREL, and nothing else. The authored marker carries the gun's long axis as
@@ -756,16 +780,96 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
     // grenade and swap animations turn it 24 to 177 degrees -- and travels several times further.
     // Both fades are smooth so an animation passing through the band eases the gun rather than
     // popping it.
-    float align = dot(ref_basis.forward, marker_basis.forward);
-    align = std::min(align, dot(ref_basis.left, marker_basis.left));
-    align = std::min(align, dot(ref_basis.up, marker_basis.up));
-    const float turned_deg = std::acos(std::clamp(align, -1.0f, 1.0f)) * 57.2957795131f;
-    const float weight = (1.0f - smoothstep(8.0f, 20.0f, turned_deg)) *
-                         (1.0f - smoothstep(max_m, 2.0f * max_m, length(moved) * kMetresPerBlamUnit));
+    const float weight = (1.0f - smoothstep(8.0f, 20.0f, last_turned_deg)) *
+                         (1.0f - smoothstep(max_m, 2.0f * max_m, last_moved_m));
     const float out_m = std::min(back * kMetresPerBlamUnit, max_m) * weight * std::min(gain, 2.0f);
     if (!(out_m > 0.0f) || !std::isfinite(out_m)) return {};
     last_back_m = out_m;
     return back_axis * (out_m / kMetresPerBlamUnit);
+}
+
+// ---- THE AUTHORED ACTION WATCH ------------------------------------------------------------------
+
+void ActionWatch::reset(float hold_seconds) {
+    const float keep = weight;                 // the hand must not pop because the weapon changed
+    *this = ActionWatch{};
+    weight = keep;
+    hold_s = hold_seconds > 0.0f ? hold_seconds : 0.0f;
+}
+
+float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis,
+                          float gate, float dt) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    gate = std::isfinite(gate) ? std::clamp(gate, 0.25f, 4.0f) : 1.0f;
+    last_hand_m = 0.0f; last_hand_deg = 0.0f;
+
+    const bool ok = finite(hand_pos) && valid_basis(hand_basis);
+    if (ok) {
+        bool still = false;
+        if (have_prev) {
+            float a = dot(prev_basis.forward, hand_basis.forward);
+            a = std::min(a, dot(prev_basis.left, hand_basis.left));
+            a = std::min(a, dot(prev_basis.up, hand_basis.up));
+            still = length(hand_pos - prev_pos) * kMetresPerBlamUnit < 0.0006f && a > 0.999986f;
+        }
+        prev_pos = hand_pos; prev_basis = hand_basis; have_prev = true;
+        stable = still ? std::min(stable + 1, 1000000) : 0;
+
+        if (have_rest) {
+            float a = dot(rest_basis.forward, hand_basis.forward);
+            a = std::min(a, dot(rest_basis.left, hand_basis.left));
+            a = std::min(a, dot(rest_basis.up, hand_basis.up));
+            last_hand_m   = length(hand_pos - rest_pos) * kMetresPerBlamUnit;
+            last_hand_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
+        }
+        // The hand's rest relation is only ever learned while the GUN is at rest, and -- like the
+        // gun's own -- a relation far from the known one has to hold for 1.5 s before it is believed.
+        const bool gun_rest = gun.have_ref && gun.stable >= 20 && gun.last_moved_m < 0.005f &&
+                              gun.last_turned_deg < 2.0f;
+        if (gun_rest) {
+            const bool near_rest = !have_rest || (last_hand_m < 0.015f && last_hand_deg < 5.0f);
+            if (stable >= (near_rest ? 20 : 90)) {
+                if (!have_rest) { rest_pos = hand_pos; rest_basis = hand_basis; have_rest = true; }
+                else {
+                    rest_pos   = rest_pos + (hand_pos - rest_pos) * 0.2f;
+                    rest_basis = blend_basis(rest_basis, hand_basis, 0.2f);
+                    if (!valid_basis(rest_basis)) rest_basis = hand_basis;
+                }
+            }
+        }
+    } else {
+        stable = 0; have_prev = false;
+    }
+
+    // WHAT COUNTS AS AN ACTION, from the recording (Magnum + Assault Rifle, 5149 frames): melee,
+    // both reloads and both grenade throws carry the gun 16-87 cm and turn it 24-178 deg, and move
+    // the off hand 18-108 cm / 80-176 deg RELATIVE TO THE GUN -- the hand signal leads, 12-19 cm by
+    // the second frame of a punch or a reload. Everything that is not an action stays far below
+    // every band: the rifle's burst is 4 cm / 0.6 deg with the hand 0.1 cm off, and the largest
+    // idle drift is 4.6 cm / 5.8 deg / 0.7 cm. The bands are smoothsteps so a borderline kick tugs
+    // the hand a little rather than throwing it, and `gate` scales them all.
+    float target = 0.0f;
+    if (!gun.have_ref) {
+        target = hold_s > 0.0f ? 1.0f : 0.0f;          // a weapon on its way up: see reset()
+        hold_s = std::max(0.0f, hold_s - dt);
+    } else {
+        hold_s = 0.0f;
+        target = std::max(smoothstep(0.08f * gate, 0.16f * gate, gun.last_moved_m),
+                          smoothstep(20.0f * gate, 35.0f * gate, gun.last_turned_deg));
+        if (have_rest && ok) {
+            target = std::max(target, smoothstep(0.03f * gate, 0.08f * gate, last_hand_m));
+            target = std::max(target, smoothstep(12.0f * gate, 30.0f * gate, last_hand_deg));
+        }
+    }
+    last_target = target;
+
+    // In quickly (a melee lands within a quarter second), out at the two-hand hold's own pace.
+    const float tau = target > weight ? 0.06f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && target <= 0.0f) weight = 0.0f;
+    return weight;
 }
 
 } // namespace halo::palettearm

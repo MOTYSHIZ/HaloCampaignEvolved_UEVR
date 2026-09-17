@@ -1341,6 +1341,8 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pahandrest")    == 0) { g_cfg.pa_hand_rest      = (float)v; return true; }
     if (_stricmp(key, "paforearmroll") == 0) { g_cfg.pa_forearm_roll   = (float)v; return true; }
     if (_stricmp(key, "paforearmarmor") == 0) { g_cfg.pa_forearm_armor = (float)v; return true; }
+    if (_stricmp(key, "pasupanim")     == 0) { g_cfg.pa_sup_anim       = (int)v;   return true; }
+    if (_stricmp(key, "pasupanimgate") == 0) { g_cfg.pa_sup_anim_gate  = (float)v; return true; }
     if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }
     if (_stricmp(key, "pastretchshare") == 0) { g_cfg.pa_stretch_share = (float)v; return true; }
     if (_stricmp(key, "parecoil")      == 0) { g_cfg.pa_recoil         = (float)v; return true; }

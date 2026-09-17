@@ -4005,6 +4005,28 @@ struct Config {
     //   0 = rigid with the elbow (the game's way) .. 1 = with the forearm beside it (DEFAULT) ..
     //   3 = cap (2.3 puts the gauntlet on the wrist-end twist bone's roll)
     float pa_forearm_armor = 1.0f;    // DEV KEY paforearmarmor
+    // THE FREE SUPPORT HAND JOINS THE GAME'S ACTIONS (2026-09-17, headset: "the reload animations
+    // worked great when my left hand was gripping the weapon ... can you make it so that the
+    // animation plays regardless of whether or not I am gripping the weapon with my left hand? Same
+    // with melee animations"). Gripping, the hand rides the transform that carries the gun, so it
+    // performs whatever the game animates; free, it followed the controller and a reload swapped a
+    // magazine with nobody holding it. There is no reload or melee event to subscribe to, so the
+    // stock palette is watched instead (pa::ActionWatch): the gun leaving its learned rest pose
+    // (8-16 cm, 20-35 deg) or the authored off hand moving RELATIVE TO THE GUN (3-8 cm, 12-30 deg).
+    // In the recording every melee / reload / grenade throw is 3-20x past those bands and nothing
+    // else comes near them (the rifle's burst: 4 cm, 0.6 deg, hand 0.1 cm). While one plays the
+    // support wrist is handed to the authored pose exactly as for a two-hand hold -- same carry,
+    // shoulder still on the body, authored fingers -- in over ~0.06 s, out over ~0.12 s. Aim is not
+    // touched: no hold is latched. On every weapon, deny-listed or not. Right-handed aim only.
+    //   pasupanim      0 = off (the hand stays on its controller, as before)
+    //                  1 = actions seen from rest: reload, melee, grenade, a weapon's put-away
+    //                  2 = DEFAULT: as 1, and held through the DRAW after a weapon change until the
+    //                      new weapon rests (3 s at most), so a swap plays as one piece
+    //   pasupanimgate  scales every threshold. 1 = as measured. Raise it (1.5, 2) if plain SHOTS tug
+    //                  the free hand on some weapon -- the dev line 'PALETTE ANIM' says what tripped.
+    // Both live.
+    int   pa_sup_anim      = 2;       // DEV KEY pasupanim
+    float pa_sup_anim_gate = 1.0f;    // DEV KEY pasupanimgate
     // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
     // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
     // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the

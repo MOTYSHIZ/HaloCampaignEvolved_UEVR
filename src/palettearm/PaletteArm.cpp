@@ -484,6 +484,8 @@ float s_sup_curl = 0.0f;                        // the support hand's current cu
 // live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
 // new weapon has rested.
 pa::RecoilPass     s_recoil;
+// ---- ...AND THE ACTION THE FREE SUPPORT HAND JOINS (pasupanim; see Config.hpp and pa::ActionWatch).
+pa::ActionWatch    s_action;
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -1203,12 +1205,49 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const bool live = !access.is_capture_bank;
                 if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
                     s_recoil.reset();
+                    s_action.reset(g_cfg.pa_sup_anim >= 2 ? 3.0f : 0.0f);
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
                 kick = s_recoil.update(marker_now, stock_w, frozen ? 0.0f : g_cfg.pa_recoil,
                                        g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen);
+                if (live) {
+                    // The STOCK support wrist in the STOCK marker's frame: neither has been touched
+                    // yet (the carry is applied below, the arms after that).
+                    static std::chrono::steady_clock::time_point s_act_t{};
+                    const auto  tnow = std::chrono::steady_clock::now();
+                    const float adt  = std::chrono::duration<float>(tnow - s_act_t).count();
+                    s_act_t = tnow;
+                    const auto&    swn  = access.palette[support_arm.wrist];
+                    const pa::Mat3 minv = pa::transpose(stock_w);
+                    [[maybe_unused]] const float was = s_action.weight;
+                    s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
+                                    pa::multiply(minv, pa::orthonormal_basis(swn)),
+                                    g_cfg.pa_sup_anim_gate, adt);
+#if HALO_VR_DEV
+                    // One line as the hand is taken and one as it is given back, with what tripped
+                    // it -- the way to tell, from a headset log, whether plain SHOTS tug the hand.
+                    static float s_act_peak_m = 0.0f, s_act_peak_deg = 0.0f, s_act_peak_hm = 0.0f, s_act_peak_hd = 0.0f;
+                    static std::chrono::steady_clock::time_point s_act_since{};
+                    if (s_action.weight > 0.0f) {
+                        s_act_peak_m   = (std::max)(s_act_peak_m,   s_recoil.last_moved_m);
+                        s_act_peak_deg = (std::max)(s_act_peak_deg, s_recoil.last_turned_deg);
+                        s_act_peak_hm  = (std::max)(s_act_peak_hm,  s_action.last_hand_m);
+                        s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.last_hand_deg);
+                    }
+                    if (was <= 0.0f && s_action.weight > 0.0f) s_act_since = tnow;
+                    if (was > 0.0f && s_action.weight <= 0.0f && g_cfg.pa_sup_anim != 0) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
+                                             "action for %.2f s (gun up to %.1f cm / %.0f deg from rest, off hand up "
+                                             "to %.1f cm / %.0f deg from its hold; gate x%.2f, mode %d)",
+                                             std::chrono::duration<float>(tnow - s_act_since).count(),
+                                             s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
+                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, g_cfg.pa_sup_anim);
+                        s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
+                    }
+#endif
+                }
 #if HALO_VR_DEV
                 if (live) {
                     const float cmk = pa::kMetresPerBlamUnit * 100.0f;
@@ -1885,9 +1924,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
             const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
             grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
         }
-        if (g_cfg.pa_grab_weapon != 0 && aim_is_right && !plan.is_aim && wpn_delta_valid &&
-            !s_hfreeze_active.load(std::memory_order_acquire) && grab_allowed) {
-            const float w = ::halo::two_hand_hold_weight();
+        // ...OR AN AUTHORED ACTION IS PLAYING (pasupanim; see Config.hpp). The same hand-over, by the
+        // action watch's weight instead of the hold's, and on EVERY weapon: the deny list says which
+        // guns take a two-hand HOLD, not which ones have a reload.
+        if (aim_is_right && !plan.is_aim && wpn_delta_valid &&
+            !s_hfreeze_active.load(std::memory_order_acquire)) {
+            float w = (g_cfg.pa_grab_weapon != 0 && grab_allowed) ? ::halo::two_hand_hold_weight() : 0.0f;
+            if (g_cfg.pa_sup_anim != 0) w = (std::max)(w, s_action.weight);
             if (w > 0.0f) {
                 const pa::Vec3 on_gun_pos =
                     wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
