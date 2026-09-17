@@ -20,6 +20,8 @@
 #include "uevr/API.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -410,6 +412,52 @@ std::atomic<std::uint32_t> s_rigw_seq{0};       // odd while being written
 std::atomic_bool           s_rigw_valid{false};
 std::atomic<int>           s_rigw_age{1000};    // ticks since the last note; aged by palettearm_update
 std::atomic_bool           s_rigw_used{false};  // the last live drive carried the gun this way
+std::atomic_bool           s_rigw_frozen{false};// a calibration hold is pinning the gun (see the note)
+
+// ---- THE AIM HAND'S RELATION TO ITS CONTROLLER, for the free support hand to mirror
+// (pasupmirror; see Config.hpp). basis = the wrist in the controller's GRIP frame, offset = the
+// wrist from the grip position in that frame (Blam units). Measured against the TICK's controller
+// sample, because the rig target it is differenced with is a tick value -- a fresh pose here would
+// put the two samples a few ms apart and the difference would shake with every fast rotation, which
+// is precisely the right-hand-moves-the-left coupling this whole lane exists to remove.
+//
+// LATCHED ONLY WHEN IT HOLDS STILL. The relation is calibration x authored grip, constant while the
+// weapon idles; recoil, reloads, melee and swaps all move the authored wrist, and none of that may
+// reach the other hand. A new value has to repeat for half a second, then it is EASED in, so a
+// weapon swap or a recalibration arrives as a drift rather than a pop.
+struct GripRelation {
+    pa::Mat3 basis{};
+    pa::Vec3 offset{};
+    bool     have = false;
+    pa::Mat3 cand_basis{};
+    pa::Vec3 cand_offset{};
+    int      stable = 0;
+
+    void observe(const pa::Mat3& b, const pa::Vec3& o) {
+        if (!pa::valid_basis(b) || !pa::finite(o)) { stable = 0; return; }
+        const float af = pa::dot(cand_basis.forward, b.forward);
+        const float al = pa::dot(cand_basis.left,    b.left);
+        const float au = pa::dot(cand_basis.up,      b.up);
+        float align = af; if (al < align) align = al; if (au < align) align = au;
+        const float moved = pa::length(o - cand_offset) * pa::kMetresPerBlamUnit;
+        if (align > 0.99990f && moved < 0.004f) {            // ~0.8 deg, 4 mm
+            if (++stable >= 30) {
+                if (!have) { basis = cand_basis; offset = cand_offset; have = true; }
+                else {
+                    basis  = pa::blend_basis(basis, cand_basis, 0.15f);
+                    offset = offset + (cand_offset - offset) * 0.15f;
+                }
+                if (stable > 1000000) stable = 30;
+            }
+        } else {
+            cand_basis = b; cand_offset = o; stable = 0;
+        }
+    }
+    void reset() { have = false; stable = 0; cand_basis = pa::Mat3{}; cand_offset = pa::Vec3{}; }
+};
+GripRelation s_aim_relation;
+std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
+float s_sup_curl = 0.22f;                       // the support hand's current curl, eased
 std::atomic<float> s_dbg_grab_w{0.0f};          // the support hand's ride-the-gun weight, last drive
 std::atomic<float> s_dbg_stockhg_x{0.0f}, s_dbg_stockhg_y{0.0f}, s_dbg_stockhg_z{0.0f};
 bool s_fresh_poses  = true;
@@ -1054,7 +1102,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         { &aim_arm,     pa::Quat{aim_q.x, aim_q.y, aim_q.z, aim_q.w},
           tracking.aim_grip_position,
           aim_is_right ? &s_conv_right : &s_conv_left, !aim_is_right, true },
-        { &support_arm, s_support_aim ? tracking.support_aim_rotation : tracking.support_grip_rotation,
+        { &support_arm,
+          (g_cfg.pa_support_mirror && s_aim_relation.have) ? tracking.support_grip_rotation
+          : (s_support_aim ? tracking.support_aim_rotation : tracking.support_grip_rotation),
           tracking.support_grip_position,
           aim_is_right ? &s_conv_left : &s_conv_right, aim_is_right, false },
     };
@@ -1397,6 +1447,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     }
 
     bool any_posed = false;
+    bool support_posed = false;
     for (int i = 0; i < 2; ++i) {
         const HandPlan& plan = plans[i];
         const int arm_bit = plan.is_aim ? 1 : 2;
@@ -1529,6 +1580,23 @@ bool drive_palette(const pa::PaletteAccess& access) {
             (g_cfg.pa_target_frame >= 2)
                 ? pa::multiply(pa::multiply(stage_basis, controller_raw), plan.conv->latched)
                 : pa::multiply(pa::multiply(root_basis, controller), plan.conv->latched);
+        // ---- THE FREE SUPPORT HAND MIRRORS THE AIM HAND (pasupmirror; see Config.hpp and
+        // GripRelation). The rig mirrors its hands by BEHAVIOUR: corresponding bones differ by a
+        // half turn about the lateral axis (every offset of one hand is the negative of the other's,
+        // measured), so the mirror image of a wrist basis across the controller's own sagittal
+        // plane is each of its axes with X and Z negated; a vector mirrors by negating Y.
+        const bool mirror_free = !plan.is_aim && g_cfg.pa_support_mirror && s_aim_relation.have &&
+                                 g_cfg.pa_target_frame >= 2;
+        pa::Vec3 mirror_offset{};
+        if (mirror_free) {
+            const pa::Mat3& r = s_aim_relation.basis;
+            const pa::Mat3 mirrored{ pa::Vec3{-r.forward.x, r.forward.y, -r.forward.z},
+                                     pa::Vec3{-r.left.x,    r.left.y,    -r.left.z},
+                                     pa::Vec3{-r.up.x,      r.up.y,      -r.up.z} };
+            desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), mirrored);
+            mirror_offset = pa::Vec3{s_aim_relation.offset.x, -s_aim_relation.offset.y,
+                                     s_aim_relation.offset.z};
+        }
         if (!pa::valid_basis(desired_wrist)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[4];); continue; }
 
         // The POSITION half of the same lift. Rotating only the orientation would leave the hand
@@ -1563,7 +1631,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
         pa::Vec3 wrist_target =
             (g_cfg.pa_target_frame >= 1)
                 ? (root_position + pa::transform_vector(stage_basis, stage_off) +
-                   pa::transform_vector(pa::multiply(stage_basis, controller_raw), wrist_local))
+                   pa::transform_vector(pa::multiply(stage_basis, controller_raw),
+                                        mirror_free ? mirror_offset : wrist_local))
                 : (root_position + pa::transform_vector(root_basis, delta_blam) +
                    pa::transform_vector(pa::multiply(root_basis, controller), wrist_local));
 
@@ -1671,6 +1740,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
             if (pa::valid_basis(on_gun_basis)) {
                 wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
                 desired_wrist = on_gun_basis;
+
+                // ...and MEASURE how that hand sits on its controller, for the other hand to mirror.
+                // Only off the rig carry (the calibrated one), never while a two-hand swing or a
+                // calibration hold has the gun somewhere the controller alone would not put it.
+                if (!access.is_capture_bank && g_cfg.pa_support_mirror && s_rigw_used.load() &&
+                    !s_rigw_frozen.load(std::memory_order_relaxed) &&
+                    ::halo::two_hand_hold_weight() <= 0.0f) {
+                    const TrackingSnapshot tk = s_tracking;          // the TICK's sample, see GripRelation
+                    const pa::Quat tcomp = pa::normalized(tk.stage_rotation);
+                    const pa::Mat3 g_tick = xr_rotation_to_blam_basis(
+                        pa::normalized(tcomp * tk.aim_grip_rotation));
+                    if (tk.valid && pa::valid_basis(g_tick)) {
+                        const pa::Mat3 sinv = pa::transpose(stage_basis);
+                        const pa::Mat3 ginv = pa::transpose(g_tick);
+                        const pa::Vec3 c_stage =
+                            xr_to_blam(pa::rotate(tcomp, tk.aim_grip_position - tk.hmd_position)) *
+                            wscale / pa::kMetresPerBlamUnit;
+                        const pa::Vec3 w_stage = pa::transform_vector(sinv, wrist_target - root_position);
+                        s_aim_relation.observe(pa::multiply(ginv, pa::multiply(sinv, desired_wrist)),
+                                               pa::transform_vector(ginv, w_stage - c_stage));
+                    }
+                }
             }
         }
         //
@@ -1723,6 +1814,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             continue;
         }
         any_posed = true;
+        if (!plan.is_aim) support_posed = true;
         HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_posed;);
 
         if (!plan.is_aim && !access.is_capture_bank && map->weapon_marker != pa::kNoNode) {
@@ -1864,6 +1956,57 @@ bool drive_palette(const pa::PaletteAccess& access) {
     const pa::HandCurl closed{};
     pa::apply_hand_openness(access.palette, aim_arm, closed);
     if (tracking.support_valid) pa::apply_hand_openness(access.palette, support_arm, closed);
+
+    // ---- THE SUPPORT HAND'S SHAPE (pahandpose; see Config.hpp). Eased here, on the live drive's own
+    // clock, so a grip press closes the hand over ~90 ms instead of snapping; the banks take the
+    // result through the mirror like every other driven node.
+    if (g_cfg.pa_hand_pose && tracking.support_valid && support_posed) {
+        if (!access.is_capture_bank) {
+            static std::chrono::steady_clock::time_point s_shape_t{};
+            const auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - s_shape_t).count();
+            s_shape_t = now;
+            if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+            const float rest   = g_cfg.pa_hand_rest < 0.0f ? 0.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
+            const float target = ::halo::two_hand_support_grip_held() ? 1.0f : rest;
+            const float k      = 1.0f - std::exp(-dt / 0.045f);
+            s_sup_curl += (target - s_sup_curl) * k;
+        }
+        pa::apply_hand_shape(access.palette, support_arm, s_sup_curl,
+                             s_dbg_grab_w.load(std::memory_order_relaxed));
+    }
+#if HALO_VR_DEV
+    if (g_cfg.two_hand_log && !access.is_capture_bank && tracking.support_valid && support_posed) {
+        static std::uint32_t s_mn = 0;
+        if (((++s_mn) % 90u) == 1u) {
+            const pa::Mat3 sinv = pa::transpose(stage_basis);
+            const auto& wr = access.palette[aim_arm.wrist];
+            const auto& wl = access.palette[support_arm.wrist];
+            const pa::Vec3 pr = pa::transform_vector(sinv, wr.position - root_position);
+            const pa::Vec3 pl = pa::transform_vector(sinv, wl.position - root_position);
+            const pa::Vec3 dpos{pl.x - pr.x, pl.y + pr.y, pl.z - pr.z};
+            const pa::Mat3 br = pa::multiply(sinv, pa::orthonormal_basis(wr));
+            const pa::Mat3 bl = pa::multiply(sinv, pa::orthonormal_basis(wl));
+            const pa::Mat3 bm{ pa::Vec3{-br.forward.x, br.forward.y, -br.forward.z},
+                               pa::Vec3{-br.left.x,    br.left.y,    -br.left.z},
+                               pa::Vec3{-br.up.x,      br.up.y,      -br.up.z} };
+            float tr = pa::dot(bl.forward, bm.forward) + pa::dot(bl.left, bm.left) + pa::dot(bl.up, bm.up);
+            float ca = (tr - 1.0f) * 0.5f; ca = ca < -1.0f ? -1.0f : (ca > 1.0f ? 1.0f : ca);
+            // The support wrist's OWN pose in the stage frame: with the support controller held
+            // still these must not change when only the aim controller moves.
+            const float cm = pa::kMetresPerBlamUnit * 100.0f;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] PALETTE MIRROR: support wrist vs the mirror image of the aim wrist: "
+                "%.1f cm, %.1f deg | relation latched=%d stable=%d | curl=%.2f grabw=%.2f | support "
+                "wrist stage pos=(%.2f,%.2f,%.2f)cm fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f)",
+                pa::length(dpos) * cm, std::acos(ca) * 57.2957795f,
+                (int)s_aim_relation.have, s_aim_relation.stable, s_sup_curl,
+                s_dbg_grab_w.load(std::memory_order_relaxed),
+                pl.x * cm, pl.y * cm, pl.z * cm,
+                bl.forward.x, bl.forward.y, bl.forward.z, bl.up.x, bl.up.y, bl.up.z);
+        }
+    }
+#endif
 
     // ---- HANDS-ONLY, last of all. Everything above has already run, so this only decides what is
     // VISIBLE -- see Config.hpp pa_hands_only. Fails visible: a false return leaves the arms shown.
@@ -2424,7 +2567,8 @@ bool palettearm_parse_key(const char* key, double v) {
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
-                                const float up[3], const float wpn_cm[3]) {
+                                const float up[3], const float wpn_cm[3], bool frozen) {
+    s_rigw_frozen.store(frozen, std::memory_order_relaxed);
     if (!valid || fwd == nullptr || right == nullptr || up == nullptr || wpn_cm == nullptr) {
         s_rigw_valid.store(false, std::memory_order_release);
         return;

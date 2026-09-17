@@ -50,8 +50,10 @@ void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]);
 //   wpn_cm        where rig mode puts the weapon (the PrimaryWeapon attach point)
 // valid=false whenever rig mode itself would not place the gun (origin hold, a rig mode other than
 // 3). Ages out on its own if the rig block stops running.
+// frozen = a weapon calibration hold is pinning the gun in the world: the target is still valid for
+// the carry, but it no longer describes how the gun sits on the controller.
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
-                                const float up[3], const float wpn_cm[3]);
+                                const float up[3], const float wpn_cm[3], bool frozen);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

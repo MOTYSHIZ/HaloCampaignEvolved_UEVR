@@ -180,4 +180,19 @@ struct HandCurl {
 // no hard-coded Euler axes, which is what makes it survive a weapon we have never tested.
 bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const HandCurl& curl);
 
+// ---- HAND SHAPES FROM THE GAME'S OWN ANIMATIONS ------------------------------------------------
+//
+// Two key poses recorded off the stock first-person palette: the OPEN hand at the release of the
+// grenade throw, and the FIST of the Magnum's off-hand punch. Stored as parent-relative joint
+// rotations (joint 0 relative to the wrist). This rig mirrors its hands by BEHAVIOUR -- every bone
+// offset of the left hand is the exact negative of the right's, measured -- so one set of local
+// rotations curls either hand, and the bone OFFSETS are read off the palette in hand rather than
+// stored, which keeps every finger bone its authored length.
+//
+//   curl      0 = the open hand .. 1 = the fist
+//   authored  1 = leave the fingers exactly as the game posed them .. 0 = replace them entirely
+//
+// Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
+bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
+
 } // namespace halo::palettearm

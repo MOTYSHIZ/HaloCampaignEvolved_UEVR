@@ -85,7 +85,90 @@ bool apply_finger_openness(BlamMatrix4x3* palette, std::uint8_t wrist,
     return true;
 }
 
+// Recorded 2026-09-17 with pahandrec from the LEFT hand: open = the grenade throw's release, fist =
+// the Magnum's off-hand punch. (x, y, z, w), parent-relative.
+constexpr float kHandPoseOpen[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{0.075015f, 0.016572f, -0.153967f, 0.985085f}, {0.000000f, -0.045626f, 0.000000f, 0.998959f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.022462f, 0.034487f, -0.041689f, 0.998283f}, {-0.004730f, 0.056643f, -0.083164f, 0.994914f}, {0.000000f, 0.000000f, 0.000092f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.129555f, -0.041293f, -0.006470f, 0.990691f}, {0.002106f, 0.008393f, 0.244637f, 0.969576f}, {-0.000000f, 0.000000f, -0.055178f, 0.998477f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.171560f, 0.024386f, 0.343507f, 0.923025f}, {-0.000000f, 0.064578f, 0.000000f, 0.997913f}, {0.000000f, -0.000000f, 0.000397f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.508638f, -0.554387f, 0.021364f, 0.658397f}, {-0.015809f, -0.033632f, 0.063236f, 0.997306f}, {-0.012269f, 0.031587f, 0.284404f, 0.958105f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+constexpr float kHandPoseFist[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{-0.001221f, -0.028718f, 0.624083f, 0.780829f}, {-0.031007f, -0.033479f, 0.678559f, 0.733127f}, {0.000000f, 0.000000f, 0.663460f, 0.748212f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.038302f, -0.034029f, 0.714581f, 0.697674f}, {0.038240f, 0.042086f, 0.671417f, 0.738895f}, {0.000000f, -0.000000f, 0.482743f, 0.875762f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.092383f, 0.058048f, 0.693067f, 0.712569f}, {0.006897f, 0.005249f, 0.795702f, 0.605627f}, {0.000000f, -0.000000f, 0.477532f, 0.878614f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.066658f, 0.102658f, 0.696254f, 0.707283f}, {0.044253f, 0.047031f, 0.683818f, 0.726789f}, {0.000000f, -0.000000f, 0.638589f, 0.769548f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.390557f, -0.579899f, 0.080174f, 0.710461f}, {-0.022431f, -0.034395f, 0.162879f, 0.985791f}, {-0.021149f, 0.028138f, 0.519217f, 0.853917f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+
+Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
+    Quat b = b_in;
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0.0f) { b = Quat{-b.x, -b.y, -b.z, -b.w}; d = -d; }
+    if (d > 0.9995f) {
+        return normalized(Quat{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t,
+                               a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t});
+    }
+    const float th = std::acos(std::clamp(d, -1.0f, 1.0f));
+    const float s  = std::sin(th);
+    const float wa = std::sin((1.0f - t) * th) / s, wb = std::sin(t * th) / s;
+    return normalized(Quat{a.x * wa + b.x * wb, a.y * wa + b.y * wb,
+                           a.z * wa + b.z * wb, a.w * wa + b.w * wb});
+}
+
 } // namespace
+
+bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored) {
+    if (palette == nullptr) return false;
+    curl     = std::clamp(curl, 0.0f, 1.0f);
+    authored = std::clamp(authored, 0.0f, 1.0f);
+    if (authored >= 0.999f) return true;               // the game's own fingers, untouched
+
+    const Mat3 wrist_basis = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wrist_basis)) return false;
+    const Vec3 wrist_pos = palette[arm.wrist].position;
+
+    const FingerChain* chains[5] = {&arm.index, &arm.middle, &arm.ring, &arm.pinky, &arm.thumb};
+    for (std::size_t f = 0; f < 5; ++f) {
+        const FingerChain& ch = *chains[f];
+        // MEASURE the authored chain first -- every joint's rotation and offset in its parent's
+        // frame -- because rebuilding joint j overwrites the frame joint j+1 was measured in.
+        Mat3 stock_rel[4];
+        Vec3 stock_off[4];
+        Mat3 pb = wrist_basis;
+        Vec3 pp = wrist_pos;
+        for (std::size_t j = 0; j < ch.size(); ++j) {
+            const Mat3 nb = orthonormal_basis(palette[ch[j]]);
+            if (!valid_basis(nb)) return false;
+            const Mat3 pinv = transpose(pb);
+            stock_rel[j] = multiply(pinv, nb);
+            stock_off[j] = transform_vector(pinv, palette[ch[j]].position - pp);
+            pb = nb;
+            pp = palette[ch[j]].position;
+        }
+        pb = wrist_basis;
+        pp = wrist_pos;
+        for (std::size_t j = 0; j < ch.size(); ++j) {
+            const Quat qo{kHandPoseOpen[f][j][0], kHandPoseOpen[f][j][1],
+                          kHandPoseOpen[f][j][2], kHandPoseOpen[f][j][3]};
+            const Quat qf{kHandPoseFist[f][j][0], kHandPoseFist[f][j][1],
+                          kHandPoseFist[f][j][2], kHandPoseFist[f][j][3]};
+            Quat q = slerp_short(qo, qf, curl);
+            if (authored > 0.001f) q = slerp_short(q, rotation_from_basis(stock_rel[j]), authored);
+            const Mat3 rel = rotation_basis(q);
+            if (!valid_basis(rel)) return false;
+            const Mat3 nb = multiply(pb, rel);
+            const Vec3 np = pp + transform_vector(pb, stock_off[j]);
+            BlamMatrix4x3& m = palette[ch[j]];
+            m.forward = nb.forward; m.left = nb.left; m.up = nb.up;
+            m.position = np;
+            pb = nb;
+            pp = np;
+        }
+    }
+    return true;
+}
 
 void apply_rigid_delta(BlamMatrix4x3* palette, const std::uint8_t* nodes, std::size_t count,
                        const Mat3& rotation, const Vec3& pivot) {

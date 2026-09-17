@@ -138,7 +138,13 @@ constexpr int kWeaponFixSchema = 1;
 // Same idea, same reasoning, for the SUPPORT-HAND rigid fix (`handfix` in halo_vr_calib.cfg): the
 // stamp is file-borne and a line under any other stamp is dropped at parse. One number, not two --
 // the hand fix has a single writer and a single reader, so there is no second tier to version.
-constexpr int kHandFixSchema = 1;
+//
+// 2 (2026-09-17): the pose the fix TRIMS changed. The free support hand used to be the controller
+// composed with the wrist's AUTHORED convention (a hand under a forestock); it is now the mirror of
+// the aim hand's relation to its own controller (pasupmirror). A v1 fix was solved against the old
+// baseline -- typically 90-160 degrees of roll that the new baseline no longer needs -- so applying it
+// on top would rotate the hand by exactly the error it used to cancel. v1 lines are dropped at parse.
+constexpr int kHandFixSchema = 2;
 
 // ---- THE ONE PER-WEAPON LOOKUP -----------------------------------------------------------------
 //
@@ -3958,6 +3964,28 @@ struct Config {
     // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
     // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
     int   pa_grab_weapon   = 1;
+    // HAND SHAPES LIFTED FROM THE GAME'S OWN ANIMATIONS (2026-09-17, by request: "a resting open hand
+    // pose when we are not attached to the weapon; when grip is held even without gripping the
+    // weapon, close into a fist ... the fist from the Magnum left arm punch, the open hand near the
+    // end of the grenade throw"). Both were recorded off the stock palette (pahandrec) and are stored
+    // as parent-relative joint rotations, which this rig shares between its two hands.
+    //   free support hand  -> the open hand, relaxed by pahandrest toward the fist
+    //   grip held, no gun  -> the fist
+    //   riding the gun     -> the AUTHORED fingers (eased by the two-hand hold's own ramp)
+    // The aim hand is always on the gun and keeps its authored grip. DEV KEY pahandpose. 0 = the
+    // authored grip on both hands always (the behaviour to date).
+    bool  pa_hand_pose     = true;
+    float pa_hand_rest     = 0.22f;   // DEV KEY pahandrest: 0 = the flat open hand .. 1 = the fist
+    // THE FREE SUPPORT HAND MIRRORS THE AIM HAND. The aim hand's pose relative to ITS controller is
+    // the product of the player's own weapon calibration and the artist's grip -- and the player
+    // confirmed it in a headset. Controllers are mirror images held mirror-image, so the free support
+    // hand takes the mirror of that relation (orientation and wrist offset) off its own GRIP pose.
+    // Before this it was the controller composed with the wrist's authored convention, i.e. a hand
+    // posed for the underside of a forestock: 90-160 degrees of roll out, by the player's own
+    // calibration attempts. Measured only while the aim hand rides the gun, not two-handing and not
+    // calibrating, and latched only when it has held still, so neither recoil nor a reload reaches
+    // the other hand. DEV KEY pasupmirror. 0 = the authored convention (the behaviour to date).
+    bool  pa_support_mirror = true;
     // DEV: record the STOCK first-person palette (every node, before this route edits it) to
     // <profile>\data\handrec.bin, one frame per live build, while > 0. The value is a cap in frames
     // (60/s), so a forgotten key cannot fill the disk. Used to lift hand shapes (open hand, fist)

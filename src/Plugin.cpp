@@ -10656,7 +10656,7 @@ void update() {
                     const float ua[3] = {u.x, u.y, u.z}, wa[3] = {w.x, w.y, w.z};
                     const bool finite_ok = std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)
                                         && std::isfinite(f.x) && std::isfinite(r.x) && std::isfinite(u.x);
-                    halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa);
+                    halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa, calibrating);
 #if HALO_VR_DEV
                     // GROUND TRUTH, read not predicted: how far the drawn weapon actually sits from
                     // where rig mode would have put it. Independent of everything the palette did.

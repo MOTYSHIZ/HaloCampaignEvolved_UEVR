@@ -1122,7 +1122,19 @@ static bool parse_hand_fix(const char* val) {
 
     // THE STAMP GATE, AT PARSE -- so by the time anything reads g_cfg.hand_fix_* it is a value this
     // build vouches for, with no second rule for a consumer to get wrong.
-    if (s_handfix_file_ver != kHandFixSchema) return true;
+    if (s_handfix_file_ver != kHandFixSchema) {
+        // SAY SO, once. A calibration that silently stops applying reads as "my capture was lost".
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            API::get()->log_info("[Halo-CampE-UEVR] HANDFIX: a stored support-hand fix stamped v%d was "
+                                 "NOT applied -- this build's baseline is v%d (the free support hand now "
+                                 "mirrors the aim hand). Recapture it from the menu if the hand still "
+                                 "needs a trim; the old line is left in the file untouched.",
+                                 s_handfix_file_ver, kHandFixSchema);
+        }
+        return true;
+    }
 
     char buf[128] = {0};
     strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
@@ -1325,6 +1337,9 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "patgtframe")    == 0) { g_cfg.pa_target_frame   = (int)v; return true; }
     if (_stricmp(key, "pagrabwpn")     == 0) { g_cfg.pa_grab_weapon    = (int)v; return true; }
     if (_stricmp(key, "pahandrec")     == 0) { g_cfg.pa_hand_rec       = (int)v; return true; }
+    if (_stricmp(key, "pahandpose")    == 0) { g_cfg.pa_hand_pose      = (v != 0.0); return true; }
+    if (_stricmp(key, "pahandrest")    == 0) { g_cfg.pa_hand_rest      = (float)v; return true; }
+    if (_stricmp(key, "pasupmirror")   == 0) { g_cfg.pa_support_mirror = (v != 0.0); return true; }
     if (_stricmp(key, "pawpnlift")     == 0) { g_cfg.pa_wpn_lift      = (int)v; return true; }
     if (_stricmp(key, "pawpnyaw")      == 0) { g_cfg.pa_wpn_yaw       = (float)v; return true; }
     if (_stricmp(key, "pawpnpitch")    == 0) { g_cfg.pa_wpn_pitch     = (float)v; return true; }
