@@ -1642,6 +1642,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
             for (std::size_t k = 0; k < map->right.shoulder_count; ++k) add(map->right.shoulder_subtree[k]);
             for (std::size_t k = 0; k < map->left.shoulder_count;  ++k) add(map->left.shoulder_subtree[k]);
             if (chest_route) add((std::uint8_t)s_pa_chest_node);
+            // The weapon carry (pawpn=1) rewrites the weapon nodes on the live slot; without them in
+            // the mirror the banks keep the stock, camera-glued gun and the carry never shows.
+            if (g_cfg.pa_weapon) for (std::size_t k = 0; k < map->weapon_count; ++k) add(map->weapon_nodes[k]);
         }
         s_mirror_tag   = access.model_tag;
         s_mirror_count = access.node_count;
