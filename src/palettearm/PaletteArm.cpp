@@ -448,6 +448,18 @@ struct GripRelation {
                     offset = offset + (cand_offset - offset) * 0.15f;
                 }
                 if (stable > 1000000) stable = 30;
+#if HALO_VR_DEV
+                if (stable == 60) {      // settled on this candidate: say what it is, once per settle
+                    const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MIRROR RELATION settled: fwd=(%.5f,%.5f,%.5f) "
+                        "left=(%.5f,%.5f,%.5f) up=(%.5f,%.5f,%.5f) offset=(%.3f,%.3f,%.3f) cm",
+                        cand_basis.forward.x, cand_basis.forward.y, cand_basis.forward.z,
+                        cand_basis.left.x, cand_basis.left.y, cand_basis.left.z,
+                        cand_basis.up.x, cand_basis.up.y, cand_basis.up.z,
+                        cand_offset.x * cm, cand_offset.y * cm, cand_offset.z * cm);
+                }
+#endif
             }
         } else {
             cand_basis = b; cand_offset = o; stable = 0;
@@ -1448,6 +1460,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
 
     bool any_posed = false;
     bool support_posed = false;
+    pa::Vec3 aim_stock_wrist{};          // the AIM hand's authored wrist, for the cupped-stance test
+    bool     have_aim_stock = false;
     for (int i = 0; i < 2; ++i) {
         const HandPlan& plan = plans[i];
         const int arm_bit = plan.is_aim ? 1 : 2;
@@ -1546,6 +1560,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // target turns "the hand is in the wrong place" into a measured error vector.
         const pa::Vec3 stock_wrist_pos = access.palette[plan.arm->wrist].position;
         const pa::Mat3 stock_wrist_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
+        if (plan.is_aim) { aim_stock_wrist = stock_wrist_pos; have_aim_stock = true; }
         if (!plan.is_aim && !access.is_capture_bank) {
             const pa::Vec3 sh0 = access.palette[plan.arm->shoulder].position;
             const pa::Vec3 srel{stock_wrist_pos.x - sh0.x, stock_wrist_pos.y - sh0.y,
@@ -1785,9 +1800,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 s_dbg_stockhg_x = hg0.x; s_dbg_stockhg_y = hg0.y; s_dbg_stockhg_z = hg0.z;
             }
         }
+        // A deny-listed one-hander still takes the hand when the artist posed it ON the gun.
+        bool grab_allowed = g_cfg.pa_grab_weapon >= 2 || !::halo::two_hand_hold_denied();
+        if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim && have_aim_stock) {
+            const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
+            grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
+        }
         if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
-            !s_hfreeze_active.load(std::memory_order_acquire) &&
-            (g_cfg.pa_grab_weapon >= 2 || !::halo::two_hand_hold_denied())) {
+            !s_hfreeze_active.load(std::memory_order_acquire) && grab_allowed) {
             const float w = ::halo::two_hand_hold_weight();
             if (w > 0.0f) {
                 const pa::Vec3 on_gun_pos =

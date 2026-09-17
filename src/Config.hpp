@@ -3959,8 +3959,11 @@ struct Config {
     //       normally be gripping the weapon in flat mode or in rig parented mode"). While the hold
     //       is latched the support wrist takes the AUTHORED wrist carried by the same rigid transform
     //       that placed the gun, eased in over the hold's own ramp; the arm is still IK'd from the
-    //       body shoulder. Not on twohanddeny weapons: a one-hander's authored off hand is not on it.
-    //   2 = as 1, on deny-listed weapons too.
+    //       body shoulder. On a twohanddeny weapon only when the ARTIST put the off hand on the gun
+    //       -- the authored wrists within 18 cm of each other, which is the Magnum's cupped stance
+    //       (12 cm, measured) and not a plasma pistol's free arm. The hold latches on those weapons
+    //       for zoom, and the relaxed zone there is exactly "cup the pistol under your firing hand".
+    //   2 = as 1, on every deny-listed weapon regardless.
     // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
     // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
     int   pa_grab_weapon   = 1;
