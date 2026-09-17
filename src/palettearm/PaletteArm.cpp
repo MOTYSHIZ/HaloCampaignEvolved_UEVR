@@ -2516,8 +2516,9 @@ void hand_fix_tick() {
     // around a controller -- a fixed mismatch exactly like the weapon's. The player needed 90-165
     // degrees of roll and this bound refused seventeen captures in a row ("it tends to snap back
     // and not save the value"). So a FIRST capture (nothing stored yet) may be large, as the
-    // weapon's may; refinements on top of a stored fix keep the tight bound.
-    const float ang_limit = g_cfg.hand_fix_valid ? 45.0f : 175.0f;
+    // weapon's may; a refinement on top of a stored fix gets 90 -- still a gross-error guard, but a
+    // second attempt at a roll the first one got wrong must not be refused seventeen times over.
+    const float ang_limit = g_cfg.hand_fix_valid ? 90.0f : 175.0f;
     if (!std::isfinite(dm) || dm > 0.30f || !std::isfinite(ang) || ang > ang_limit) {
         API::get()->log_info("[Halo-CampE-UEVR] HANDFIX: REJECTED (moved %.2f m, rotated %.0f deg; "
                              "limits 0.30 m / %.0f deg) -- tracking dropped, or your hand was not "
