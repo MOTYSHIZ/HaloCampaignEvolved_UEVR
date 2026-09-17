@@ -1718,7 +1718,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimorigin") == 0) g_cfg.aim_origin = (v != 0.0) ? 1 : 0;
         // aimhand=left|right, also accepting 1/0 so it behaves like every other key here.
         else if (_stricmp(key, "aimhand")  == 0) {
-            g_cfg.aim_left_hand = (_stricmp(val, "left") == 0) || (_stricmp(val, "l") == 0) ||
+            // First character only: a CRLF file hands this "left\r", which matched neither spelling
+            // and silently parsed as right-handed (found 2026-09-17).
+            g_cfg.aim_left_hand = (val[0] == 'l') || (val[0] == 'L') ||
                                   (val[0] >= '1' && val[0] <= '9');
         }
         else if (_stricmp(key, "turnmode")  == 0) g_cfg.turn_mode  = (int)v;

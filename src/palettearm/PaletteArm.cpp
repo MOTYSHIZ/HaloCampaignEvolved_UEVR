@@ -1614,13 +1614,21 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                  g_cfg.pa_target_frame >= 2;
         pa::Vec3 mirror_offset{};
         if (mirror_free) {
+            // The relation is a RIGHT hand's (it is only ever measured off a right aim hand, and the
+            // baked default is one). A LEFT support hand takes its mirror image; a RIGHT support
+            // hand -- left-handed aim -- takes it as it stands.
             const pa::Mat3& r = s_aim_relation.basis;
-            const pa::Mat3 mirrored{ pa::Vec3{-r.forward.x, r.forward.y, -r.forward.z},
-                                     pa::Vec3{-r.left.x,    r.left.y,    -r.left.z},
-                                     pa::Vec3{-r.up.x,      r.up.y,      -r.up.z} };
-            desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), mirrored);
-            mirror_offset = pa::Vec3{s_aim_relation.offset.x, -s_aim_relation.offset.y,
-                                     s_aim_relation.offset.z};
+            if (plan.left_side) {
+                const pa::Mat3 mirrored{ pa::Vec3{-r.forward.x, r.forward.y, -r.forward.z},
+                                         pa::Vec3{-r.left.x,    r.left.y,    -r.left.z},
+                                         pa::Vec3{-r.up.x,      r.up.y,      -r.up.z} };
+                desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), mirrored);
+                mirror_offset = pa::Vec3{s_aim_relation.offset.x, -s_aim_relation.offset.y,
+                                         s_aim_relation.offset.z};
+            } else {
+                desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), r);
+                mirror_offset = s_aim_relation.offset;
+            }
         }
         if (!pa::valid_basis(desired_wrist)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[4];); continue; }
 
@@ -1760,7 +1768,12 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // ---- THE AIM HAND RIDES THE GUN (pahandgun; see Config.hpp). The AUTHORED wrist -- read
         // before this arm was anchored or lifted -- carried by the very transform that placed the
         // gun, so the hand sits on the grip exactly as it does when rig mode moves the whole mesh.
-        if (g_cfg.pa_hand_on_gun && plan.is_aim && wpn_delta_valid) {
+        // RIGHT-HANDED AIM ONLY. The game's poses are authored right-handed -- right hand on the
+        // grip, left on the forestock -- so with the LEFT hand aiming, "the aim arm's authored
+        // wrist" is the forestock, and carrying it put both hands 80 cm out pointing at the floor
+        // (measured headless, aimhand=1). Until the authored pair is mirrored across the gun for
+        // that case, a left-handed aim hand stays on its controller.
+        if (g_cfg.pa_hand_on_gun && aim_is_right && plan.is_aim && wpn_delta_valid) {
             const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
             if (pa::valid_basis(on_gun_basis)) {
                 wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
@@ -1816,7 +1829,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
             grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
         }
-        if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
+        if (g_cfg.pa_grab_weapon != 0 && aim_is_right && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire) && grab_allowed) {
             const float w = ::halo::two_hand_hold_weight();
             if (w > 0.0f) {
