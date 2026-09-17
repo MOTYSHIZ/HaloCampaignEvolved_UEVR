@@ -240,7 +240,9 @@ std::atomic<float> g_locked_view_yaw{0.0f};
 // can anchor the shoulders to the BODY rather than to the aim-driven camera. Defined here because
 // the two raw yaws have internal linkage; see MotionAimControl.hpp for why the delta is the right
 // thing to export rather than the pair.
+static float calib_frame_yaw_use();   // defined below; published here for Rig.cpp's shot-point aim
 void publish_view_lock_delta() {
+    ::halo::g_calib_frame_yaw.store(calib_frame_yaw_use());
     float d = g_dbg_view_out.load() - g_dbg_view_in.load();
     while (d > 180.0f)  d -= 360.0f;
     while (d < -180.0f) d += 360.0f;
@@ -8717,6 +8719,7 @@ void update() {
             // yaws about the same axis, which is the one case where adding the scalars is correct.
             const Quat q_turn = rotator_to_quat(
                 0.0f, g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use(), 0.0f);
+            ::halo::g_calib_frame_yaw.store(calib_frame_yaw_use());   // the shot-point aim's copy
 
             const Quat q_ctrl = quat_mul(q_turn, rotator_to_quat(g_pitch, g_yaw, g_roll));
             // USE SITE 2 of 2: the grip trim is a yaw calibration too, and carries the same frame.

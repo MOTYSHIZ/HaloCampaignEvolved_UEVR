@@ -132,6 +132,16 @@ extern std::atomic<float> g_setpoint_rate_dps;
 // it in -- see the note in MotionAimControl.cpp.
 extern std::atomic<float> g_turn_offset;
 
+// THE CALIBRATION FRAME YAW the rig composes into its world pre-rotation beside the turn offset
+// (Plugin.cpp calib_frame_yaw_use(): the locked view yaw under calibrelative + calibver >= 2, else
+// 0). It is 0 in any session injected at the main menu -- the lock first primes there, at yaw 0, and
+// a mission's spawn yaw is folded into the TURN offset -- which is why its absence from the
+// shot-point aim went unnoticed: that path reconstructs the bore on the rig's composition but added
+// only the turn. Inject mid-mission and the lock primes on the gameplay camera instead, the frame is
+// that yaw (-163.4 in the session that found this), and aim, legs and shots all pointed exactly that
+// far from the drawn gun. Published so Rig.cpp's reconstruction and capture carry the same term.
+extern std::atomic<float> g_calib_frame_yaw;
+
 // THE VIEW-LOCK PAIR, defined in Plugin.cpp and declared here beside g_turn_offset because they are
 // the same kind of quantity: how the aim frame relates to the frame the player actually inhabits.
 //

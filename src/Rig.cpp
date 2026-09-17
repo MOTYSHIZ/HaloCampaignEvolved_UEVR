@@ -1184,7 +1184,8 @@ bool shotpoint_aim_angles(int32_t ridx, const Quat& cq, bool two_hand,
     if (!shotpoint_bore_local(&F)) return false;   // no frozen constant -> caller cascades
     const Quat q_gun = shotpoint_gun_quat_live(ridx, cq, two_hand);   // game space, no turn
     const Vec3 bore  = quat_rotate(q_gun, F);
-    const float turn = g_cfg.aim_turn * g_turn_offset.load();
+    // Turn AND the calibration frame: the rig's q_turn carries both, and this must match it.
+    const float turn = g_cfg.aim_turn * g_turn_offset.load() + g_calib_frame_yaw.load();
     if (out_yaw)   *out_yaw   = wrap180(std::atan2(bore.y, bore.x) * RAD2DEG + turn);
     if (out_pitch) *out_pitch = std::asin(clampf(bore.z, -1.0f, 1.0f)) * RAD2DEG;
     return true;
@@ -1215,7 +1216,9 @@ static bool capture_bore_local(API::UObject* wpn) {
     // (a live swing would cancel between q_gun and the swung mesh bore anyway, but keeping it off
     // makes the stored constant unambiguous).
     const Quat q_gun = shotpoint_gun_quat_live(ridx, cq, /*two_hand=*/false);   // game space, no turn
-    const float turn = g_cfg.aim_turn * g_turn_offset.load();
+    // Strip the calibration frame with the turn, or a capture made in a mid-mission-injected session
+    // would bake that session's frame yaw into the stored bore.
+    const float turn = g_cfg.aim_turn * g_turn_offset.load() + g_calib_frame_yaw.load();
     const float tr = turn * DEG2RAD, ct = std::cos(tr), st = std::sin(tr);
     const Vec3 bore_nt{ bore_ue.x*ct + bore_ue.y*st, -bore_ue.x*st + bore_ue.y*ct, bore_ue.z };  // strip snap turn (UE +Z)
     const Vec3 F = quat_rotate(quat_conj(q_gun), bore_nt);
