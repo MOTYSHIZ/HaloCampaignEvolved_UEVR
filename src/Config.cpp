@@ -1324,6 +1324,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paarmrest")     == 0) { g_cfg.pa_arm_rest_lift = (int)v; return true; }
     if (_stricmp(key, "patgtframe")    == 0) { g_cfg.pa_target_frame   = (int)v; return true; }
     if (_stricmp(key, "pagrabwpn")     == 0) { g_cfg.pa_grab_weapon    = (int)v; return true; }
+    if (_stricmp(key, "pahandrec")     == 0) { g_cfg.pa_hand_rec       = (int)v; return true; }
     if (_stricmp(key, "pawpnlift")     == 0) { g_cfg.pa_wpn_lift      = (int)v; return true; }
     if (_stricmp(key, "pawpnyaw")      == 0) { g_cfg.pa_wpn_yaw       = (float)v; return true; }
     if (_stricmp(key, "pawpnpitch")    == 0) { g_cfg.pa_wpn_pitch     = (float)v; return true; }

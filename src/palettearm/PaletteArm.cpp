@@ -410,6 +410,8 @@ std::atomic<std::uint32_t> s_rigw_seq{0};       // odd while being written
 std::atomic_bool           s_rigw_valid{false};
 std::atomic<int>           s_rigw_age{1000};    // ticks since the last note; aged by palettearm_update
 std::atomic_bool           s_rigw_used{false};  // the last live drive carried the gun this way
+std::atomic<float> s_dbg_grab_w{0.0f};          // the support hand's ride-the-gun weight, last drive
+std::atomic<float> s_dbg_stockhg_x{0.0f}, s_dbg_stockhg_y{0.0f}, s_dbg_stockhg_z{0.0f};
 bool s_fresh_poses  = true;
 bool s_target_head  = false;
 bool s_support_aim  = true;
@@ -559,6 +561,65 @@ void dump_palette(const pa::PaletteAccess& access) {
 #endif
 }
 
+// ---- DEV: THE STOCK PALETTE RECORDER (pahandrec; see Config.hpp). Raw frames, analysed offline:
+// header "HREC1" + node count, then per frame { u32 frame, i32 model_tag, u8 grip, u8 latched,
+// u8 pad[2], float[node_count * 13] } with each node as scale, forward, left, up, position -- the
+// engine's own layout. Runs BEFORE this route edits anything, so what is recorded is the game's
+// animation and nothing of ours.
+void hand_rec_frame(const pa::PaletteAccess& access) {
+#if HALO_VR_DEV
+    static std::FILE*   s_f = nullptr;
+    static std::uint32_t s_n = 0;
+    static bool          s_said_full = false;
+    if (g_cfg.pa_hand_rec <= 0) {
+        if (s_f != nullptr) {
+            std::fclose(s_f); s_f = nullptr;
+            API::get()->log_info("[Halo-CampE-UEVR] HANDREC: closed after %u frames", s_n);
+        }
+        s_n = 0; s_said_full = false;
+        return;
+    }
+    if (s_n >= (std::uint32_t)g_cfg.pa_hand_rec) {
+        if (!s_said_full) {
+            s_said_full = true;
+            if (s_f != nullptr) { std::fclose(s_f); s_f = nullptr; }
+            API::get()->log_info("[Halo-CampE-UEVR] HANDREC: frame cap %d reached -- file closed. "
+                                 "Set pahandrec=0 then a new value to record again.", g_cfg.pa_hand_rec);
+        }
+        return;
+    }
+    if (s_f == nullptr) {
+        char appdata[512] = {0};
+        const DWORD n = GetEnvironmentVariableA("APPDATA", appdata, (DWORD)sizeof(appdata));
+        if (n == 0 || n >= sizeof(appdata)) return;
+        char path[768];
+        std::snprintf(path, sizeof(path), "%s\\UnrealVRMod\\HaloCampaignEvolved\\data", appdata);
+        CreateDirectoryA(path, nullptr);
+        std::snprintf(path, sizeof(path),
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\data\\handrec.bin", appdata);
+        s_f = std::fopen(path, "wb");
+        if (s_f == nullptr) return;
+        const char magic[8] = {'H','R','E','C','1',0,0,0};
+        const std::uint32_t nc = access.node_count;
+        std::fwrite(magic, 1, sizeof(magic), s_f);
+        std::fwrite(&nc, sizeof(nc), 1, s_f);
+        API::get()->log_info("[Halo-CampE-UEVR] HANDREC: recording the stock palette (%u nodes) to %s",
+                             nc, path);
+    }
+    const std::uint32_t frame = s_n++;
+    const std::int32_t  tag   = access.model_tag;
+    const std::uint8_t  flags[4] = { (std::uint8_t)(::halo::two_hand_support_grip_held() ? 1 : 0),
+                                     (std::uint8_t)(::halo::two_hand_latched() ? 1 : 0), 0, 0 };
+    std::fwrite(&frame, sizeof(frame), 1, s_f);
+    std::fwrite(&tag,   sizeof(tag),   1, s_f);
+    std::fwrite(flags, 1, sizeof(flags), s_f);
+    std::fwrite(access.palette, sizeof(pa::BlamMatrix4x3), access.node_count, s_f);
+    if ((frame % 120u) == 0u) std::fflush(s_f);
+#else
+    (void)access;
+#endif
+}
+
 bool drive_palette(const pa::PaletteAccess& access) {
     if (!s_tracking_ready.load(std::memory_order_acquire)) {
         s_drive_stage = "no tracking snapshot"; return false;
@@ -607,6 +668,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         cam_pitch_deg  = 0.0f;
     }
     if (!tracking.valid) { s_drive_stage = "tracking snapshot invalid"; return false; }
+    if (!access.is_capture_bank) hand_rec_frame(access);
 
     // THE DUMP FIRES BEFORE THE GUARD, deliberately: the case we most need numbers for is exactly
     // the one where the map is about to be refused, and running it after would print only on the
@@ -1611,18 +1673,39 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 desired_wrist = on_gun_basis;
             }
         }
+        //
+        // THE AUTHORED WRIST IS THE ONE READ BEFORE THIS ARM WAS TOUCHED (stock_wrist_*). This block
+        // used to read the wrist node HERE, after the shoulder anchor and the rest lift had already
+        // moved it, so "the artist's pose on the gun" was really that pose dragged to the body
+        // shoulder and turned by the torso frame. It was gated off, so nobody saw it.
+        //
+        // two_hand_hold_weight(), not _blend_weight(): the latter reads 0 whenever no swing is
+        // published, and a hand must not leave the forestock on a frame the barrel needs no bend.
+        s_dbg_grab_w = 0.0f;
+        if (!plan.is_aim && wpn_delta_valid && map->weapon_marker != pa::kNoNode) {
+            // Where the AUTHORED support wrist sits in the carried gun's own frame. The rigid carry
+            // cancels out of this, so it is the artist's hand-to-gun relation and nothing else --
+            // the number the achieved `handgun` has to equal while the hand rides the gun.
+            const auto&    wm0 = access.palette[map->weapon_marker];
+            const pa::Mat3 wb0 = pa::orthonormal_basis(wm0);
+            if (pa::valid_basis(wb0)) {
+                const pa::Vec3 og = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
+                const pa::Vec3 hg0 = pa::transform_vector(pa::transpose(wb0), og - wm0.position);
+                s_dbg_stockhg_x = hg0.x; s_dbg_stockhg_y = hg0.y; s_dbg_stockhg_z = hg0.z;
+            }
+        }
         if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
-            !s_hfreeze_active.load(std::memory_order_acquire)) {
-            const float w = ::halo::two_hand_blend_weight();
+            !s_hfreeze_active.load(std::memory_order_acquire) &&
+            (g_cfg.pa_grab_weapon >= 2 || !::halo::two_hand_hold_denied())) {
+            const float w = ::halo::two_hand_hold_weight();
             if (w > 0.0f) {
-                const pa::Vec3 stock_pos   = access.palette[plan.arm->wrist].position;
-                const pa::Mat3 stock_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
                 const pa::Vec3 on_gun_pos =
-                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_pos);
-                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_basis);
+                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
+                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
                 if (pa::valid_basis(on_gun_basis)) {
                     wrist_target  = wrist_target + (on_gun_pos - wrist_target) * w;
                     desired_wrist = pa::blend_basis(desired_wrist, on_gun_basis, w);
+                    s_dbg_grab_w  = w;
                 }
             }
         }
@@ -1651,6 +1734,30 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                    gotw.z - wm.position.z};
                 const pa::Vec3 hg = pa::transform_vector(pa::transpose(wb), wrel);
                 s_dbg_handgun_x = hg.x; s_dbg_handgun_y = hg.y; s_dbg_handgun_z = hg.z;
+#if HALO_VR_DEV
+                // THE GRAB, MEASURED: achieved hand-in-gun-frame against the authored one. Logged
+                // while the hold ramps or the grip is down, ~once a second -- never at rest.
+                {
+                    static std::uint32_t s_gn = 0;
+                    const float gw = s_dbg_grab_w.load(std::memory_order_relaxed);
+                    const bool  gr = ::halo::two_hand_support_grip_held();
+                    if ((gw > 0.0f || gr) && ((++s_gn) % 60u) == 1u) {
+                        const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                        const float ex = hg.x - s_dbg_stockhg_x.load(), ey = hg.y - s_dbg_stockhg_y.load(),
+                                    ez = hg.z - s_dbg_stockhg_z.load();
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PALETTE GRAB: w=%.2f grip=%d latched=%d denied=%d | hand in gun "
+                            "frame (%.1f,%.1f,%.1f) cm, authored (%.1f,%.1f,%.1f) cm, off by %.1f cm | "
+                            "wrist miss %.1f cm",
+                            gw, (int)gr, (int)::halo::two_hand_latched(), (int)::halo::two_hand_hold_denied(),
+                            hg.x * cm, hg.y * cm, hg.z * cm,
+                            s_dbg_stockhg_x.load() * cm, s_dbg_stockhg_y.load() * cm,
+                            s_dbg_stockhg_z.load() * cm,
+                            std::sqrt(ex * ex + ey * ey + ez * ez) * cm,
+                            pa::length(gotw - wrist_target) * cm);
+                    }
+                }
+#endif
             }
             s_dbg_blend = ::halo::two_hand_blend_weight();
             {
@@ -2217,10 +2324,18 @@ void hand_fix_tick() {
     // to ~100 degrees; this one has none -- the support hand is already placed straight from the
     // controller, so the whole quantity being measured is a human hand's offset inside a human
     // grip. Anything past 45 degrees or 30 cm of that is a tracking dropout, not an alignment.
-    if (!std::isfinite(dm) || dm > 0.30f || !std::isfinite(ang) || ang > 45.0f) {
+    //
+    // CORRECTED 2026-09-17 FROM A HEADSET LOG: "this one has none" was wrong. The support wrist's
+    // convention is latched from its AUTHORED pose, which is a hand under a forestock, not a hand
+    // around a controller -- a fixed mismatch exactly like the weapon's. The player needed 90-165
+    // degrees of roll and this bound refused seventeen captures in a row ("it tends to snap back
+    // and not save the value"). So a FIRST capture (nothing stored yet) may be large, as the
+    // weapon's may; refinements on top of a stored fix keep the tight bound.
+    const float ang_limit = g_cfg.hand_fix_valid ? 45.0f : 175.0f;
+    if (!std::isfinite(dm) || dm > 0.30f || !std::isfinite(ang) || ang > ang_limit) {
         API::get()->log_info("[Halo-CampE-UEVR] HANDFIX: REJECTED (moved %.2f m, rotated %.0f deg; "
-                             "limits 0.30 m / 45 deg) -- tracking dropped, or your hand was not "
-                             "where the frozen one was. Nothing captured.", dm, ang);
+                             "limits 0.30 m / %.0f deg) -- tracking dropped, or your hand was not "
+                             "where the frozen one was. Nothing captured.", dm, ang, ang_limit);
         return;
     }
 

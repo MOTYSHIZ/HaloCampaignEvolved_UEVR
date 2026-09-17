@@ -3946,13 +3946,23 @@ struct Config {
     // patgtframe=1 reverts the orientation half live; 0 reverts both.
     int   pa_target_frame  = 2;
 
-    // Does the SUPPORT hand ride the weapon while two-handing? 0 = no (default), 1 = yes.
-    //
-    // 0 follows pancreations MCC VR, who never attach it: the support arm is solved onto its own
-    // controller and the hands couple ONE WAY, through the aim basis only. Attaching it makes the
-    // hand inherit everything the weapon inherits, including the aim hand rotation, which is why
-    // "grabbing" kept surfacing as a separate complaint from the arm itself.
-    int   pa_grab_weapon   = 0;
+    // Does the SUPPORT hand ride the weapon while two-handing?
+    //   0 = no: the support arm is solved onto its own controller throughout (pancreations MCC VR).
+    //   1 = yes, on weapons that TAKE a two-handed hold (DEFAULT since 2026-09-17, by request: "when
+    //       we 2-hand aim, the left hand snaps to its authored position -- where the hand would
+    //       normally be gripping the weapon in flat mode or in rig parented mode"). While the hold
+    //       is latched the support wrist takes the AUTHORED wrist carried by the same rigid transform
+    //       that placed the gun, eased in over the hold's own ramp; the arm is still IK'd from the
+    //       body shoulder. Not on twohanddeny weapons: a one-hander's authored off hand is not on it.
+    //   2 = as 1, on deny-listed weapons too.
+    // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
+    // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
+    int   pa_grab_weapon   = 1;
+    // DEV: record the STOCK first-person palette (every node, before this route edits it) to
+    // <profile>\data\handrec.bin, one frame per live build, while > 0. The value is a cap in frames
+    // (60/s), so a forgotten key cannot fill the disk. Used to lift hand shapes (open hand, fist)
+    // out of the game's own animations rather than inventing them. DEV KEY pahandrec.
+    int   pa_hand_rec      = 0;
 
     int   pa_arm_rest_lift = 1;
 
