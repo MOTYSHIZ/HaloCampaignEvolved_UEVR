@@ -425,10 +425,20 @@ std::atomic_bool           s_rigw_frozen{false};// a calibration hold is pinning
 // weapon idles; recoil, reloads, melee and swaps all move the authored wrist, and none of that may
 // reach the other hand. A new value has to repeat for half a second, then it is EASED in, so a
 // weapon swap or a recalibration arrives as a drift rather than a pop.
+//
+// STARTS FROM A BAKED DEFAULT, not from "none". Measured 2026-09-17 with the Assault Rifle on the
+// shipped calibration (two settles agreed to 0.8 deg / 0.1 cm). The relation is calibration x
+// authored grip -- it does not depend on the runtime or on how the controller happens to be held --
+// so the default is right wherever the shipped fit is in use and close everywhere else, and the
+// first real measurement is EASED onto it. Without it the hand spent the first half second of every
+// session in the old convention and then popped, and a weapon whose idle never holds still enough
+// to latch would have kept the old convention for good.
 struct GripRelation {
-    pa::Mat3 basis{};
-    pa::Vec3 offset{};
-    bool     have = false;
+    pa::Mat3 basis{ pa::Vec3{0.07812f, -0.98184f, -0.17286f},
+                    pa::Vec3{0.31734f,  0.18886f, -0.92931f},
+                    pa::Vec3{0.94509f,  0.01774f,  0.32633f} };
+    pa::Vec3 offset{ -0.002f / 304.8f, -7.553f / 304.8f, 6.262f / 304.8f };   // cm -> Blam units
+    bool     have = true;
     pa::Mat3 cand_basis{};
     pa::Vec3 cand_offset{};
     int      stable = 0;
