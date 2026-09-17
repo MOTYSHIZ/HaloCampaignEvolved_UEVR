@@ -201,6 +201,16 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
 // Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
 
+// A rotation part of the way from `a` to `b`, along the SHORT ARC.
+//
+// blend_basis() is a normalised lerp, and says itself that it is only meaningful for nearby
+// orientations: with the two forwards opposed it has no forward left to normalise at the half-way
+// mark and returns something that is not a rotation. That was harmless while it only ever ramped a
+// hand onto a forestock it was already reaching for; a FREE hand handed to a reload animation can
+// start from any orientation at all. Never returns a non-rotation: degenerate inputs snap to the
+// nearer end.
+Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight);
+
 // ---- FOREARM TWIST --------------------------------------------------------------------------
 //
 // The solve turns the HAND to the controller and leaves the forearm exactly as the elbow carries

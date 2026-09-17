@@ -1937,7 +1937,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_wrist_basis);
                 if (pa::valid_basis(on_gun_basis)) {
                     wrist_target  = wrist_target + (on_gun_pos - wrist_target) * w;
-                    desired_wrist = pa::blend_basis(desired_wrist, on_gun_basis, w);
+                    // Short-arc, not a normalised lerp: a free hand handed to an action can start
+                    // from ANY orientation, and a lerp has no answer half way between opposites.
+                    desired_wrist = pa::slerp_basis(desired_wrist, on_gun_basis, w);
                     s_dbg_grab_w  = w;
                 }
             }

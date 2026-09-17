@@ -157,6 +157,13 @@ Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
 
 } // namespace
 
+Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight) {
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (!valid_basis(a) || !valid_basis(b)) return weight < 0.5f ? a : b;
+    const Mat3 out = rotation_basis(slerp_short(rotation_from_basis(a), rotation_from_basis(b), weight));
+    return valid_basis(out) ? out : (weight < 0.5f ? a : b);
+}
+
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored) {
     if (palette == nullptr) return false;
     curl     = std::clamp(curl, -1.0f, 1.0f);
