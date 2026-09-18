@@ -2670,15 +2670,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
             s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));
             if (s_aim_gesture_w < 0.001f && aw <= 0.0f) s_aim_gesture_w = 0.0f;
         }
+        // The per-segment tuning (papointseg/rot, pathumbdownseg/rot, pathumbupseg/rot), straight from
+        // config: ~40 floats copied per drive, no engine call.
+        pa::HandTrim trim{};
+        for (int s = 0; s < 3; ++s) {
+            trim.point_curl[s] = g_cfg.pa_point_seg[s];
+            trim.down_curl[s]  = g_cfg.pa_thumb_down_seg[s];
+            trim.up_curl[s]    = g_cfg.pa_thumb_up_seg[s];
+            for (int a = 0; a < 3; ++a) {
+                trim.point_rot[s][a] = g_cfg.pa_point_rot[s * 3 + a];
+                trim.down_rot[s][a]  = g_cfg.pa_thumb_down_rot[s * 3 + a];
+                trim.up_rot[s][a]    = g_cfg.pa_thumb_up_rot[s * 3 + a];
+            }
+        }
         if (tracking.support_valid && support_posed) {
             const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
             if (g_cfg.pa_gesture != 0) pa::apply_hand_gesture(access.palette, support_arm, s_gesture[1], on_gun,
-                                                              g_cfg.pa_thumb_over, g_cfg.pa_thumb_out);
+                                                              g_cfg.pa_thumb_over, g_cfg.pa_thumb_out, &trim);
             else                       pa::apply_hand_shape(access.palette, support_arm, s_sup_curl, on_gun);
         }
         if (s_aim_gesture_w > 0.001f)
             pa::apply_hand_gesture(access.palette, aim_arm, s_gesture[0], 1.0f - s_aim_gesture_w,
-                                   g_cfg.pa_thumb_over, g_cfg.pa_thumb_out);
+                                   g_cfg.pa_thumb_over, g_cfg.pa_thumb_out, &trim);
     }
     // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
     // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the

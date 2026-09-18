@@ -1337,6 +1337,21 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
     return false;
 }
 
+// "a,b,,d" -> up to n floats; blank or missing fields are 0. For the per-segment finger tuning lists.
+static void parse_float_list(const char* val, float* out, int n) {
+    for (int i = 0; i < n; ++i) out[i] = 0.0f;
+    if (val == nullptr) return;
+    const char* p = val;
+    for (int i = 0; i < n && *p != 0; ++i) {
+        char* end = nullptr;
+        const double d = std::strtod(p, &end);
+        if (end != p && std::isfinite(d)) out[i] = (float)d;
+        const char* comma = std::strchr(p, ',');
+        if (comma == nullptr) break;
+        p = comma + 1;
+    }
+}
+
 static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
     if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
@@ -1396,6 +1411,12 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "papointcurl")   == 0) { g_cfg.pa_point_curl     = (float)v; return true; }
     if (_stricmp(key, "pathumbext")    == 0) { g_cfg.pa_thumb_ext      = (float)v; return true; }
     if (_stricmp(key, "pathumbout")    == 0) { g_cfg.pa_thumb_out      = (float)v; return true; }
+    if (_stricmp(key, "papointseg")     == 0) { parse_float_list(val, g_cfg.pa_point_seg, 3);      return true; }
+    if (_stricmp(key, "papointrot")     == 0) { parse_float_list(val, g_cfg.pa_point_rot, 9);      return true; }
+    if (_stricmp(key, "pathumbdownseg") == 0) { parse_float_list(val, g_cfg.pa_thumb_down_seg, 3); return true; }
+    if (_stricmp(key, "pathumbdownrot") == 0) { parse_float_list(val, g_cfg.pa_thumb_down_rot, 9); return true; }
+    if (_stricmp(key, "pathumbupseg")   == 0) { parse_float_list(val, g_cfg.pa_thumb_up_seg, 3);   return true; }
+    if (_stricmp(key, "pathumbuprot")   == 0) { parse_float_list(val, g_cfg.pa_thumb_up_rot, 9);   return true; }
     if (_stricmp(key, "paarmlod0")     == 0) { g_cfg.pa_arm_lod0       = (int)v;   return true; }
     if (_stricmp(key, "fpscale")       == 0) { g_cfg.fp_scale          = (float)v; return true; }
     if (_stricmp(key, "fpfov")         == 0) { g_cfg.fp_fov            = (float)v; return true; }

@@ -4035,6 +4035,20 @@ struct Config {
     // index finger when clenching a fist": a CURLED thumb's base joint turned this far back toward
     // the open hand (0..1, scaled by the curl). Live; a first guess.
     float pa_thumb_out     = 0.3f;    // DEV KEY pathumbout
+    // PER-SEGMENT TUNING, per gesture (pa::HandTrim; 2026-09-18: "what I really need are tunables for
+    // the second and last segments of the pointer finger" / the fist's thumb "neither thumb out or
+    // thumb over ... let me tune enough"). Segments: 1 = knuckle, 2 = second, 3 = last. Comma lists,
+    // blank or missing fields = 0, all unbounded and negative-capable, all live:
+    //   *seg=s1,s2,s3                 curl added per segment along its own arc (+ closes, - opens)
+    //   *rot=x1,y1,z1,x2,y2,z2,x3,y3,z3   degrees about each segment's own local X / Y / Z
+    // papoint* = the pointing index; pathumbdown* = the thumb down (fist, point-thumb-down);
+    // pathumbup* = the thumb out (thumbs up, point-thumb-out).
+    float pa_point_seg[3]      = {0.0f, 0.0f, 0.0f};   // DEV KEY papointseg
+    float pa_point_rot[9]      = {};                   // DEV KEY papointrot
+    float pa_thumb_down_seg[3] = {0.0f, 0.0f, 0.0f};   // DEV KEY pathumbdownseg
+    float pa_thumb_down_rot[9] = {};                   // DEV KEY pathumbdownrot
+    float pa_thumb_up_seg[3]   = {0.0f, 0.0f, 0.0f};   // DEV KEY pathumbupseg
+    float pa_thumb_up_rot[9]   = {};                   // DEV KEY pathumbuprot
     // FORCE THE ARM MESH TO ITS FULL-DETAIL LOD. On low geometry settings a vertex of the middle
     // finger follows the INDEX when pointing: the reduced LOD's skinning puts some of it on the index
     // bone, which the authored animation never separates. SetForcedLOD(1) pins LOD0 -- where the
