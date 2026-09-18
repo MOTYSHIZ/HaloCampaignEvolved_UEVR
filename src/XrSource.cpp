@@ -755,6 +755,32 @@ done:
 
 uint32_t g_next_probe = 0;
 
+// DECAYING BACKOFF for the primary chain probe (2026-09-17). On a build the walk can decode -- the
+// Steam Win64 binary these offsets were measured against -- g_chain latches on the FIRST attempt,
+// the !g_chain.valid() gate then goes false, and none of this ever advances. It exists for the
+// build it CANNOT decode: the Microsoft Store / Game Pass (WinGDK) binary lays FRHITexture's
+// descriptor out differently, so desc_plausible rejects every extent match and nothing latches.
+// Without backoff the ~tens-to-200 ms probe() re-ran every ~0.7 s for the whole session -- the
+// "every other second" stutter a Game Pass player reported. Doubling the interval after a short
+// warm-up turns it into a brief flurry then near-silence; the reticule falls back to the in-scene
+// crosshair (fail closed), no worse than xrlayersrc=0. Reset to the fast cadence when the SUBJECT
+// render target changes -- a re-host or level load is a fresh chance for the walk to succeed.
+uint32_t g_probe_attempts = 0;      // consecutive probe schedules against the current subject
+void*    g_probe_subject   = nullptr;   // identity only, never dereferenced
+constexpr uint32_t kProbeBaseTicks = 32;    // ~0.7-1 s: the warm-up cadence, unchanged from before
+constexpr uint32_t kProbeFastTries = 8;     // keep that cadence for ~6 s before decaying
+constexpr uint32_t kProbeMaxShift  = 6;     // cap the doubling at 64x
+constexpr uint32_t kProbeCapTicks  = 1350;  // ~30-45 s ceiling once decayed
+
+// Interval (ticks) until the next probe, given how many have already failed against this subject.
+uint32_t probe_backoff_ticks(uint32_t attempts) {
+    if (attempts <= kProbeFastTries) return kProbeBaseTicks;
+    uint32_t shift = attempts - kProbeFastTries;
+    if (shift > kProbeMaxShift) shift = kProbeMaxShift;
+    const uint32_t step = kProbeBaseTicks << shift;
+    return step < kProbeCapTicks ? step : kProbeCapTicks;
+}
+
 void reset_slot(int s) {
     Target& t = g_t[s];
     if (t.fed != nullptr) { xrlayer_set_slot_source(s, nullptr); t.fed = nullptr; }
@@ -1076,8 +1102,6 @@ void xrsource_tick(uint32_t tick) {
     // art the layer is supposed to carry. Self-limiting: gated on !g_chain.valid(), so it stops
     // for good once the chain is measured.
     if (probe_mode > 0 && !g_chain.valid() && (int32_t)(tick - g_next_probe) >= 0) {
-        g_next_probe = tick + 32;
-
         const int want = g_t[XRLAYER_SLOT_RETICULE].want;
         // The widget's own target when it exists, otherwise one we make. The offsets are the same
         // either way; see probe_render_target().
@@ -1093,6 +1117,12 @@ void xrsource_tick(uint32_t tick) {
         // build to measure something that is about to exist anyway is a cost with no payer.
         if (subject == nullptr && want >= 16 && want <= 4096) subject = probe_render_target(want);
 #endif
+
+        // Schedule the next attempt with decaying backoff (see g_probe_attempts). A changed subject
+        // re-arms the fast cadence -- the previous target's failures must not delay a fresh render
+        // target's first walk.
+        if (subject != g_probe_subject) { g_probe_subject = subject; g_probe_attempts = 0; }
+        g_next_probe = tick + probe_backoff_ticks(++g_probe_attempts);
 
         if (subject == nullptr) {
             set_status("no render target to probe (neither the widget's nor a made one)");
