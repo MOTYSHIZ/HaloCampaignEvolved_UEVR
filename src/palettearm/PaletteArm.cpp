@@ -2661,7 +2661,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                                : s_in_grip[0].load(std::memory_order_relaxed);
                     pa::ease_gesture(s_gesture[h],
                                      pa::gesture_for_inputs(grip, s_in_trig[h].load(std::memory_order_relaxed),
-                                                            s_in_thumb[h].load(std::memory_order_relaxed), rest),
+                                                            s_in_thumb[h].load(std::memory_order_relaxed), rest,
+                                                            g_cfg.pa_point_curl, g_cfg.pa_thumb_ext),
                                      dt, 0.045f);
                 }
             }
@@ -2671,11 +2672,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
         }
         if (tracking.support_valid && support_posed) {
             const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
-            if (g_cfg.pa_gesture != 0) pa::apply_hand_gesture(access.palette, support_arm, s_gesture[1], on_gun, g_cfg.pa_thumb_over);
+            if (g_cfg.pa_gesture != 0) pa::apply_hand_gesture(access.palette, support_arm, s_gesture[1], on_gun,
+                                                              g_cfg.pa_thumb_over, g_cfg.pa_thumb_out);
             else                       pa::apply_hand_shape(access.palette, support_arm, s_sup_curl, on_gun);
         }
         if (s_aim_gesture_w > 0.001f)
-            pa::apply_hand_gesture(access.palette, aim_arm, s_gesture[0], 1.0f - s_aim_gesture_w, g_cfg.pa_thumb_over);
+            pa::apply_hand_gesture(access.palette, aim_arm, s_gesture[0], 1.0f - s_aim_gesture_w,
+                                   g_cfg.pa_thumb_over, g_cfg.pa_thumb_out);
     }
     // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
     // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the
@@ -2847,15 +2850,31 @@ bool capture_tracking_into(TrackingSnapshot& snap) {
 // actions UEVR binds for that hand -- it binds no thumbstick- or trackpad-touch action at all.
 void sample_hand_inputs() {
     if (g_cfg.pa_gesture == 0) return;
+    // TRIGGER TOUCH, WHEN THE BACKEND HAS IT. The index should follow the capacitive TOUCH on the
+    // trigger, not a pull -- a pull fires (or throws a grenade on the off hand), so a fist that needs
+    // one is a fist that throws a grenade. Stock UEVR binds no /input/trigger/touch path (its OpenXR
+    // table has trigger, squeeze, A/B/X/Y touch and the thumbrest only), so these handles are null on
+    // it and the index falls back to the pull. A backend that adds the action lights this up with no
+    // plugin change.
+    static UEVR_ActionHandle s_trig_touch[2] = {nullptr, nullptr};   // [left, right]
+    static const char* const kTrigTouch[2] = {"/actions/default/in/TriggerTouchLeft",
+                                              "/actions/default/in/TriggerTouchRight"};
+    for (int side = 0; side < 2; ++side)
+        if (s_trig_touch[side] == nullptr) s_trig_touch[side] = API::VR::get_action_handle(kTrigTouch[side]);
     static UEVR_ActionHandle s_grip = nullptr, s_trig = nullptr;
-    static UEVR_ActionHandle s_touch[2][3] = {{nullptr, nullptr, nullptr}, {nullptr, nullptr, nullptr}};   // [left,right][A,B,rest]
-    static const char* const kTouch[2][3] = {
-        {"/actions/default/in/AButtonTouchLeft",  "/actions/default/in/BButtonTouchLeft",  "/actions/default/in/ThumbrestTouchLeft"},
-        {"/actions/default/in/AButtonTouchRight", "/actions/default/in/BButtonTouchRight", "/actions/default/in/ThumbrestTouchRight"}};
+    // The thumb sensor: A/X and B/Y touch, the thumbrest -- and a THUMBSTICK touch, which stock UEVR
+    // does not bind (its OpenXR table has thumbstick and thumbstick/click only); the fourth name is
+    // for a backend that adds it, and is simply null on stock UEVR. The thumbrest action is also the
+    // one a player can route thumbstick/touch into from UEVR's own OpenXR bindings editor (see the
+    // dev catalog), which then needs no change here.
+    static UEVR_ActionHandle s_touch[2][4] = {{nullptr, nullptr, nullptr, nullptr}, {nullptr, nullptr, nullptr, nullptr}};   // [left,right][A,B,rest,stick]
+    static const char* const kTouch[2][4] = {
+        {"/actions/default/in/AButtonTouchLeft",  "/actions/default/in/BButtonTouchLeft",  "/actions/default/in/ThumbrestTouchLeft",  "/actions/default/in/ThumbstickTouchLeft"},
+        {"/actions/default/in/AButtonTouchRight", "/actions/default/in/BButtonTouchRight", "/actions/default/in/ThumbrestTouchRight", "/actions/default/in/ThumbstickTouchRight"}};
     if (s_grip == nullptr) s_grip = API::VR::get_action_handle("/actions/default/in/Grip");
     if (s_trig == nullptr) s_trig = API::VR::get_action_handle("/actions/default/in/Trigger");
     for (int side = 0; side < 2; ++side)
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < 4; ++k)
             if (s_touch[side][k] == nullptr) s_touch[side][k] = API::VR::get_action_handle(kTouch[side][k]);
     // hand 0 = aim, 1 = support; side 0 = left, 1 = right
     for (int hand = 0; hand < 2; ++hand) {
@@ -2863,10 +2882,13 @@ void sample_hand_inputs() {
         const int  side    = is_left ? 0 : 1;
         const auto src     = is_left ? API::VR::get_left_joystick_source() : API::VR::get_right_joystick_source();
         bool thumb = false;
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < 4; ++k)
             thumb = thumb || (s_touch[side][k] != nullptr && API::VR::is_action_active(s_touch[side][k], src));
         s_in_grip[hand].store(s_grip != nullptr && API::VR::is_action_active(s_grip, src), std::memory_order_relaxed);
-        s_in_trig[hand].store(s_trig != nullptr && API::VR::is_action_active(s_trig, src), std::memory_order_relaxed);
+        const bool trig = (s_trig_touch[side] != nullptr)
+                              ? API::VR::is_action_active(s_trig_touch[side], src)
+                              : (s_trig != nullptr && API::VR::is_action_active(s_trig, src));
+        s_in_trig[hand].store(trig, std::memory_order_relaxed);
         s_in_thumb[hand].store(thumb, std::memory_order_relaxed);
     }
 }

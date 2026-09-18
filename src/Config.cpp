@@ -1393,6 +1393,12 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pagesture")     == 0) { g_cfg.pa_gesture        = (int)v;   return true; }
     if (_stricmp(key, "pathumbover")   == 0) { g_cfg.pa_thumb_over     = (float)v; return true; }
     if (_stricmp(key, "paunarmedarms") == 0) { g_cfg.pa_unarmed_arms   = (int)v;   return true; }
+    if (_stricmp(key, "papointcurl")   == 0) { g_cfg.pa_point_curl     = (float)v; return true; }
+    if (_stricmp(key, "pathumbext")    == 0) { g_cfg.pa_thumb_ext      = (float)v; return true; }
+    if (_stricmp(key, "pathumbout")    == 0) { g_cfg.pa_thumb_out      = (float)v; return true; }
+    if (_stricmp(key, "paarmlod0")     == 0) { g_cfg.pa_arm_lod0       = (int)v;   return true; }
+    if (_stricmp(key, "fpscale")       == 0) { g_cfg.fp_scale          = (float)v; return true; }
+    if (_stricmp(key, "fpfov")         == 0) { g_cfg.fp_fov            = (float)v; return true; }
     if (_stricmp(key, "pasupanimgate") == 0) { g_cfg.pa_sup_anim_gate  = (float)v; return true; }
     if (_stricmp(key, "paequipanim")   == 0) { g_cfg.pa_equip_anim     = (int)v;   return true; }
     if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
