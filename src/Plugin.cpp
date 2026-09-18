@@ -255,6 +255,16 @@ std::atomic<bool>  g_lock_primed{false};
 // and the render re-apply) makes NO writes, so the mesh sits where the GAME puts it -- the frame
 // the palette records are authored in. See the rig block for the measurement behind this.
 std::atomic<bool>  g_mesh_standdown{false};
+// THE VIRTUAL RIG FRAME under the palette route (scope parity with rig mode, 2026-09-17). With the
+// mesh held in the body frame (pameshbody) the rig component is level and yaw-only, but the scope
+// places its pane relative to the rig and anchors its compositor quad in the rig's frame, both of
+// which assume the rig IS the gun -- as it is in rig mode. Rig mode's rig root sits at
+// weapon - R*socket_local, and socket_local is the stock weapon marker the palette holds, so the
+// same root exists here with nothing to read it from. The tick publishes its WORLD offset from the
+// rig parent (as g_rigw_off_* does for rig mode); the render path recomposes it against the live
+// parent and hands it to the layer, the same two-clocks shape as the rig-mode block.
+std::atomic<float> g_palrig_off_x{0.0f}, g_palrig_off_y{0.0f}, g_palrig_off_z{0.0f};
+std::atomic<bool>  g_palrig_off_valid{false};
 // The rig's relative transform as found at acquisition, BEFORE this plugin's first write -- what
 // stand-down restores. Zeros when the fields could not be read (zeros are also the expected value).
 static double g_rig_stock_loc[3] = {0.0, 0.0, 0.0};
@@ -10657,6 +10667,30 @@ void update() {
                     const bool finite_ok = std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)
                                         && std::isfinite(f.x) && std::isfinite(r.x) && std::isfinite(u.x);
                     halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa, calibrating);
+                    // ---- THE VIRTUAL RIG FRAME, for the scope (see g_palrig_off_*). Rig mode's rig
+                    // root is weapon - R*socket_local; socket_local is the stock weapon marker the
+                    // palette holds. Published as a world offset from the rig parent (the render
+                    // side recomposes it) and handed to the scope with the parent read on THIS tick.
+                    {
+                        float S[3] = {0.0f, 0.0f, 0.0f};
+                        Vec3  pl{};
+                        const bool ok = rw_ok && finite_ok && halo::palettearm_stock_marker_ue(S) &&
+                                        g_rig_parent != nullptr &&
+                                        call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pl) &&
+                                        std::isfinite(pl.x) && std::isfinite(pl.y) && std::isfinite(pl.z);
+                        if (ok) {
+                            const Vec3 rs = quat_rotate(q_gun, Vec3{S[0], S[1], S[2]});
+                            const Vec3 root_off{wpn_t.x - rs.x, wpn_t.y - rs.y, wpn_t.z - rs.z};
+                            g_palrig_off_x.store(root_off.x, std::memory_order_relaxed);
+                            g_palrig_off_y.store(root_off.y, std::memory_order_relaxed);
+                            g_palrig_off_z.store(root_off.z, std::memory_order_relaxed);
+                            g_palrig_off_valid.store(true, std::memory_order_release);
+                            halo::scope_note_rig_frame(Vec3{pl.x + root_off.x, pl.y + root_off.y, pl.z + root_off.z},
+                                                       q_gun, tick);
+                        } else {
+                            g_palrig_off_valid.store(false, std::memory_order_relaxed);
+                        }
+                    }
 #if HALO_VR_DEV
                     // GROUND TRUTH, read not predicted: how far the drawn weapon actually sits from
                     // where rig mode would have put it. Independent of everything the palette did.
@@ -12304,8 +12338,24 @@ public:
                 // location, level, at the body yaw. One reflected call, same as the path it replaces.
                 if (g_cfg.rig_render) {
                     Vec3 rloc{};
-                    if (call_ret_vec3(brig, L"K2_GetComponentLocation", &rloc) &&
+                    if (g_palrig_off_valid.load(std::memory_order_acquire) && g_rigw_valid.load() &&
+                        g_rig_parent != nullptr && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &rloc) &&
                         std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
+                        // THE VIRTUAL RIG FRAME (see g_palrig_off_*): rig mode's root, recomposed
+                        // against the LIVE parent, with the gun's rotation -- the same frame the tick
+                        // handed the scope, so the quad's re-anchor cancels the GUN's motion between
+                        // tick and render as it does in rig mode. The body frame published below
+                        // cancels only the turn, and the pane trailed every pitch and roll.
+                        const Quat qr{g_rigw_x.load(), g_rigw_y.load(), g_rigw_z.load(), g_rigw_w.load()};
+                        const Vec3 root{rloc.x + g_palrig_off_x.load(std::memory_order_relaxed),
+                                        rloc.y + g_palrig_off_y.load(std::memory_order_relaxed),
+                                        rloc.z + g_palrig_off_z.load(std::memory_order_relaxed)};
+                        halo::xrlayer_note_rig(root,
+                                               quat_rotate(qr, Vec3{1.0f, 0.0f, 0.0f}),
+                                               quat_rotate(qr, Vec3{0.0f, 1.0f, 0.0f}),
+                                               quat_rotate(qr, Vec3{0.0f, 0.0f, 1.0f}));
+                    } else if (call_ret_vec3(brig, L"K2_GetComponentLocation", &rloc) &&
+                               std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
                         const float yr = body_yaw * DEG2RAD;
                         const float cyw = std::cos(yr), syw = std::sin(yr);
                         halo::xrlayer_note_rig(rloc, Vec3{cyw, syw, 0.0f}, Vec3{-syw, cyw, 0.0f},

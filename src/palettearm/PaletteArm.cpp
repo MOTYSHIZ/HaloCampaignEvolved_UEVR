@@ -655,6 +655,10 @@ float pad_age_s(const std::atomic<long long>& t) {
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     return std::chrono::duration<float>(std::chrono::steady_clock::duration(now - v)).count();
 }
+// The stock weapon marker, published every live frame for the scope's virtual rig frame
+// (palettearm_stock_marker_ue): UE cm, plus the steady_clock ticks it was read at.
+std::atomic<float>     s_stock_marker_x{0.0f}, s_stock_marker_y{0.0f}, s_stock_marker_z{0.0f};
+std::atomic<long long> s_stock_marker_ticks{0};
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -1419,6 +1423,15 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // there leaves the kick standing, in the gun's own carried frame. Not while a calibration
             // hold pins the gun, and only the live slot teaches the rest pose.
             const pa::Vec3 marker_now = access.palette[map->weapon_marker].position;
+            if (!access.is_capture_bank) {
+                // ...published for the scope's virtual rig frame (UE axes: Blam's +Y left -> -Y).
+                const float cmk = pa::kMetresPerBlamUnit * 100.0f;
+                s_stock_marker_x.store(marker_now.x * cmk, std::memory_order_relaxed);
+                s_stock_marker_y.store(-marker_now.y * cmk, std::memory_order_relaxed);
+                s_stock_marker_z.store(marker_now.z * cmk, std::memory_order_relaxed);
+                s_stock_marker_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                                           std::memory_order_release);
+            }
             pa::Vec3 kick{};
             {
                 const bool live = !access.is_capture_bank;
@@ -3146,6 +3159,18 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+bool palettearm_stock_marker_ue(float out_cm[3]) {
+    if (out_cm == nullptr) return false;
+    const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
+    if (t == 0) return false;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (std::chrono::duration<float>(std::chrono::steady_clock::duration(now - t)).count() > 0.25f) return false;
+    out_cm[0] = s_stock_marker_x.load(std::memory_order_relaxed);
+    out_cm[1] = s_stock_marker_y.load(std::memory_order_relaxed);
+    out_cm[2] = s_stock_marker_z.load(std::memory_order_relaxed);
+    return std::isfinite(out_cm[0]) && std::isfinite(out_cm[1]) && std::isfinite(out_cm[2]);
+}
+
 void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving,
                          bool reload_down) {
     if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving && !reload_down) return;

@@ -54,6 +54,11 @@ void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]);
 // the carry, but it no longer describes how the gun sits on the controller.
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
                                 const float up[3], const float wpn_cm[3], bool frozen);
+// The STOCK weapon marker this frame -- the weapon socket's offset from the FP model's root as
+// rig mode measures it (the Magnum: (61.2,13.1,-23.5) cm measured on the rig, (61.5,-13.1,-23.5)
+// on the stock palette; UE's Y is Blam's -Y) -- in UE axes and centimetres. False when the live
+// drive has not run in the last quarter second. The scope's virtual rig frame is built from it.
+bool palettearm_stock_marker_ue(float out_cm[3]);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

@@ -91,6 +91,13 @@ void scope_notice_focus(const Vec3& world_hit, bool valid, uint32_t tick);
 
 void scope_notice_ray(const Vec3& origin, const Vec3& target, uevr::API::UObject* rig,
                       uint32_t tick);
+// THE VIRTUAL RIG FRAME (palette route, scope parity with rig mode, 2026-09-17). Under the
+// palette route the rig component is held level in the body frame, so it is no longer the gun
+// frame the pane's relative mount, the compositor quad's anchor and the calibration capture all
+// assume. The tick hands the scope the frame rig mode's rig WOULD have -- root at
+// weapon - R*socket_local, rotation = the gun's -- and the scope uses it in place of the
+// component wherever it would have read the rig, for as long as it is fresh (2 ticks).
+void scope_note_rig_frame(const Vec3& pos, const Quat& rot, uint32_t tick);
 void scope_frame_end(uint32_t tick);
 
 } // namespace halo

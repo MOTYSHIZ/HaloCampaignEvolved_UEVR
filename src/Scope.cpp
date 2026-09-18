@@ -126,6 +126,14 @@ int   s_anchored_mount = -1;
 // Set once if the relative mount is measured to have put the pane somewhere unintended -- see
 // the readback in scope_apply. Session-scoped; a config edit to scopemount clears it.
 bool  s_relative_rejected = false;
+// THE VIRTUAL RIG FRAME (scope_note_rig_frame; see Scope.hpp). Fresh for two ticks after it was
+// noted; stale or never noted means "read the rig component", which is rig mode's behaviour.
+Vec3     s_vrig_pos{};
+Quat     s_vrig_rot{0.0f, 0.0f, 0.0f, 1.0f};
+uint32_t s_vrig_tick = 0;
+bool     s_vrig_have = false;
+bool vrig_fresh(uint32_t tick) { return s_vrig_have && (tick - s_vrig_tick) <= 2u; }
+Vec3 vrig_axis(const Vec3& local) { return quat_rotate(s_vrig_rot, local); }
 // Last good roll-lock angle. The lock is ABSOLUTE now (the image is locked to the lens itself,
 // not to a remembered pose), so no reference pose is needed -- this only carries the previous
 // value across the one degenerate case, where the lens's up axis lies along the aim ray.
@@ -2832,6 +2840,16 @@ void scope_notice_focus(const Vec3& world_hit, bool valid, uint32_t tick) {
     s_focus_tick  = tick;
 }
 
+void scope_note_rig_frame(const Vec3& pos, const Quat& rot, uint32_t tick) {
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) ||
+        !std::isfinite(rot.x) || !std::isfinite(rot.y) || !std::isfinite(rot.z) || !std::isfinite(rot.w))
+        return;
+    // The first frame ever noted re-opens the relative mount: a rejection latched before the
+    // palette route was up was a rejection of the BODY frame, not of this one.
+    if (!s_vrig_have) { s_relative_rejected = false; s_pane_anchored = false; }
+    s_vrig_pos = pos; s_vrig_rot = rot; s_vrig_tick = tick; s_vrig_have = true;
+}
+
 void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig, uint32_t tick) {
     s_ray_origin = origin;
     s_ray_target = target;
@@ -3651,7 +3669,17 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                 // The rig's rotation on THIS tick, measured alongside the pane axes so the two
                 // describe one instant. The submit thread differences it against the render-rate
                 // rig to cancel the interval the pane has already moved through.
-                if (rig != nullptr) {
+                if (vrig_fresh(tick)) {
+                    // THE VIRTUAL RIG FRAME (palette route): the frame rig mode's rig would have,
+                    // from the same quaternion the render side re-anchors against -- so the two
+                    // clocks describe one frame, and the gun's motion between them cancels, as it
+                    // does in rig mode. The component itself is level under this route.
+                    feed.rig_pos       = s_vrig_pos;
+                    feed.rig_fwd       = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
+                    feed.rig_right     = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
+                    feed.rig_up        = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
+                    feed.rig_rot_valid = true;
+                } else if (rig != nullptr) {
                     // AXES, not a rotator. K2_GetComponentRotation would hand back Euler angles and
                     // put a decomposition on this path -- the exact thing that made the pane jitter
                     // on roll. Three vectors carry the same information with no ordering and no
@@ -3835,13 +3863,30 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
             // rig on every frozen write, so the answer is simply there to be read.
             auto* rel_loc = pane->get_property_data<double>(L"RelativeLocation");
             auto* rel_rot = pane->get_property_data<double>(L"RelativeRotation");
-            if (rel_loc != nullptr && rel_rot != nullptr) {
-                g_cfg.scope_dist  = (float)rel_loc[0];
-                g_cfg.scope_right = (float)rel_loc[1];
-                g_cfg.scope_up    = (float)rel_loc[2];
-                g_cfg.scope_rot_p = (float)rel_rot[0];
-                g_cfg.scope_rot_y = (float)rel_rot[1];
-                g_cfg.scope_rot_r = (float)rel_rot[2];
+            // PALETTE ROUTE: the numbers must be in the VIRTUAL rig frame, not the level body-frame
+            // component the pane is parented to, or a capture made here would not describe the
+            // same place on the gun as one made in rig mode (and would be re-applied through the
+            // virtual frame above, in the wrong frame). Differenced from the pane's WORLD transform.
+            Vec3  vw_loc{}, vw_rotv{};
+            bool  have_v = false;
+            float v_dist = 0.0f, v_right = 0.0f, v_up = 0.0f, v_p = 0.0f, v_y = 0.0f, v_r = 0.0f;
+            if (vrig_fresh(tick) && call_ret_vec3(pane, L"K2_GetComponentLocation", &vw_loc) &&
+                read_component_rotation(pane, &vw_rotv)) {
+                const Vec3 d{vw_loc.x - s_vrig_pos.x, vw_loc.y - s_vrig_pos.y, vw_loc.z - s_vrig_pos.z};
+                const Vec3 l = quat_rotate(quat_conj(s_vrig_rot), d);
+                const Quat qrel = quat_mul(quat_conj(s_vrig_rot), rotator_to_quat(vw_rotv.x, vw_rotv.y, vw_rotv.z));
+                quat_to_rotator(qrel.x, qrel.y, qrel.z, qrel.w, &v_p, &v_y, &v_r);
+                v_dist = l.x; v_right = l.y; v_up = l.z;
+                have_v = std::isfinite(v_dist) && std::isfinite(v_right) && std::isfinite(v_up) &&
+                         std::isfinite(v_p) && std::isfinite(v_y) && std::isfinite(v_r);
+            }
+            if (have_v || (rel_loc != nullptr && rel_rot != nullptr)) {
+                g_cfg.scope_dist  = have_v ? v_dist  : (float)rel_loc[0];
+                g_cfg.scope_right = have_v ? v_right : (float)rel_loc[1];
+                g_cfg.scope_up    = have_v ? v_up    : (float)rel_loc[2];
+                g_cfg.scope_rot_p = have_v ? v_p     : (float)rel_rot[0];
+                g_cfg.scope_rot_y = have_v ? v_y     : (float)rel_rot[1];
+                g_cfg.scope_rot_r = have_v ? v_r     : (float)rel_rot[2];
                 // ---- PER-WEAPON TRIM CLAIMS THE CAPTURE, IF ARMED.
                 //
                 // The gesture above is identical either way -- freeze the pane, move it, release.
@@ -3905,8 +3950,29 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         // Z up in rig space, with the facing trims as a plain relative rotation. Nothing here
         // consults the aim ray, so rotation and translation cannot interact -- the reported
         // "applying a rotation changes how the translation variables are evaluated".
-        set_relative_location(pane, g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up);
-        set_relative_rotation(pane, g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+        if (vrig_fresh(tick)) {
+            // PALETTE ROUTE: the same numbers, composed against the VIRTUAL rig frame and written in
+            // world space -- the component the pane is parented to is level in the body frame under
+            // this route, so a relative write would land the pane 64 cm along the body's forward
+            // instead of the gun's (the "NOT WHERE IT WAS ASKED FOR" readback below, every time).
+            // The socket handshake that follows is KeepWorld, so from here on nothing differs from
+            // rig mode, and the same calibration numbers describe the same place on the gun.
+            const Vec3 f = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
+            const Vec3 r = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
+            const Vec3 u = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
+            const Vec3 pos{
+                s_vrig_pos.x + f.x * g_cfg.scope_dist + r.x * g_cfg.scope_right + u.x * g_cfg.scope_up,
+                s_vrig_pos.y + f.y * g_cfg.scope_dist + r.y * g_cfg.scope_right + u.y * g_cfg.scope_up,
+                s_vrig_pos.z + f.z * g_cfg.scope_dist + r.z * g_cfg.scope_right + u.z * g_cfg.scope_up};
+            const Quat qw = quat_mul(s_vrig_rot, rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r));
+            float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+            quat_to_rotator(qw.x, qw.y, qw.z, qw.w, &wp, &wy, &wr);
+            set_world_location(pane, pos);
+            set_world_rotation(pane, (double)wp, (double)wy, (double)wr);
+        } else {
+            set_relative_location(pane, g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up);
+            set_relative_rotation(pane, g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+        }
         const double s = g_cfg.scope_size / 100.0;   // Engine Plane is 100 cm across
         // The round lens is a Cylinder squashed on its own axis; the flat Plane keeps uniform
         // scale. Both end up scope_size across.
