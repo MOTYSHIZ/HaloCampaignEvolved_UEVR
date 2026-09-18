@@ -383,6 +383,7 @@ bool features_xrlayer_latch_released() { return stability_xrlayer_latch_released
 bool features_xrsource_wanted() { return stability_xrsource_wanted(); }
 bool features_move_probe_allowed() { return stability_move_probe_allowed(); }
 unsigned short features_steal_extra_mask() { return stability_steal_extra_mask(); }
+unsigned short features_steal_dead_mask() { return stability_steal_dead_mask(); }
 // THE SEAT STAND-DOWN ON THE HOLSTER STEAL. The steal takes the throw and grenade-switch buttons
 // off the pad so the holster gestures own them; mounted in a Warthog or a turret those are the
 // game's own controls and taking them reads as "the controllers stopped working".

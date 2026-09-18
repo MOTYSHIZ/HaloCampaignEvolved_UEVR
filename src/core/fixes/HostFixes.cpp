@@ -215,6 +215,25 @@ unsigned short stability_steal_extra_mask() {
     return stab_on() ? (unsigned short)g_cfg.steal_extra_mask : (unsigned short)0;
 }
 
+// A DEAD STEAL THAT EATS A LIVE CONTROL. The author strips holstergswitchmask alongside the throw
+// mask, but the only thing that ever INJECTS that mask is the grenade type switch inside the pouch
+// grab (Holster.cpp try_grab), and every path into the pouches goes through aim_can_grab() or
+// off_can_grab(), both of which require holstergren. With holstergren off -- its own default --
+// nothing can inject it, so the steal is pure loss. It is worse than loss on the owner's profile:
+// his holstergswitchmask is 0x0008, d-pad RIGHT, and he runs mapdpadshift=1, so the steal eats the
+// shifted d-pad right the shift exists to produce.
+//
+// Returned as bits to KEEP, so his mask expression is untouched and the steal simply does not claim
+// a button nothing of his or ours can press. Nothing else is moved: his block stays where he put
+// it, and with this feature off his steal is exactly his again.
+unsigned short stability_steal_dead_mask() {
+    if (!stab_on()) return 0;
+    const unsigned short gsw = (unsigned short)g_cfg.holster_gswitch_mask;
+    if (gsw == 0) return 0;
+    if (g_cfg.holster_enabled && g_cfg.holster_grenades) return 0;   // the grab can run: the injector is live
+    return gsw;
+}
+
 namespace { bool s_src_was_on = false; }
 bool stability_xrsource_wanted() {
     if (!stab_on() || g_cfg.xr_layer) {

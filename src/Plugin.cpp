@@ -12698,8 +12698,9 @@ public:
             // does whatever that button natively does") describes a gesture that is triggered BY
             // that button. Ours is body-frame only, so the premise does not hold here. That is
             // what made this steal look justified while it was quietly disabling a control.
-            const WORD steal = (WORD)((WORD)g_cfg.holster_throw_mask
-                                    | (WORD)g_cfg.holster_gswitch_mask | features_steal_extra_mask());
+            const WORD steal = (WORD)(((WORD)g_cfg.holster_throw_mask
+                                     | (WORD)g_cfg.holster_gswitch_mask | features_steal_extra_mask())
+                                     & (WORD)~features_steal_dead_mask());
             const WORD before = state->Gamepad.wButtons;
             state->Gamepad.wButtons &= (WORD)~steal;
             if (g_cfg.map_btn_log && before != state->Gamepad.wButtons) {
