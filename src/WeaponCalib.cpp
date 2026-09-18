@@ -344,8 +344,21 @@ void wpn_calib_write_file() {
         fprintf(f, "\r\n# wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>  -- the palette\r\n"
                    "# arms' animation preferences for ONE weapon, over the globals pasprintanim /\r\n"
                    "# pameleeanim / paequipanim / pagrenadetrim / pasupanim (see halo_vr_dev.cfg).\r\n"
+                   "# <sprint>, <melee> and <equip> each take the same four values -- what the arms do\r\n"
+                   "# while that animation plays:\r\n"
+                   "#   0 = the whole animation with the IK on top: the free left hand JOINS it\r\n"
+                   "#   1 = the gun hand only: the left hand stays on its controller (a gripping one\r\n"
+                   "#       holds its rest grip on the gun)\r\n"
+                   "#   2 = the whole animation and NO tracking: arms and gun eased back to the stock\r\n"
+                   "#       pose for the animation's duration, back to the controllers as it ends\r\n"
+                   "#   3 = no animation: gun and right hand (fingers too) held to their rest pose, the\r\n"
+                   "#       left hand on its controller\r\n"
+                   "# <grenadetrim> = seconds cut off the END of the throw before the left hand is walked\r\n"
+                   "#   back onto the gun (0.6 = let go as the return begins; 0 = ride the whole throw).\r\n"
+                   "# <supanim> = 1: the free left hand joins reloads/melees/throws at all; 0: never.\r\n"
                    "# Positional; a blank field or '-' keeps the global: wpnanim=FP_Shotgun,3 sets\r\n"
-                   "# only the sprint mode, wpnanim=FP_Magnum,,2 only the melee mode. Hand-written\r\n"
+                   "# only the sprint mode, wpnanim=FP_Magnum,,2 only the melee mode,\r\n"
+                   "# wpnanim=FP_RocketLauncher,2,-,3 sprint 2 and no equip animation. Hand-written\r\n"
                    "# lines here are kept across captures. Delete a line to drop that weapon's overrides.\r\n\r\n");
         for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
             const auto& a = g_cfg.wpn_anim[i];

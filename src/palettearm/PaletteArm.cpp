@@ -581,6 +581,47 @@ bool taught_adopt(std::int32_t tag) {
     if (t->have_sup_fingers) { for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) s_sup_fingers[i] = t->sup_fingers[i]; s_sup_fingers_have = true; }
     return t->have_gun;
 }
+// ---- BAKED REST POSES, per weapon CLASS (2026-09-17, headset, first thing on the memory build:
+// "had first offhand reload fail, then had a second one succeed" -- the PALETTE RELOAD PRESS line
+// read "rest pose NONE, hand relation NONE": the press came 2.8 s after the shotgun's model was
+// first seen, and the rest was learned 3 s after that). Memory cannot cover the FIRST time a model
+// is seen in a session, and "learned" means the gun held still for a third of a second, which it
+// never does while the player moves. But the marker's rest pose and the two wrists' relations to
+// it are AUTHORED, model-space data, the same for every player -- the recording's Magnum rests its
+// marker at (61.5,-13.1,-23.5) cm, the live sessions learn 61.3-64.5 -- so they can be baked per
+// class and adopted (remembered, so the first learn re-anchors them) the first time a class is
+// held. Positions in Blam units; bases as forward / left / up. Rows come from the replay tool
+// (Tools\handrec\replay, section D) and from the dev line PALETTE REST BAKE, printed the first
+// time a session LEARNS all three for a class -- paste new rows in as they appear in logs.
+struct BakedRest {
+    const char* cls;
+    float marker[3], mf[3], ml[3], mu[3];      // the stock weapon marker at rest
+    float sup[3],    sf[3], sl[3], su[3];      // the support wrist in the marker's frame
+    float aim[3],    af[3], al[3], au[3];      // the aim wrist in the marker's frame
+};
+constexpr BakedRest kBakedRest[] = {
+    { "BP_FP_Magnum_WeaponActor_C",       {0.201766f,-0.042830f,-0.077090f}, {-0.000051f,-0.999999f,0.001119f}, {0.999999f,-0.000050f,0.001225f}, {-0.001225f,0.001119f,0.999999f},  {-0.021474f,-0.026848f,-0.005833f}, {0.969820f,-0.052432f,0.238117f}, {-0.067541f,-0.996159f,0.055735f}, {0.234280f,-0.070136f,-0.969636f},  {0.015034f,-0.042510f,-0.000976f}, {0.920774f,-0.097749f,0.377653f}, {0.017840f,0.977636f,0.209546f}, {-0.389690f,-0.186207f,0.901925f} },
+    { "BP_FP_AssaultRifle_WeaponActor_C", {0.077603f,-0.041554f,-0.086049f}, {-0.001633f,-0.999999f,-0.000057f}, {0.999991f,-0.001633f,0.003800f}, {-0.003800f,-0.000051f,0.999993f},  {-0.013816f,0.087310f,0.005125f}, {0.235192f,-0.153203f,0.959799f}, {-0.660931f,-0.749250f,0.042362f}, {0.712639f,-0.644324f,-0.277474f},  {0.015143f,-0.029309f,0.003382f}, {0.998724f,0.029651f,0.040890f}, {-0.034980f,0.990025f,0.136482f}, {-0.036436f,-0.137738f,0.989798f} },
+};
+const BakedRest* baked_rest_for(const char* cls) {
+    if (cls == nullptr || cls[0] == 0) return nullptr;
+    for (const auto& b : kBakedRest) if (std::strcmp(b.cls, cls) == 0) return &b;
+    return nullptr;
+}
+void adopt_baked(const BakedRest& b) {
+    auto V = [](const float* f) { return pa::Vec3{f[0], f[1], f[2]}; };
+    auto B = [&](const float* f, const float* l, const float* u) { pa::Mat3 m; m.forward = V(f); m.left = V(l); m.up = V(u); return m; };
+    s_recoil.adopt(V(b.marker), B(b.mf, b.ml, b.mu));
+    s_action.hand.adopt(V(b.sup), B(b.sf, b.sl, b.su));
+    s_aim_rest.adopt(V(b.aim), B(b.af, b.al, b.au));
+}
+// The class has to read the SAME, non-empty, for this many frames before a baked rest is adopted:
+// it blips empty at every actor swap, and the class is published by the game tick while the
+// palette runs on the animation update, so the frame the model changes may still carry the old
+// weapon's class -- adopting the Magnum's rest onto the rifle would hand the free hand over to
+// an idle. Reset on every model change.
+char s_bake_cls[128] = {0};
+int  s_bake_stable   = 0;
 // The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
 // its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
 // the way wpnoff is matched). A few strstr calls a frame.
@@ -1390,6 +1431,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     s_sprint.reset();
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
                     weapon_changed = true;
+                    s_bake_stable = 0; s_bake_cls[0] = 0;
 #if HALO_VR_DEV
                     API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d in hand -- %s",
                                          (int)access.model_tag,
@@ -1398,6 +1440,27 @@ bool drive_palette(const pa::PaletteAccess& access) {
 #else
                     (void)known;
 #endif
+                }
+                // A model never seen before starts from the BAKED rest for its weapon class (see
+                // kBakedRest), once the class has read the same, non-empty, for 10 frames.
+                if (live && !s_recoil.have_ref && !s_action.hand.have) {
+                    const char* cls = ::halo::weapon_offset_current_class();
+                    if (cls != nullptr && cls[0] != 0 && std::strncmp(cls, s_bake_cls, sizeof(s_bake_cls) - 1) == 0) {
+                        if (++s_bake_stable == 10) {
+                            if (const BakedRest* b = baked_rest_for(cls)) {
+                                adopt_baked(*b);
+#if HALO_VR_DEV
+                                API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d is %s -- baked rest pose "
+                                                     "and hand relations adopted (re-anchored by the first still third of a second)",
+                                                     (int)access.model_tag, cls);
+#endif
+                            }
+                        }
+                    } else {
+                        std::strncpy(s_bake_cls, cls != nullptr ? cls : "", sizeof(s_bake_cls) - 1);
+                        s_bake_cls[sizeof(s_bake_cls) - 1] = 0;
+                        s_bake_stable = 0;
+                    }
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
@@ -1497,6 +1560,25 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                                  (int)access.model_tag);
                         }
                         s_reload_age_was = reload_age;
+                    }
+                    // The row kBakedRest is filled from: once per weapon class per session, the
+                    // first time all three rest poses are LEARNED (not adopted). Paste it in.
+                    static char s_bake_said[128] = {0};
+                    if (s_recoil.have_ref && !s_recoil.remembered && s_action.hand.have && !s_action.hand.remembered &&
+                        s_aim_rest.have && !s_aim_rest.remembered) {
+                        const char* cls = ::halo::weapon_offset_current_class();
+                        if (cls != nullptr && cls[0] != 0 && std::strncmp(cls, s_bake_said, sizeof(s_bake_said) - 1) != 0) {
+                            std::strncpy(s_bake_said, cls, sizeof(s_bake_said) - 1);
+                            s_bake_said[sizeof(s_bake_said) - 1] = 0;
+                            char v[12][48];
+                            const pa::Vec3 vs[12] = {
+                                s_recoil.ref_pos, s_recoil.ref_basis.forward, s_recoil.ref_basis.left, s_recoil.ref_basis.up,
+                                s_action.hand.pos, s_action.hand.basis.forward, s_action.hand.basis.left, s_action.hand.basis.up,
+                                s_aim_rest.pos, s_aim_rest.basis.forward, s_aim_rest.basis.left, s_aim_rest.basis.up };
+                            for (int k = 0; k < 12; ++k) std::snprintf(v[k], sizeof(v[k]), "{%.6ff,%.6ff,%.6ff}", vs[k].x, vs[k].y, vs[k].z);
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE REST BAKE: { \"%s\", %s, %s, %s, %s,  %s, %s, %s, %s,  %s, %s, %s, %s },",
+                                                 cls, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+                        }
                     }
                     if (was > 0.0f && s_action.weight <= 0.0f && prefs.sup_anim != 0) {
                         API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
