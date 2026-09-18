@@ -487,7 +487,7 @@ float s_sup_curl = 0.0f;                        // the support hand's current cu
 // must not call into the runtime. [0] = the aim hand, [1] = the support hand.
 std::atomic<bool> s_in_grip[2]{}, s_in_trig[2]{}, s_in_thumb[2]{};
 std::atomic<bool> s_unarmed{false};             // on foot with no weapon (palettearm_note_unarmed)
-pa::HandGesture   s_gesture[2]{};               // eased, per finger
+pa::HandPoseBlend s_pose_blend[2]{};            // eased weight of each tuned pose, per hand
 float             s_aim_gesture_w = 0.0f;       // eased 0..1: how much of the aim hand is the gesture's
 // ---- THE KICK THE RIG CARRY LEAVES IN (parecoil; see Config.hpp and pa::RecoilPass). Learned off the
 // live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
@@ -2639,8 +2639,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // clock, so a grip press closes the hand over ~90 ms instead of snapping; the banks take the
     // result through the mirror like every other driven node.
     //
-    // EMPTY-HAND GESTURES (pagesture; see Config.hpp): the same three key poses per FINGER, from the
-    // controller's grip, trigger and thumb sensor. The support hand whenever it is free -- on the
+    // EMPTY-HAND GESTURES (pagesture; see Config.hpp): the controller's grip, trigger and thumb
+    // sensor pick a tuned pose from the table (pahand), eased between. The support hand whenever it is free -- on the
     // gun the grab weight hands the fingers back to the authored grip, as before -- and the AIM
     // hand only while unarmed, eased in and out so picking a weapon up does not snap the fingers.
     if (g_cfg.pa_hand_pose) {
@@ -2659,39 +2659,47 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     // The support hand's grip is the hold's own (it honours bindtwohand too).
                     const bool grip = (h == 1) ? ::halo::two_hand_support_grip_held()
                                                : s_in_grip[0].load(std::memory_order_relaxed);
-                    pa::ease_gesture(s_gesture[h],
-                                     pa::gesture_for_inputs(grip, s_in_trig[h].load(std::memory_order_relaxed),
-                                                            s_in_thumb[h].load(std::memory_order_relaxed), rest,
-                                                            g_cfg.pa_point_curl, g_cfg.pa_thumb_ext),
-                                     dt, 0.045f);
+                    pa::ease_pose_blend(s_pose_blend[h],
+                                        pa::pose_for_inputs(grip, s_in_trig[h].load(std::memory_order_relaxed),
+                                                            s_in_thumb[h].load(std::memory_order_relaxed)),
+                                        dt, 0.045f);
                 }
             }
             const float aw = (g_cfg.pa_gesture != 0 && s_unarmed.load(std::memory_order_relaxed)) ? 1.0f : 0.0f;
             s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));
             if (s_aim_gesture_w < 0.001f && aw <= 0.0f) s_aim_gesture_w = 0.0f;
         }
-        // The per-segment tuning (papointseg/rot, pathumbdownseg/rot, pathumbupseg/rot), straight from
-        // config: ~40 floats copied per drive, no engine call.
-        pa::HandTrim trim{};
-        for (int s = 0; s < 3; ++s) {
-            trim.point_curl[s] = g_cfg.pa_point_seg[s];
-            trim.down_curl[s]  = g_cfg.pa_thumb_down_seg[s];
-            trim.up_curl[s]    = g_cfg.pa_thumb_up_seg[s];
-            for (int a = 0; a < 3; ++a) {
-                trim.point_rot[s][a] = g_cfg.pa_point_rot[s * 3 + a];
-                trim.down_rot[s][a]  = g_cfg.pa_thumb_down_rot[s * 3 + a];
-                trim.up_rot[s][a]    = g_cfg.pa_thumb_up_rot[s * 3 + a];
+        // THE POSE TABLE (pahand / pahandthumb; see Config.hpp), converted per drive: ~300 floats
+        // copied, no engine call. pahandrest offsets the fingers each pose leaves relaxed.
+        pa::HandPose table[pa::kHandPoseCount];
+        for (int p = 0; p < pa::kHandPoseCount && p < kHandPoseTunes; ++p) {
+            const HandPoseTune& src = g_cfg.hand_poses.pose[p];
+            pa::HandPose& dst = table[p];
+            for (int f = 0; f < pa::kHandFingers; ++f) {
+                dst.finger[f].curl = src.f[f].curl;
+                for (int j = 0; j < pa::kHandSegments; ++j) {
+                    dst.finger[f].seg[j] = src.f[f].seg[j];
+                    for (int a = 0; a < 3; ++a) dst.finger[f].rot[j][a] = src.f[f].rot[j * 3 + a];
+                }
             }
+            dst.thumb_over = src.thumb_over;
+            dst.thumb_ext  = src.thumb_ext;
+            dst.thumb_out  = src.thumb_out;
+        }
+        if (rest != 0.0f) {
+            for (int f = 0; f < pa::kHandFingers; ++f) table[static_cast<int>(pa::HandPoseId::Rest)].finger[f].curl += rest;
+            for (int f = 1; f < pa::kHandFingers; ++f) table[static_cast<int>(pa::HandPoseId::RestIndex)].finger[f].curl += rest;
+            for (int f = 1; f < 4; ++f)                table[static_cast<int>(pa::HandPoseId::Ok)].finger[f].curl += rest;
         }
         if (tracking.support_valid && support_posed) {
             const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
-            if (g_cfg.pa_gesture != 0) pa::apply_hand_gesture(access.palette, support_arm, s_gesture[1], on_gun,
-                                                              g_cfg.pa_thumb_over, g_cfg.pa_thumb_out, &trim);
+            if (g_cfg.pa_gesture != 0) pa::apply_hand_pose(access.palette, support_arm,
+                                                           pa::blend_hand_poses(table, s_pose_blend[1]), on_gun);
             else                       pa::apply_hand_shape(access.palette, support_arm, s_sup_curl, on_gun);
         }
         if (s_aim_gesture_w > 0.001f)
-            pa::apply_hand_gesture(access.palette, aim_arm, s_gesture[0], 1.0f - s_aim_gesture_w,
-                                   g_cfg.pa_thumb_over, g_cfg.pa_thumb_out, &trim);
+            pa::apply_hand_pose(access.palette, aim_arm, pa::blend_hand_poses(table, s_pose_blend[0]),
+                                1.0f - s_aim_gesture_w);
     }
     // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
     // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the
