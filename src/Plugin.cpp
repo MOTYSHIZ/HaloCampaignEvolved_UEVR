@@ -6863,6 +6863,7 @@ void update() {
             // Either route is "the player is driving in first person", which is what turning wants.
             g_fp_control_now   = route_alive || on_foot;
             g_on_foot_unarmed  = on_foot;   // the rig block hides the arms on this
+            halo::palettearm_note_unarmed(on_foot);   // ...and the aim hand gestures on it (pagesture)
 
             // A successful suppression produces NO stick-mode transition at all -- which is the
             // point, and also means the log would be silent about the very state this exists for.
@@ -8360,8 +8361,11 @@ void update() {
             auto* rig_v = reinterpret_cast<API::UObject*>(g_rig_component.load());
             // Two reasons to hide the arms: the unarmed T-pose stopgap (hide_arms, grace-gated),
             // and the standing "never show arms" preference (show_arms=0), which needs no grace.
+            // ...EXCEPT under the palette arm driver, where the reason to hide no longer holds: the
+            // unarmed arms are driven from the controllers there, not a T-pose (paunarmedarms).
+            const bool hands_driven = g_cfg.arm_driver == 2 && g_cfg.pa_unarmed_arms != 0;
             const bool want_hidden = g_cfg.enabled &&
-                                     ((g_cfg.hide_arms && unarmed_held) || !g_cfg.show_arms);
+                                     ((g_cfg.hide_arms && unarmed_held && !hands_driven) || !g_cfg.show_arms);
 
             // A NEW rig component is a different object that we have never touched, so our claim
             // does not carry over to it. Dropping the claim rather than restoring is deliberate:

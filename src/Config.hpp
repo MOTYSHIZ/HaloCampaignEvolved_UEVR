@@ -4006,6 +4006,28 @@ struct Config {
     // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
     // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
     int   pa_grab_weapon   = 1;
+
+    // EMPTY-HAND GESTURES (2026-09-18, by request). The three key hand poses blended PER FINGER from
+    // the controller's own inputs -- no new authored poses (pa::gesture_for_inputs):
+    //   grip + trigger + thumb sensor   a fist, thumb clenched over the fingers
+    //   grip + trigger                  thumbs up
+    //   grip + thumb sensor             pointing, thumb down
+    //   grip                            pointing, thumb out
+    //   trigger alone                   the relaxed hand with the index pulled in
+    // "Thumb sensor" = any of UEVR's capacitive thumb actions for that hand: A-touch, B-touch or
+    // the thumbrest. UEVR binds no thumbstick- or trackpad-TOUCH action, so resting the thumb on
+    // the stick itself is invisible to a plugin. The SUPPORT hand gestures whenever it is free (on
+    // the gun it keeps the authored grip); the AIM hand only while unarmed, since its trigger is
+    // the weapon's. 0 = the old behaviour (grip closes the whole support hand, nothing else).
+    // pathumbover = how far past the recorded fist the clenched thumb goes, as a fraction of its
+    // open->fist arc (the fist was taken from a punch that holds the thumb beside the fingers).
+    int   pa_gesture       = 1;       // DEV KEY pagesture
+    float pa_thumb_over    = 0.35f;   // DEV KEY pathumbover
+    // UNARMED ARMS. hidearms exists because an unarmed viewmodel was a T-pose swinging with the rig
+    // ("a STOPGAP with a known end date ... the moment real hands are driven from the controllers
+    // this should become 'show the VR hands'"). Under armdriver=2 the hands ARE driven, so the
+    // unarmed hide stands down. 0 = keep hiding them. showarms=0 still hides them regardless.
+    int   pa_unarmed_arms  = 1;       // DEV KEY paunarmedarms
     // HAND SHAPES LIFTED FROM THE GAME'S OWN ANIMATIONS (2026-09-17, by request: "a resting open hand
     // pose when we are not attached to the weapon; when grip is held even without gripping the
     // weapon, close into a fist ... the fist from the Magnum left arm punch, the open hand near the

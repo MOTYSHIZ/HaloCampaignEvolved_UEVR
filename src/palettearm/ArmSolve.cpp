@@ -165,9 +165,42 @@ Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight) {
 }
 
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored) {
+    HandGesture g{};
+    for (float& c : g.curl) c = curl;
+    return apply_hand_gesture(palette, arm, g, authored, 0.0f);
+}
+
+HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest) {
+    rest = std::isfinite(rest) ? std::clamp(rest, -1.0f, 1.0f) : 0.0f;
+    HandGesture g{};
+    if (!grip) {
+        for (float& c : g.curl) c = rest;
+        if (trigger) g.curl[0] = 1.0f;                       // the trigger finger, pulled
+        return g;
+    }
+    g.curl[1] = g.curl[2] = g.curl[3] = 1.0f;                // middle, ring, pinky: closed on any grip
+    g.curl[0] = trigger ? 1.0f : -1.0f;                      // index: closed, or pointing
+    g.curl[4] = thumb_touch ? 1.0f : -1.0f;                  // thumb: down, or out / up
+    g.thumb_over = (trigger && thumb_touch) ? 1.0f : 0.0f;   // ...and wrapped over a full fist
+    return g;
+}
+
+void ease_gesture(HandGesture& current, const HandGesture& target, float dt, float tau) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    const float k = (tau > 0.0f) ? 1.0f - std::exp(-dt / tau) : 1.0f;
+    for (int i = 0; i < 5; ++i) {
+        current.curl[i] += (target.curl[i] - current.curl[i]) * k;
+        if (!std::isfinite(current.curl[i])) current.curl[i] = target.curl[i];
+    }
+    current.thumb_over += (target.thumb_over - current.thumb_over) * k;
+    if (!std::isfinite(current.thumb_over)) current.thumb_over = target.thumb_over;
+}
+
+bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandGesture& gesture,
+                        float authored, float over_gain) {
     if (palette == nullptr) return false;
-    curl     = std::clamp(curl, -1.0f, 1.0f);
-    authored = std::clamp(authored, 0.0f, 1.0f);
+    authored  = std::clamp(authored, 0.0f, 1.0f);
+    over_gain = std::isfinite(over_gain) ? std::clamp(over_gain, 0.0f, 1.0f) : 0.0f;
     if (authored >= 0.999f) return true;               // the game's own fingers, untouched
 
     const Mat3 wrist_basis = orthonormal_basis(palette[arm.wrist]);
@@ -202,8 +235,15 @@ bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, f
             const Quat qr{kHandPoseRest[f][j][0], kHandPoseRest[f][j][1],
                           kHandPoseRest[f][j][2], kHandPoseRest[f][j][3]};
             // Three key poses on one axis, the relaxed hand in the middle: a grip press travels
-            // rest -> fist and never passes through the stretched hand on the way.
+            // rest -> fist and never passes through the stretched hand on the way. PER FINGER.
+            const float curl = std::isfinite(gesture.curl[f]) ? std::clamp(gesture.curl[f], -1.0f, 1.0f) : 0.0f;
             Quat q = (curl >= 0.0f) ? slerp_short(qr, qf, curl) : slerp_short(qr, qo, -curl);
+            // The thumb goes PAST the fist to wrap over the fingers: further along its own
+            // open -> fist arc, scaled by how closed it already is so it never leads the curl.
+            if (f == 4 && curl > 0.0f && gesture.thumb_over > 0.0f && over_gain > 0.0f) {
+                const float over = std::clamp(gesture.thumb_over, 0.0f, 1.0f) * over_gain * curl;
+                q = slerp_short(qo, q, 1.0f + over);
+            }
             if (authored > 0.001f) q = slerp_short(q, rotation_from_basis(stock_rel[j]), authored);
             const Mat3 rel = rotation_basis(q);
             if (!valid_basis(rel)) return false;
