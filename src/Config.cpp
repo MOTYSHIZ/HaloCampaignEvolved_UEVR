@@ -1334,65 +1334,6 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
 }
 
 // "a,b,,d" -> up to n floats; blank or missing fields are 0. For the per-segment finger tuning lists.
-const char* const kHandPoseTuneNames[kHandPoseTunes] = {"rest", "index", "fist", "thumbsup",
-                                                         "point", "pointdown", "ok"};
-const char* const kHandFingerTuneNames[5] = {"index", "middle", "ring", "pinky", "thumb"};
-
-// "a,b,c" -> up to n floats written into out[]; a field that is blank, '-' or not a finite number
-// leaves out[i] as it was, so a line changes only what it names. Returns the rest after n fields.
-static const char* parse_float_fields(const char* p, float* out, int n) {
-    for (int i = 0; i < n && p != nullptr && *p != 0; ++i) {
-        while (*p == ' ' || *p == '\t') ++p;
-        char* end = nullptr;
-        const double d = std::strtod(p, &end);
-        if (end != p && std::isfinite(d)) out[i] = (float)d;
-        const char* comma = std::strchr(p, ',');
-        p = (comma != nullptr) ? comma + 1 : nullptr;
-    }
-    return p;
-}
-
-// Reads the leading name (up to a comma) and matches it against names[] or a plain index.
-static int parse_name_field(const char*& p, const char* const* names, int count) {
-    if (p == nullptr) return -1;
-    while (*p == ' ' || *p == '\t') ++p;
-    char tok[32] = {};
-    int len = 0;
-    while (*p != 0 && *p != ',' && len < 31) { if (*p != ' ' && *p != '\t') tok[len++] = *p; ++p; }
-    while (*p != 0 && *p != ',') ++p;
-    if (*p == ',') ++p;
-    for (int i = 0; i < count; ++i) if (_stricmp(tok, names[i]) == 0) return i;
-    char* end = nullptr;
-    const long idx = std::strtol(tok, &end, 10);
-    if (len > 0 && end != tok && *end == 0 && idx >= 0 && idx < count) return (int)idx;
-    return -1;
-}
-
-// pahand=<pose>,<finger>,curl,s1,s2,s3,x1,y1,z1,x2,y2,z2,x3,y3,z3
-static void parse_pahand(const char* val) {
-    const char* p = val;
-    const int pose = parse_name_field(p, kHandPoseTuneNames, kHandPoseTunes);
-    const int fing = parse_name_field(p, kHandFingerTuneNames, 5);
-    if (pose < 0 || fing < 0) { API::get()->log_info("[Halo-CampE-UEVR] config: pahand=%s -- unknown pose or finger (poses: rest index "
-                                         "fist thumbsup point pointdown ok; fingers: index middle ring "
-                                         "pinky thumb)", val ? val : ""); return; }
-    HandFingerTune& f = g_cfg.hand_poses.pose[pose].f[fing];
-    p = parse_float_fields(p, &f.curl, 1);
-    p = parse_float_fields(p, f.seg, 3);
-    parse_float_fields(p, f.rot, 9);
-}
-
-// pahandthumb=<pose>,over,ext,out
-static void parse_pahandthumb(const char* val) {
-    const char* p = val;
-    const int pose = parse_name_field(p, kHandPoseTuneNames, kHandPoseTunes);
-    if (pose < 0) { API::get()->log_info("[Halo-CampE-UEVR] config: pahandthumb=%s -- unknown pose", val ? val : ""); return; }
-    HandPoseTune& t = g_cfg.hand_poses.pose[pose];
-    float v3[3] = {t.thumb_over, t.thumb_ext, t.thumb_out};
-    parse_float_fields(p, v3, 3);
-    t.thumb_over = v3[0]; t.thumb_ext = v3[1]; t.thumb_out = v3[2];
-}
-
 static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
     if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
@@ -1449,8 +1390,6 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paforearmbone") == 0) { g_cfg.pa_forearm_bone   = (float)v; return true; }
     if (_stricmp(key, "pasupanim")     == 0) { g_cfg.pa_sup_anim       = (int)v;   return true; }
     if (_stricmp(key, "pagesture")     == 0) { g_cfg.pa_gesture        = (int)v;   return true; }
-    if (_stricmp(key, "pahand")        == 0) { parse_pahand(val);      return true; }
-    if (_stricmp(key, "pahandthumb")   == 0) { parse_pahandthumb(val); return true; }
     if (_stricmp(key, "paunarmedarms") == 0) { g_cfg.pa_unarmed_arms   = (int)v;   return true; }
     if (_stricmp(key, "paarmlod0")     == 0) { g_cfg.pa_arm_lod0       = (int)v;   return true; }
     if (_stricmp(key, "fpscale")       == 0) { g_cfg.fp_scale          = (float)v; return true; }
