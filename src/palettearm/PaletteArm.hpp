@@ -63,7 +63,12 @@ bool palettearm_stock_marker_ue(float out_cm[3]);
 // RecoilPass); false until one is known. The scope's socket handshake judges "the bone is at rest"
 // against this rather than against a slow average of its own, which after a swap was still
 // remembering the previous weapon for seconds.
-bool palettearm_stock_marker_rest_ue(float out_cm[3]);
+// The optional axes are the rest pose's BASIS in the same UE model frame: the marker's own X, Y
+// and Z axes as unit vectors (the socket's frame, since the PrimaryWeapon socket IS this node).
+// With them the socket-relative placement of anything mounted in the rig frame is a closed form,
+// M^-1 (t - S) -- no world reads, no clock to be a tick behind.
+bool palettearm_stock_marker_rest_ue(float out_cm[3], float x_axis[3] = nullptr, float y_axis[3] = nullptr,
+                                     float z_axis[3] = nullptr);
 // Bumped every time the weapon MODEL changes (the tag the palette keys its memory by), so a
 // consumer sampling the marker knows its history is from another weapon.
 int  palettearm_model_serial();

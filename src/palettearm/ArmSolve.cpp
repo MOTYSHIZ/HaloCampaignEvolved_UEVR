@@ -749,7 +749,11 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
             float align = dot(prev_basis.forward, marker_basis.forward);
             align = std::min(align, dot(prev_basis.left, marker_basis.left));
             align = std::min(align, dot(prev_basis.up, marker_basis.up));
-            still = step_m < 0.0006f && align > 0.999986f;          // 0.6 mm, 0.3 degrees
+            // 3 mm and 1 degree a frame: an idle SWAY (a slow figure-of-eight of a centimetre or
+            // two) moves the marker up to ~2 mm a frame and is rest; a kick or a draw moves it
+            // 6-20 mm a frame and is not. At the old 0.6 mm / 0.3 deg a swaying weapon never rested
+            // and its first reload after pickup had nothing to measure from (4-7 s in the log).
+            still = step_m < 0.003f && align > 0.99985f;
         }
         prev_pos = marker_pos; prev_basis = marker_basis; have_prev = true;
         stable = still ? std::min(stable + 1, 1000000) : 0;
@@ -845,7 +849,7 @@ void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
         float a = dot(prev_basis.forward, b.forward);
         a = std::min(a, dot(prev_basis.left, b.left));
         a = std::min(a, dot(prev_basis.up, b.up));
-        still = length(p - prev_pos) * kMetresPerBlamUnit < 0.0006f && a > 0.999986f;
+        still = length(p - prev_pos) * kMetresPerBlamUnit < 0.003f && a > 0.99985f;   // 3 mm, 1 degree (as RecoilPass)
     }
     prev_pos = p; prev_basis = b; have_prev = true;
     stable = still ? std::min(stable + 1, 1000000) : 0;
@@ -903,6 +907,20 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
     if (gun.have_ref && hand.have) {
         target = std::max(smoothstep(0.12f * gate, 0.20f * gate, hand.dev_m),
                           smoothstep(12.0f * gate, 30.0f * gate, hand.dev_deg));
+    }
+
+    // A NEW PRESS STARTS A NEW ACTION. A hand-over cut for its return holds until the authored
+    // hand is home -- and if it never quite gets there (a relation a few centimetres off after a
+    // re-anchor), the NEXT reload's press found the cut still latched and was refused outright
+    // ("action w=0.01 (cut, waiting for home)" at a reload press, headset 2026-09-17). The press
+    // is the player asking again: drop the old action, cut and all, and take this one fresh.
+    {
+        float youngest = -1.0f;
+        const auto take = [&](float a) { if (a >= 0.0f && (youngest < 0.0f || a < youngest)) youngest = a; };
+        take(melee_age_s); take(reload_age_s); take(grenade_age_s);
+        if (youngest >= 0.0f && youngest < 0.05f && (home_cut || (engaged && since_onset_s > 0.3f))) {
+            home_cut = false; engaged = false;
+        }
     }
 
     // WHICH ACTION, from the press that asked for it (a throw, a reload and a melee are always
@@ -1073,22 +1091,26 @@ float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev
 
 void SprintWatch::reset() { *this = SprintWatch{}; }
 
-float SprintWatch::update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt) {
+float SprintWatch::update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt,
+                          float other_age_s) {
     if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
     // The sprint animation carries the gun well away from rest for as long as the sprint lasts.
     // That alone is also what a put-away or a melee looks like, so it counts only with the player
     // pushing the stick AND having asked for a sprint in the last three seconds (a hold, or a
     // toggle pressed before setting off). It ends when either the stick or the pose lets go --
     // the game itself ends a sprint on firing, aiming or stopping -- and never outlives the rest
-    // pose it is measured against.
+    // pose it is measured against. And it is NOT a sprint within two seconds of a reload, melee
+    // or throw being asked for: a reload takes the gun just as far from rest, with the stick
+    // pushed and a sprint asked for moments before it read as one and held the free hand off.
     const bool away   = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
     const bool moving = move_age_s >= 0.0f && move_age_s < 0.2f;
     const bool asked  = button_age_s >= 0.0f && button_age_s < 3.0f;
+    const bool other  = other_age_s >= 0.0f && other_age_s < 2.0f;
     if (!active) {
-        if (away && moving && asked) { active = true; quiet_s = 0.0f; }
+        if (away && moving && asked && !other) { active = true; quiet_s = 0.0f; }
     } else {
         if (away && moving) quiet_s = 0.0f; else quiet_s += dt;
-        if (quiet_s > 0.15f || !gun.have_ref) active = false;
+        if (quiet_s > 0.15f || !gun.have_ref || other) active = false;
     }
     const float target = active ? 1.0f : 0.0f;
     const float tau = target > weight ? 0.08f : 0.15f;
