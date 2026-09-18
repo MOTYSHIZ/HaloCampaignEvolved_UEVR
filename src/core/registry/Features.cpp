@@ -164,7 +164,7 @@ const FeatureRow kFeatures[] = {
     { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
       "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
       "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
-      "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagbelt,reloadmagoffw,reloadresetholds,"
+      "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagasset,reloadmagbelt,reloadmagoffw,reloadresetholds,"
       "reloadroomanchor,reloadseat,reloadslidems,reloadstate,reloadstatedeath,reloadstatedrop,"
       "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker",
       "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"

@@ -450,6 +450,20 @@ bool features_two_hand_support_blocked() {
 uevr::API::UObject* features_holster_mag_mesh(int* out_rank) { return reload_manual_available() ? reload_engine_mag_mesh(out_rank) : nullptr; }
 Vec3 features_holster_mag_belt_point(const Vec3& his_offset) { return reload_manual_available() ? reload_engine_mag_belt_point() : his_offset; }
 bool features_holster_mag_cands_stale(int rank) { return reload_manual_available() && reload_engine_mag_cands_stale(rank); }
+bool features_holster_mag_survey_off() { return reload_manual_available() && reload_engine_mag_survey_off(); }
+bool features_holster_mag_resurvey(int rank) {
+    return reload_manual_available() ? reload_engine_mag_resurvey(rank) : (rank < 3);
+}
+bool features_holster_mag_pick_final(int rank) {
+    return !reload_manual_available() || reload_engine_mag_pick_final(rank);
+}
+uevr::API::UObject* features_holster_mag_spawn_mesh(uevr::API::UObject* survey, uevr::API::UObject* frag) {
+    return reload_manual_available() ? reload_engine_mag_spawn_mesh(survey, frag)
+                                     : (survey != nullptr ? survey : frag);
+}
+void features_holster_mag_drawn(uevr::API::UObject* m, bool wanted) {
+    if (reload_manual_available()) reload_engine_mag_drawn(m, wanted);
+}
 bool features_holster_mag_in_hand(uevr::API::UObject* m, const Vec3& gpos, const Vec3& hpos, float pitchr, float yawr, float rollr) {
     return reload_manual_available() && reload_engine_mag_in_hand(m, gpos, hpos, pitchr, yawr, rollr);
 }

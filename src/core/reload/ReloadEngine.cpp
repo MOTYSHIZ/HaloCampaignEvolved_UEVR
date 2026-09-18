@@ -688,10 +688,56 @@ void reload_engine_released() {
 // ---- THE BELT MAGAZINE (Holster.cpp's hooks)
 
 API::UObject* reload_engine_mag_mesh(int* out_rank) {
-    // The weapon's own magazine component first (exact, rank 4); the survey is the fallback.
+    // The weapon's own magazine component first (exact, rank 4); then the same asset found by NAME
+    // from the weapon key, which is exact too and so also rank 4 (reloadmagasset, doctrine in
+    // ConfigFields.inl). With reloadmagasset on there is no third answer: nothing else is a
+    // magazine, so nothing else is drawn.
     auto* nm = native_mag_mesh_impl();
+    if (nm == nullptr && g_cfg.reload_mag_asset != 0) nm = mag_asset_by_name_impl();
     if (nm != nullptr && out_rank != nullptr) *out_rank = 4;
     return nm;
+}
+
+// ---- THE FOUR GATES reloadmagasset PUTS ON THE AUTHOR'S SURVEY. Each is one hook call in
+// Holster.cpp and each returns the author's own answer while the key is 0, so upstream's
+// behaviour is intact and recoverable by one cfg line.
+
+// The name survey itself. With the key on it never runs, which is what removes the "ammo" rank
+// (its whole yield on the owner's level was eight ammo pickups and a crate), the "clip" rank, and
+// the frag-grenade fallback at the end of the author's chain in one stroke. "clip" goes with it
+// deliberately: no shipped asset in this game is named with it -- every magazine in the owner's
+// SLIDEPART listings is SM_<Weapon>_Magazine*, the classic AR's is Megazine, and the only other
+// ammunition assets are SM_AmmoPickup_*/SM_ammo_pickup_*/SM_ammo_crate -- so the rank could only
+// ever match something that is not a magazine.
+bool reload_engine_mag_survey_off() { return g_cfg.reload_mag_asset != 0; }
+
+// The author's "re-survey once for a pick weaker than a magazine" condition. With the key on there
+// is no survey to re-run, so it must not clear the candidate list and re-arm a ~290k walk.
+bool reload_engine_mag_resurvey(int rank) { return g_cfg.reload_mag_asset != 0 ? false : rank < 3; }
+
+// Whether this pick may be STORED under the weapon key as the final answer. Only the weapon's own
+// magazine component or the name-matched asset (both rank 4) may. Anything weaker leaves the key
+// unset, so the next tick picks again -- which is what unlatches the magnum: its component was
+// simply not attached yet at the tick the first pick ran, and both resolvers memoise per weapon
+// key, so re-picking walks nothing.
+bool reload_engine_mag_pick_final(int rank) { return g_cfg.reload_mag_asset == 0 || rank >= 4; }
+
+// The mesh the marker component is SPAWNED with. The author's line is "the survey found nothing:
+// the frag stands in, visibly" -- that is the path that put a grenade on the belt, so with the key
+// on there is no stand-in: our own resolver's answer, or no marker at all.
+API::UObject* reload_engine_mag_spawn_mesh(API::UObject* survey, API::UObject* frag) {
+    if (g_cfg.reload_mag_asset == 0) return survey != nullptr ? survey : frag;
+    return reload_engine_mag_mesh(nullptr);
+}
+
+// The last word on the marker in a tick: a weapon whose magazine asset does not resolve draws NO
+// magazine, rather than the previous weapon's magazine left on the component by the pick that
+// was refused above.
+void reload_engine_mag_drawn(API::UObject* m, bool wanted) {
+    if (g_cfg.reload_mag_asset == 0 || m == nullptr || !wanted) return;
+    if (reload_engine_mag_mesh(nullptr) != nullptr) return;
+    holster_marker_show(m, false);
+    marker_render_drop(m);
 }
 
 Vec3 reload_engine_mag_belt_point() { return mag_belt_point(); }

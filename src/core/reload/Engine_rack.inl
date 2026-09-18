@@ -650,6 +650,73 @@ API::UObject* native_mag_mesh_impl() {
     return s_mesh.get();
 }
 
+// ---- THE MAGAZINE ASSET BY NAME (reloadmagasset, doctrine in ConfigFields.inl). The component
+// path above needs the weapon's magazine component to be attached to the Default skeletal mesh at
+// the tick it runs, and on the magnum it was not. The marker renders an ASSET, not a component,
+// so the asset can be taken straight off the loaded-object list by the name the weapon key
+// implies: FP_Magnum -> stem "magnum" -> SM_magnum_magazine*, prefix-matched so every shipped
+// variant lands. The names are the owner's own SLIDEPART native listings, not a guess:
+//   SM_Magnum_Magazine_Default             FP_Magnum
+//   SM_AssaultRifle_Magazine_M_Default     FP_AssaultRifle
+//   SM_SMG_Magazine1Jnt_L_Default          FP_SMG   (no separator after Magazine: prefix, not exact)
+//   SM_RocketLauncher_Magazine_M_Default   FP_RocketLauncher
+// plus the classic assault rifle's asset spelled "Megazine", which mag_hide_apply and the rack's
+// part scan already both treat as a magazine spelling. The shotgun's listing has no magazine part
+// at all (HandleJnt, PumpJnt, ShellJnt, ShellSliderJnt, Glass_HandleJnt -- it loads shells), so it
+// resolves to nothing and nothing is drawn, which is the answer the owner asked for in place of a
+// wrong mesh.
+//
+// PACED. The walk is the whole ~290k object array (65-100 ms, measured by the holster's own
+// survey), so: one walk when the weapon key changes, and for a weapon that resolves to nothing at
+// most two more, no oftener than every 2 s. The name is read BEFORE the class name so only the
+// sm_* objects pay for a second string. A miss is never stored as the marker's mesh.
+API::UObject* mag_asset_by_name_impl() {
+    static std::string s_key; static TrackedObject s_mesh; static bool s_none = false;
+    static long long s_at = 0; static int s_walks = 0;
+    const std::string key = weapon_key();
+    if (key.empty()) return nullptr;
+    const bool fresh_key = (key != s_key);
+    const bool retry = s_none && s_walks < 3 && now_ticks() - s_at > ms_to_ticks(2000);
+    if (fresh_key || (s_mesh.get() == nullptr && !s_none) || retry) {
+        if (fresh_key) { s_key = key; s_walks = 0; }
+        s_mesh = TrackedObject{}; s_none = false; s_at = now_ticks(); ++s_walks;
+        std::wstring stem;
+        {
+            std::string k = key;
+            if (k.rfind("FP_", 0) == 0) k.erase(0, 3);
+            for (char ch : k) stem.push_back((wchar_t)towlower((unsigned char)ch));
+        }
+        auto* arr = (stem.empty()) ? nullptr : API::get()->get_uobject_array();
+        if (arr != nullptr) {
+            const std::wstring want_mag = L"sm_" + stem + L"_magazine";
+            const std::wstring want_meg = L"sm_" + stem + L"_megazine";
+            const int32_t nn = arr->get_object_count();
+            for (int32_t i = 0; i < nn; ++i) {
+                auto* o = static_cast<API::UObject*>(arr->get_object(i));
+                if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
+                const auto* fn = o->get_fname(); if (fn == nullptr) continue;
+                std::wstring nm = fn->to_string(); for (auto& ch : nm) ch = (wchar_t)towlower(ch);
+                if (nm.rfind(want_mag, 0) != 0 && nm.rfind(want_meg, 0) != 0) continue;
+                if (nm.find(L"shadow") != std::wstring::npos) continue;   // the shadow proxy, not the part
+                if (nm.find(L"_ui_") != std::wstring::npos) continue;     // the readout's copy
+                if (class_name_of(o) != L"StaticMesh") continue;
+                s_mesh.set_at(o, i);
+                if (g_cfg.reload_vr_log)
+                    API::get()->log_info("[Halo-CampE-UEVR] RELOAD magazine asset by name for %s: %ls (walk %d)",
+                                         key.c_str(), o->get_full_name().c_str(), s_walks);
+                break;
+            }
+        }
+        if (s_mesh.get() == nullptr) {
+            s_none = true;
+            if (g_cfg.reload_vr_log)
+                API::get()->log_info("[Halo-CampE-UEVR] RELOAD no SM_%ls_Magazine* asset loaded for %s (walk %d): NO magazine is drawn",
+                                     stem.c_str(), key.c_str(), s_walks);
+        }
+    }
+    return s_mesh.get();
+}
+
 // ---- ANIMSTATE (under slidelog): every change of the weapon AnimBP's FirstPersonState, so the
 // fire state's enum value is read off a shot rather than guessed.
 void anim_state_probe_tick() {

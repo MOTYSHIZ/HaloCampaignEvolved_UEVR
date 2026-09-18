@@ -73,6 +73,12 @@ bool reload_engine_reload_busy();
 uevr::API::UObject* reload_engine_mag_mesh(int* out_rank);   // rank 4
 Vec3 reload_engine_mag_belt_point();
 bool reload_engine_mag_cands_stale(int rank);
+// reloadmagasset: the four gates on the author's name survey, and the tick's last word on the marker.
+bool reload_engine_mag_survey_off();
+bool reload_engine_mag_resurvey(int rank);
+bool reload_engine_mag_pick_final(int rank);
+uevr::API::UObject* reload_engine_mag_spawn_mesh(uevr::API::UObject* survey, uevr::API::UObject* frag);
+void reload_engine_mag_drawn(uevr::API::UObject* m, bool wanted);
 bool reload_engine_mag_in_hand(uevr::API::UObject* m, const Vec3& gpos, const Vec3& hpos, float pitchr, float yawr, float rollr);
 
 } // namespace halo

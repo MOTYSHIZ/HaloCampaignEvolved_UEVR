@@ -114,6 +114,7 @@ std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; 
 
 API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
     if (auto* nm = features_holster_mag_mesh(out_rank)) return nm;
+    if (features_holster_mag_survey_off()) { if (out_rank != nullptr) *out_rank = 0; return nullptr; }
     std::wstring tok;
     {
         std::string k = wkey;
@@ -601,8 +602,7 @@ void holster_update(float dt) {
                 if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { features_holster_marker_spawned(m); s_hand_g.set(m); } }
             }
             if (want_mag_mark && s_mag_marker.get() == nullptr) {
-                auto* mm = s_mesh_mag.get();
-                if (mm == nullptr) mm = mf;   // survey found nothing: the frag stands in, visibly
+                auto* mm = features_holster_mag_spawn_mesh(s_mesh_mag.get(), mf);
                 if (mm != nullptr) {
                     if (auto* m = holster_marker_spawn_mesh(owner, mm, (double)g_cfg.reload_mag_scale)) {
                         s_mag_marker.set(m);
@@ -704,7 +704,7 @@ void holster_update(float dt) {
                     // a ~290k-object walk every tick.
                     static std::string s_resurveyed_for;
                     if (features_holster_mag_cands_stale(rank)) s_resurveyed_for.clear();
-                    if (rank < 3 && s_resurveyed_for != wk) {
+                    if (features_holster_mag_resurvey(rank) && s_resurveyed_for != wk) {
                         s_resurveyed_for = wk;
                         s_mag_cands.clear();
                         s_mag_pick = 0;
@@ -713,7 +713,7 @@ void holster_update(float dt) {
                             API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag pick for %s ranked %d"
                                                  " -- re-surveying", wk.c_str(), rank);
                         // s_mag_mesh_key stays unset: re-pick next tick, after the walk.
-                    } else {
+                    } else if (features_holster_mag_pick_final(rank)) {
                         if (mesh != nullptr) {
                             holster_marker_set_mesh(m, mesh);
                             if (g_cfg.reload_log)
@@ -770,6 +770,7 @@ void holster_update(float dt) {
                 holster_marker_show(m, false);
                 marker_render_drop(m);
             }
+            features_holster_mag_drawn(m, rs != ReloadState::Idle);
         }
     }
     if (zone != s_in_zone) {
