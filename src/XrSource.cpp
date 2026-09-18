@@ -1118,15 +1118,24 @@ void xrsource_tick(uint32_t tick) {
         if (subject == nullptr && want >= 16 && want <= 4096) subject = probe_render_target(want);
 #endif
 
-        // Schedule the next attempt with decaying backoff (see g_probe_attempts). A changed subject
-        // re-arms the fast cadence -- the previous target's failures must not delay a fresh render
-        // target's first walk.
-        if (subject != g_probe_subject) { g_probe_subject = subject; g_probe_attempts = 0; }
-        g_next_probe = tick + probe_backoff_ticks(++g_probe_attempts);
-
         if (subject == nullptr) {
+            // Nothing to walk yet -- the reticule widget / render target is not up (main menu, level
+            // load). This path is cheap (no probe(), so no stutter), so it must NOT decay: keep the
+            // fast cadence and hold attempts at 0. Otherwise a player who lingers pre-widget would
+            // decay the interval, and the crisp reticle would then take up to the ~30 s ceiling to
+            // appear after the widget finally does -- because the block will not re-run to notice the
+            // new subject until g_next_probe. Backoff is for a REAL subject that keeps failing.
+            g_probe_subject  = nullptr;
+            g_probe_attempts = 0;
+            g_next_probe     = tick + kProbeBaseTicks;
             set_status("no render target to probe (neither the widget's nor a made one)");
         } else {
+            // A real subject: this is the expensive walk that stutters when it cannot latch. Apply
+            // the decaying backoff, re-arming the fast cadence when the subject render target changes
+            // (a re-host or level load is a fresh chance to succeed).
+            if (subject != g_probe_subject) { g_probe_subject = subject; g_probe_attempts = 0; }
+            g_next_probe = tick + probe_backoff_ticks(++g_probe_attempts);
+
             probe(subject, want, probe_mode, &g_chain);
             if (g_chain.valid()) {
                 for (auto& t : g_t) t.next_resolve = tick;   // resolve through it next tick
