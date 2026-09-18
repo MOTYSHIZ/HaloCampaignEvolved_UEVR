@@ -1676,8 +1676,11 @@
     //      centre and the magazine component's world transform are all sampled together, and the
     //      zone, the seat, the grab test and the markers are built from that alone. No newest
     //      value read anywhere in the path. zonehandrel's hand-frame conversion is kept, with its
-    //      low pass opened to 1.0 -- the 0.2/tick filter existed to hide this frame mix, and with
-    //      one snapshot a lag filter can only put the lag back  [default]
+    //      low pass shortened from 0.2/tick (~150 ms) to 0.5/tick (~62 ms): a filter cannot fix
+    //      the frame mix, because that error is a BIAS proportional to player speed and a lag
+    //      filter only delays a bias, which is why the long one left the zone chasing. What the
+    //      filter genuinely buys is killing the weapon animation's bob and the recoil, and with
+    //      the bias gone it needs far less lag to do that.
     //   2  ZONE FROM THE DRAWN GUN. The placement owns the rendered pose, so the zone is built in
     //      the DRAWN weapon's own rotation frame (the palette's published pose) on the snapshot's
     //      hand, and the game component leaves the path entirely. Needs the placement (palettewpn);
@@ -1687,9 +1690,15 @@
     //      Detection, both measured and neither guessed: the game camera's own per-tick travel
     //      (gesture_game_cam already integrates it) below zonesnapshotstill metres, and the
     //      offset's per-tick change below zonesnapshotsteady metres for four consecutive ticks.
-    //      Either condition failing freezes the offset where learning left it.
+    //      Either condition failing freezes the offset where learning left it. SHIPPED, because
+    //      it is the only one of the three that answers BOTH halves of the report with no lag at
+    //      all: the snapshot removes the speed bias, and the hold removes the animation the
+    //      player cannot see (the rendered gun is placed by the palette and never plays the
+    //      sprint animation, so the offset learned while still is the right one to hold). Until
+    //      it has learned it tracks live, so a weapon picked up on the run is never stuck on a
+    //      stale value  [default]
     //   0  off: the inherited newest-value reads (the behaviour before this key)
-    int   zone_snapshot = 1;
+    int   zone_snapshot = 3;
     // Mode 3's two learning gates, metres: the camera may travel this far in a tick and still
     // count as "not sprinting", and the hand-frame offset may change this much in a tick and still
     // count as steady. Defaults measured off the camera travel the game reports at a walk.

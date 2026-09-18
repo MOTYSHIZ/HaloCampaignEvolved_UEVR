@@ -412,7 +412,7 @@
 # magazine from one instant, so they stay where you see them while you run; 2 takes the slide's
 # position off the weapon you actually see instead of the game's own; 3 also holds each weapon's
 # measurement steady once it settles, so a sprint animation cannot move it; 0 is the old behaviour.
-#zonesnapshot=1
+#zonesnapshot=3
 # Hide the arms while manual reload is on: 0 never, 1 always (default), 2 always, other method, 3 only
 # during a reload. A choice of your own for Hide the stock arms wins.
 #reloadhidearms=1

@@ -138,11 +138,14 @@ Vec3 reload_world_room(const Vec3& world, const Vec3& head_room) {
 // seat point tracks the RENDERED gun instead of the game's own sprint animation. The alpha
 // (0.2/tick at ~32 Hz, ~150 ms) kills the bob but follows a real weapon swap instantly through
 // the snap guard.
-// THE LOW PASS IS ZONESNAPSHOT'S BUSINESS NOW. 0.2/tick at ~32 Hz is a ~150 ms lag, and it was
-// there to hide the frame mix; with one snapshot it can only put the lag back, so mode 1 opens it
-// to 1.0. Mode 3 replaces it outright with a learn-then-hold, which is what actually answers the
-// sprint animation (see zone_offset_hold below). Mode 0 keeps the inherited filter.
-float zone_offset_alpha() { return (g_cfg.zone_snapshot == 0) ? 0.2f : 1.0f; }
+// THE LOW PASS IS ZONESNAPSHOT'S BUSINESS NOW, BUT IT IS NOT REMOVED. A filter cannot fix the
+// frame mix -- that error is a BIAS proportional to player speed, and a lag filter only delays a
+// bias, which is why 0.2/tick (~150 ms at 32 Hz) left the zone chasing. What the filter genuinely
+// buys is killing the weapon animation's bob and the recoil, and with the bias gone it needs far
+// less lag to do that: mode 1 runs 0.5/tick (~2 ticks, ~62 ms), which still halves the bob every
+// tick. Mode 3 removes both without any lag at all by learning the offset and holding it, which
+// is why it is the shipped default. Mode 0 keeps the inherited filter exactly.
+float zone_offset_alpha() { return (g_cfg.zone_snapshot == 0) ? 0.2f : 0.5f; }
 // MODE 3: LEARN THE HAND-FRAME OFFSET, THEN HOLD IT. Learning is allowed only while the player is
 // not moving the camera much (the sprint animation only plays while he is) and the offset is
 // steady tick to tick. Both gates are MEASURED, not inferred: the camera's own per-tick travel is
