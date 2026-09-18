@@ -677,6 +677,12 @@ std::atomic<float>     s_stock_rest_rx{0.0f}, s_stock_rest_ry{1.0f}, s_stock_res
 std::atomic<float>     s_stock_rest_ux{0.0f}, s_stock_rest_uy{0.0f}, s_stock_rest_uz{1.0f};
 std::atomic<int>       s_stock_model_serial{0};      // bumped on every model-tag change
 std::atomic<bool>      s_stock_carry{false};         // the weapon bone was CARRIED to the rig target this live frame
+// LATCHED WHERE HELD: the support wrist's relation to the carried gun on the frame a two-hand hold
+// latched on a weapon whose AUTHORED off hand is not on the gun (the Needler, the plasma pistol --
+// see the grab block). Ridden rigidly until the hold lets go; reset with it.
+bool     s_grab_rel_valid = false;
+pa::Vec3 s_grab_rel_pos{};
+pa::Mat3 s_grab_rel_basis{};
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -2361,19 +2367,59 @@ bool drive_palette(const pa::PaletteAccess& access) {
             const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
             grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
         }
+        // ...AND ONE WHOSE OFF HAND THE ARTIST LEFT FREE (the Needler, the plasma pistol) takes it
+        // WHERE THE PLAYER GRABBED. The authored wrist is nowhere near the gun on those, so pulling
+        // the hand to it would pull it off the gun the player is physically holding; leaving it on
+        // the controller (the old behaviour) gave a hold that latched for zoom and haptics but
+        // never latched visually ("some single-hand weapons do not latch the secondary grip
+        // visually", headset 2026-09-17). So on the frame the hold latches, the wrist's relation to
+        // the carried gun -- the controller's own pose, mapped back through the carry -- is kept
+        // and ridden rigidly, exactly as an authored wrist would be, until the hold lets go.
+        bool grab_where_held = false;
+        if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim && wpn_delta_valid &&
+            !s_hfreeze_active.load(std::memory_order_acquire)) {
+            if (::halo::two_hand_hold_weight() > 0.0f) {
+                if (!s_grab_rel_valid) {
+                    const pa::Mat3 dinv = pa::transpose(wpn_delta_basis);
+                    s_grab_rel_pos   = pa::transform_vector(dinv, wrist_target - wpn_delta_pos);
+                    s_grab_rel_basis = pa::multiply(dinv, desired_wrist);
+                    s_grab_rel_valid = pa::valid_basis(s_grab_rel_basis) && pa::finite(s_grab_rel_pos);
+#if HALO_VR_DEV
+                    if (s_grab_rel_valid)
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE GRAB: latched WHERE HELD on %s -- the "
+                                             "authored off hand is not on this gun, so the hand rides the "
+                                             "gun from where the hold caught it",
+                                             ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "?");
+#endif
+                }
+                grab_where_held = s_grab_rel_valid;
+            } else {
+                s_grab_rel_valid = false;
+            }
+        } else if (!plan.is_aim) {
+            s_grab_rel_valid = false;
+        }
         // ...OR AN AUTHORED ACTION IS PLAYING (pasupanim; see Config.hpp). The same hand-over, by the
         // action watch's weight instead of the hold's, and on EVERY weapon: the deny list says which
         // guns take a two-hand HOLD, not which ones have a reload.
         if (aim_is_right && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire)) {
-            float w = (g_cfg.pa_grab_weapon != 0 && grab_allowed) ? ::halo::two_hand_hold_weight() : 0.0f;
+            const float hold_w = (g_cfg.pa_grab_weapon != 0 && (grab_allowed || grab_where_held))
+                                     ? ::halo::two_hand_hold_weight() : 0.0f;
+            float w = hold_w;
             // ...the action hand-over, less whatever the melee preference keeps off it.
-            if (prefs.sup_anim != 0) w = (std::max)(w, s_action.weight * (1.0f - melee_left_w));
+            const float act_w = (prefs.sup_anim != 0) ? s_action.weight * (1.0f - melee_left_w) : 0.0f;
+            w = (std::max)(w, act_w);
             w = (std::max)(w, sprint_join_w);                    // pasprintanim 0: the whole animation
             if (w > 0.0f) {
+                // The authored wrist, or the one the hold caught -- unless an authored ACTION has
+                // the hand, whose pose is the animation's and not the player's.
+                const bool     held    = grab_where_held && hold_w >= act_w && hold_w >= sprint_join_w;
+                const pa::Vec3 gw_pos   = held ? s_grab_rel_pos   : gun_wrist_pos;
+                const pa::Mat3 gw_basis = held ? s_grab_rel_basis : gun_wrist_basis;
                 const pa::Vec3 on_gun_pos =
-                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
-                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
+                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gw_pos);
+                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gw_basis);
                 if (pa::valid_basis(on_gun_basis)) {
                     wrist_target  = wrist_target + (on_gun_pos - wrist_target) * w;
                     // Short-arc, not a normalised lerp: a free hand handed to an action can start
