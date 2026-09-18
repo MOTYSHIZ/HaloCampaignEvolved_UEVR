@@ -67,6 +67,10 @@ bool palettearm_stock_marker_rest_ue(float out_cm[3]);
 // Bumped every time the weapon MODEL changes (the tag the palette keys its memory by), so a
 // consumer sampling the marker knows its history is from another weapon.
 int  palettearm_model_serial();
+// True while the palette is actually carrying the weapon bone to the rig target (this live frame,
+// within the last quarter second). False at spawn until the carry is up, during an origin hold,
+// and whenever the live drive is not running: the socket then sits at the stock animation's place.
+bool palettearm_carry_active();
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

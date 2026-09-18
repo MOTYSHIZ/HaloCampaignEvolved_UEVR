@@ -602,6 +602,8 @@ struct BakedRest {
 constexpr BakedRest kBakedRest[] = {
     { "BP_FP_Magnum_WeaponActor_C",       {0.201766f,-0.042830f,-0.077090f}, {-0.000051f,-0.999999f,0.001119f}, {0.999999f,-0.000050f,0.001225f}, {-0.001225f,0.001119f,0.999999f},  {-0.021474f,-0.026848f,-0.005833f}, {0.969820f,-0.052432f,0.238117f}, {-0.067541f,-0.996159f,0.055735f}, {0.234280f,-0.070136f,-0.969636f},  {0.015034f,-0.042510f,-0.000976f}, {0.920774f,-0.097749f,0.377653f}, {0.017840f,0.977636f,0.209546f}, {-0.389690f,-0.186207f,0.901925f} },
     { "BP_FP_AssaultRifle_WeaponActor_C", {0.077603f,-0.041554f,-0.086049f}, {-0.001633f,-0.999999f,-0.000057f}, {0.999991f,-0.001633f,0.003800f}, {-0.003800f,-0.000051f,0.999993f},  {-0.013816f,0.087310f,0.005125f}, {0.235192f,-0.153203f,0.959799f}, {-0.660931f,-0.749250f,0.042362f}, {0.712639f,-0.644324f,-0.277474f},  {0.015143f,-0.029309f,0.003382f}, {0.998724f,0.029651f,0.040890f}, {-0.034980f,0.990025f,0.136482f}, {-0.036436f,-0.137738f,0.989798f} },
+    // PALETTE REST BAKE, headset session 2026-09-17 20:47 (four learns within 1 cm of each other)
+    { "BP_FP_BattleRifle_WeaponActor_C",  {0.061392f,-0.044304f,-0.088852f}, {0.000174f,-1.000000f,0.000071f}, {0.999995f,0.000174f,0.003024f}, {-0.003024f,0.000071f,0.999995f},  {-0.008629f,0.104027f,0.003097f}, {-0.099536f,-0.193581f,0.976022f}, {-0.659115f,-0.722006f,-0.210417f}, {0.745426f,-0.664255f,-0.055726f},  {0.015424f,-0.025656f,0.007141f}, {0.997062f,0.063652f,0.042604f}, {-0.068366f,0.990379f,0.120311f}, {-0.034536f,-0.122871f,0.991822f} },
 };
 const BakedRest* baked_rest_for(const char* cls) {
     if (cls == nullptr || cls[0] == 0) return nullptr;
@@ -662,6 +664,7 @@ std::atomic<long long> s_stock_marker_ticks{0};
 std::atomic<float>     s_stock_rest_x{0.0f}, s_stock_rest_y{0.0f}, s_stock_rest_z{0.0f};
 std::atomic<bool>      s_stock_rest_valid{false};
 std::atomic<int>       s_stock_model_serial{0};      // bumped on every model-tag change
+std::atomic<bool>      s_stock_carry{false};         // the weapon bone was CARRIED to the rig target this live frame
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -2597,6 +2600,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
     }
 #endif
 
+    // Whether the weapon bone was actually CARRIED to the rig target on this live frame, for the
+    // scope's socket handshake: its conversion reads the socket's world transform, and a socket
+    // still at the stock animation's place (the carry not yet up at spawn, an origin hold) is 40 cm
+    // from where it will be once the carry runs -- measured at the first scope-in after a spawn,
+    // which converted on exactly that and put the pane off to the right until the next swap.
+    if (!access.is_capture_bank) s_stock_carry.store(wpn_delta_valid, std::memory_order_relaxed);
+
     // ---- HANDS-ONLY, last of all. Everything above has already run, so this only decides what is
     // VISIBLE -- see Config.hpp pa_hands_only. Fails visible: a false return leaves the arms shown.
     HALO_VR_DEV_ONLY(
@@ -3183,6 +3193,14 @@ bool palettearm_stock_marker_rest_ue(float out_cm[3]) {
 }
 
 int palettearm_model_serial() { return s_stock_model_serial.load(std::memory_order_relaxed); }
+
+bool palettearm_carry_active() {
+    const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
+    if (t == 0) return false;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (std::chrono::duration<float>(std::chrono::steady_clock::duration(now - t)).count() > 0.25f) return false;
+    return s_stock_carry.load(std::memory_order_relaxed);
+}
 
 bool palettearm_stock_marker_ue(float out_cm[3]) {
     if (out_cm == nullptr) return false;

@@ -129,11 +129,13 @@ int   s_anchored_mount = -1;
 bool  s_relative_rejected = false;
 // THE VIRTUAL RIG FRAME (scope_note_rig_frame; see Scope.hpp). Fresh for two ticks after it was
 // noted; stale or never noted means "read the rig component", which is rig mode's behaviour.
-Vec3     s_vrig_pos{};
+Vec3     s_vrig_off{};               // the root's world offset from the arm mesh, as noted
+Vec3     s_vrig_pos{};               // the root THIS tick: the mesh's position now + that offset
 Quat     s_vrig_rot{0.0f, 0.0f, 0.0f, 1.0f};
 uint32_t s_vrig_tick = 0;
 bool     s_vrig_have = false;
-bool vrig_fresh(uint32_t tick) { return s_vrig_have && (tick - s_vrig_tick) <= 2u; }
+bool     s_vrig_pos_valid = false;   // s_vrig_pos was composed on this tick (scope_apply's top)
+bool vrig_fresh(uint32_t tick) { return s_vrig_have && s_vrig_pos_valid && (tick - s_vrig_tick) <= 2u; }
 Vec3 vrig_axis(const Vec3& local) { return quat_rotate(s_vrig_rot, local); }
 // Last good roll-lock angle. The lock is ABSOLUTE now (the image is locked to the lens itself,
 // not to a remembered pose), so no reference pose is needed -- this only carries the previous
@@ -1536,6 +1538,11 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     if (vrig_fresh(tick) && ::halo::palettearm_stock_marker_ue(S)) {
         sp = Vec3{S[0], S[1], S[2]};
         have = true;
+        // ...and the bone must actually be CARRIED to the controller, or the socket the conversion
+        // reads is at the stock animation's place -- 40 cm from where it will be once the carry
+        // runs (measured at the first scope-in after a spawn: converted there, pane off to the
+        // right until the next swap). Not carried = not still, whatever the marker says.
+        if (!::halo::palettearm_carry_active()) s_moved_tick = tick;
         // A weapon MODEL change (the palette says so) is a new bone with a new rest: the velocity
         // and rest state from the previous weapon must not carry over. Left in place, the 2%/tick
         // rest average needed seconds to walk over from the old marker to the new one, and the
@@ -2902,14 +2909,14 @@ void scope_notice_focus(const Vec3& world_hit, bool valid, uint32_t tick) {
     s_focus_tick  = tick;
 }
 
-void scope_note_rig_frame(const Vec3& pos, const Quat& rot, uint32_t tick) {
-    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) ||
+void scope_note_rig_frame(const Vec3& off_from_mesh, const Quat& rot, uint32_t tick) {
+    if (!std::isfinite(off_from_mesh.x) || !std::isfinite(off_from_mesh.y) || !std::isfinite(off_from_mesh.z) ||
         !std::isfinite(rot.x) || !std::isfinite(rot.y) || !std::isfinite(rot.z) || !std::isfinite(rot.w))
         return;
     // The first frame ever noted re-opens the relative mount: a rejection latched before the
     // palette route was up was a rejection of the BODY frame, not of this one.
     if (!s_vrig_have) { s_relative_rejected = false; s_pane_anchored = false; }
-    s_vrig_pos = pos; s_vrig_rot = rot; s_vrig_tick = tick; s_vrig_have = true;
+    s_vrig_off = off_from_mesh; s_vrig_rot = rot; s_vrig_tick = tick; s_vrig_have = true;
 }
 
 void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig, uint32_t tick) {
@@ -3233,6 +3240,19 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (len < 1e-3f) return;
     dir.x /= len; dir.y /= len; dir.z /= len;
+
+    // THE VIRTUAL RIG FRAME'S ORIGIN, THIS TICK (see scope_note_rig_frame): the arm mesh's position
+    // as it is now plus the body-relative offset the tick noted -- the same composition the render
+    // side makes against the mesh, so both clocks describe one frame and neither is a tick behind.
+    s_vrig_pos_valid = false;
+    if (s_vrig_have && (tick - s_vrig_tick) <= 2u && rig != nullptr) {
+        Vec3 ml{};
+        if (call_ret_vec3(rig, L"K2_GetComponentLocation", &ml) &&
+            std::isfinite(ml.x) && std::isfinite(ml.y) && std::isfinite(ml.z)) {
+            s_vrig_pos = Vec3{ml.x + s_vrig_off.x, ml.y + s_vrig_off.y, ml.z + s_vrig_off.z};
+            s_vrig_pos_valid = true;
+        }
+    }
 
     // CAPTURE: on the shot line, looking along it -- so what the reticule promises is what the
     // pane shows. It sits scope_cam_dist out rather than at the origin, which puts it BEYOND the
