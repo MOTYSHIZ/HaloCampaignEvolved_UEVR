@@ -188,21 +188,27 @@ void reload_engine_tick_begin(float dt, bool active) {
     wpn_ammo_dump_tick();
     ammo_seq_tick();
     mag_drop_tick();
-    // The held weapon's Blam object index, for the sim-side node probe (every ~30 ticks).
+    // The held weapon's Blam object index, EVERY TICK, unconditionally.
+    //
+    // It used to publish every 30 ticks unless the reload state tracker was running, and that
+    // gate is now wrong: this branch retired the roundsguard switch and made the guard permanent,
+    // so rounds_field() compares the published datum against the pointer's own datum on every
+    // read (Engine_rack.inl, rounds_field). A datum that is up to 30 ticks (~1 s) stale after a
+    // weapon swap makes that comparison fail on a perfectly good pointer, and the guard then
+    // returns null for that whole second: the phantom round, the dry stop, the everyshot lock and
+    // the empty judge all go blind on the gun the player just drew. reloadstate is a different
+    // feature and has no business deciding it. One property read a tick is what the permanent
+    // guard costs, and it is what the play build pays with roundsguard at its own default.
     {
-        static int s_n = 0;
-        // Every tick while the reload state tracker runs: the phantom's object guard compares it.
-        if ((++s_n % 30) == 0 || g_cfg.reload_state_id != 0) {
-            int32_t idx = -1;
-            if (auto* wpn = fp_weapon_actor()) {
-                auto** pc = wpn->get_property_data<API::UObject*>(L"BlamObjectSynchronization");
-                if (pc != nullptr && !IsBadReadPtr(pc, sizeof(void*)) && *pc != nullptr && !IsBadReadPtr(*pc, sizeof(void*))) {
-                    auto* p = (*pc)->get_property_data<int32_t>(L"BlamObjectIndex");
-                    if (p != nullptr && !IsBadReadPtr(p, sizeof(int32_t))) idx = *p;
-                }
+        int32_t idx = -1;
+        if (auto* wpn = fp_weapon_actor()) {
+            auto** pc = wpn->get_property_data<API::UObject*>(L"BlamObjectSynchronization");
+            if (pc != nullptr && !IsBadReadPtr(pc, sizeof(void*)) && *pc != nullptr && !IsBadReadPtr(*pc, sizeof(void*))) {
+                auto* p = (*pc)->get_property_data<int32_t>(L"BlamObjectIndex");
+                if (p != nullptr && !IsBadReadPtr(p, sizeof(int32_t))) idx = *p;
             }
-            g_wpn_obj_index.store(idx, std::memory_order_relaxed);
         }
+        g_wpn_obj_index.store(idx, std::memory_order_relaxed);
     }
 }
 
