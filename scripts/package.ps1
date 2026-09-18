@@ -85,8 +85,14 @@ if ($missing.Count -gt 0) {
 # waiting to be swept up by the wholesale copy above. Shipping it is harmless in itself and
 # thoroughly confusing: every player would receive a log of somebody else's session, in the exact
 # file the troubleshooting guide tells them to read to find out whether the layer loaded.
+#
+# halo_vr_palette_calib.cfg belongs beside halo_vr_weapons.cfg for the same reason: the weapon
+# placement WRITES it into the live profile when a placement calibration is captured, and the
+# profile is copied wholesale, so an author who has ever calibrated has one waiting to be swept up.
+# It is one person's hands and one person's controllers; shipping it would hand every player a
+# placement they never made and no obvious way to know why their gun sits wrong.
 $forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg',
-                'halo_vr_weapons.cfg', 'apilayer\halo_vr_layer.log',
+                'halo_vr_weapons.cfg', 'halo_vr_palette_calib.cfg', 'apilayer\halo_vr_layer.log',
                 # The third-party cutscene-detection plugin was RETIRED 2026-09-08: our own fix
                 # (the movie as an OpenXR quad, cutscenemono=6) replaced it and it is gone from the
                 # repo. The profile is copied wholesale, so an author who still has it in a live

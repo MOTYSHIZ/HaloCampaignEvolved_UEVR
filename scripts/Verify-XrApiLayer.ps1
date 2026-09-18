@@ -50,6 +50,12 @@ try {
     # 2. The harness.
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $vsPath  = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vsPath) {
+        # Same fallback as build-apilayer.ps1: an instance flagged incomplete still has a working
+        # cl.exe; -all lists it, and vcvars64.bat is the real test.
+        $vsPath = & $vswhere -all -latest -products * -property installationPath
+        if ($vsPath -and -not (Test-Path (Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'))) { $vsPath = $null }
+    }
     if (-not $vsPath) { throw 'No Visual Studio C++ toolchain found.' }
     $vcvars  = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
     $exe     = Join-Path $work 'LayerSelfTest.exe'

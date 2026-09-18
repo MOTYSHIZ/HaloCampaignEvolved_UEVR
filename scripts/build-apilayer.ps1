@@ -57,6 +57,13 @@ if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Forc
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vsPath  = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vsPath) {
+    # The component query answers nothing on some Build Tools installs whose instance is flagged
+    # incomplete even though a working x64 cl.exe is present (scripts\build-local.ps1 exists for
+    # the same reason). -all lists those instances too; vcvars64.bat is the real test.
+    $vsPath = & $vswhere -all -latest -products * -property installationPath
+    if ($vsPath -and -not (Test-Path (Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'))) { $vsPath = $null }
+}
 if (-not $vsPath) { throw 'No Visual Studio C++ toolchain found (install VS Build Tools with the C++ workload).' }
 $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
 
