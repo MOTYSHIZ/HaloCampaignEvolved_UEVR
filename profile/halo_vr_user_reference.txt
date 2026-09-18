@@ -326,6 +326,11 @@
 # Lens tone curve. How much of the game's tone curve the lens image keeps, from 0 to 1; below 0 leaves
 # the game's own setting.
 #scopetonecurve=0.5
+# Lens lighting. Which lighting model the lens renders with. The game switches bounce light off for
+# everything it renders into a lens, which makes the view through the scope flatter and darker than
+# the same view outside it; 1 gives the lens the same bounce light as the main view, at some cost in
+# framerate. 2 is a cheaper approximation, 0 none, and below 0 leaves the game's own setting.
+#scopelenslumen=1
 # Lens update distance. The lens image only updates while the lens is within this many centimetres of
 # your eye, which saves performance with the weapon lowered; 0 always updates it.
 #scopeeyedist=15

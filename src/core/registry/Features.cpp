@@ -156,7 +156,7 @@ const FeatureRow kFeatures[] = {
       "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
     { "scopelens",    1, Tier::Experimental, "Weapon", "Scope lens on the weapon",
       "A magnifying lens in the scope housing of the scoped weapons. The standard scope stands down while on.",
-      "scopeev,scopeeyedist,scopereticletint,scopertfmt,scopeseptrans,scopesfflags,scopeshowflags,"
+      "scopeev,scopeeyedist,scopelenslumen,scopereticletint,scopertfmt,scopeseptrans,scopesfflags,scopeshowflags,"
       "scopesource,scopetint,scopetonecurve",
       "scopeabtest,scopecamfwd,scopecvardump,scopehz,scopepp,scopeprobe,scopereticle,scopereticlescale,"
       "scoperollfix,scoperound,scopewpn",

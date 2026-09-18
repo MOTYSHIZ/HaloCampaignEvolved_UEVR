@@ -92,7 +92,10 @@ void apply_capture_pp() {
     if (pps == nullptr || base == nullptr) { static bool said = false; if (!said) { said = true; API::get()->log_info("[Halo-CampE-UEVR] SCOPE: PostProcessSettings not reachable (struct %p data %p)", (void*)pps, (void*)base); } return; }
     static bool s_logged = false;
     const bool write_ev  = (g_cfg.scope_pp_override != 0);
-    const bool write_lum = (g_cfg.scope_lumen > 0);   // > 0, not != 0: the pane path's scopelumen uses -1 for "leave alone"
+    // scopelenslumen, the lens's OWN key. It used to read his scopelumen, which feeds HIS pane and
+    // defaults to -1 (leave alone), so the shipped lens never forced Lumen on its capture at all.
+    // > 0, not != 0: -1 is "leave alone" and 0 is "None", and only a real method is written.
+    const bool write_lum = (g_cfg.scope_lens_lumen > 0);
     if (!write_ev && !write_lum && g_cfg.scope_tone_curve < 0.0f && s_logged) return;   // log-only pass once, then nothing
     // Every setter takes its own write flag so the exposure block and the Lumen block are
     // independently switchable (scopepp / scopelumen); offsets/masks/before-values log once.
@@ -116,8 +119,12 @@ void apply_capture_pp() {
     // measured 2026-08-19 renders no bounce light, so force it to Lumen (1) here.
     // EDynamicGlobalIlluminationMethod: 0 None, 1 Lumen, 2 ScreenSpace, 3 RayTraced, 4 Plugin.
     // EReflectionMethod:                0 None, 1 Lumen, 2 ScreenSpace, 3 RayTraced.
-    set_bit(write_lum, L"bOverride_DynamicGlobalIlluminationMethod", true); set_u8(write_lum, L"DynamicGlobalIlluminationMethod", 1);
-    set_bit(write_lum, L"bOverride_ReflectionMethod", true);                set_u8(write_lum, L"ReflectionMethod", 1);
+    // The method comes from the key now, so the A/B against ScreenSpace costs no rebuild. The
+    // reflection enum has no Plugin entry, so 3 (GI only) leaves reflections on Lumen.
+    const uint8_t lum_gi = (uint8_t)g_cfg.scope_lens_lumen;
+    const uint8_t lum_rf = (uint8_t)(g_cfg.scope_lens_lumen == 3 ? 1 : g_cfg.scope_lens_lumen);
+    set_bit(write_lum, L"bOverride_DynamicGlobalIlluminationMethod", true); set_u8(write_lum, L"DynamicGlobalIlluminationMethod", lum_gi);
+    set_bit(write_lum, L"bOverride_ReflectionMethod", true);                set_u8(write_lum, L"ReflectionMethod", lum_rf);
     // ---- tone curve (scopetonecurve, live; <0 = leave alone). The decisive knob for the lens:
     // sources 2/9 composite translucency (the shield wall) but apply the film tone curve, and the
     // main view then tone-curves the lens surface AGAIN -> flat grey (measured 2026-08-19). With
@@ -237,7 +244,7 @@ void probe_rt() {
     }
     API::get()->log_info("[Halo-CampE-UEVR] SCOPE-RT: centre %.4f %.4f %.4f | q1 %.4f %.4f %.4f | q3 %.4f %.4f %.4f (src %d fmt %d tint %.2f pp %d lumen %d)",
         out[0][0], out[0][1], out[0][2], out[1][0], out[1][1], out[1][2], out[2][0], out[2][1], out[2][2],
-        g_cfg.scope_capture_source, g_cfg.scope_rt_format, g_cfg.scope_tint, g_cfg.scope_pp_override, g_cfg.scope_lumen);
+        g_cfg.scope_capture_source, g_cfg.scope_rt_format, g_cfg.scope_tint, g_cfg.scope_pp_override, g_cfg.scope_lens_lumen);
 }
 
 bool s_cap_on = true;   // the gate/AB decision; the rate cap only fires while this is true
@@ -674,7 +681,9 @@ void scope_update(float dt) {
 
 // ---- PHYSICAL PER-WEAPON SCOPES (Scope.hpp: scopewpn= entries and their capture knobs). A
 // second hoisted family beside parse_scope_key above, early-return for the same C1061 reason.
-// `scope`, `scoperes` and `scopelumen` are parsed by parse_scope_key, which owns those names.
+// `scope`, `scoperes` and `scopelumen` are parsed by parse_scope_key, which owns those names. The
+// lens reads its own scopelenslumen for the capture's lighting model; his scopelumen still feeds his
+// pane, untouched.
 bool parse_physscope_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopelens") == 0) { g_cfg.scope_lens = (v != 0.0); return true; }
     if (_stricmp(key, "scopesource")    == 0) { g_cfg.scope_capture_source = (int)v; return true; }
@@ -682,6 +691,7 @@ bool parse_physscope_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopertfmt")     == 0) { g_cfg.scope_rt_format = (int)v; return true; }
     if (_stricmp(key, "scopeev")        == 0) { g_cfg.scope_ev = clampf((float)v, -10.0f, 10.0f); return true; }
     if (_stricmp(key, "scopepp")        == 0) { g_cfg.scope_pp_override = (int)v; return true; }
+    if (_stricmp(key, "scopelenslumen") == 0) { g_cfg.scope_lens_lumen = (int)clampf((float)v, -1.0f, 3.0f); return true; }
     if (_stricmp(key, "scopecvardump")  == 0) { g_cfg.scope_cvar_dump = (v != 0.0); return true; }
     if (_stricmp(key, "scoperound")     == 0) { g_cfg.scope_round = (int)v; return true; }
     if (_stricmp(key, "scopeshowflags") == 0) { g_cfg.scope_showflags = (int)v; return true; }

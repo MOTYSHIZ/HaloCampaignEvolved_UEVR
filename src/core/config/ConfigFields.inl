@@ -419,6 +419,22 @@
     // Default: the value the scope lens is tuned with.
     float scope_ev = 0.5f;
     int   scope_pp_override = 1;        // 0 = do not touch the capture's PostProcessSettings
+    // THE LENS'S OWN BOUNCE LIGHT (scopelenslumen). UE force-disables Lumen for every scene
+    // capture (SceneCaptureRendering.cpp sets both methods to None), so the main view renders
+    // with Lumen GI and Lumen reflections and the lens does not: same scene, same camera, a
+    // DIFFERENT LIGHTING MODEL. From the headset that reads as "the lighting is different for the
+    // scene through the scope" -- flatter, warmer, darker exactly where the light was indirect --
+    // and it was chased as a colour cast for hours because it is BASE-PASS lighting, upstream of
+    // exposure, bloom, the tone curve and the tint, so none of those could ever reach it.
+    //
+    // The lens used to read the author's scopelumen for this. That key is HIS, it feeds HIS pane,
+    // and its default is -1 (leave alone), so nothing shipped ever turned the lens's bounce light
+    // on; per the no-shared-keys rule the lens gets its own. Same values as his, so a number means
+    // the same thing in either: -1 leave alone, 0 None, 1 Lumen, 2 ScreenSpace, 3 Plugin.
+    // Shipped at 1, the value the owner plays with and the one that matches the main view on this
+    // title. It costs real GPU time (the capture runs a second Lumen scene), which is why his own
+    // key stayed opt-in; the lens is a fork feature and this is the value it is tuned for.
+    int   scope_lens_lumen = 1;
     bool  scope_cvar_dump = false;      // one-shot log of Lumen/SceneCapture console variables
     // Display multiplier on the lens (live); exposure itself is scope_ev.
     // Default: the value the scope lens is tuned with.
