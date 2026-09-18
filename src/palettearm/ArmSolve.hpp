@@ -201,71 +201,57 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
 // Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
 
-// ---- EMPTY-HAND GESTURES (2026-09-18, by request). The same three key poses, blended PER FINGER
-// instead of per hand -- no new authored poses are needed, because every finger is its own chain
-// and a point is just "index from the open hand, the rest from the fist".
+// ---- HAND POSES (2026-09-18, restructured by request: "there to essentially be a pose struct that
+// defines these types of custom values per finger for that tuned pose"). A pose is a full set of
+// per-finger values; the three recorded key poses (open / relaxed / fist) are the space every value
+// is expressed in, so no new authored poses are needed. What drives it is kept SEPARATE from the pose
+// table: today three controller inputs pick a pose; a finger-tracking controller (Valve Index, Steam
+// Frame) will instead supply a curl per finger, with tuned poses for particular finger combinations
+// on top -- the table and the apply step do not change for that.
 //
-//   curl[]      index, middle, ring, pinky, thumb -- each on apply_hand_shape's axis (-1 open ..
-//               0 relaxed .. 1 fist)
-//   thumb_over  how far PAST the fist the thumb goes (0..1 of `over_gain`): the punch the fist was
-//               taken from holds its thumb beside the fingers, and a clenched fist wraps it over
-//               them. Extrapolated along the thumb's own open->fist arc; only used at thumb curl 1.
-//   thumb_ext   how far PAST the open hand the thumb's outer joints go (0..1+): the recorded open
-//               hand leaves the thumb tip bent, which reads as a limp thumbs-up. Extrapolated along
-//               the thumb's own relaxed->open arc, outer joints only, and only while the thumb is
-//               opening (curl < 0).
-//   w_point / w_thumb_down / w_thumb_up   how much of each gesture's HandTrim applies (0..1, eased
-//               with the rest): the index is pointing, the thumb is down, the thumb is out.
-struct HandGesture {
-    float curl[5]{0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    float thumb_over{0.0f};
-    float thumb_ext{0.0f};
-    float w_point{0.0f};
-    float w_thumb_down{0.0f};
-    float w_thumb_up{0.0f};
+// Finger order everywhere: 0 index, 1 middle, 2 ring, 3 pinky, 4 thumb (the order of the key-pose
+// tables). Segments: 0 the knuckle joint, 1 the second, 2 the last. Every value is unbounded and
+// may be negative -- for exploring in a headset.
+constexpr int kHandFingers  = 5;
+constexpr int kHandSegments = 3;
+
+struct FingerPose {
+    float curl{0.0f};                            // -1 open .. 0 relaxed .. 1 fist; past +-1 extrapolates
+    float seg[kHandSegments]{0.0f, 0.0f, 0.0f};  // added to `curl` per segment, along its own arc
+    float rot[kHandSegments][3]{};               // degrees about each segment's own local X, Y, Z
+};
+struct HandPose {
+    FingerPose finger[kHandFingers]{};
+    float thumb_over{0.0f};   // a CURLED thumb carried past the fist (wraps over the fingers), x curl
+    float thumb_ext{0.0f};    // an OPEN thumb's outer joints carried past the open hand (straight tip)
+    float thumb_out{0.0f};    // a CURLED thumb's base turned back toward the open hand, x curl
 };
 
-// PER-SEGMENT TUNING, per gesture (headset, 2026-09-18: "what I really need are tunables for the
-// second and last segments of the pointer finger"; "thumb still clips index finger in a fist, and
-// neither thumb out or thumb over ... let me tune enough"). Segment 0 is the knuckle joint, 1 the
-// second segment, 2 the last. Unbounded, negative included, for exploring:
-//   *_curl[s]    added to that segment's curl, along its own relaxed->fist arc (+ closes, - opens;
-//                past +-1 extrapolates beyond the recorded poses)
-//   *_rot[s][3]  degrees about the segment's OWN local X, Y, Z (its parent-relative frame), applied
-//                after the curl -- the sideways and twist moves no curl arc contains
-// Applied by the gesture's weight, so each set only acts in its own gesture.
-struct HandTrim {
-    float point_curl[3]{0.0f, 0.0f, 0.0f};
-    float point_rot[3][3]{};
-    float down_curl[3]{0.0f, 0.0f, 0.0f};   // the thumb, down (fist; point with thumb down)
-    float down_rot[3][3]{};
-    float up_curl[3]{0.0f, 0.0f, 0.0f};     // the thumb, out (thumbs up; point with thumb out)
-    float up_rot[3][3]{};
+// The tuned poses. Rest = no grip, no trigger; RestIndex = no grip, finger on the trigger.
+enum class HandPoseId : int { Rest = 0, RestIndex, Fist, ThumbsUp, Point, PointDown, Ok, Count };
+constexpr int kHandPoseCount = static_cast<int>(HandPoseId::Count);
+const char* hand_pose_name(HandPoseId id);
+
+// Which pose three controller inputs ask for ("thumb" = any capacitive thumb sensor, "trigger" = the
+// trigger touch where the backend binds it, else the pull):
+//   grip + trigger + thumb   Fist          no grip + trigger + thumb   Ok
+//   grip + trigger           ThumbsUp      no grip + trigger           RestIndex
+//   grip + thumb             PointDown     no grip (+ thumb or not)    Rest
+//   grip                     Point
+HandPoseId pose_for_inputs(bool grip, bool trigger, bool thumb);
+
+// How much of each pose the hand is in (sums to 1), eased toward one pose so a change of gesture
+// slides rather than snaps.
+struct HandPoseBlend {
+    float w[kHandPoseCount]{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 };
-// What a controller's three inputs mean on an empty hand. `rest` is the relaxed hand's curl.
-//   grip + trigger + thumb sensor   a fist, thumb clenched over
-//   grip + trigger                  thumbs up
-//   grip + thumb sensor             pointing, thumb down
-//   grip                            pointing, thumb out
-//   trigger alone                   the relaxed hand with the index pulled in
-//   nothing                         the relaxed hand
-//   point_curl  the index's curl when it POINTS (-1 = the recorded open hand, which lifts it too far
-//               to read as a point; -0.5 sits between that and the relaxed hand).
-//   thumb_ext   the thumb's extension past the open hand when it is OUT (thumbs up, point).
-HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest,
-                               float point_curl = -1.0f, float thumb_ext = 0.0f);
-// Ease `current` toward `target`, finger by finger (tau seconds, first-order).
-void ease_gesture(HandGesture& current, const HandGesture& target, float dt, float tau);
-// `over_gain` = how far past the fist a full thumb_over goes, as a fraction of the open->fist arc.
-// `thumb_out` = how far a CURLED thumb's base joint is turned back toward the open hand (0..1), so a
-//               thumb laid across a fist sits outside the index instead of through it (headset,
-//               2026-09-18: "the thumb down position also needs to be rotated out a little so it
-//               doesn't clip with the index finger when clenching a fist"). Base joint only.
-// None of the gains is clamped (finite is the only requirement): negative and past-1 values are
-// allowed on purpose, for exploring in a headset.
-bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandGesture& gesture,
-                        float authored, float over_gain = 0.35f, float thumb_out = 0.0f,
-                        const HandTrim* trim = nullptr);
+void ease_pose_blend(HandPoseBlend& blend, HandPoseId target, float dt, float tau);
+// The weighted mean of the table's poses under `blend` -- every value is linear in the pose.
+HandPose blend_hand_poses(const HandPose* table, const HandPoseBlend& blend);
+
+// Pose the fingers. `authored` 1 = leave the game's fingers exactly as posed .. 0 = the pose entirely.
+// Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
+bool apply_hand_pose(BlamMatrix4x3* palette, const ArmNodes& arm, const HandPose& pose, float authored);
 
 // A rotation part of the way from `a` to `b`, along the SHORT ARC.
 //

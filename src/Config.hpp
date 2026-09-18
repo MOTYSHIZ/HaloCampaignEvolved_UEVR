@@ -191,6 +191,48 @@ const WeaponFix* weapon_fix_for(const char* class_name);
 // Returns nullptr when gripoffsets is off, so every consumer gets the switch for free.
 const WeaponGrip* weapon_grip_for(const char* class_name);
 
+// ---- THE HAND POSE TABLE (palette arms; mirrors pa::HandPose, which the pure layer owns and which
+// cannot see this header). One entry per tuned pose, each a full set of per-finger values. Finger
+// order 0 index, 1 middle, 2 ring, 3 pinky, 4 thumb; segments 0 knuckle, 1 second, 2 last.
+//   curl      -1 open .. 0 relaxed .. 1 fist (past +-1 extrapolates)
+//   seg[3]    added to curl per segment, along its own arc
+//   rot[9]    x,y,z degrees per segment, about that segment's own local axes
+// Pose order: rest, index (no grip + trigger), fist, thumbsup, point, pointdown, ok.
+struct HandFingerTune { float curl; float seg[3]; float rot[9]; };
+struct HandPoseTune   { HandFingerTune f[5]; float thumb_over; float thumb_ext; float thumb_out; };
+constexpr int kHandPoseTunes = 7;
+struct HandPoseTable  { HandPoseTune pose[kHandPoseTunes]; };
+extern const char* const kHandPoseTuneNames[kHandPoseTunes];     // Config.cpp: "rest", "index", ...
+extern const char* const kHandFingerTuneNames[5];                // Config.cpp: "index", ..., "thumb"
+
+// THE SHIPPED POSES. CANONIZED 2026-09-18 from the user's own headset tuning of the first gesture
+// build (papointcurl=0, papointseg=0,-.85,-3, papointrot=-6,..., pathumbdownrot=20,0,20,...,
+// pathumbuprot=-20,0,-20,..., pathumbext=-2, pathumbover=0.35, pathumbout=0.3), re-expressed as poses:
+// the pointing index in Point and PointDown, the thumb-down set in Fist / PointDown / Ok, the
+// thumb-up set in ThumbsUp / Point. OK is NEW: the fist's index and thumb, the other three fingers
+// on the current open (no-grip) hand -- the relaxed pose plus pahandrest, exactly as in Rest.
+inline HandPoseTable default_hand_poses() {
+    HandPoseTable t{};
+    auto fingers = [](HandPoseTune& p, float i, float m, float r, float k, float th) {
+        p.f[0].curl = i; p.f[1].curl = m; p.f[2].curl = r; p.f[3].curl = k; p.f[4].curl = th;
+    };
+    auto point_index = [](HandPoseTune& p) {
+        p.f[0].curl = 0.0f; p.f[0].seg[1] = -0.85f; p.f[0].seg[2] = -3.0f; p.f[0].rot[0] = -6.0f;
+    };
+    auto thumb_down = [](HandPoseTune& p) { p.f[4].rot[0] = 20.0f;  p.f[4].rot[2] = 20.0f; };
+    auto thumb_up   = [](HandPoseTune& p) { p.f[4].rot[0] = -20.0f; p.f[4].rot[2] = -20.0f; p.thumb_ext = -2.0f; };
+    for (auto& p : t.pose) p.thumb_out = 0.3f;
+    HandPoseTune& rest = t.pose[0];  fingers(rest, 0, 0, 0, 0, 0);
+    HandPoseTune& idx  = t.pose[1];  fingers(idx,  1, 0, 0, 0, 0);
+    HandPoseTune& fist = t.pose[2];  fingers(fist, 1, 1, 1, 1, 1);  thumb_down(fist); fist.thumb_over = 0.35f;
+    HandPoseTune& up   = t.pose[3];  fingers(up,   1, 1, 1, 1, -1); thumb_up(up);
+    HandPoseTune& pt   = t.pose[4];  fingers(pt,   0, 1, 1, 1, -1); point_index(pt); thumb_up(pt);
+    HandPoseTune& ptd  = t.pose[5];  fingers(ptd,  0, 1, 1, 1, 1);  point_index(ptd); thumb_down(ptd);
+    HandPoseTune& ok   = t.pose[6];  fingers(ok,   1, 0, 0, 0, 1);   thumb_down(ok); ok.thumb_over = 0.35f;
+    (void)rest; (void)idx;
+    return t;
+}
+
 struct Config {
     bool  enabled      = true;
     bool  drive_pitch  = true;
@@ -4001,48 +4043,27 @@ struct Config {
     // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
     int   pa_grab_weapon   = 1;
 
-    // EMPTY-HAND GESTURES (2026-09-18, by request). The three key hand poses blended PER FINGER from
-    // the controller's own inputs -- no new authored poses (pa::gesture_for_inputs):
-    //   grip + trigger + thumb sensor   a fist, thumb clenched over the fingers
-    //   grip + trigger                  thumbs up
-    //   grip + thumb sensor             pointing, thumb down
-    //   grip                            pointing, thumb out
-    //   trigger alone                   the relaxed hand with the index pulled in
-    // "Thumb sensor" = any of UEVR's capacitive thumb actions for that hand: A-touch, B-touch or
-    // the thumbrest. UEVR binds no thumbstick- or trackpad-TOUCH action, so resting the thumb on
-    // the stick itself is invisible to a plugin. The SUPPORT hand gestures whenever it is free (on
-    // the gun it keeps the authored grip); the AIM hand only while unarmed, since its trigger is
-    // the weapon's. 0 = the old behaviour (grip closes the whole support hand, nothing else).
-    // pathumbover = how far past the recorded fist the clenched thumb goes, as a fraction of its
-    // open->fist arc (the fist was taken from a punch that holds the thumb beside the fingers).
+    // EMPTY-HAND GESTURES (2026-09-18, by request). The controller's inputs pick one of the tuned
+    // poses in hand_poses below, eased between (pa::pose_for_inputs):
+    //   grip + trigger + thumb   fist            no grip + trigger + thumb   ok
+    //   grip + trigger           thumbsup        no grip + trigger           index
+    //   grip + thumb             pointdown       no grip                     rest
+    //   grip                     point
+    // "Trigger" = the trigger TOUCH where our UEVR backend binds it, else the pull. "Thumb" = any
+    // capacitive thumb sensor: A/B touch, the thumbrest, or the thumbstick touch (backend-bound).
+    // The SUPPORT hand gestures whenever it is free (on the gun it keeps the authored grip); the AIM
+    // hand only while unarmed, since its trigger is the weapon's. 0 = the old behaviour (grip closes
+    // the whole support hand, nothing else).
     int   pa_gesture       = 1;       // DEV KEY pagesture
-    float pa_thumb_over    = 0.35f;   // DEV KEY pathumbover
-    // First headset pass on the gestures (2026-09-18): "the last segment of the thumb is not out
-    // enough to give a convincing thumbs up" and "the index finger rotates a bit too high up to be
-    // a natural looking pointing gesture". The recorded OPEN hand is a stretched hand: its index
-    // bends up past straight and its thumb tip stays flexed. So a pointing index stops short of it
-    // (papointcurl, -1 = the open hand .. 0 = relaxed) and an out thumb's outer joints go past it
-    // (pathumbext, 0 = the open hand). Both live; both first guesses, to be tuned by eye.
-    float pa_point_curl    = -0.5f;   // DEV KEY papointcurl
-    float pa_thumb_ext     = 0.6f;    // DEV KEY pathumbext
-    // "The thumb down position also needs to be rotated out a little so it doesn't clip with the
-    // index finger when clenching a fist": a CURLED thumb's base joint turned this far back toward
-    // the open hand (0..1, scaled by the curl). Live; a first guess.
-    float pa_thumb_out     = 0.3f;    // DEV KEY pathumbout
-    // PER-SEGMENT TUNING, per gesture (pa::HandTrim; 2026-09-18: "what I really need are tunables for
-    // the second and last segments of the pointer finger" / the fist's thumb "neither thumb out or
-    // thumb over ... let me tune enough"). Segments: 1 = knuckle, 2 = second, 3 = last. Comma lists,
-    // blank or missing fields = 0, all unbounded and negative-capable, all live:
-    //   *seg=s1,s2,s3                 curl added per segment along its own arc (+ closes, - opens)
-    //   *rot=x1,y1,z1,x2,y2,z2,x3,y3,z3   degrees about each segment's own local X / Y / Z
-    // papoint* = the pointing index; pathumbdown* = the thumb down (fist, point-thumb-down);
-    // pathumbup* = the thumb out (thumbs up, point-thumb-out).
-    float pa_point_seg[3]      = {0.0f, 0.0f, 0.0f};   // DEV KEY papointseg
-    float pa_point_rot[9]      = {};                   // DEV KEY papointrot
-    float pa_thumb_down_seg[3] = {0.0f, 0.0f, 0.0f};   // DEV KEY pathumbdownseg
-    float pa_thumb_down_rot[9] = {};                   // DEV KEY pathumbdownrot
-    float pa_thumb_up_seg[3]   = {0.0f, 0.0f, 0.0f};   // DEV KEY pathumbupseg
-    float pa_thumb_up_rot[9]   = {};                   // DEV KEY pathumbuprot
+    // THE HAND POSES (pa::HandPose; see HandPoseTable above struct Config for the layout and the
+    // canonized values). Each is a full per-finger set, live-editable one finger at a time:
+    //   pahand=<pose>,<finger>,curl,s1,s2,s3,x1,y1,z1,x2,y2,z2,x3,y3,z3
+    //   pahandthumb=<pose>,over,ext,out
+    // Poses: rest index fist thumbsup point pointdown ok. Fingers: index middle ring pinky thumb.
+    // A blank field or '-' keeps the compiled value; every number is unbounded, negative included.
+    // pahandrest still offsets the relaxed fingers: all of rest, and the fingers of index and ok that
+    // the pose leaves relaxed (index: all but the index; ok: middle, ring, pinky).
+    HandPoseTable hand_poses = default_hand_poses();   // DEV KEYS pahand / pahandthumb
     // FORCE THE ARM MESH TO ITS FULL-DETAIL LOD. On low geometry settings a vertex of the middle
     // finger follows the INDEX when pointing: the reduced LOD's skinning puts some of it on the index
     // bone, which the authored animation never separates. SetForcedLOD(1) pins LOD0 -- where the
