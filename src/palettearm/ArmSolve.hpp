@@ -306,39 +306,57 @@ struct RestRelation {
 // performs whatever the game animates -- the magazine swap, the pump. A FREE support hand follows
 // its controller, and then a reload swaps a magazine with nobody holding it. This says WHEN the
 // game is playing such an action, from the stock palette alone (there is no reload event to
-// subscribe to), as an eased 0..1 weight for the caller to hand the wrist to the animation by,
-// exactly as it does for a two-hand hold.
+// subscribe to): the authored off hand moving RELATIVE TO THE GUN from its rest relation. The
+// result is an eased 0..1 weight for the caller to hand the wrist to the animation by, exactly as
+// it does for a two-hand hold. The gun leaving its own rest pose is NOT an action here -- that is
+// the EquipGate's business.
 //
-//   the ACTION half   the authored off hand moving RELATIVE TO THE GUN from its rest relation
-//   the EQUIP half    the gun leaving its own rest pose (a put-away), plus -- via reset()'s hold --
-//                     the draw after a weapon change, until the new weapon rests. `equip` = false
-//                     leaves both out, and `swap_age_s` (seconds since the player asked for a swap,
-//                     negative = never) then keeps the weight at zero for 2.5 s outright.
-//
-// The weight itself survives a reset, so nothing pops.
-// The authored grenade throw's length, seconds (1.37 / 1.40 measured on the Magnum and the rifle),
-// the reference `grenade_trim_s` counts back from.
-constexpr float kThrowSeconds = 1.35f;
+// `*_age_s` = seconds since that mask was last seen going to the game (negative = never): they say
+// which action a hand-over is, for the RETURN CUT (see the .cpp) -- a melee lets go on its first
+// sustained approach after the peak, a reload (and anything not asked for) only once the gun is
+// nearly home too, a throw `grenade_trim_s` before its authored end. The weight itself survives a
+// reset, so nothing pops.
+constexpr float kThrowSeconds = 1.35f;      // the authored throw (1.37 / 1.40 measured on Magnum / rifle)
 
 struct ActionWatch {
+    enum class Kind : std::uint8_t { Other, Melee, Reload, Grenade };
     RestRelation hand;           // the support wrist in the marker's frame
-    float hold_s{0.0f};
     float weight{0.0f};
     float last_target{0.0f};     // diagnostics, as of the last update
     bool  engaged{false};        // a hand-over is in progress (weight above zero)
+    Kind  kind{Kind::Other};     // ...and what asked for it
     float since_onset_s{0.0f};
-    bool  grenade{false};        // ...and it began within 0.6 s of a throw being asked for
-    bool  grenade_cut{false};    // ...and has been cut short; stays so until the authored hand is home
+    float peak_m{0.0f};          // the furthest the off hand has been from its hold this time
+    int   descending{0};         // consecutive frames it has been coming home
+    bool  home_cut{false};       // let go for the return; stays so until the authored hand is home
 
-    void  reset(float hold_seconds);
+    void  reset();
     // `hand_*` = the STOCK support wrist expressed in the STOCK marker's frame. `gate` scales every
-    // threshold (1 = as measured). `*_age_s` = seconds since that button was last seen going to the
-    // game, negative = never. `grenade_trim_s` cuts a throw's hand-over that long before its end.
-    // Live frames only.
+    // threshold (1 = as measured). Live frames only.
     float update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis, float gate, float dt,
-                 bool equip = false, float swap_age_s = -1.0f, float grenade_age_s = -1.0f,
+                 float melee_age_s = -1.0f, float reload_age_s = -1.0f, float grenade_age_s = -1.0f,
                  float grenade_trim_s = 0.0f);
 };
+
+// IS AN EQUIP ANIMATION PLAYING? The put-away (the gun leaving rest within a second of a swap being
+// asked for) and the draw (from the weapon model changing until the new weapon rests, 3 s at most).
+struct EquipGate {
+    bool  active{false};
+    bool  draw{false};
+    float since_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt);
+};
+
+// A HAND'S REST SHAPE: every wrist-subtree node's relation to the wrist. Captured off the stock
+// palette while the gun is at rest, and blended back in when an animation is being held off a
+// hand that is otherwise placed rigidly from the live pose -- otherwise "the fingers still animate".
+struct RestNode { Vec3 pos{}; Mat3 basis{}; };
+bool capture_hand_rest(const BlamMatrix4x3* palette, const ArmNodes& arm, RestNode* out, std::size_t out_count);
+bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestNode* rest, std::size_t rest_count,
+                        float weight);
 
 // IS A MELEE PLAYING? Which animation an action is cannot be read off the pose -- a butt stroke and
 // a reload overlap in every magnitude -- but a melee is always ASKED for: the swing gesture presses

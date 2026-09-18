@@ -47,7 +47,7 @@ struct WeaponAdjust {
 constexpr int kMaxWeaponAdjust = 24;
 
 // One per-weapon ANIMATION preference line (the palette arms' pasprintanim / pameleeanim /
-// pasupequip / pagrenadetrim / pasupanim, for one weapon). Positional like wpnoff, everything after
+// paequipanim / pagrenadetrim / pasupanim, for one weapon). Positional like wpnoff, everything after
 // the match optional; a blank field, or '-', leaves that setting on its global. `set` says which
 // fields were given. Lives in halo_vr_weapons.cfg by request ("cleaner to put them there and match
 // their naming standard ... all animation settings for a particular weapon on a single line"), and
@@ -4054,14 +4054,38 @@ struct Config {
     // rest on its own is the EQUIP half below. Both live.
     int   pa_sup_anim      = 1;       // DEV KEY pasupanim
     float pa_sup_anim_gate = 1.0f;    // DEV KEY pasupanimgate
-    // EQUIP ANIMATIONS ON THE FREE SUPPORT HAND -- OFF BY DEFAULT (headset, same run: "switching
-    // weapons over the shoulder currently causes the left hand to snap to its position, which ends
-    // up awkward when combined with motion tracking"). With it on, the gun leaving its rest pose
-    // counts as an action (the put-away) and the hand-over is held through the DRAW after a weapon
-    // change until the new weapon rests (3 s at most), so a swap plays as one piece. With it off, a
-    // swap the player ASKED for (the Y press, or the holster gesture that presses it) also keeps the
-    // hand on the controller outright for 2.5 s, whatever the off hand does on the way down. Live.
-    int   pa_sup_equip     = 0;       // DEV KEY pasupequip
+    // THE ANIMATION PREFERENCES: MELEE, EQUIP, SPRINT -- ONE SCHEME (headset, 2026-09-17: "I think the
+    // melee animation playing is actually a preference when it comes to physical melee", "the left
+    // hand playing equip animations ... should default to off, since switching weapons over the
+    // shoulder currently causes the left hand to snap to its position", "only during sprint, the arms
+    // animation can use a specific mode ... per-weapon override", and "reach parity and standardize
+    // the value settings with the sprint anim options for equip and melee"). Each is a GATE the pose
+    // cannot supply on its own, keyed off what the game is handed on the pad:
+    //   melee  the melee mask (the swing gesture presses it, so does a thumb), a few frames AHEAD of
+    //          the animation, up until the pose is back at rest (pa::MeleeGate, 4 s cap)
+    //   equip  the put-away (the gun leaving rest within 1 s of the swap mask) and the draw (from
+    //          the weapon model changing until the new weapon rests, 3 s cap) (pa::EquipGate)
+    //   sprint the gun well away from rest WHILE the stick is pushed AND the sprint mask was seen in
+    //          the last 3 s (pasprintmask); ends when stick or pose lets go (pa::SprintWatch). The
+    //          plugin has no sprint state of its own; no rest pose is learned through a sprint, or
+    //          the sprint pose would become "rest" in 1.5 s
+    // and each takes the same four values:
+    //   0 = the whole animation with the IK on top: the free support hand JOINS it
+    //   1 = the gun hand only: the gun and the aim hand play it as they always have, the free
+    //       support hand stays on its controller, a gripping one at its rest relation on the gun
+    //   2 = the whole animation and NO tracking: every driven node is eased back to the stock pose
+    //       for the animation's duration and comes back to the controllers as it ends
+    //   3 = no animation: the gun and the aim hand are held to their rest pose (weapon nodes moved
+    //       onto the eased rest marker before the carry, the aim wrist and its FINGERS to their rest
+    //       relation, the kick faded), the support hand stays on its controller. Needs a rest pose,
+    //       so the DRAW of a new weapon plays as 1 until the weapon has rested once.
+    // Defaults: melee 1 (a physical swing is the melee), equip 1 (the swap is the player's reach
+    // over the shoulder), sprint 0. All live. Per weapon: a wpnanim line in halo_vr_weapons.cfg
+    // (see WeaponAnim) -- one line covers these three, pagrenadetrim and pasupanim.
+    int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
+    int   pa_equip_anim    = 1;       // DEV KEY paequipanim
+    int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
+    int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
     // THE GRENADE THROW'S TAIL (headset, same run: "a live tunable for how many seconds to trim off
     // the end of the grenade throw anim. It has a notify or something that tells the left hand to go
     // back to the support grip, and that might confuse some players"). The authored throw is
@@ -4069,42 +4093,10 @@ struct Config {
     // ~1.0 s. A hand-over that began within 0.6 s of a throw being asked for (the trigger gesture or
     // the button the game reads as throw) is cut this many seconds before the authored end, and not
     // taken again until the authored hand is home. 0.6 = let go as the return begins. 0 = off. Live.
+    // The RETURN of every other action is cut by its shape (ActionWatch): a melee on its first
+    // sustained approach after the peak, a reload -- or anything not asked for -- only once the gun
+    // is nearly home too, because a reload's magazine coming in looks like a return at its onset.
     float pa_grenade_trim_s = 0.6f;   // DEV KEY pagrenadetrim
-    // THE MELEE PREFERENCE (headset, same run: "I think the melee animation playing is actually a
-    // preference when it comes to physical melee ... 3 settings. Melee plays, Melee doesn't play,
-    // and melee doesn't play only on left hand"). A melee is always ASKED for -- the swing gesture
-    // presses the melee mask, and so does a thumb -- so the press (as the game receives it) opens a
-    // gate a few frames AHEAD of the animation, and the gate stays up until the pose is back at
-    // rest (pa::MeleeGate; 4 s at most).
-    //   0 = melee does not play: the gun and the aim hand are held to their REST pose (the weapon
-    //       nodes moved onto the eased rest marker before the carry, the aim wrist to its rest
-    //       relation on it, the kick faded) and the support hand stays off the animation. What you
-    //       see is your own swing.
-    //   1 = DEFAULT: plays on the gun hand only. The gun and the aim hand swing with the animation
-    //       as they always have; the free support hand stays on its controller, and a gripping one
-    //       stays at its rest relation on the (swinging) gun instead of punching or bracing.
-    //   2 = plays on both hands, the free support hand joining as for any other action.
-    // Live.
-    int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
-    // THE SPRINT (headset, same run: "only during sprint, the arms animation can use a specific
-    // mode. There would be a global default, but also a per-weapon override setting, since some
-    // weapons work fine with Player IK on their sprint anims"). The plugin has no sprint state, so
-    // one is inferred (pa::SprintWatch): the gun well away from its rest pose WHILE the movement
-    // stick is pushed AND a sprint was asked for in the last 3 s (pasprintmask, a hold or a toggle);
-    // it ends when the stick or the pose lets go. No rest pose is learned through one, or the
-    // sprint pose would become "rest" in 1.5 s. Modes, in the order they were asked for:
-    //   0 = DEFAULT: the whole sprint animation with the IK on top -- the gun and the aim hand play
-    //       it as they always have and the free support hand joins it
-    //   1 = the gun hand only: the free support hand stays on its controller, a gripping one at
-    //       its rest relation on the gun
-    //   2 = the whole animation and NO tracking: every driven node is eased back to the stock pose
-    //       for the sprint's duration, and comes back to the controllers as it ends
-    //   3 = no sprint animation: the gun and the aim hand are held to their rest pose, the free
-    //       support hand stays on its controller
-    // Live. Per weapon: a wpnanim line in halo_vr_weapons.cfg (see WeaponAnim), which covers this
-    // key and pameleeanim, pasupequip, pagrenadetrim and pasupanim on one line.
-    int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
-    int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
     // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
     // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
     // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the

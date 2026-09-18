@@ -13587,7 +13587,8 @@ public:
                                       g_cfg.holster_swap_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.holster_swap_mask) != 0,
                                       g_cfg.grenade_action != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.grenade_action) != 0,
                                       g_cfg.pa_sprint_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.pa_sprint_mask) != 0,
-                                      mlx * mlx + mly * mly > 0.25f);
+                                      mlx * mlx + mly * mly > 0.25f,
+                                      g_cfg.reload_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.reload_mask) != 0);
         }
 
         // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the

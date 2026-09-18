@@ -490,20 +490,27 @@ pa::ActionWatch    s_action;
 // ---- ...THE MELEE GATE (pameleeanim) and the AIM wrist's rest relation to the gun, which the
 // "melee does not play" mode holds the right hand and the gun to while a swing plays out.
 pa::MeleeGate      s_melee;
+pa::EquipGate      s_equip;
 pa::RestRelation   s_aim_rest;
+// Each hand's REST SHAPE (every wrist-subtree node's relation to its wrist), captured off the stock
+// palette while the gun rests, for the modes that hold a hand still: placed rigidly from the live
+// pose, "the fingers still animate" otherwise.
+pa::RestNode       s_aim_fingers[pa::kMaxPaletteNodes];
+pa::RestNode       s_sup_fingers[pa::kMaxPaletteNodes];
+bool               s_aim_fingers_have = false, s_sup_fingers_have = false;
 // The pad, as the game is about to receive it (palettearm_note_pad): steady_clock ticks of the last
 // poll each mask was seen down, 0 = never. Written by the XInput hook, read by the live drive.
 std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0},
-                       s_pad_sprint_ticks{0}, s_pad_move_ticks{0};
+                       s_pad_sprint_ticks{0}, s_pad_move_ticks{0}, s_pad_reload_ticks{0};
 // ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
 // frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
 pa::SprintWatch    s_sprint;
 // The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
 // its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
 // the way wpnoff is matched). A few strstr calls a frame.
-struct EffectivePrefs { int melee_anim; int sup_equip; int sup_anim; float grenade_trim_s; int sprint_anim; };
+struct EffectivePrefs { int melee_anim; int equip_anim; int sup_anim; float grenade_trim_s; int sprint_anim; };
 EffectivePrefs resolve_prefs(const char* cls) {
-    EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_sup_equip, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
+    EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_equip_anim, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
                      g_cfg.pa_sprint_anim};
     if (cls == nullptr || cls[0] == 0 || g_cfg.wpn_anim_count == 0) return e;
     char low[96]; std::size_t n = 0;
@@ -518,7 +525,7 @@ EffectivePrefs resolve_prefs(const char* cls) {
         if (std::strstr(low, m) == nullptr) continue;
         if (a.set & 1u)  e.sprint_anim    = (int)a.sprint;
         if (a.set & 2u)  e.melee_anim     = (int)a.melee;
-        if (a.set & 4u)  e.sup_equip      = (int)a.equip;
+        if (a.set & 4u)  e.equip_anim     = (int)a.equip;
         if (a.set & 8u)  e.grenade_trim_s = a.grenade_trim;
         if (a.set & 16u) e.sup_anim       = (int)a.sup_anim;
         break;
@@ -1196,26 +1203,41 @@ bool drive_palette(const pa::PaletteAccess& access) {
     pa::Mat3 wpn_delta_basis{};
     pa::Vec3 wpn_delta_pos{};
     bool     wpn_delta_valid = false;
-    // THE MELEE PREFERENCE (pameleeanim; see Config.hpp). While a swing plays out: how much the GUN
-    // (and with it the aim hand) is held to its rest pose, and how much the SUPPORT hand is kept
-    // off the animation. The marker the hands are placed against is the effective one -- the live
-    // marker, or the live marker eased toward its rest pose.
-    float    melee_gun_w  = 0.0f;
-    float    melee_left_w = 0.0f;
+    // THE ANIMATION PREFERENCES (pameleeanim / paequipanim / pasprintanim; see Config.hpp), for the
+    // weapon in hand (a wpnanim line over the globals). Three gates -- a melee, an equip, a sprint
+    // -- each carrying an eased 0..1 weight from the LAST live update (the same for the banks), and
+    // one four-mode scheme for all three:
+    //   0 = the whole animation with the IK on top: the free support hand JOINS it
+    //   1 = the gun hand only: the free support hand stays on its controller, a gripping one at its
+    //       rest relation on the gun
+    //   2 = the whole animation and NO tracking: every driven node eased back to the stock pose
+    //   3 = no animation: the gun and the aim hand HELD to their rest pose, the support hand off
+    // Folded into four weights: join / off / stock / hold. `gun_eff_*` is the marker the hands are
+    // placed against -- the live marker, or the live marker eased toward its rest pose by `hold`.
+    const EffectivePrefs prefs = resolve_prefs(::halo::weapon_offset_current_class());
+    float join_w = 0.0f, off_w = 0.0f, stock_w_all = 0.0f, hold_w = 0.0f;
+    {
+        const struct { int mode; float w; } gates[3] = {
+            { prefs.melee_anim,  s_melee.weight },
+            { prefs.equip_anim,  s_equip.weight },
+            { prefs.sprint_anim, s_sprint.weight },
+        };
+        for (const auto& g : gates) {
+            switch (g.mode) {
+                case 0:  join_w = (std::max)(join_w, g.w); break;
+                case 2:  stock_w_all = (std::max)(stock_w_all, g.w); break;
+                case 3:  hold_w = (std::max)(hold_w, g.w); off_w = (std::max)(off_w, g.w); break;
+                default: off_w = (std::max)(off_w, g.w); break;                        // 1
+            }
+        }
+    }
+    float    melee_gun_w  = 0.0f;                            // `hold`, once the rest pose is known
+    float    melee_left_w = off_w;                           // `off`
     pa::Vec3 gun_eff_pos{};
     pa::Mat3 gun_eff_basis{};
-    // THE PREFERENCES IN FORCE for the weapon in hand (per-weapon overrides over the globals), and
-    // what the sprint asks of this frame. pasprintanim: 0 = the whole animation with the IK on top
-    // (the free hand joins), 1 = the gun hand only (the free hand stays on its controller), 2 = the
-    // whole animation and NO tracking (every driven node eased back to the stock pose), 3 = no
-    // sprint animation (the gun and the aim hand held to rest, the free hand on its controller).
-    // Modes 0/1/3 reuse the melee machinery; mode 2 is a blend back to the stock palette at the end.
-    const EffectivePrefs prefs = resolve_prefs(::halo::weapon_offset_current_class());
-    const float sprint_w = s_sprint.weight;                  // last live update's, same for banks
-    const float sprint_join_w  = (prefs.sprint_anim == 0) ? sprint_w : 0.0f;
-    const float sprint_off_w   = (prefs.sprint_anim == 1 || prefs.sprint_anim == 3) ? sprint_w : 0.0f;
-    const float sprint_stock_w = (prefs.sprint_anim == 2) ? sprint_w : 0.0f;
-    const float sprint_hold_w  = (prefs.sprint_anim == 3) ? sprint_w : 0.0f;
+    const float sprint_join_w  = join_w;
+    const float sprint_stock_w = stock_w_all;
+    const float sprint_hold_w  = hold_w;
     // Mode 2 needs the STOCK pose of every driven node as it was before any of this touched it.
     pa::BlamMatrix4x3 stock_snapshot[pa::kMaxPaletteNodes];
     std::uint8_t      stock_nodes[pa::kMaxPaletteNodes];
@@ -1283,12 +1305,15 @@ bool drive_palette(const pa::PaletteAccess& access) {
             pa::Vec3 kick{};
             {
                 const bool live = !access.is_capture_bank;
+                bool weapon_changed = false;
                 if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
                     s_recoil.reset();
-                    s_action.reset(prefs.sup_equip != 0 ? 3.0f : 0.0f);
+                    s_action.reset();
                     s_aim_rest.reset();
                     s_sprint.reset();
+                    s_aim_fingers_have = s_sup_fingers_have = false;
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
+                    weapon_changed = s_recoil_have_tag;
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
@@ -1310,17 +1335,24 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     const bool teach = s_recoil.at_rest() && !s_sprint.active;
                     s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
                                     pa::multiply(minv, pa::orthonormal_basis(swn)),
-                                    g_cfg.pa_sup_anim_gate, adt, prefs.sup_equip != 0,
-                                    pad_age_s(s_pad_swap_ticks), pad_age_s(s_pad_throw_ticks),
+                                    g_cfg.pa_sup_anim_gate, adt, pad_age_s(s_pad_melee_ticks),
+                                    pad_age_s(s_pad_reload_ticks), pad_age_s(s_pad_throw_ticks),
                                     prefs.grenade_trim_s);
                     if (s_sprint.active) s_action.hand.stable = 0;       // no rest is learned through a sprint
                     // ...the AIM wrist's rest relation, for the modes that hold it to the gun...
                     const auto& awn = access.palette[aim_arm.wrist];
                     s_aim_rest.learn(teach, pa::transform_vector(minv, awn.position - marker_now),
                                      pa::multiply(minv, pa::orthonormal_basis(awn)));
-                    // ...and the gate itself, off the melee press the game is being handed.
+                    // ...both hands' rest SHAPES, refreshed whenever the gun and that hand are at rest
+                    // (a shape captured mid-animation would be held instead of the grip)...
+                    if (teach && s_aim_rest.have && s_aim_rest.dev_m < 0.005f && s_aim_rest.stable >= 20)
+                        s_aim_fingers_have = pa::capture_hand_rest(access.palette, aim_arm, s_aim_fingers, pa::kMaxPaletteNodes) || s_aim_fingers_have;
+                    if (teach && s_action.hand.have && s_action.hand.dev_m < 0.005f && s_action.hand.stable >= 20)
+                        s_sup_fingers_have = pa::capture_hand_rest(access.palette, support_arm, s_sup_fingers, pa::kMaxPaletteNodes) || s_sup_fingers_have;
+                    // ...and the gates themselves, off the presses the game is being handed.
                     s_melee.update(pad_age_s(s_pad_melee_ticks), s_recoil, s_action.hand.dev_m,
                                    s_action.hand.dev_deg, adt);
+                    s_equip.update(pad_age_s(s_pad_swap_ticks), weapon_changed, s_recoil, adt);
 #if HALO_VR_DEV
                     // One line as the hand is taken and one as it is given back, with what tripped
                     // it -- the way to tell, from a headset log, whether plain SHOTS tug the hand.
@@ -1353,7 +1385,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                              "melee gate %.2f)",
                                              std::chrono::duration<float>(tnow - s_act_since).count(),
                                              s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
-                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, prefs.sup_equip,
+                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, prefs.equip_anim,
                                              prefs.melee_anim, s_melee.weight);
                         s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
                     }
@@ -1384,18 +1416,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 }
 #endif
             }
-            // THE MELEE PREFERENCE, applied. Mode 0 holds the gun to its rest pose while the swing
-            // plays: the weapon nodes are moved from the live marker onto the eased one BEFORE the
-            // carry (a rigid transform, so whatever animates inside the gun keeps doing so), and the
-            // kick is faded with it. Modes 0 and 1 keep the support hand off the animation.
+            // MODE 3, applied: the gun held to its rest pose while the animation plays. The weapon
+            // nodes are moved from the live marker onto the eased one BEFORE the carry (a rigid
+            // transform, so whatever animates inside the gun keeps doing so) and the kick is faded
+            // with it. Needs a rest pose: the draw of a new weapon has none yet, so it plays.
             gun_eff_pos   = marker_now;
             gun_eff_basis = stock_w;
-            melee_gun_w   = (prefs.melee_anim <= 0 && s_recoil.have_ref) ? s_melee.weight : 0.0f;
-            melee_left_w  = (prefs.melee_anim <= 1) ? s_melee.weight : 0.0f;
-            // ...and the sprint's: mode 3 holds the gun like melee mode 0, modes 1 and 3 keep the
-            // free hand off like melee mode 1.
-            if (s_recoil.have_ref) melee_gun_w = (std::max)(melee_gun_w, sprint_hold_w);
-            melee_left_w = (std::max)(melee_left_w, sprint_off_w);
+            melee_gun_w   = s_recoil.have_ref ? sprint_hold_w : 0.0f;
             if (melee_gun_w > 0.001f) {
                 gun_eff_pos   = marker_now + (s_recoil.ref_pos - marker_now) * melee_gun_w;
                 gun_eff_basis = pa::slerp_basis(stock_w, s_recoil.ref_basis, melee_gun_w);
@@ -2293,6 +2320,17 @@ bool drive_palette(const pa::PaletteAccess& access) {
         pa::apply_hand_shape(access.palette, support_arm, s_sup_curl,
                              s_dbg_grab_w.load(std::memory_order_relaxed));
     }
+    // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
+    // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the
+    // hold weight; the support hand's by the off weight, but only as far as it is on the gun (a
+    // free hand keeps the shape given above).
+    if (melee_gun_w > 0.001f && s_aim_fingers_have)
+        pa::blend_hand_to_rest(access.palette, aim_arm, s_aim_fingers, pa::kMaxPaletteNodes, melee_gun_w);
+    if (melee_left_w > 0.001f && s_sup_fingers_have && tracking.support_valid) {
+        const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
+        if (on_gun > 0.001f)
+            pa::blend_hand_to_rest(access.palette, support_arm, s_sup_fingers, pa::kMaxPaletteNodes, melee_left_w * on_gun);
+    }
 #if HALO_VR_DEV
     if (g_cfg.two_hand_log && !access.is_capture_bank && tracking.support_valid && support_posed) {
         static std::uint32_t s_mn = 0;
@@ -2906,14 +2944,16 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
-void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving) {
-    if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving) return;
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving,
+                         bool reload_down) {
+    if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving && !reload_down) return;
     const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
     if (melee_down)  s_pad_melee_ticks.store(now, std::memory_order_relaxed);
     if (swap_down)   s_pad_swap_ticks.store(now, std::memory_order_relaxed);
     if (throw_down)  s_pad_throw_ticks.store(now, std::memory_order_relaxed);
     if (sprint_down) s_pad_sprint_ticks.store(now, std::memory_order_relaxed);
     if (moving)      s_pad_move_ticks.store(now, std::memory_order_relaxed);
+    if (reload_down) s_pad_reload_ticks.store(now, std::memory_order_relaxed);
 }
 
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],

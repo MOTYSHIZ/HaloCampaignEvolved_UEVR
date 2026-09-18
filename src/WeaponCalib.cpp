@@ -317,7 +317,7 @@ void wpn_calib_write_file() {
         // being copied here to outlive it.
         fprintf(f, "\r\n# wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>  -- the palette\r\n"
                    "# arms' animation preferences for ONE weapon, over the globals pasprintanim /\r\n"
-                   "# pameleeanim / pasupequip / pagrenadetrim / pasupanim (see halo_vr_dev.cfg).\r\n"
+                   "# pameleeanim / paequipanim / pagrenadetrim / pasupanim (see halo_vr_dev.cfg).\r\n"
                    "# Positional; a blank field or '-' keeps the global: wpnanim=FP_Shotgun,3 sets\r\n"
                    "# only the sprint mode, wpnanim=FP_Magnum,,2 only the melee mode. Hand-written\r\n"
                    "# lines here are kept across captures. Delete a line to drop that weapon's overrides.\r\n\r\n");

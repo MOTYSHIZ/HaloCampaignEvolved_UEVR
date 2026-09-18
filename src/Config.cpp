@@ -940,7 +940,7 @@ static bool parse_weapon_offset(const char* val) {
 }
 
 // wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- the palette arms' animation
-// preferences for one weapon (pasprintanim / pameleeanim / pasupequip / pagrenadetrim / pasupanim).
+// preferences for one weapon (pasprintanim / pameleeanim / paequipanim / pagrenadetrim / pasupanim).
 //
 // One line per weapon, repeatable, positional, everything after the match optional -- and unlike
 // wpnoff an EMPTY field (or '-') means "leave that one on its global", so "wpnanim=FP_Shotgun,3"
@@ -1387,7 +1387,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paforearmbone") == 0) { g_cfg.pa_forearm_bone   = (float)v; return true; }
     if (_stricmp(key, "pasupanim")     == 0) { g_cfg.pa_sup_anim       = (int)v;   return true; }
     if (_stricmp(key, "pasupanimgate") == 0) { g_cfg.pa_sup_anim_gate  = (float)v; return true; }
-    if (_stricmp(key, "pasupequip")    == 0) { g_cfg.pa_sup_equip      = (int)v;   return true; }
+    if (_stricmp(key, "paequipanim")   == 0) { g_cfg.pa_equip_anim     = (int)v;   return true; }
     if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
     if (_stricmp(key, "pameleeanim")   == 0) { g_cfg.pa_melee_anim     = (int)v;   return true; }
     if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }

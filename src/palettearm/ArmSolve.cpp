@@ -855,18 +855,18 @@ void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
     }
 }
 
-void ActionWatch::reset(float hold_seconds) {
+void ActionWatch::reset() {
     const float keep = weight;                 // the hand must not pop because the weapon changed
     *this = ActionWatch{};
     weight = keep;
-    hold_s = hold_seconds > 0.0f ? hold_seconds : 0.0f;
 }
 
 float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis,
-                          float gate, float dt, bool equip, float swap_age_s, float grenade_age_s,
+                          float gate, float dt, float melee_age_s, float reload_age_s, float grenade_age_s,
                           float grenade_trim_s) {
     if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
     gate = std::isfinite(gate) ? std::clamp(gate, 0.25f, 4.0f) : 1.0f;
+    const float prev_dev = hand.have ? hand.dev_m : 0.0f;
     hand.learn(gun.at_rest(), hand_pos, hand_basis);
 
     // WHAT COUNTS AS AN ACTION. Two bodies of evidence: the recording (Magnum + Assault Rifle, 5149
@@ -879,48 +879,58 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
     //   the rifle's burst, idle     <= 4.6 cm, <= 5.8 deg  <= 0.7 cm,   <= 4 deg
     //
     // So the OFF HAND is the action signal -- above all its TURN, which separates an action from a
-    // put-away by 44 against 5 degrees -- and the gun leaving rest on its own means only "this
-    // weapon is going away" (or kicked hard). The gun signal and the hold through the draw are
-    // therefore the EQUIP half, and are off unless asked for: with motion controls the player is
-    // already reaching over a shoulder when the animation would snap the hand to the gun.
-    // The bands are smoothsteps so a borderline case tugs rather than throws; `gate` scales them.
+    // put-away by 44 against 5 degrees. The gun leaving rest on its own means only "this weapon
+    // is going away" (or kicked hard), and is the EquipGate's business, not this one's. The bands
+    // are smoothsteps so a borderline case tugs rather than throws; `gate` scales them.
     float target = 0.0f;
-    if (!gun.have_ref) {
-        target = (equip && hold_s > 0.0f) ? 1.0f : 0.0f;      // a weapon on its way up: see reset()
-        hold_s = std::max(0.0f, hold_s - dt);
-    } else {
-        hold_s = 0.0f;
-        if (hand.have) {
-            target = std::max(smoothstep(0.12f * gate, 0.20f * gate, hand.dev_m),
-                              smoothstep(12.0f * gate, 30.0f * gate, hand.dev_deg));
-        }
-        if (equip) {
-            target = std::max(target, smoothstep(0.08f * gate, 0.16f * gate, gun.last_moved_m));
-            target = std::max(target, smoothstep(20.0f * gate, 35.0f * gate, gun.last_turned_deg));
-        }
+    if (gun.have_ref && hand.have) {
+        target = std::max(smoothstep(0.12f * gate, 0.20f * gate, hand.dev_m),
+                          smoothstep(12.0f * gate, 30.0f * gate, hand.dev_deg));
     }
-    // With equip off, a swap the player ASKED for (the button, or the holster gesture that presses
-    // it) keeps the hand on the controller outright until the new weapon has had time to come up,
-    // whatever the off hand does on the way down.
-    if (!equip && swap_age_s >= 0.0f && swap_age_s < 2.5f) target = 0.0f;
 
-    // THE GRENADE THROW'S TAIL. The authored throw (1.35-1.40 s on both recorded weapons) releases
-    // the grenade at ~0.15 s, hangs the arm out to ~0.75 s, then brings the hand back onto the
-    // forestock by ~1.0 s. Played on a free hand, that last part carries the player's hand onto the
-    // gun and drops it back at the controller from there -- "it has a notify or something that tells
-    // the left hand to go back to the support grip, and that might confuse some players". A throw
-    // is always asked for (the trigger gesture or the button press the game reads as throw), so an
-    // action that starts within 0.6 s of one is a throw, and its hand-over is cut `grenade_trim_s`
-    // before the authored end and NOT re-taken until the authored hand is back at rest.
+    // WHICH ACTION, from the press that asked for it (a throw, a reload and a melee are always
+    // asked for -- by a gesture that presses the mask, or a thumb).
     if (target > 0.0f && !engaged) {
-        engaged = true; since_onset_s = 0.0f;
-        grenade = grenade_age_s >= 0.0f && grenade_age_s < 0.6f;
+        engaged = true; since_onset_s = 0.0f; peak_m = 0.0f; descending = 0;
+        kind = Kind::Other;
+        if      (grenade_age_s >= 0.0f && grenade_age_s < 0.6f) kind = Kind::Grenade;
+        else if (reload_age_s  >= 0.0f && reload_age_s  < 0.6f) kind = Kind::Reload;
+        else if (melee_age_s   >= 0.0f && melee_age_s   < 0.6f) kind = Kind::Melee;
     }
-    if (engaged) since_onset_s += dt;
-    if (engaged && grenade && grenade_trim_s > 0.0f && since_onset_s > kThrowSeconds - grenade_trim_s)
-        grenade_cut = true;
-    if (grenade_cut) {
-        if (target <= 0.0f) grenade_cut = false;                // the authored hand is home again
+    if (engaged) {
+        since_onset_s += dt;
+        peak_m = std::max(peak_m, hand.dev_m);
+        descending = (hand.dev_m < prev_dev - 0.008f) ? descending + 1 : 0;     // 0.8 cm a frame
+    }
+
+    // THE RETURN TO THE GRIP. Every action ends with the authored off hand coming home onto the
+    // forestock; played on a free hand that walks the player's hand onto the gun and drops it back
+    // at the controller from there ("a notify or something that tells the left hand to go back to
+    // the support grip, and that might confuse some players"). Measured on the recording:
+    //   * a melee is one peak: out, held, and a single 0.2-0.3 s return (the punch: 107 cm held,
+    //     then 98 / 76 / 52 / 10 cm on consecutive 4-frame steps) -- so the FIRST sustained approach
+    //     after the peak is the return, and the hand lets go there;
+    //   * a reload has a return in the MIDDLE that looks the same at its onset -- the hand bringing
+    //     the magazine in while the gun untilts (105 -> 68 cm with the gun still 89 deg over), then
+    //     out again -- so for a reload, and for anything not asked for (an auto-reload on an empty
+    //     magazine has no press), the approach only counts once the gun is nearly home itself;
+    //   * a throw's final return is too quick to catch by its shape (42 -> 16 cm in four frames after
+    //     a 0.4 s hang), so it keeps its time trim: cut `grenade_trim_s` before the authored end
+    //     (1.35 s: release ~0.15, arm out to ~0.75, home by ~1.0).
+    // A cut holds until the authored hand is home, so the hand is not taken again on the way in.
+    if (engaged && !home_cut) {
+        const bool past_peak  = hand.dev_m < 0.85f * peak_m && hand.dev_m > 0.20f * gate;
+        const bool approaching = descending >= 3 && past_peak;
+        const bool gun_home    = gun.last_moved_m < 0.25f && gun.last_turned_deg < 40.0f;
+        switch (kind) {
+            case Kind::Grenade: if (grenade_trim_s > 0.0f && since_onset_s > kThrowSeconds - grenade_trim_s) home_cut = true; break;
+            case Kind::Melee:   if (approaching) home_cut = true; break;
+            case Kind::Reload:
+            case Kind::Other:   if (approaching && gun_home) home_cut = true; break;
+        }
+    }
+    if (home_cut) {
+        if (target <= 0.0f) home_cut = false;                   // the authored hand is home again
         target = 0.0f;
     }
     last_target = target;
@@ -931,8 +941,72 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
     if (!std::isfinite(weight)) weight = 0.0f;
     weight = std::clamp(weight, 0.0f, 1.0f);
     if (weight < 0.001f && target <= 0.0f) weight = 0.0f;
-    if (weight <= 0.0f && target <= 0.0f) { engaged = false; grenade = false; }
+    if (weight <= 0.0f && target <= 0.0f) { engaged = false; kind = Kind::Other; }
     return weight;
+}
+
+void EquipGate::reset() { *this = EquipGate{}; }
+
+float EquipGate::update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    // THE PUT-AWAY: the gun leaving rest within a second of a swap being asked for. THE DRAW: from
+    // the weapon model changing until the new weapon has come to rest (3 s at most). Neither can
+    // be told from a melee or a big kick by the pose alone -- the swap press and the model change
+    // are what make them equip.
+    const bool away = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
+    if (weapon_changed) { active = true; draw = true; since_s = 0.0f; }
+    else if (!active && swap_age_s >= 0.0f && swap_age_s < 1.0f && away) { active = true; draw = false; since_s = 0.0f; }
+    if (active) {
+        since_s += dt;
+        if (draw) { if ((gun.have_ref && gun.at_rest()) || since_s > 3.0f) active = false; }
+        else      { if (!away || since_s > 2.0f) active = false; }
+    }
+    const float target = active ? 1.0f : 0.0f;
+    const float tau = target > weight ? 0.06f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
+    return weight;
+}
+
+bool capture_hand_rest(const BlamMatrix4x3* palette, const ArmNodes& arm, RestNode* out, std::size_t out_count) {
+    if (palette == nullptr || out == nullptr || out_count < arm.wrist_count) return false;
+    const Mat3 wb = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wb)) return false;
+    const Mat3 winv = transpose(wb);
+    const Vec3 wp   = palette[arm.wrist].position;
+    for (std::size_t i = 0; i < arm.wrist_count; ++i) {
+        const BlamMatrix4x3& n = palette[arm.wrist_subtree[i]];
+        const Mat3 nb = orthonormal_basis(n);
+        if (!valid_basis(nb)) return false;
+        out[i].pos   = transform_vector(winv, n.position - wp);
+        out[i].basis = multiply(winv, nb);
+    }
+    return true;
+}
+
+bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestNode* rest, std::size_t rest_count,
+                        float weight) {
+    if (palette == nullptr || rest == nullptr || rest_count < arm.wrist_count) return false;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight <= 0.0f) return true;
+    const Mat3 wb = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wb)) return false;
+    const Vec3 wp = palette[arm.wrist].position;
+    for (std::size_t i = 0; i < arm.wrist_count; ++i) {
+        const std::uint8_t node = arm.wrist_subtree[i];
+        if (node == arm.wrist) continue;
+        BlamMatrix4x3& n = palette[node];
+        const Mat3 live = orthonormal_basis(n);
+        const Mat3 want = multiply(wb, rest[i].basis);
+        if (!valid_basis(live) || !valid_basis(want)) continue;
+        const Mat3 b = slerp_basis(live, want, weight);
+        const Vec3 p = wp + transform_vector(wb, rest[i].pos);
+        n.forward = b.forward; n.left = b.left; n.up = b.up;
+        n.position = n.position + (p - n.position) * weight;
+    }
+    return true;
 }
 
 void MeleeGate::reset() { *this = MeleeGate{}; }
