@@ -1354,6 +1354,8 @@ static void parse_float_list(const char* val, float* out, int n) {
 
 static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
+    if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
+    if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = std::isfinite(v) ? (float)std::fmin(std::fmax(v, 0.0), 2.0) : 0.4f; return true; }
     if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
     if (_stricmp(key, "meleeext")       == 0) { g_cfg.melee_ext      = clampf((float)v, 0.0f, 20.0f); return true; }
     if (_stricmp(key, "meleereach")     == 0) { g_cfg.melee_reach    = clampf((float)v, 0.0f, 2.0f); return true; }

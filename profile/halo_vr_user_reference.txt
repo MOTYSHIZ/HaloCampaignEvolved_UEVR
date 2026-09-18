@@ -396,6 +396,17 @@
 # Never fires in stick mode (vehicles, cutscenes, death) or during calibration.
 #meleeswing=1
 
+# Punch with the OFF hand too (the hand without the gun). Same speed, extension
+# and reach tests as the aim hand, and the strike goes the way the punch went.
+# It stays out of the way while that hand is busy: reloading, holding the gun
+# two-handed, or working a grenade pouch. 0 = only the aim hand melees.
+#meleeleft=1
+
+# Off-hand chops: how far (metres) the hand must travel during the swing to
+# count as a strike even when it barely reaches away from you -- a downward chop
+# arcs around the shoulder rather than extending. 0 = extension only.
+#meleedisp=0.40
+
 # Controller speed that counts as a strike, m/s. Conservative on purpose: a
 # missed melee costs one swing, a spurious one shoves at the wrong moment.
 #meleespeed=1.50

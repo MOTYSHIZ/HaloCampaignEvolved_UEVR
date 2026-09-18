@@ -1,5 +1,6 @@
 #include "Gesture.hpp"
 #include "TwoHandAim.hpp"   // two_hand_latched(): the grip is shared with the barrel hold
+#include "Holster.hpp"      // holster_offhand_busy / holster_offhand_melee_veto: the off-hand melee's stand-downs
 
 #include "Config.hpp"
 #include "Math.hpp"
@@ -297,6 +298,149 @@ void gesture_reset() {
     s_prev_buttons = 0;
 }
 
+// ---- OFF-HAND MELEE (meleeleft). Ported 2026-09-18 from blindcowboy24's play build of 2026-09-10
+// (Gesture.cpp offhand_melee_update), with the ForceTube shot window left out. A punch does not
+// care which hand throws it. Same three tests and thresholds as the aim hand, own detector state,
+// SHARED cooldown so the two detectors cannot double-fire one press. What differs is what the off
+// hand does all day -- fetch magazines, pull grenades, brace the weapon -- each a fast, extending
+// reach, so each gets an explicit stand-down rather than a threshold tweak. The strike is aimed
+// along the punch (meleeaimmode 1), which is what makes a left hook land left.
+void offhand_melee_update(float dt) {
+    static Vec3      s2_prev_rel{};
+    static float     s2_prev_reach = 0.0f;
+    static bool      s2_have = false;
+    static Vec3      s2_vel{};
+    static float     s2_ext = 0.0f;
+    static long long s2_last = 0;
+    static bool      s2_in_swing = false;
+    static float     s2_pk_spd = 0.0f, s2_pk_ext = 0.0f, s2_pk_reach = 0.0f;
+    static Vec3      s2_rel0{};          // hand-rel-head where this swing began
+    static float     s2_pk_disp = 0.0f;  // furthest it has travelled from there
+
+    if (!g_cfg.melee_left) { s2_have = false; return; }
+
+    // A gap in our own run cadence means a gate upstream was engaged -- reseed instead of
+    // differentiating across it.
+    const long long nowt = now_ticks();
+    if (s2_last != 0 && nowt - s2_last > ms_to_ticks(250)) s2_have = false;
+    s2_last = nowt;
+
+    const auto idx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
+                                         : API::VR::get_left_controller_index();
+    Vec3 pos{}; Quat rot{};
+    Vec3 hpos{}; Quat hrot{};
+    if (!get_pose(idx, &pos, &rot, /*use_aim=*/false) ||
+        !get_pose(API::VR::get_hmd_index(), &hpos, &hrot, /*use_aim=*/false)) {
+        s2_have = false;
+        return;
+    }
+
+    const Vec3  rel{pos.x - hpos.x, pos.y - hpos.y, pos.z - hpos.z};
+    const float reach = std::sqrt(rel.x * rel.x + rel.y * rel.y + rel.z * rel.z);
+    if (reach > g_cfg.melee_max_reach) {
+        s2_have = false;
+        s2_vel = Vec3{0.0f, 0.0f, 0.0f};
+        s2_ext = 0.0f;
+        return;
+    }
+    if (!s2_have) {
+        s2_prev_rel = rel;
+        s2_prev_reach = reach;
+        s2_have = true;
+        return;
+    }
+
+    const Vec3 raw{(rel.x - s2_prev_rel.x) / dt,
+                   (rel.y - s2_prev_rel.y) / dt,
+                   (rel.z - s2_prev_rel.z) / dt};
+    const float ext_raw = (reach - s2_prev_reach) / dt;
+    s2_prev_rel = rel;
+    s2_prev_reach = reach;
+
+    const float a = ema_alpha(g_cfg.melee_tau_ms, dt);
+    s2_vel.x += (raw.x - s2_vel.x) * a;
+    s2_vel.y += (raw.y - s2_vel.y) * a;
+    s2_vel.z += (raw.z - s2_vel.z) * a;
+    s2_ext   += (ext_raw - s2_ext) * a;
+
+    const float speed = std::sqrt(s2_vel.x * s2_vel.x + s2_vel.y * s2_vel.y + s2_vel.z * s2_vel.z);
+    if (speed > g_cfg.melee_max_speed) {
+        s2_have = false;
+        s2_vel = Vec3{0.0f, 0.0f, 0.0f};
+        s2_ext = 0.0f;
+        return;
+    }
+
+    // Swing segmentation, same shape as the aim hand's: peaks over one continuous motion, reported
+    // when the hand settles, so a swing that never fires still leaves its numbers in the log.
+    float disp = 0.0f;
+    if (speed > REST_SPEED_MPS) {
+        if (!s2_in_swing) s2_rel0 = rel;
+        s2_in_swing = true;
+        const float ddx = rel.x - s2_rel0.x, ddy = rel.y - s2_rel0.y, ddz = rel.z - s2_rel0.z;
+        disp = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        if (speed  > s2_pk_spd)   s2_pk_spd   = speed;
+        if (s2_ext > s2_pk_ext)   s2_pk_ext   = s2_ext;
+        if (reach  > s2_pk_reach) s2_pk_reach = reach;
+        if (disp   > s2_pk_disp)  s2_pk_disp  = disp;
+    } else if (s2_in_swing) {
+        s2_in_swing = false;
+        if (g_cfg.melee_log) {
+            const bool would = (s2_pk_spd   >= g_cfg.melee_speed) &&
+                               (s2_pk_ext   >= g_cfg.melee_ext ||
+                                (g_cfg.melee_disp > 0.0f && s2_pk_disp >= g_cfg.melee_disp)) &&
+                               (s2_pk_reach >= g_cfg.melee_reach);
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] MELEE swing (OFF HAND)  speed=%.2f  ext=%.2f  reach=%.2f  disp=%.2f   "
+                "(need spd>=%.2f ext>=%.2f|disp>=%.2f reach>=%.2f) -- %s",
+                s2_pk_spd, s2_pk_ext, s2_pk_reach, s2_pk_disp,
+                g_cfg.melee_speed, g_cfg.melee_ext, g_cfg.melee_disp, g_cfg.melee_reach,
+                would ? "FIRED" : "no");
+        }
+        s2_pk_spd = 0.0f; s2_pk_ext = 0.0f; s2_pk_reach = 0.0f; s2_pk_disp = 0.0f;
+    }
+
+    if (nowt < s_cooldown_until)   return;
+    if (speed < g_cfg.melee_speed) return;
+    // Extension OR travel: a vertical chop barely extends but travels far (see meleedisp).
+    const bool travelled = g_cfg.melee_disp > 0.0f && disp >= g_cfg.melee_disp;
+    if (s2_ext < g_cfg.melee_ext && !travelled) return;
+    if (reach < g_cfg.melee_reach) return;
+
+    // ---- THE OFF HAND'S DAY JOBS, each a hard stand-down, each named in the log.
+    const char* job = nullptr;
+    if      (s_reload != ReloadState::Idle)  job = "reload in progress";
+    else if (two_hand_latched())             job = "two-hand brace";
+    else if (holster_offhand_busy())         job = "grenade in pouch/hand";
+    else if (holster_offhand_melee_veto())   job = "holster veto";
+    if (job != nullptr) {
+        if (g_cfg.melee_log) {
+            API::get()->log_info("[Halo-CampE-UEVR] MELEE (OFF HAND) stood down by %s: "
+                                 "speed=%.2f ext=%.2f reach=%.2f", job, speed, s2_ext, reach);
+        }
+        if (holster_offhand_melee_veto()) s_cooldown_until = nowt + ms_to_ticks(150);
+        return;
+    }
+
+    g_melee_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);
+    s_cooldown_until = nowt + ms_to_ticks(g_cfg.melee_cooldown_ms);
+
+    // Aim hold along the punch, mode 1 only (the shipped mode), exactly as the aim hand does it.
+    if (g_cfg.melee_aim_mode == 1 && g_cfg.melee_aim_hold_ms > 0 && speed > 0.0001f) {
+        const float hy = wrap180(std::atan2(s2_vel.x, -s2_vel.z) * RAD2DEG
+                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
+        const float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, s2_vel.y / speed))) * RAD2DEG;
+        g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
+        g_melee_aim_ctrl_pitch.store(hp, std::memory_order_relaxed);
+        g_melee_aim_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_aim_hold_ms),
+                                     std::memory_order_relaxed);
+    }
+    if (g_cfg.melee_log) {
+        API::get()->log_info("[Halo-CampE-UEVR] MELEE FIRED (OFF HAND): speed=%.2f ext=%.2f reach=%.2f disp=%.2f",
+                             speed, s2_ext, reach, disp);
+    }
+}
+
 void gesture_update(float dt) {
     // ---- GLOBAL STAND-DOWN. States the player did not ask to gesture in AT ALL, so both features
     // go down together and the reload machine is reset (which releases any fire suppression).
@@ -347,6 +491,9 @@ void gesture_update(float dt) {
         s_have_prev = false;
         return;
     }
+
+    // The off hand's own detector (meleeleft). Its own poses and state; shares the cooldown.
+    offhand_melee_update(dt);
 
     // HEAD-RELATIVE, and the head pose is REQUIRED -- no fail-open here. Without it there is no
     // extension measurement at all, and the previous version's fallback (assume the gate passes)

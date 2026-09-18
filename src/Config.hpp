@@ -3594,6 +3594,18 @@ struct Config {
     // Poses are in METRES (see xdist_m, added directly to a pose position in MotionAimControl),
     // so melee_speed is genuinely m/s and not an abstract unit.
     bool  melee_swing     = true;
+    // THE OFF HAND PUNCHES TOO (ported 2026-09-18 from blindcowboy24's play build of 2026-09-10,
+    // Gesture.cpp offhand_melee_update). Same three tests and thresholds as the aim hand, its own
+    // detector state, the SHARED cooldown so the two cannot double-fire one press, and the strike is
+    // aimed along the punch's own direction (meleeaimmode 1). Stands down while the off hand is doing
+    // its actual jobs: a VR reload in progress, a two-hand brace, a grenade in the pouch or hand, and
+    // the off hand's own holster window. Their ForceTube shot window is not ported (no ForceTube here).
+    bool  melee_left      = true;
+    // Off-hand CHOP rescue: extension OR this much travel (m) since the swing began. A vertical chop
+    // arcs around the shoulder -- big speed and over a metre of travel while the extension gate never
+    // passes (their measurement: ext 1.43 / 1.80 against the gate, travel 1.13 / 0.77 m). Jitter stays
+    // under 0.1 m. 0 = extension only. Off hand only, as in the original.
+    float melee_disp      = 0.40f;
 
     // ---- WHAT COUNTS AS A STRIKE: ARM EXTENSION, NOT SPEED.
     //
