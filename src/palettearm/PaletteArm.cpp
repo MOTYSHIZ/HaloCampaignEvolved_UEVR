@@ -600,10 +600,16 @@ struct BakedRest {
     float aim[3],    af[3], al[3], au[3];      // the aim wrist in the marker's frame
 };
 constexpr BakedRest kBakedRest[] = {
-    { "BP_FP_Magnum_WeaponActor_C",       {0.201766f,-0.042830f,-0.077090f}, {-0.000051f,-0.999999f,0.001119f}, {0.999999f,-0.000050f,0.001225f}, {-0.001225f,0.001119f,0.999999f},  {-0.021474f,-0.026848f,-0.005833f}, {0.969820f,-0.052432f,0.238117f}, {-0.067541f,-0.996159f,0.055735f}, {0.234280f,-0.070136f,-0.969636f},  {0.015034f,-0.042510f,-0.000976f}, {0.920774f,-0.097749f,0.377653f}, {0.017840f,0.977636f,0.209546f}, {-0.389690f,-0.186207f,0.901925f} },
-    { "BP_FP_AssaultRifle_WeaponActor_C", {0.077603f,-0.041554f,-0.086049f}, {-0.001633f,-0.999999f,-0.000057f}, {0.999991f,-0.001633f,0.003800f}, {-0.003800f,-0.000051f,0.999993f},  {-0.013816f,0.087310f,0.005125f}, {0.235192f,-0.153203f,0.959799f}, {-0.660931f,-0.749250f,0.042362f}, {0.712639f,-0.644324f,-0.277474f},  {0.015143f,-0.029309f,0.003382f}, {0.998724f,0.029651f,0.040890f}, {-0.034980f,0.990025f,0.136482f}, {-0.036436f,-0.137738f,0.989798f} },
-    // PALETTE REST BAKE, headset session 2026-09-17 20:47 (four learns within 1 cm of each other)
-    { "BP_FP_BattleRifle_WeaponActor_C",  {0.061392f,-0.044304f,-0.088852f}, {0.000174f,-1.000000f,0.000071f}, {0.999995f,0.000174f,0.003024f}, {-0.003024f,0.000071f,0.999995f},  {-0.008629f,0.104027f,0.003097f}, {-0.099536f,-0.193581f,0.976022f}, {-0.659115f,-0.722006f,-0.210417f}, {0.745426f,-0.664255f,-0.055726f},  {0.015424f,-0.025656f,0.007141f}, {0.997062f,0.063652f,0.042604f}, {-0.068366f,0.990379f,0.120311f}, {-0.034536f,-0.122871f,0.991822f} },
+    // Magnum and Assault Rifle from the recording (Tools\handrec\replay, section D); the rest from
+    // PALETTE REST BAKE lines in headset sessions on 2026-09-17 (each the session's last learn of
+    // that class; repeated learns of one class sit within ~1 cm of each other).
+    { "BP_FP_Magnum_WeaponActor_C",         {0.201766f,-0.042830f,-0.077090f}, {-0.000051f,-0.999999f,0.001119f}, {0.999999f,-0.000050f,0.001225f}, {-0.001225f,0.001119f,0.999999f},  {-0.021474f,-0.026848f,-0.005833f}, {0.969820f,-0.052432f,0.238117f}, {-0.067541f,-0.996159f,0.055735f}, {0.234280f,-0.070136f,-0.969636f},  {0.015034f,-0.042510f,-0.000976f}, {0.920774f,-0.097749f,0.377653f}, {0.017840f,0.977636f,0.209546f}, {-0.389690f,-0.186207f,0.901925f} },
+    { "BP_FP_AssaultRifle_WeaponActor_C",   {0.077603f,-0.041554f,-0.086049f}, {-0.001633f,-0.999999f,-0.000057f}, {0.999991f,-0.001633f,0.003800f}, {-0.003800f,-0.000051f,0.999993f},  {-0.013816f,0.087310f,0.005125f}, {0.235192f,-0.153203f,0.959799f}, {-0.660931f,-0.749250f,0.042362f}, {0.712639f,-0.644324f,-0.277474f},  {0.015143f,-0.029309f,0.003382f}, {0.998724f,0.029651f,0.040890f}, {-0.034980f,0.990025f,0.136482f}, {-0.036436f,-0.137738f,0.989798f} },
+    { "BP_FP_BattleRifle_WeaponActor_C",    {0.061392f,-0.044304f,-0.088852f}, {0.000174f,-1.000000f,0.000071f}, {0.999995f,0.000174f,0.003024f}, {-0.003024f,0.000071f,0.999995f},  {-0.008629f,0.104027f,0.003097f}, {-0.099536f,-0.193581f,0.976022f}, {-0.659115f,-0.722006f,-0.210417f}, {0.745426f,-0.664255f,-0.055726f},  {0.015424f,-0.025656f,0.007141f}, {0.997062f,0.063652f,0.042604f}, {-0.068366f,0.990379f,0.120311f}, {-0.034536f,-0.122871f,0.991822f} },
+    { "BP_FP_RocketLauncher_WeaponActor_C", {0.148661f,-0.072636f,-0.076506f}, {0.004689f,-0.999984f,-0.003192f}, {0.999934f,0.004722f,-0.010468f}, {0.010483f,-0.003142f,0.999940f},  {-0.039607f,0.056311f,0.006831f}, {0.483780f,0.293688f,-0.824442f}, {-0.248410f,-0.857195f,-0.451121f}, {-0.839196f,0.423043f,-0.341739f},  {0.014908f,-0.030003f,-0.004434f}, {0.956101f,0.022215f,0.292193f}, {-0.094277f,0.967427f,0.234938f}, {-0.277457f,-0.252172f,0.927053f} },
+    { "BP_FP_SMG_WeaponActor_C",            {0.153560f,-0.034333f,-0.062148f}, {0.007838f,-0.997391f,0.071767f}, {0.999837f,0.008984f,0.015654f}, {-0.016258f,0.071632f,0.997299f},  {-0.023792f,0.040801f,-0.005012f}, {0.868535f,-0.457680f,0.190202f}, {-0.434867f,-0.887817f,-0.150572f}, {0.237778f,0.048064f,-0.970129f},  {0.020873f,-0.037571f,-0.002026f}, {0.994146f,0.067459f,0.084396f}, {-0.083131f,0.976529f,0.198697f}, {-0.069011f,-0.204550f,0.976420f} },
+    { "BP_FP_Shotgun_WeaponActor_C",        {0.100838f,-0.060300f,-0.108161f}, {0.049288f,-0.998683f,0.014269f}, {0.996443f,0.050145f,0.067730f}, {-0.068357f,0.010880f,0.997602f},  {-0.015349f,0.125291f,0.006442f}, {-0.069859f,0.155641f,0.985340f}, {-0.670998f,-0.738239f,0.069037f}, {0.738161f,-0.656338f,0.156007f},  {0.010704f,-0.032683f,0.007254f}, {0.960876f,-0.272215f,0.051141f}, {0.271173f,0.962167f,0.026455f}, {-0.056407f,-0.011552f,0.998341f} },
+    { "BP_FP_SniperRifle_WeaponActor_C",    {0.089370f,-0.056139f,-0.088666f}, {-0.002500f,-0.999334f,-0.036408f}, {0.999975f,-0.002738f,0.006491f}, {-0.006586f,-0.036391f,0.999316f},  {-0.012422f,0.116214f,0.004272f}, {0.235216f,-0.235897f,0.942882f}, {-0.661722f,-0.749415f,-0.022418f}, {0.711898f,-0.618652f,-0.332372f},  {0.011897f,-0.026977f,0.011099f}, {0.990247f,-0.117272f,0.075217f}, {0.114242f,0.992504f,0.043402f}, {-0.079743f,-0.034386f,0.996222f} },
 };
 const BakedRest* baked_rest_for(const char* cls) {
     if (cls == nullptr || cls[0] == 0) return nullptr;
@@ -663,6 +669,12 @@ std::atomic<float>     s_stock_marker_x{0.0f}, s_stock_marker_y{0.0f}, s_stock_m
 std::atomic<long long> s_stock_marker_ticks{0};
 std::atomic<float>     s_stock_rest_x{0.0f}, s_stock_rest_y{0.0f}, s_stock_rest_z{0.0f};
 std::atomic<bool>      s_stock_rest_valid{false};
+// ...and the rest pose's BASIS in UE axes (columns: the marker's X, Y and Z axes in the model
+// frame). Blam's frame is X forward, Y LEFT, Z up; UE's Y is right, so a Blam vector v becomes
+// P.v with P = diag(1,-1,1), and a rotation R becomes P.R.P -- columns P.f, -P.l, P.u.
+std::atomic<float>     s_stock_rest_fx{1.0f}, s_stock_rest_fy{0.0f}, s_stock_rest_fz{0.0f};
+std::atomic<float>     s_stock_rest_rx{0.0f}, s_stock_rest_ry{1.0f}, s_stock_rest_rz{0.0f};
+std::atomic<float>     s_stock_rest_ux{0.0f}, s_stock_rest_uy{0.0f}, s_stock_rest_uz{1.0f};
 std::atomic<int>       s_stock_model_serial{0};      // bumped on every model-tag change
 std::atomic<bool>      s_stock_carry{false};         // the weapon bone was CARRIED to the rig target this live frame
 std::int32_t       s_recoil_tag = 0;
@@ -1440,6 +1452,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     s_stock_rest_x.store(s_recoil.ref_pos.x * cmk, std::memory_order_relaxed);
                     s_stock_rest_y.store(-s_recoil.ref_pos.y * cmk, std::memory_order_relaxed);
                     s_stock_rest_z.store(s_recoil.ref_pos.z * cmk, std::memory_order_relaxed);
+                    const pa::Mat3& b = s_recoil.ref_basis;                // Blam axes: forward / left / up
+                    s_stock_rest_fx.store( b.forward.x, std::memory_order_relaxed);   // X column = P.f
+                    s_stock_rest_fy.store(-b.forward.y, std::memory_order_relaxed);
+                    s_stock_rest_fz.store( b.forward.z, std::memory_order_relaxed);
+                    s_stock_rest_rx.store(-b.left.x,    std::memory_order_relaxed);   // Y column = -P.l
+                    s_stock_rest_ry.store( b.left.y,    std::memory_order_relaxed);
+                    s_stock_rest_rz.store(-b.left.z,    std::memory_order_relaxed);
+                    s_stock_rest_ux.store( b.up.x,      std::memory_order_relaxed);   // Z column = P.u
+                    s_stock_rest_uy.store(-b.up.y,      std::memory_order_relaxed);
+                    s_stock_rest_uz.store( b.up.z,      std::memory_order_relaxed);
                 }
                 s_stock_rest_valid.store(s_recoil.have_ref, std::memory_order_relaxed);
                 s_stock_marker_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(),
@@ -1505,7 +1527,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     const pa::Mat3 minv = pa::transpose(stock_w);
                     [[maybe_unused]] const float was = s_action.weight;
                     // The sprint first: the rest relations below must not learn through one.
-                    s_sprint.update(pad_age_s(s_pad_sprint_ticks), pad_age_s(s_pad_move_ticks), s_recoil, adt);
+                    {
+                        // ...and not within two seconds of a reload, melee or throw being asked for.
+                        float other = -1.0f;
+                        const auto take = [&](float a) { if (a >= 0.0f && (other < 0.0f || a < other)) other = a; };
+                        take(pad_age_s(s_pad_reload_ticks)); take(pad_age_s(s_pad_melee_ticks)); take(pad_age_s(s_pad_throw_ticks));
+                        s_sprint.update(pad_age_s(s_pad_sprint_ticks), pad_age_s(s_pad_move_ticks), s_recoil, adt, other);
+                    }
                     const bool teach = s_recoil.at_rest() && !s_sprint.active;
                     s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
                                     pa::multiply(minv, pa::orthonormal_basis(swn)),
@@ -3180,7 +3208,7 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
-bool palettearm_stock_marker_rest_ue(float out_cm[3]) {
+bool palettearm_stock_marker_rest_ue(float out_cm[3], float x_axis[3], float y_axis[3], float z_axis[3]) {
     if (out_cm == nullptr || !s_stock_rest_valid.load(std::memory_order_relaxed)) return false;
     const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
     if (t == 0) return false;
@@ -3189,7 +3217,26 @@ bool palettearm_stock_marker_rest_ue(float out_cm[3]) {
     out_cm[0] = s_stock_rest_x.load(std::memory_order_relaxed);
     out_cm[1] = s_stock_rest_y.load(std::memory_order_relaxed);
     out_cm[2] = s_stock_rest_z.load(std::memory_order_relaxed);
-    return std::isfinite(out_cm[0]) && std::isfinite(out_cm[1]) && std::isfinite(out_cm[2]);
+    bool ok = std::isfinite(out_cm[0]) && std::isfinite(out_cm[1]) && std::isfinite(out_cm[2]);
+    if (x_axis != nullptr) {
+        x_axis[0] = s_stock_rest_fx.load(std::memory_order_relaxed);
+        x_axis[1] = s_stock_rest_fy.load(std::memory_order_relaxed);
+        x_axis[2] = s_stock_rest_fz.load(std::memory_order_relaxed);
+        ok = ok && std::isfinite(x_axis[0]) && std::isfinite(x_axis[1]) && std::isfinite(x_axis[2]);
+    }
+    if (y_axis != nullptr) {
+        y_axis[0] = s_stock_rest_rx.load(std::memory_order_relaxed);
+        y_axis[1] = s_stock_rest_ry.load(std::memory_order_relaxed);
+        y_axis[2] = s_stock_rest_rz.load(std::memory_order_relaxed);
+        ok = ok && std::isfinite(y_axis[0]) && std::isfinite(y_axis[1]) && std::isfinite(y_axis[2]);
+    }
+    if (z_axis != nullptr) {
+        z_axis[0] = s_stock_rest_ux.load(std::memory_order_relaxed);
+        z_axis[1] = s_stock_rest_uy.load(std::memory_order_relaxed);
+        z_axis[2] = s_stock_rest_uz.load(std::memory_order_relaxed);
+        ok = ok && std::isfinite(z_axis[0]) && std::isfinite(z_axis[1]) && std::isfinite(z_axis[2]);
+    }
+    return ok;
 }
 
 int palettearm_model_serial() { return s_stock_model_serial.load(std::memory_order_relaxed); }

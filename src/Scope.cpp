@@ -321,6 +321,63 @@ void place_pane_from_vrig(API::UObject* pane) {
     set_world_rotation(pane, (double)wp, (double)wy, (double)wr);
 }
 
+// A rotation from its three column axes -- the exact inverse of quat_to_mat3() (Math.cpp), whose
+// m[i][0..2] rows carry X/Y/Z columns as the images of the axes. Shepperd's branches, so a basis
+// near any of the four singular cases stays exact.
+Quat quat_from_axes(const Vec3& X, const Vec3& Y, const Vec3& Z) {
+    const float m00 = X.x, m10 = X.y, m20 = X.z;
+    const float m01 = Y.x, m11 = Y.y, m21 = Y.z;
+    const float m02 = Z.x, m12 = Z.y, m22 = Z.z;
+    const float tr = m00 + m11 + m22;
+    Quat q{0.0f, 0.0f, 0.0f, 1.0f};
+    if (tr > 0.0f) {
+        const float s = std::sqrt(tr + 1.0f) * 2.0f;
+        q.w = 0.25f * s; q.x = (m21 - m12) / s; q.y = (m02 - m20) / s; q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s; q.x = 0.25f * s; q.y = (m01 + m10) / s; q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s; q.x = (m01 + m10) / s; q.y = 0.25f * s; q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s; q.x = (m02 + m20) / s; q.y = (m12 + m21) / s; q.z = 0.25f * s;
+    }
+    return q;
+}
+
+// THE SOCKET-FRAME PLACEMENT, IN CLOSED FORM (palette route). The pane's calibrated place is
+// root + R*t in the rig frame (t = scopedist/right/up, the rot trims as a rotation Qt). The
+// PrimaryWeapon socket is the weapon marker node, whose rest pose in the model frame is (S, M) --
+// the palette knows it (learned, remembered or baked). Under this route the root is w - R*S and
+// the carried socket sits at w with basis R*M, so relative to the socket the pane is
+//     M^-1 (t - S)   and   M^-1 Qt
+// -- per weapon constants, no world transform read on any clock. Checked against rig mode's own
+// KeepWorld conversions: the Battle Rifle's settled SPACE SWITCH numbers (-0.3, -8, 30) are
+// exactly what this gives from its bake line. Every other route (a KeepWorld attach of a pane
+// written on one tick against a socket read on another) put one tick of whatever was moving --
+// the body, the gun, the draw -- into the offset, and the pane rode the weapon wrong until the
+// next swap. False until the palette knows this weapon's rest.
+bool socket_relative_from_rest(Vec3* rel_loc, Vec3* rel_rot_deg) {
+    float S[3] = {0, 0, 0}, X[3] = {0, 0, 0}, Y[3] = {0, 0, 0}, Z[3] = {0, 0, 0};
+    if (rel_loc == nullptr || rel_rot_deg == nullptr) return false;
+    if (!::halo::palettearm_stock_marker_rest_ue(S, X, Y, Z)) return false;
+    const Vec3 xa{X[0], X[1], X[2]}, ya{Y[0], Y[1], Y[2]}, za{Z[0], Z[1], Z[2]};
+    const Vec3 d{g_cfg.scope_dist - S[0], g_cfg.scope_right - S[1], g_cfg.scope_up - S[2]};
+    // M^-1 = M^T: the columns become the rows.
+    *rel_loc = Vec3{xa.x * d.x + xa.y * d.y + xa.z * d.z,
+                    ya.x * d.x + ya.y * d.y + ya.z * d.z,
+                    za.x * d.x + za.y * d.y + za.z * d.z};
+    const Quat qM   = quat_from_axes(xa, ya, za);
+    const Quat qt   = rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+    const Quat qrel = quat_mul(quat_conj(qM), qt);
+    float p = 0.0f, y = 0.0f, r = 0.0f;
+    quat_to_rotator(qrel.x, qrel.y, qrel.z, qrel.w, &p, &y, &r);
+    *rel_rot_deg = Vec3{p, y, r};
+    return std::isfinite(rel_loc->x) && std::isfinite(rel_loc->y) && std::isfinite(rel_loc->z) &&
+           std::isfinite(p) && std::isfinite(y) && std::isfinite(r);
+}
+
 // PIN THE CAPTURE'S EXPOSURE.
 //
 // A post-processed capture source (FinalColorHDR / FinalToneCurveHDR) is the only way to get the
@@ -1558,6 +1615,14 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
         float R[3] = {0.0f, 0.0f, 0.0f};
         if (::halo::palettearm_stock_marker_rest_ue(R)) {
             s_rest = Vec3{R[0], R[1], R[2]}; s_rest_valid = true; rest_authoritative = true;
+            // AND THERE IS NOTHING TO WAIT FOR. With the rest known the socket-frame placement is
+            // written in closed form at the attach (socket_relative_from_rest), so the bone's
+            // motion, the carry and the animation no longer enter into it: convert now. (The
+            // velocity state below is left untouched; a fallback to it starts from the reset a
+            // model change already forces.)
+            g_socket_rest_est = s_rest;
+            s_waiting = false;
+            return !placing;
         }
     } else {
         if (s_src_palette) { s_src_palette = false; s_prev_valid = false; s_rest_valid = false; }
@@ -1907,6 +1972,21 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
             // which re-attaches... a permanent oscillation between the two frames, at tick rate, on a
             // pane the player is looking through.
             if (parent_changed) s_pane_anchored = false;
+
+            // PALETTE ROUTE: OVERWRITE THE ENGINE'S CONVERSION WITH THE CLOSED FORM. The KeepWorld
+            // attach above computed a socket-relative transform from a pane written on one clock
+            // against a socket read on another; while the palette knows this weapon's rest, the
+            // exact numbers rig mode would settle on are known without reading anything (see
+            // socket_relative_from_rest), so they are written over it here, before the readback
+            // below prints them. Whatever the body, the gun or the draw were doing at the attach
+            // no longer matters.
+            if (ok && want_socket != nullptr && vrig_fresh(tick)) {
+                Vec3 rl_c{}, rr_c{};
+                if (socket_relative_from_rest(&rl_c, &rr_c)) {
+                    set_relative_location(s_pane.ptr, (double)rl_c.x, (double)rl_c.y, (double)rl_c.z);
+                    set_relative_rotation(s_pane.ptr, (double)rr_c.x, (double)rr_c.y, (double)rr_c.z);
+                }
+            }
 
             // ---- THE CONVERTED NUMBERS, PRINTED IN A FORM THAT CAN BE CANONIZED ------------------
             //

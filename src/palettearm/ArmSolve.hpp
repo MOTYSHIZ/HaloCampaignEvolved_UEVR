@@ -395,13 +395,18 @@ struct MeleeGate {
 // within the last three seconds (`button_age_s`: the sprint mask, a hold or a toggle). Ends when the
 // stick or the pose lets go, or the rest pose is lost. The caller must stop teaching rest poses
 // while this is active, or the sprint pose becomes "rest" after a second and a half.
+// `other_age_s` = seconds since a reload, melee or throw was asked for (negative = never): within
+// two seconds of one it is not a sprint and a running one ends -- a RELOAD also takes the gun
+// "well away from rest" while the stick is pushed, and with a sprint asked for moments earlier
+// that read as a sprint and held the free hand off the reload (headset, 2026-09-17).
 struct SprintWatch {
     bool  active{false};
     float quiet_s{0.0f};
     float weight{0.0f};          // eased 0..1
 
     void  reset();
-    float update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt);
+    float update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt,
+                 float other_age_s = -1.0f);
 };
 
 } // namespace halo::palettearm
