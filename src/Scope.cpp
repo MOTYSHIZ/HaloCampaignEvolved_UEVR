@@ -3923,6 +3923,21 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // Ordering rule worth keeping: this call must precede every early return in scope_apply that can
     // happen while the pane is alive. It is the only thing that keeps the attachment frame and the
     // calibration frame in agreement.
+    // PALETTE ROUTE, WHILE THE PANE WAITS ON THE RIG ORIGIN FOR THE SOCKET: keep it on the gun --
+    // and do it HERE, before the attachment update, which is where the KeepWorld conversion is
+    // taken. The rig origin is a camera-mounted, body-frame mesh under this route, so a pane left
+    // there stands still while the gun moves; re-writing it from the virtual frame each tick keeps
+    // the world transform the conversion reads correct at the moment it is taken -- but only if
+    // the write precedes the read. This used to sit after the placement block below, so the
+    // conversion read the pane as written at the END OF THE PREVIOUS TICK against a socket at this
+    // tick's position, and a conversion taken while walking baked one tick of the body's motion
+    // into the socket offset ("offset slightly in the direction I was locomoting" on the first
+    // scope-in after a swap). Two reflected calls per tick, only while unsocketed, never during a
+    // calibration hold (which owns the pane) and never on the aim-ray path.
+    if (vrig_fresh(tick) && s_pane_anchored && s_attached_socket == nullptr && !s_calib_held &&
+        g_cfg.scope_mount == 1 && !s_relative_rejected) {
+        place_pane_from_vrig(pane);
+    }
     update_pane_attachment(rig, true, tick);
 
     // ---- CALIBRATION GESTURE, before the ordinary placement so it owns the pane while held.
@@ -4168,16 +4183,8 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                              g_cfg.scope_rot_r);
     }
 
-    // PALETTE ROUTE, WHILE THE PANE WAITS ON THE RIG ORIGIN FOR THE SOCKET: keep it on the gun.
-    // The rig origin is a camera-mounted, body-frame mesh under this route, so a pane left there
-    // stands still while the gun moves; re-writing it from the virtual frame each tick keeps the
-    // world transform the KeepWorld conversion will read correct at the moment it is taken. Two
-    // reflected calls per tick, only while unsocketed, never during a calibration hold (which
-    // owns the pane) and never on the aim-ray path (which has no rig frame to be wrong about).
-    if (vrig_fresh(tick) && s_pane_anchored && s_attached_socket == nullptr && !s_calib_held &&
-        g_cfg.scope_mount == 1 && !s_relative_rejected) {
-        place_pane_from_vrig(pane);
-    }
+    // (The per-tick re-place of a pane waiting for the socket lives ABOVE the attachment update,
+    // where the conversion reads it -- see the note there.)
 
     // Live-tunable brightness, same as the reticule tint path.
     if (auto* mid = s_pane_mid.get_checked(L"MaterialInstanceDynamic")) {
