@@ -76,6 +76,9 @@ int  palettearm_model_serial();
 // within the last quarter second). False at spawn until the carry is up, during an origin hold,
 // and whenever the live drive is not running: the socket then sits at the stock animation's place.
 bool palettearm_carry_active();
+// On foot with NO weapon (the state hidearms keys off): the aim hand takes the empty-hand gestures
+// only then, since with a weapon in it the trigger is the weapon's. Game thread.
+void palettearm_note_unarmed(bool unarmed);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

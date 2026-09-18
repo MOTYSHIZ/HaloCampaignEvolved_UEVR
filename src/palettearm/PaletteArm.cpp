@@ -482,6 +482,13 @@ struct GripRelation {
 GripRelation s_aim_relation;
 std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
 float s_sup_curl = 0.0f;                        // the support hand's current curl, eased (0 = relaxed)
+// EMPTY-HAND GESTURES (pagesture; see Config.hpp). The controller inputs are sampled on the GAME
+// tick (capture_tracking) and only read here -- the drive runs inside the game's own builder and
+// must not call into the runtime. [0] = the aim hand, [1] = the support hand.
+std::atomic<bool> s_in_grip[2]{}, s_in_trig[2]{}, s_in_thumb[2]{};
+std::atomic<bool> s_unarmed{false};             // on foot with no weapon (palettearm_note_unarmed)
+pa::HandGesture   s_gesture[2]{};               // eased, per finger
+float             s_aim_gesture_w = 0.0f;       // eased 0..1: how much of the aim hand is the gesture's
 // ---- THE KICK THE RIG CARRY LEAVES IN (parecoil; see Config.hpp and pa::RecoilPass). Learned off the
 // live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
 // new weapon has rested.
@@ -2631,20 +2638,44 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // ---- THE SUPPORT HAND'S SHAPE (pahandpose; see Config.hpp). Eased here, on the live drive's own
     // clock, so a grip press closes the hand over ~90 ms instead of snapping; the banks take the
     // result through the mirror like every other driven node.
-    if (g_cfg.pa_hand_pose && tracking.support_valid && support_posed) {
+    //
+    // EMPTY-HAND GESTURES (pagesture; see Config.hpp): the same three key poses per FINGER, from the
+    // controller's grip, trigger and thumb sensor. The support hand whenever it is free -- on the
+    // gun the grab weight hands the fingers back to the authored grip, as before -- and the AIM
+    // hand only while unarmed, eased in and out so picking a weapon up does not snap the fingers.
+    if (g_cfg.pa_hand_pose) {
+        const float rest = g_cfg.pa_hand_rest < -1.0f ? -1.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
         if (!access.is_capture_bank) {
             static std::chrono::steady_clock::time_point s_shape_t{};
             const auto now = std::chrono::steady_clock::now();
             float dt = std::chrono::duration<float>(now - s_shape_t).count();
             s_shape_t = now;
             if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
-            const float rest   = g_cfg.pa_hand_rest < -1.0f ? -1.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
+            const float k = 1.0f - std::exp(-dt / 0.045f);
             const float target = ::halo::two_hand_support_grip_held() ? 1.0f : rest;
-            const float k      = 1.0f - std::exp(-dt / 0.045f);
             s_sup_curl += (target - s_sup_curl) * k;
+            if (g_cfg.pa_gesture != 0) {
+                for (int h = 0; h < 2; ++h) {
+                    // The support hand's grip is the hold's own (it honours bindtwohand too).
+                    const bool grip = (h == 1) ? ::halo::two_hand_support_grip_held()
+                                               : s_in_grip[0].load(std::memory_order_relaxed);
+                    pa::ease_gesture(s_gesture[h],
+                                     pa::gesture_for_inputs(grip, s_in_trig[h].load(std::memory_order_relaxed),
+                                                            s_in_thumb[h].load(std::memory_order_relaxed), rest),
+                                     dt, 0.045f);
+                }
+            }
+            const float aw = (g_cfg.pa_gesture != 0 && s_unarmed.load(std::memory_order_relaxed)) ? 1.0f : 0.0f;
+            s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));
+            if (s_aim_gesture_w < 0.001f && aw <= 0.0f) s_aim_gesture_w = 0.0f;
         }
-        pa::apply_hand_shape(access.palette, support_arm, s_sup_curl,
-                             s_dbg_grab_w.load(std::memory_order_relaxed));
+        if (tracking.support_valid && support_posed) {
+            const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
+            if (g_cfg.pa_gesture != 0) pa::apply_hand_gesture(access.palette, support_arm, s_gesture[1], on_gun, g_cfg.pa_thumb_over);
+            else                       pa::apply_hand_shape(access.palette, support_arm, s_sup_curl, on_gun);
+        }
+        if (s_aim_gesture_w > 0.001f)
+            pa::apply_hand_gesture(access.palette, aim_arm, s_gesture[0], 1.0f - s_aim_gesture_w, g_cfg.pa_thumb_over);
     }
     // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
     // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the
@@ -2811,7 +2842,37 @@ bool capture_tracking_into(TrackingSnapshot& snap) {
     return true;
 }
 
+// The gesture inputs, GAME THREAD. Handles are retried until the runtime has built its action set
+// (a cached null would silently kill the feature). The thumb sensor is ANY of the capacitive thumb
+// actions UEVR binds for that hand -- it binds no thumbstick- or trackpad-touch action at all.
+void sample_hand_inputs() {
+    if (g_cfg.pa_gesture == 0) return;
+    static UEVR_ActionHandle s_grip = nullptr, s_trig = nullptr;
+    static UEVR_ActionHandle s_touch[2][3] = {{nullptr, nullptr, nullptr}, {nullptr, nullptr, nullptr}};   // [left,right][A,B,rest]
+    static const char* const kTouch[2][3] = {
+        {"/actions/default/in/AButtonTouchLeft",  "/actions/default/in/BButtonTouchLeft",  "/actions/default/in/ThumbrestTouchLeft"},
+        {"/actions/default/in/AButtonTouchRight", "/actions/default/in/BButtonTouchRight", "/actions/default/in/ThumbrestTouchRight"}};
+    if (s_grip == nullptr) s_grip = API::VR::get_action_handle("/actions/default/in/Grip");
+    if (s_trig == nullptr) s_trig = API::VR::get_action_handle("/actions/default/in/Trigger");
+    for (int side = 0; side < 2; ++side)
+        for (int k = 0; k < 3; ++k)
+            if (s_touch[side][k] == nullptr) s_touch[side][k] = API::VR::get_action_handle(kTouch[side][k]);
+    // hand 0 = aim, 1 = support; side 0 = left, 1 = right
+    for (int hand = 0; hand < 2; ++hand) {
+        const bool is_left = (hand == 0) == (g_cfg.aim_left_hand != 0);
+        const int  side    = is_left ? 0 : 1;
+        const auto src     = is_left ? API::VR::get_left_joystick_source() : API::VR::get_right_joystick_source();
+        bool thumb = false;
+        for (int k = 0; k < 3; ++k)
+            thumb = thumb || (s_touch[side][k] != nullptr && API::VR::is_action_active(s_touch[side][k], src));
+        s_in_grip[hand].store(s_grip != nullptr && API::VR::is_action_active(s_grip, src), std::memory_order_relaxed);
+        s_in_trig[hand].store(s_trig != nullptr && API::VR::is_action_active(s_trig, src), std::memory_order_relaxed);
+        s_in_thumb[hand].store(thumb, std::memory_order_relaxed);
+    }
+}
+
 void capture_tracking() {
+    sample_hand_inputs();
     TrackingSnapshot snap{};
     if (!capture_tracking_into(snap)) {
         s_tracking_ready.store(false, std::memory_order_release);
@@ -3307,6 +3368,8 @@ bool palettearm_stock_marker_rest_ue(float out_cm[3], float x_axis[3], float y_a
     }
     return ok;
 }
+
+void palettearm_note_unarmed(bool unarmed) { s_unarmed.store(unarmed, std::memory_order_relaxed); }
 
 int palettearm_model_serial() { return s_stock_model_serial.load(std::memory_order_relaxed); }
 

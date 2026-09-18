@@ -201,6 +201,33 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
 // Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
 bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
 
+// ---- EMPTY-HAND GESTURES (2026-09-18, by request). The same three key poses, blended PER FINGER
+// instead of per hand -- no new authored poses are needed, because every finger is its own chain
+// and a point is just "index from the open hand, the rest from the fist".
+//
+//   curl[]      index, middle, ring, pinky, thumb -- each on apply_hand_shape's axis (-1 open ..
+//               0 relaxed .. 1 fist)
+//   thumb_over  how far PAST the fist the thumb goes (0..1 of `over_gain`): the punch the fist was
+//               taken from holds its thumb beside the fingers, and a clenched fist wraps it over
+//               them. Extrapolated along the thumb's own open->fist arc; only used at thumb curl 1.
+struct HandGesture {
+    float curl[5]{0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float thumb_over{0.0f};
+};
+// What a controller's three inputs mean on an empty hand. `rest` is the relaxed hand's curl.
+//   grip + trigger + thumb sensor   a fist, thumb clenched over
+//   grip + trigger                  thumbs up
+//   grip + thumb sensor             pointing, thumb down
+//   grip                            pointing, thumb out
+//   trigger alone                   the relaxed hand with the index pulled in
+//   nothing                         the relaxed hand
+HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest);
+// Ease `current` toward `target`, finger by finger (tau seconds, first-order).
+void ease_gesture(HandGesture& current, const HandGesture& target, float dt, float tau);
+// `over_gain` = how far past the fist a full thumb_over goes, as a fraction of the open->fist arc.
+bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandGesture& gesture,
+                        float authored, float over_gain = 0.35f);
+
 // A rotation part of the way from `a` to `b`, along the SHORT ARC.
 //
 // blend_basis() is a normalised lerp, and says itself that it is only meaningful for nearby
