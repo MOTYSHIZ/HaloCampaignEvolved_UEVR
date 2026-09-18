@@ -1,6 +1,7 @@
 #include "PaletteArm.hpp"
 
 #include "ArmSolve.hpp"
+#include "HandPoseJson.hpp"
 #include "NodeDiscovery.hpp"
 #include "NodeMap.hpp"
 #include "PaletteHook.hpp"
@@ -489,6 +490,14 @@ std::atomic<bool> s_in_grip[2]{}, s_in_trig[2]{}, s_in_thumb[2]{};
 std::atomic<bool> s_unarmed{false};             // on foot with no weapon (palettearm_note_unarmed)
 pa::HandPoseBlend s_pose_blend[2]{};            // eased weight of each tuned pose, per hand
 float             s_aim_gesture_w = 0.0f;       // eased 0..1: how much of the aim hand is the gesture's
+// THE POSE TABLE, from halo_vr_handposes.json (palettearm_hand_poses_poll). Double-buffered: the poll
+// fills the back copy and flips the index, the drive copies the front one -- a reload never hands the
+// drive a half-written table. Starts as the built-in poses, so a missing file changes nothing.
+struct PoseTable { pa::HandPose p[pa::kHandPoseCount]; };
+PoseTable         s_pose_tables[2]{};
+std::atomic<int>  s_pose_front{-1};             // -1 = not loaded yet: use the built-in table
+char              s_pose_path[MAX_PATH]{};
+unsigned long long s_pose_stamp = ~0ull;         // last write time seen; ~0 = never looked
 // ---- THE KICK THE RIG CARRY LEAVES IN (parecoil; see Config.hpp and pa::RecoilPass). Learned off the
 // live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
 // new weapon has rested.
@@ -2640,7 +2649,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // result through the mirror like every other driven node.
     //
     // EMPTY-HAND GESTURES (pagesture; see Config.hpp): the controller's grip, trigger and thumb
-    // sensor pick a tuned pose from the table (pahand), eased between. The support hand whenever it is free -- on the
+    // sensor pick a tuned pose from the table (halo_vr_handposes.json), eased between. The support hand whenever it is free -- on the
     // gun the grab weight hands the fingers back to the authored grip, as before -- and the AIM
     // hand only while unarmed, eased in and out so picking a weapon up does not snap the fingers.
     if (g_cfg.pa_hand_pose) {
@@ -2669,22 +2678,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
             s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));
             if (s_aim_gesture_w < 0.001f && aw <= 0.0f) s_aim_gesture_w = 0.0f;
         }
-        // THE POSE TABLE (pahand / pahandthumb; see Config.hpp), converted per drive: ~300 floats
-        // copied, no engine call. pahandrest offsets the fingers each pose leaves relaxed.
+        // THE POSE TABLE (halo_vr_handposes.json), copied per drive: ~1.3 KB, no engine call.
+        // pahandrest offsets the fingers each pose leaves relaxed.
         pa::HandPose table[pa::kHandPoseCount];
-        for (int p = 0; p < pa::kHandPoseCount && p < kHandPoseTunes; ++p) {
-            const HandPoseTune& src = g_cfg.hand_poses.pose[p];
-            pa::HandPose& dst = table[p];
-            for (int f = 0; f < pa::kHandFingers; ++f) {
-                dst.finger[f].curl = src.f[f].curl;
-                for (int j = 0; j < pa::kHandSegments; ++j) {
-                    dst.finger[f].seg[j] = src.f[f].seg[j];
-                    for (int a = 0; a < 3; ++a) dst.finger[f].rot[j][a] = src.f[f].rot[j * 3 + a];
-                }
-            }
-            dst.thumb_over = src.thumb_over;
-            dst.thumb_ext  = src.thumb_ext;
-            dst.thumb_out  = src.thumb_out;
+        {
+            const int front = s_pose_front.load(std::memory_order_acquire);
+            if (front < 0) pa::default_hand_poses(table);
+            else for (int p = 0; p < pa::kHandPoseCount; ++p) table[p] = s_pose_tables[front].p[p];
         }
         if (rest != 0.0f) {
             for (int f = 0; f < pa::kHandFingers; ++f) table[static_cast<int>(pa::HandPoseId::Rest)].finger[f].curl += rest;
@@ -3380,6 +3380,74 @@ bool palettearm_parse_key(const char* key, double v) {
 }
 
 const char* palettearm_status() { return s_status; }
+
+// ---- halo_vr_handposes.json ---------------------------------------------------------------------
+namespace {
+unsigned long long pose_file_stamp(const char* path) {
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return 0;   // 0 = absent
+    return (static_cast<unsigned long long>(fa.ftLastWriteTime.dwHighDateTime) << 32) |
+           fa.ftLastWriteTime.dwLowDateTime;
+}
+void publish_pose_table(const pa::HandPose (&t)[pa::kHandPoseCount]) {
+    const int back = (s_pose_front.load(std::memory_order_relaxed) == 0) ? 1 : 0;
+    for (int p = 0; p < pa::kHandPoseCount; ++p) s_pose_tables[back].p[p] = t[p];
+    s_pose_front.store(back, std::memory_order_release);
+}
+} // namespace
+
+void palettearm_hand_poses_init(const char* path) {
+    if (path == nullptr || path[0] == 0) return;
+    strcpy_s(s_pose_path, sizeof(s_pose_path), path);
+    // Written ONCE, from the built-in table, when the player has no file. Never touched again:
+    // it is theirs (user-owned, never shipped). 'wx' refuses to open a file that already exists.
+    FILE* f = nullptr;
+    if (fopen_s(&f, s_pose_path, "wx") == 0 && f != nullptr) {
+        pa::HandPose def[pa::kHandPoseCount];
+        pa::default_hand_poses(def);
+        const std::string text = pa::hand_poses_to_json(def);
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+        API::get()->log_info("[Halo-CampE-UEVR] HAND POSES: wrote the built-in poses to %s", s_pose_path);
+    }
+    palettearm_hand_poses_poll();
+}
+
+void palettearm_hand_poses_poll() {
+    if (s_pose_path[0] == 0) return;
+    const unsigned long long stamp = pose_file_stamp(s_pose_path);
+    if (stamp == s_pose_stamp) return;          // one stat call per poll; the file is read on change only
+    s_pose_stamp = stamp;
+    pa::HandPose t[pa::kHandPoseCount];
+    pa::default_hand_poses(t);                  // a value removed from the file reverts to built-in
+    if (stamp == 0) {
+        publish_pose_table(t);
+        API::get()->log_info("[Halo-CampE-UEVR] HAND POSES: no %s -- using the built-in poses", s_pose_path);
+        return;
+    }
+    std::string text;
+    FILE* f = nullptr;
+    if (fopen_s(&f, s_pose_path, "rb") != 0 || f == nullptr) {
+        s_pose_stamp = ~0ull;                   // an editor may hold it mid-save: try again next poll
+        return;
+    }
+    char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < (1u << 20)) text.append(buf, n);
+    fclose(f);
+    const pa::HandPoseJsonResult r = pa::hand_poses_from_json(text.c_str(), text.size(), t);
+    if (!r.ok) {
+        // Keep what is running: a half-typed edit must not snap the hands back to the defaults.
+        API::get()->log_info("[Halo-CampE-UEVR] HAND POSES: %s NOT applied -- %s. The previous poses stay "
+                             "in use until the file reads cleanly.", s_pose_path, r.error.c_str());
+        return;
+    }
+    publish_pose_table(t);
+    std::string ign;
+    for (const std::string& k : r.ignored) { if (!ign.empty()) ign += ", "; ign += k; }
+    API::get()->log_info("[Halo-CampE-UEVR] HAND POSES: loaded %d value(s) from %s%s%s", r.values, s_pose_path,
+                         ign.empty() ? "" : " -- IGNORED (no such pose/finger/field): ", ign.c_str());
+}
 const char* palettearm_status_geom() { return s_status_geom; }
 bool palettearm_stock_marker_rest_ue(float out_cm[3], float x_axis[3], float y_axis[3], float z_axis[3]) {
     if (out_cm == nullptr || !s_stock_rest_valid.load(std::memory_order_relaxed)) return false;

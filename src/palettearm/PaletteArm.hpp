@@ -31,6 +31,12 @@ void palettearm_release();
 // `else if` toward its 128-deep block limit and the chain is already near it (fatal C1061).
 bool palettearm_parse_key(const char* key, double value);
 
+// THE HAND POSE FILE (halo_vr_handposes.json; format in HandPoseJson.hpp). init stores the path,
+// writes the built-in poses there if the player has no file (never overwrites one), and loads it;
+// poll re-reads it when its write time changes -- call it on the config poll, not every tick.
+void palettearm_hand_poses_init(const char* path);
+void palettearm_hand_poses_poll();
+
 // One line of status for the support diagnostics: resolution, install state, call count.
 const char* palettearm_status();
 

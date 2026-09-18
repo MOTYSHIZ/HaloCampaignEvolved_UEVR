@@ -73,6 +73,8 @@ if ($missing.Count -gt 0) {
 # on upgrade (UEVR's Import Config merges file-by-file), so shipping one would clobber every
 # player's kept settings -- their absence from the zip is exactly what makes settings survive
 # updates and "delete halo_vr_user.cfg" mean "back to shipped defaults".
+# halo_vr_handposes.json (the palette arms' hand poses) is the player's own copy of the pose table,
+# written by the plugin on first launch; shipping one would reset everyone's tuned hands.
 # halo_vr_weapons.cfg joined this list with PR #7: the plugin REWRITES it in full on every
 # per-weapon capture, so shipping one would replace a player's captured weapon deltas wholesale.
 # It matters more since the per-weapon calibration gained a SHIPPED baseline in halo_vr.cfg: this
@@ -86,7 +88,7 @@ if ($missing.Count -gt 0) {
 # thoroughly confusing: every player would receive a log of somebody else's session, in the exact
 # file the troubleshooting guide tells them to read to find out whether the layer loaded.
 $forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg',
-                'halo_vr_weapons.cfg', 'apilayer\halo_vr_layer.log',
+                'halo_vr_weapons.cfg', 'halo_vr_handposes.json', 'apilayer\halo_vr_layer.log',
                 # The third-party cutscene-detection plugin was RETIRED 2026-09-08: our own fix
                 # (the movie as an OpenXR quad, cutscenemono=6) replaced it and it is gone from the
                 # repo. The profile is copied wholesale, so an author who still has it in a live

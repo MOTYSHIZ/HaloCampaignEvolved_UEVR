@@ -5885,6 +5885,7 @@ void update() {
             menu_applied = menu_bridge_tick();
         }
         load_config();
+        palettearm_hand_poses_poll();   // halo_vr_handposes.json: one stat, read on change
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
                                  menu_applied);
@@ -11467,6 +11468,15 @@ public:
 
         ensure_user_cfg_template();   // all-comment template; never touches an existing file
         ensure_weapons_cfg_template();// the per-weapon file's sections + weapon-name legend; same rule
+        {   // The hand pose table (palette arms): its own JSON file, written from the built-in poses
+            // if absent and user-owned after that -- same rule as the two above.
+            char hp[MAX_PATH] = {0};
+            if (n > 0 && n < MAX_PATH)
+                sprintf_s(hp, MAX_PATH, "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_handposes.json", appdata);
+            else
+                strcpy_s(hp, MAX_PATH, "halo_vr_handposes.json");
+            palettearm_hand_poses_init(hp);
+        }
         load_config();                // writes a commented default halo_vr.cfg if none exists
 
         // Every override layer now ships or is template-created, so file EXISTENCE says nothing --
