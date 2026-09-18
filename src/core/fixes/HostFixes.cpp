@@ -366,4 +366,46 @@ bool stability_menu_command_file_absent(const char* path) {
     return GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES;
 }
 
+// ---- OFF-PATH PARITY, PRINTED. Every hook in this file is a gate on the AUTHOR'S code, so with
+// stabilityfixes off each one must reproduce HIS expression exactly -- not "allow", and not the
+// play build's fork gate, which is a different thing and the easy mistake to make when checking
+// this. Several of his expressions are UNGATED, so the honest off-value for those hooks really is
+// "allow", and the only way to tell the two apart is to write his expression down beside it.
+//
+// Logged once, when the feature resolves off, against upstream/development at the line given.
+// Checked 2026-09-18, hook by hook, and every row below was read out of his file rather than
+// assumed. The two that read oddest are real: the movement probe and the crosshair source walk
+// are both ungated in his release, and the fork gates on moveprobe and xrlayer arrived with the
+// play build, so falling through to "runs" IS his behaviour and gating them would not be.
+void stability_log_off_parity() {
+    struct Row { const char* hook; const char* off_value; const char* his_expression; };
+    static const Row kRows[] = {
+        { "fault_stage_suffix",      "\"\" (no suffix)",   "no stage suffix exists in his release" },
+        { "nav_world_guarded",       "false",             "his own nav_world_tick runs unguarded" },
+        { "ui_manager_miss_throttled", "false",           "his miss sweep is not throttled" },
+        { "reticle_rescan_follow",   "true",              "|| g_cfg.hud_follow, ungated (Plugin.cpp:2357)" },
+        { "reticle_hide_end",        "false",             "no re-arm after a HUD rebuild in his release" },
+        { "xrlayer_latch_released",  "false",             "his latch is never cleared" },
+        { "move_probe_allowed",      "true",              "if (g_rig_parent && mag > 0.5f), UNGATED (Plugin.cpp:7995)" },
+        { "steal_extra_mask",        "0",                 "his steal mask has no extra bits" },
+        { "steal_dead_mask",         "0",                 "his steal claims holstergswitchmask unconditionally" },
+        { "xrsource_wanted",         "true",              "xrsource_tick(tick), UNGATED (Plugin.cpp:6068)" },
+        { "stick_exit_after_death",  "false",             "his exit does not re-anchor after a death" },
+        { "turn_gate_note",          "no-op",             "he logs no swallowed flick" },
+        { "turn_snap_note",          "no-op",             "he logs no snap" },
+        { "teardown_early",          "no-op",             "his teardown order is unchanged" },
+        { "teardown_restore",        "no-op",             "he has no projection rewrite to restore" },
+        { "holster_marker_tint",     "no tint",           "his pouch markers are untinted" },
+        { "throw_too_slow",          "false",             "any release is a throw in his release" },
+        // Not in this file, listed because they are the same shape and were checked with it.
+        { "hmd_pose_plausible",      "true",              "get_pose alone, no plausibility test" },
+        { "widget_log",              "true",              "if ((t++ % 32) == 0), UNGATED (Reticule.cpp:1639)" },
+        { "widget_alpha_hide_applies", "true",            "scene_hidden && hide_ws == 1 (Reticule.cpp:1691)" },
+        { "leash_lateral / vertical", "true (skips his)",  "his block only runs under g_cfg.hmd_leash at all" },
+    };
+    API::get()->log_info("[Halo-CampE-UEVR] STABPARITY: stabilityfixes is OFF; each hook's value here against the author's own expression");
+    for (const Row& r : kRows)
+        API::get()->log_info("[Halo-CampE-UEVR] STABPARITY   %-28s off=%-18s his: %s", r.hook, r.off_value, r.his_expression);
+}
+
 } // namespace halo

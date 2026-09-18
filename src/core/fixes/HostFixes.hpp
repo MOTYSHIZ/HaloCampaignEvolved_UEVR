@@ -44,5 +44,7 @@ bool stability_throw_too_slow(float peak_speed);  // stabilitygrenminthrow
 const char* stability_putback_text(const char* his_text, bool in_pouch);
 bool stability_menu_command_file_absent(const char* path);   // the menu command file poll gate
 void stability_gesture_reset_two_hand();         // gesture_reset: the two-handed hold drops too
+// One block, when the feature resolves off: every hook's off-value beside the author's own expression.
+void stability_log_off_parity();
 
 } // namespace halo

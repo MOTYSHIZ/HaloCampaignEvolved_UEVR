@@ -7,6 +7,7 @@
 #include "features/hooks/ConfigHooks.hpp"   // features_menu_status_line
 #include "core/config/CfgRead.hpp"
 #include "core/config/KeyAlias.hpp"
+#include "core/fixes/HostFixes.hpp"   // stability_log_off_parity
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -728,6 +729,10 @@ void features_log_resolved() {
                              kTierName[tier_index(r.tier)], source_text(i).c_str());
     }
     features_log_runtime();
+    // With stabilityfixes off, every gate it puts on the author's code must reproduce HIS
+    // expression, and several of his are ungated -- so the off-value alone proves nothing and the
+    // parity block prints his expression beside each one (core/fixes/HostFixes.cpp).
+    if (!g_cfg.stability_fixes) stability_log_off_parity();
 }
 
 } // namespace halo
