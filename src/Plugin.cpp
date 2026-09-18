@@ -10762,7 +10762,10 @@ void update() {
                             g_palrig_off_y.store(root.y - bl.y, std::memory_order_relaxed);
                             g_palrig_off_z.store(root.z - bl.z, std::memory_order_relaxed);
                             g_palrig_off_valid.store(true, std::memory_order_release);
-                            halo::scope_note_rig_frame(root, q_gun, tick);
+                            // The OFFSET from the mesh, not the root: the scope composes the root
+                            // against the mesh's position on its own tick (see Scope.hpp).
+                            halo::scope_note_rig_frame(Vec3{root.x - bl.x, root.y - bl.y, root.z - bl.z},
+                                                       q_gun, tick);
                         } else {
                             g_palrig_off_valid.store(false, std::memory_order_relaxed);
                         }

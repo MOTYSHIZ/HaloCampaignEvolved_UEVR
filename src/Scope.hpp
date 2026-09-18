@@ -97,7 +97,14 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, uevr::API::UObject
 // assume. The tick hands the scope the frame rig mode's rig WOULD have -- root at
 // weapon - R*socket_local, rotation = the gun's -- and the scope uses it in place of the
 // component wherever it would have read the rig, for as long as it is fresh (2 ticks).
-void scope_note_rig_frame(const Vec3& pos, const Quat& rot, uint32_t tick);
+//
+// `off_from_mesh` is the root's WORLD offset from the arm mesh component (the thing the pane
+// rides), not the root itself: the scope adds the mesh's position AS READ ON ITS OWN TICK. This
+// call comes after the scope has already run for the tick, so a root handed over here would be
+// a tick stale -- the pane target decomposed against last tick's root carried one tick of the
+// body's motion, and the quad was rebuilt that far AHEAD of the arms while walking. The offset
+// is body-relative and does not carry locomotion; the mesh position does, and is read fresh.
+void scope_note_rig_frame(const Vec3& off_from_mesh, const Quat& rot, uint32_t tick);
 void scope_frame_end(uint32_t tick);
 
 } // namespace halo
