@@ -7,6 +7,7 @@
 #include "Config.hpp"
 #include "DevTools.hpp"
 #include "Rig.hpp"   // call_ret_vec3, for the placement readback
+#include "palettearm/PaletteArm.hpp"   // palettearm_stock_marker_ue: the bone's motion relative to the gun under the palette route
 #include "Reticule.hpp"   // make_color_rt, for the dev probe's texture
 #include "ScopeBlit.hpp"  // digital zoom: registers its own render callback
 // The gun-mounted compositor quad. Driven from HERE and nowhere else -- same reason ScopeBlit
@@ -1489,10 +1490,33 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     static uint32_t s_moved_tick  = 0;   // last tick the bone moved more than the threshold
     static uint32_t s_first_wait  = 0;   // when this wait began, for the deadline
     static bool     s_waiting     = false;
+    static Vec3     s_rest{};            // the learned rest pose (see below)
+    static bool     s_rest_valid  = false;
+    static bool     s_src_palette = false;
     *out_timed_out = false;
 
-    Vec3 sp{};
-    if (rig == nullptr || !call_socket_location(rig, socket, &sp)) {
+    // WHAT "THE BONE" IS MEASURED AGAINST. In rig mode the whole mesh rides the rig, so the
+    // socket's world position moves only with the animation (and the player, who is standing
+    // still to scope). Under the PALETTE ROUTE the controller carries that bone every frame, so
+    // its world position never rests while the hand moves at all -- the log read "has not reached
+    // its rest pose in 48 ticks ... HELD" for the whole session and the pane never left the
+    // camera-mounted mesh: it rode the head, not the gun, and a weapon switch re-placed it into
+    // the same wait. The quantity the gate MEANS -- the bone's motion relative to the gun, i.e.
+    // the game's own animation -- is the stock weapon marker the palette publishes, in the same
+    // centimetres, so under that route it is measured instead. The two sources are not
+    // interchangeable mid-stream: switching resets the velocity and rest state.
+    Vec3  sp{};
+    bool  have = false;
+    float S[3] = {0.0f, 0.0f, 0.0f};
+    if (vrig_fresh(tick) && ::halo::palettearm_stock_marker_ue(S)) {
+        sp = Vec3{S[0], S[1], S[2]};
+        have = true;
+        if (!s_src_palette) { s_src_palette = true; s_prev_valid = false; s_rest_valid = false; }
+    } else {
+        if (s_src_palette) { s_src_palette = false; s_prev_valid = false; s_rest_valid = false; }
+        have = (rig != nullptr) && call_socket_location(rig, socket, &sp);
+    }
+    if (!have) {
         // Cannot measure -> do not withhold. An unmeasurable socket must degrade to the old
         // behaviour, not to a pane that never follows the weapon.
         s_prev_valid = false;
@@ -1509,8 +1533,6 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     if (moved > kSocketStillCm) s_moved_tick = tick;
 
     // The learned rest pose. Seeded on the first sample so it is never far off at startup.
-    static Vec3 s_rest{};
-    static bool s_rest_valid = false;
     if (!s_rest_valid) { s_rest = sp; s_rest_valid = true; }
     else {
         s_rest.x += (sp.x - s_rest.x) * kSocketRestEma;
