@@ -340,6 +340,16 @@ bool holster_mag_hand_in() {
     return s_mag_hand_in.load(std::memory_order_relaxed);
 }
 bool holster_gswitch_press_active() { const auto u = g_holster_gswitch_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
+// The OFF hand's own veto (ported from blindcowboy24's play build, 2026-09-10). holster_melee_veto()
+// below tests the AIM hand's zone -- right for the aim-hand detector, wrong for a left punch: the
+// right hand holding a rifle at chest height sits in pouch space and stood every left punch down in
+// their measurement. This tests the OFF hand's pouch (s_gin_zone; theirs used a wider "near" band we
+// do not track) plus the same recent-action window. A carried grenade is holster_offhand_busy().
+bool holster_offhand_melee_veto() {
+    if (!g_cfg.holster_enabled) return false;
+    if (s_gin_zone != HolsterSlot::None) return true;
+    return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
+}
 bool holster_melee_veto() {
     if (!g_cfg.holster_enabled) return false;
     // A grenade CARRIED in the aim hand vetoes melee (the throw swing IS a fast aim-hand

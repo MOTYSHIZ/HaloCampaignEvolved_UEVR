@@ -71,6 +71,9 @@ bool holster_mag_hand_in();
 bool holster_grip_held(bool right);
 
 bool holster_melee_veto();
+// The OFF hand's melee veto: its own pouch occupancy plus the recent-action window (the aim hand's
+// veto above would stand every left punch down while the rifle sits at chest height).
+bool holster_offhand_melee_veto();
 // Deadline for the synthesised grenade-type switch press.
 extern std::atomic<long long> g_holster_gswitch_until;
 bool holster_gswitch_press_active();
