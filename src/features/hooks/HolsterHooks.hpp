@@ -50,17 +50,17 @@ void features_holster_mag_zone_measured(float dist_m, const Vec3& hand_body, con
                                         const Vec3& anchor, float yaw_cos, float yaw_sin);
 // holster_update, the magazine mesh pick, after the resurvey guard: true = re-arm it (every candidate is dead).
 bool features_holster_mag_cands_stale(int rank);
-// mag_mesh_for_weapon, after the component path: true = the author's name survey (its "ammo" and "clip"
-// ranks, and the frag-grenade fallback at the end of its chain) stands down, so the pick is ours or nothing.
-bool features_holster_mag_survey_off();
-// mag_mesh_for_weapon's caller, in place of the author's "rank < 3": whether to re-run the name survey.
+// mag_mesh_for_weapon's caller, in place of the author's key comparison: whether to pick again this
+// tick (a key change, this reload's first tick, or a ~250 ms retry while the pick is provisional).
+bool features_holster_mag_repick(const char* wk, const char* stored);
+// The same caller: may this pick go on the marker at all? The rank passed in is the author's survey rank.
+bool features_holster_mag_pick_use(const char* wk, uevr::API::UObject* mesh, int rank);
+// The same caller: may it LATCH for this weapon key? Only the weapon's own magazine or its named asset may.
+bool features_holster_mag_pick_final(uevr::API::UObject* mesh, int rank);
+// The same caller, in place of the author's "rank < 3": whether to re-run his name survey.
 bool features_holster_mag_resurvey(int rank);
-// mag_mesh_for_weapon's caller: true = this pick is final and may be stored under the weapon key.
-bool features_holster_mag_pick_final(int rank);
-// holster_update, the magazine marker's spawn: the mesh to spawn it with (the author's survey pick and his
-// frag stand-in in), or null for no marker at all.
-uevr::API::UObject* features_holster_mag_spawn_mesh(uevr::API::UObject* survey, uevr::API::UObject* frag);
-// holster_update, the last statement of the magazine marker block: a weapon with no magazine asset draws none.
+// holster_update, the last statement of the magazine marker block: nothing but the weapon in hand's own
+// magazine may be visible on it.
 void features_holster_mag_drawn(uevr::API::UObject* m, bool wanted);
 // holster_update, the magazine in hand, in place of the placement: true = placed (in-hand tuning, the slide
 // into the well, the render anchor).

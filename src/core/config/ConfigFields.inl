@@ -1621,32 +1621,53 @@
     //      (capped at 30 cm), so the gate absorbs the phase error instead of measuring past it
     //   0  legacy exact (the old behaviour)
     int   reload_frame = 1;
-    // THE BELT MAGAZINE IS THE WEAPON'S OWN MAGAZINE ASSET, or nothing (from the headset,
-    // 2026-09-17: "remove ammo please. thats nuts" -- the magnum's spare magazine was rendering
-    // as an ammo CRATE, at crate size, in the hand).
+    // reloadmagpick -- HOW the belt magazine's mesh is chosen for the weapon in hand. Same key
+    // name, same values and the same meanings as the play build's, so one cfg line means one
+    // thing in either build.
     //
-    // FITTED TO log.txt, not derived. Three lines of the owner's own log are the whole failure:
-    //   MAG survey done: 8 candidates logged, using .../gear/ammo_box/SM_ammo_crate
-    //   RELOAD mag pick for FP_Magnum ranked 0 -- re-surveying
-    //   RELOAD mag mesh for FP_Magnum -> .../gear/ammo_box/SM_ammo_crate
-    // The name survey ranks "magazine" 3, "clip" 2 and "ammo" 1, and its eight hits on that level
-    // were eight ammo pickups and one crate -- NOT ONE magazine, because the survey runs once per
-    // session and the weapon magazine assets were not loaded yet. The single best hit was
-    // therefore the crate. The preferred path (the weapon's own component whose StaticMesh name
-    // contains "magazine", rank 4) returned null for the magnum at the tick the pick ran, and the
-    // caller then STORED that rank-0 answer under the weapon key and never picked again, so one
-    // bad moment latched a crate for the session. The AR picked correctly only because its pick
-    // happened to run at a better moment. The rack's own part scan listed
-    // SM_Magnum_Magazine_Default on the same weapon seconds later, so the asset was reachable all
-    // along -- just not at that tick.
-    //   1  the weapon's own magazine component, else the asset found by NAME from the weapon key
-    //      (SM_<stem>_Magazine*); nothing else is ever drawn, and a weapon with no magazine asset
-    //      (the shotgun loads shells) draws NO magazine at all. The name survey with its "ammo"
-    //      and "clip" ranks does not run, and the frag grenade never stands in for a magazine.
-    //      A pick that is not one of those two is never stored, so it is re-picked -- both
-    //      resolvers memoise per weapon key, so re-picking costs no object walk  [default]
-    //   0  the author's survey, exactly as upstream ships it
-    int   reload_mag_asset = 1;
+    // THE DEFECT THIS REPLACES, fitted to the owner's log and not derived. The session survey
+    // walked the loaded-object array before any weapon mesh was in memory, so all eight of its
+    // hits were rank-1 "ammo" names and the global pick became SM_ammo_crate. The Magnum then
+    // came up with an EMPTY component list for about 1.5 s (its SLIDEPART line lists no parts at
+    // all, and the next one 1.5 s later lists SM_Magnum_Magazine_Default). The pick ran inside
+    // that window, fell through to the crate, and LATCHED it under the weapon key for the
+    // session -- "the magazine in hand was enormous". Three things were wrong and all three are
+    // fixed: "ammo" no longer qualifies at all, a weak pick can no longer latch, and the
+    // weapon's own SM_<stem>_Magazine* asset is findable by NAME while the component walk is
+    // still empty.
+    //
+    // Three DIFFERENT mechanisms for closing that 1.5 s window, not switches on one:
+    //   0  legacy: the author's chain exactly as he ships it (the ammo and clip ranks live, the
+    //      survey pick and the frag grenade still at the bottom, everything latches). Kept only
+    //      as an escape hatch -- it is the behaviour that put the crate in his hand.
+    //   1  PER RELOAD: a provisional pick is thrown away and re-picked on the first tick of every
+    //      reload. Cheapest, and self-healing within one magazine's worth of play.
+    //   2  TIMED RETRY: a provisional pick is re-picked every ~250 ms for as long as it stays
+    //      provisional, so the window closes inside the reload that opened it. The component walk
+    //      is over the weapon actor's own component array, a handful of entries, never the ~290k
+    //      object array, so the cadence is free  [default]
+    //   3  NAME FIRST: resolve SM_<stem>_Magazine* by name up front on every weapon change and
+    //      let the component walk upgrade it when it answers. Skips the window instead of waiting
+    //      it out; costs one filtered object-array pass per weapon key.
+    //
+    // Modes 1-3 share one fixed core, and its whole content is which answers are allowed:
+    //   4  the weapon's OWN magazine component -- exact, nothing inferred. May LATCH.
+    //   3  this weapon's SM_<stem>_Magazine* asset by name. Verified names, from the owner's own
+    //      SLIDEPART listings: SM_Magnum_Magazine_Default, SM_AssaultRifle_Magazine_M_Default,
+    //      SM_SMG_Magazine1Jnt_L_Default, SM_RocketLauncher_Magazine_M_Default, plus the classic
+    //      assault rifle's "Megazine" spelling that two other readers already allow for. May LATCH.
+    //   2  a survey hit carrying both "magazine" and this weapon's own name token: still this
+    //      weapon's magazine, reached by a weaker route, so it is DRAWN but stays provisional and
+    //      the retry keeps asking for one of the two above.
+    //   0  nothing valid. The marker stays HIDDEN -- no crate, no ammo pickup, no frag grenade,
+    //      and not some other weapon's magazine. The shotgun lands here every time and should:
+    //      its parts are HandleJnt / PumpJnt / ShellJnt / ShellSliderJnt / Glass_HandleJnt and it
+    //      loads shells, so it has no magazine to carry and the belt stays empty.
+    // "clip" is dropped with "ammo" rather than kept: no shipped asset in this game is named
+    // with it -- every magazine in those listings is SM_<Weapon>_Magazine*, the classic AR's is
+    // Megazine, and the only other ammunition assets are SM_AmmoPickup_* / SM_ammo_pickup_* /
+    // SM_ammo_crate -- so the rank could only ever match something that is not a magazine.
+    int   reload_mag_pick = 2;
     // RENDER-PATH MARKER RE-ANCHOR (from the headset, 2026-09-11: the mag in the hand and the grenade
     // spheres judder back and forth on the move). holster_update places markers on the ~32 Hz
     // engine tick through a camera that renders at 90 -- the wrist HUD's old defect exactly, so

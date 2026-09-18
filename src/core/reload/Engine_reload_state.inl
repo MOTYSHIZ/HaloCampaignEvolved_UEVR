@@ -245,7 +245,7 @@ void reload_state_track() {
         if (g_cfg.reload_state_log && actor != nullptr)
             API::get()->log_info("[Halo-CampE-UEVR] RSTATE in hand: type=%s stem=%s datum=0x%08X (%s actor) mag=%d rack=%d chamber=%d always=%d nomanual=%d",
                                  type.c_str(), weapon_stem_lc_for(type).c_str(), (unsigned)datum, type == s_rs_seen_type ? "a NEW" : "another",
-                                 (int)(native_mag_mesh_impl() != nullptr), (int)weapon_in_list(g_cfg.slide_weapons), (int)weapon_in_list(g_cfg.slide_chamber_weapons),
+                                 (int)(native_mag_mesh_impl(false) != nullptr), (int)weapon_in_list(g_cfg.slide_weapons), (int)weapon_in_list(g_cfg.slide_chamber_weapons),
                                  (int)weapon_in_list(g_cfg.slide_always_weapons), (int)weapon_in_list(g_cfg.reload_skip_weapons));
         s_rs_seen_actor = actor; s_rs_seen_type = type; s_rs_since = nowt;
     }

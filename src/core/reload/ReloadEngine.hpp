@@ -77,11 +77,13 @@ Vec3 reload_engine_mag_belt_point();
 void reload_engine_mag_zone_measured(float dist_m, const Vec3& hand_body, const Vec3& belt_body,
                                      const Vec3& anchor, float yaw_cos, float yaw_sin);
 bool reload_engine_mag_cands_stale(int rank);
-// reloadmagasset: the four gates on the author's name survey, and the tick's last word on the marker.
-bool reload_engine_mag_survey_off();
+// reloadmagpick: the rank scale, when to ask again, what may be drawn, what may latch, and the
+// tick's last word on the marker. The rank passed in is the AUTHOR'S survey rank.
+int  reload_engine_mag_rank(uevr::API::UObject* mesh, int his_rank);
+bool reload_engine_mag_repick(const char* wk, const char* stored);
+bool reload_engine_mag_pick_use(const char* wk, uevr::API::UObject* mesh, int his_rank);
+bool reload_engine_mag_pick_final(uevr::API::UObject* mesh, int his_rank);
 bool reload_engine_mag_resurvey(int rank);
-bool reload_engine_mag_pick_final(int rank);
-uevr::API::UObject* reload_engine_mag_spawn_mesh(uevr::API::UObject* survey, uevr::API::UObject* frag);
 void reload_engine_mag_drawn(uevr::API::UObject* m, bool wanted);
 bool reload_engine_mag_in_hand(uevr::API::UObject* m, const Vec3& gpos, const Vec3& hpos, float pitchr, float yawr, float rollr);
 

@@ -703,9 +703,14 @@ void slide_montage_tick() {
     }
 }
 
-API::UObject* native_mag_mesh_impl() {
+// `fresh` drops the 2000 ms miss cache before testing it. That cache used to outlive the ~1.5 s
+// empty-component window it was caching a miss for, which is how one bad tick became a session:
+// the pick asked once, got nothing, and was answered "nothing" for two more seconds while the
+// components it wanted were sitting right there. reloadmagpick's retries all ask fresh.
+API::UObject* native_mag_mesh_impl(bool fresh) {
     static std::string s_key; static TrackedObject s_mesh; static bool s_none = false; static long long s_at = 0;
     const std::string key = weapon_key();
+    if (fresh && s_mesh.get() == nullptr) s_none = false;
     if (key != s_key || (s_mesh.get() == nullptr && !s_none) || (s_none && now_ticks() - s_at > ms_to_ticks(2000))) {
         s_key = key; s_mesh = TrackedObject{}; s_none = false; s_at = now_ticks();
         auto* src = reload_weapon_default_comp();
@@ -727,7 +732,7 @@ API::UObject* native_mag_mesh_impl() {
     return s_mesh.get();
 }
 
-// ---- THE MAGAZINE ASSET BY NAME (reloadmagasset, doctrine in ConfigFields.inl). The component
+// ---- THE MAGAZINE ASSET BY NAME (reloadmagpick rank 3, doctrine in ConfigFields.inl). The component
 // path above needs the weapon's magazine component to be attached to the Default skeletal mesh at
 // the tick it runs, and on the magnum it was not. The marker renders an ASSET, not a component,
 // so the asset can be taken straight off the loaded-object list by the name the weapon key

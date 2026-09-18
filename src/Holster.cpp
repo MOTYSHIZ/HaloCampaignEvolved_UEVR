@@ -114,7 +114,6 @@ std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; 
 
 API::UObject* mag_mesh_for_weapon(const std::string& wkey, int* out_rank) {
     if (auto* nm = features_holster_mag_mesh(out_rank)) return nm;
-    if (features_holster_mag_survey_off()) { if (out_rank != nullptr) *out_rank = 0; return nullptr; }
     std::wstring tok;
     {
         std::string k = wkey;
@@ -602,7 +601,8 @@ void holster_update(float dt) {
                 if (s_hand_g.get()  == nullptr) { if (auto* m = holster_marker_spawn_mesh(owner, mf, ms)) { features_holster_marker_spawned(m); s_hand_g.set(m); } }
             }
             if (want_mag_mark && s_mag_marker.get() == nullptr) {
-                auto* mm = features_holster_mag_spawn_mesh(s_mesh_mag.get(), mf);
+                auto* mm = s_mesh_mag.get();
+                if (mm == nullptr) mm = mf;   // a seed only: the pick replaces it, and it is held hidden until one lands
                 if (mm != nullptr) {
                     if (auto* m = holster_marker_spawn_mesh(owner, mm, (double)g_cfg.reload_mag_scale)) {
                         s_mag_marker.set(m);
@@ -693,7 +693,7 @@ void holster_update(float dt) {
             // in hand outlives a weapon-lowered frame, exactly as the reload state itself does.
             if (rs != ReloadState::Idle) {
                 const std::string wk = weapon_key();
-                if (!wk.empty() && wk != s_mag_mesh_key) {
+                if (features_holster_mag_repick(wk.c_str(), s_mag_mesh_key.c_str())) {
                     int rank = 0;
                     auto* mesh = mag_mesh_for_weapon(wk, &rank);
                     // A pick that is not a real MAGAZINE gets ONE re-survey before it is accepted.
@@ -714,14 +714,14 @@ void holster_update(float dt) {
                             API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag pick for %s ranked %d"
                                                  " -- re-surveying", wk.c_str(), rank);
                         // s_mag_mesh_key stays unset: re-pick next tick, after the walk.
-                    } else if (features_holster_mag_pick_final(rank)) {
+                    } else if (features_holster_mag_pick_use(wk.c_str(), mesh, rank)) {
                         if (mesh != nullptr) {
                             holster_marker_set_mesh(m, mesh);
                             if (g_cfg.reload_log)
                                 API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag mesh for %s -> %ls",
                                                      wk.c_str(), mesh->get_full_name().c_str());
                         }
-                        s_mag_mesh_key = wk;
+                        if (features_holster_mag_pick_final(mesh, rank)) s_mag_mesh_key = wk;
                     }
                 }
             }

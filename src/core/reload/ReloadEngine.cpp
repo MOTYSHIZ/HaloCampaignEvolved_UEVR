@@ -746,60 +746,98 @@ void reload_engine_released() {
 
 // ---- THE BELT MAGAZINE (Holster.cpp's hooks)
 
+Vec3 reload_engine_mag_belt_point() { return mag_belt_point(); }
+
+// ---- THE PICK (reloadmagpick, doctrine and the rank scale in ConfigFields.inl). Our two exact
+// answers, in the order the mode asks for them: the weapon's own magazine component (rank 4) and
+// this weapon's SM_<stem>_Magazine* asset by name (rank 3). Mode 3 asks by name FIRST, to jump
+// the empty-component window instead of waiting it out; every other mode lets the component
+// answer first and falls back to the name. Both memoise per weapon key, so asking again is free.
 API::UObject* reload_engine_mag_mesh(int* out_rank) {
-    // The weapon's own magazine component first (exact, rank 4); then the same asset found by NAME
-    // from the weapon key, which is exact too and so also rank 4 (reloadmagasset, doctrine in
-    // ConfigFields.inl). With reloadmagasset on there is no third answer: nothing else is a
-    // magazine, so nothing else is drawn.
-    auto* nm = native_mag_mesh_impl();
-    if (nm == nullptr && g_cfg.reload_mag_asset != 0) nm = mag_asset_by_name_impl();
-    if (nm != nullptr && out_rank != nullptr) *out_rank = 4;
-    return nm;
+    const int mode = g_cfg.reload_mag_pick;
+    auto answer = [&](API::UObject* m, int r) { if (m != nullptr && out_rank != nullptr) *out_rank = r; return m; };
+    if (mode == 0) {
+        // Legacy: exactly the author's chain, and his chain's first rung is this component.
+        return answer(native_mag_mesh_impl(false), 4);
+    }
+    if (mode == 3) { if (auto* nb = mag_asset_by_name_impl()) return answer(nb, 3); }
+    if (auto* nm = native_mag_mesh_impl(true)) return answer(nm, 4);
+    if (mode != 3) { if (auto* nb = mag_asset_by_name_impl()) return answer(nb, 3); }
+    return nullptr;
 }
 
-// ---- THE FOUR GATES reloadmagasset PUTS ON THE AUTHOR'S SURVEY. Each is one hook call in
-// Holster.cpp and each returns the author's own answer while the key is 0, so upstream's
-// behaviour is intact and recoverable by one cfg line.
-
-// The name survey itself. With the key on it never runs, which is what removes the "ammo" rank
-// (its whole yield on the owner's level was eight ammo pickups and a crate), the "clip" rank, and
-// the frag-grenade fallback at the end of the author's chain in one stroke. "clip" goes with it
-// deliberately: no shipped asset in this game is named with it -- every magazine in the owner's
-// SLIDEPART listings is SM_<Weapon>_Magazine*, the classic AR's is Megazine, and the only other
-// ammunition assets are SM_AmmoPickup_*/SM_ammo_pickup_*/SM_ammo_crate -- so the rank could only
-// ever match something that is not a magazine.
-bool reload_engine_mag_survey_off() { return g_cfg.reload_mag_asset != 0; }
-
-// The author's "re-survey once for a pick weaker than a magazine" condition. With the key on there
-// is no survey to re-run, so it must not clear the candidate list and re-arm a ~290k walk.
-bool reload_engine_mag_resurvey(int rank) { return g_cfg.reload_mag_asset != 0 ? false : rank < 3; }
-
-// Whether this pick may be STORED under the weapon key as the final answer. Only the weapon's own
-// magazine component or the name-matched asset (both rank 4) may. Anything weaker leaves the key
-// unset, so the next tick picks again -- which is what unlatches the magnum: its component was
-// simply not attached yet at the tick the first pick ran, and both resolvers memoise per weapon
-// key, so re-picking walks nothing.
-bool reload_engine_mag_pick_final(int rank) { return g_cfg.reload_mag_asset == 0 || rank >= 4; }
-
-// The mesh the marker component is SPAWNED with. The author's line is "the survey found nothing:
-// the frag stands in, visibly" -- that is the path that put a grenade on the belt, so with the key
-// on there is no stand-in: our own resolver's answer, or no marker at all.
-API::UObject* reload_engine_mag_spawn_mesh(API::UObject* survey, API::UObject* frag) {
-    if (g_cfg.reload_mag_asset == 0) return survey != nullptr ? survey : frag;
-    return reload_engine_mag_mesh(nullptr);
+// ---- THE PICK'S QUALITY. The rank the author's own survey hands back is HIS scale (3 magazine,
+// 2 clip, 1 ammo) and it is not the scale above, so it is translated here rather than compared
+// against thresholds it does not share. Which answer a mesh came from is settled by identity, not
+// by its number: if our resolver returns that same object it is ours, with its own rank; anything
+// else came off his survey, and the only survey hit worth drawing is one that carries both the
+// word magazine and this weapon's name token, which is exactly his rank 3.
+int reload_engine_mag_rank(API::UObject* mesh, int his_rank) {
+    if (g_cfg.reload_mag_pick == 0) return 4;   // legacy latches whatever it finds, as he ships it
+    if (mesh == nullptr) return 0;
+    int mine = 0;
+    if (reload_engine_mag_mesh(&mine) == mesh) return mine;
+    return (his_rank >= 3) ? 2 : 0;
 }
 
-// The last word on the marker in a tick: a weapon whose magazine asset does not resolve draws NO
-// magazine, rather than the previous weapon's magazine left on the component by the pick that
-// was refused above.
+// ---- WHAT MAY BE DRAWN, WHAT MAY LATCH, AND WHEN TO ASK AGAIN.
+namespace {
+std::string s_mag_show_key = "";   // the weapon key whose pick is currently drawable (sentinel = none)
+long long   s_mag_pick_at = 0;          // when the current pick was made (mode 2's retry clock)
+bool        s_mag_rs_prev = false;      // a reload was already in flight last tick (mode 1's edge)
+int         s_mag_rank = 0;             // how good the mesh currently on the marker is
+}
+
+// WHEN TO PICK AGAIN. A key change always re-picks, as it always did. Beyond that, a pick that is
+// still PROVISIONAL must keep being re-picked until one of the two exact answers lands -- that,
+// not the ranking, is what turned one bad tick into a session of carrying a crate. The three modes
+// are three different ways of asking again and none of them walks the object array per tick.
+bool reload_engine_mag_repick(const char* wk, const char* stored) {
+    const bool key_changed = (wk != nullptr && wk[0] != 0 && (stored == nullptr || strcmp(wk, stored) != 0));
+    const bool rs_now = reload_engine_reload_busy();
+    const bool first_tick = rs_now && !s_mag_rs_prev;
+    s_mag_rs_prev = rs_now;
+    if (g_cfg.reload_mag_pick == 0 || key_changed) return key_changed;
+    if (wk == nullptr || wk[0] == 0 || s_mag_rank >= 3) return false;
+    if (g_cfg.reload_mag_pick == 1) return first_tick;
+    return now_ticks() - s_mag_pick_at > ms_to_ticks(250);
+}
+
+// May this pick be put on the marker at all? Recorded as it is answered, so the tick's last word
+// on the marker below knows whether what is on it belongs to the weapon in hand.
+bool reload_engine_mag_pick_use(const char* wk, API::UObject* mesh, int his_rank) {
+    s_mag_pick_at = now_ticks();
+    const int rank = reload_engine_mag_rank(mesh, his_rank);
+    s_mag_rank = rank;
+    if (rank < 2) { s_mag_show_key = ""; return false; }
+    s_mag_show_key = (wk != nullptr) ? wk : "";
+    if (g_cfg.reload_vr_log)
+        API::get()->log_info("[Halo-CampE-UEVR] RELOAD mag pick for %s: rank %d, %s",
+                             (wk != nullptr) ? wk : "?", rank, rank >= 3 ? "final" : "provisional, retrying");
+    return true;
+}
+
+// Only a final rank may latch the weapon key. A provisional stand-in leaves it unset, so the
+// retry above keeps asking until the weapon's own magazine answers.
+bool reload_engine_mag_pick_final(API::UObject* mesh, int his_rank) {
+    return reload_engine_mag_rank(mesh, his_rank) >= 3;
+}
+
+// The author's "re-survey once for a pick weaker than a magazine" condition. Re-walking ~290k
+// objects to find one weapon's magazine was always the wrong instrument, and the name resolver
+// asks for that one asset directly, so no mode of ours arms it.
+bool reload_engine_mag_resurvey(int rank) { return g_cfg.reload_mag_pick != 0 ? false : rank < 3; }
+
+// The tick's last word on the marker: it may only be visible while what is on it was picked for
+// the weapon in hand. Everything else -- a crate, an ammo pickup, the frag grenade, the previous
+// weapon's magazine, the seed the component was spawned with -- is held hidden rather than drawn.
 void reload_engine_mag_drawn(API::UObject* m, bool wanted) {
-    if (g_cfg.reload_mag_asset == 0 || m == nullptr || !wanted) return;
-    if (reload_engine_mag_mesh(nullptr) != nullptr) return;
+    if (g_cfg.reload_mag_pick == 0 || m == nullptr || !wanted) return;
+    const std::string wk = weapon_key();
+    if (!wk.empty() && wk == s_mag_show_key) return;
     holster_marker_show(m, false);
     marker_render_drop(m);
 }
-
-Vec3 reload_engine_mag_belt_point() { return mag_belt_point(); }
 
 // THE BELT MAGAZINE'S ZONE, AND THE PROOF THAT IT IS ALREADY ONE FRAME. This was read the wrong
 // way round once and must not be again, so the algebra is written out and the log checks it at
