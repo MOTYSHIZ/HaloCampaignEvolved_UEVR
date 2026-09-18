@@ -262,8 +262,10 @@ std::atomic<bool>  g_mesh_standdown{false};
 // which assume the rig IS the gun -- as it is in rig mode. Rig mode's rig root sits at
 // weapon - R*socket_local, and socket_local is the stock weapon marker the palette holds, so the
 // same root exists here with nothing to read it from. The tick publishes its WORLD offset from the
-// rig parent (as g_rigw_off_* does for rig mode); the render path recomposes it against the live
-// parent and hands it to the layer, the same two-clocks shape as the rig-mode block.
+// ARM MESH component (the thing the scope pane rides; the rig parent moves on with the head
+// between ticks while the mesh does not, and a quad rebuilt from the parent led the arms); the
+// render path recomposes it against the mesh as it is then and hands it to the layer, the same
+// two-clocks shape as the rig-mode block.
 std::atomic<float> g_palrig_off_x{0.0f}, g_palrig_off_y{0.0f}, g_palrig_off_z{0.0f};
 std::atomic<bool>  g_palrig_off_valid{false};
 // The rig's relative transform as found at acquisition, BEFORE this plugin's first write -- what
@@ -10741,15 +10743,26 @@ void update() {
                                         g_rig_parent != nullptr &&
                                         call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pl) &&
                                         std::isfinite(pl.x) && std::isfinite(pl.y) && std::isfinite(pl.z);
-                        if (ok) {
+                        // ...ANCHORED ON THE ARM MESH, not on the rig parent. The pane rides the mesh
+                        // (its socket), and under this route the mesh's LOCATION is the engine's own
+                        // composition -- nothing here writes it at render rate, as rig mode does. The
+                        // parent read at render moved on with the head while the mesh had not, so a
+                        // quad rebuilt from the parent led the arms by the locomotion since the tick
+                        // ("jitters ahead of my locomotion"). Rebuilt from the mesh's own position,
+                        // the quad is exactly as fresh as the thing it is drawn on.
+                        auto* pmesh = reinterpret_cast<API::UObject*>(g_rig_component.load());
+                        Vec3  bl{};
+                        const bool bok = ok && pmesh != nullptr &&
+                                         call_ret_vec3(pmesh, L"K2_GetComponentLocation", &bl) &&
+                                         std::isfinite(bl.x) && std::isfinite(bl.y) && std::isfinite(bl.z);
+                        if (bok) {
                             const Vec3 rs = quat_rotate(q_gun, Vec3{S[0], S[1], S[2]});
-                            const Vec3 root_off{wpn_t.x - rs.x, wpn_t.y - rs.y, wpn_t.z - rs.z};
-                            g_palrig_off_x.store(root_off.x, std::memory_order_relaxed);
-                            g_palrig_off_y.store(root_off.y, std::memory_order_relaxed);
-                            g_palrig_off_z.store(root_off.z, std::memory_order_relaxed);
+                            const Vec3 root{pl.x + wpn_t.x - rs.x, pl.y + wpn_t.y - rs.y, pl.z + wpn_t.z - rs.z};
+                            g_palrig_off_x.store(root.x - bl.x, std::memory_order_relaxed);
+                            g_palrig_off_y.store(root.y - bl.y, std::memory_order_relaxed);
+                            g_palrig_off_z.store(root.z - bl.z, std::memory_order_relaxed);
                             g_palrig_off_valid.store(true, std::memory_order_release);
-                            halo::scope_note_rig_frame(Vec3{pl.x + root_off.x, pl.y + root_off.y, pl.z + root_off.z},
-                                                       q_gun, tick);
+                            halo::scope_note_rig_frame(root, q_gun, tick);
                         } else {
                             g_palrig_off_valid.store(false, std::memory_order_relaxed);
                         }
@@ -12402,13 +12415,15 @@ public:
                 if (g_cfg.rig_render) {
                     Vec3 rloc{};
                     if (g_palrig_off_valid.load(std::memory_order_acquire) && g_rigw_valid.load() &&
-                        g_rig_parent != nullptr && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &rloc) &&
+                        call_ret_vec3(brig, L"K2_GetComponentLocation", &rloc) &&
                         std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
                         // THE VIRTUAL RIG FRAME (see g_palrig_off_*): rig mode's root, recomposed
-                        // against the LIVE parent, with the gun's rotation -- the same frame the tick
-                        // handed the scope, so the quad's re-anchor cancels the GUN's motion between
-                        // tick and render as it does in rig mode. The body frame published below
-                        // cancels only the turn, and the pane trailed every pitch and roll.
+                        // against the ARM MESH as it is now (the thing the pane rides -- the parent
+                        // is fresher than the mesh under this route and a quad rebuilt from it led
+                        // the arms by the locomotion since the tick), with the gun's rotation -- the
+                        // same frame the tick handed the scope, so the quad's re-anchor cancels the
+                        // GUN's motion between tick and render as it does in rig mode. The body
+                        // frame published below cancels only the turn.
                         const Quat qr{g_rigw_x.load(), g_rigw_y.load(), g_rigw_z.load(), g_rigw_w.load()};
                         const Vec3 root{rloc.x + g_palrig_off_x.load(std::memory_order_relaxed),
                                         rloc.y + g_palrig_off_y.load(std::memory_order_relaxed),
