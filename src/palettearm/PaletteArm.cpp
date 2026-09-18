@@ -678,8 +678,10 @@ std::atomic<float>     s_stock_rest_ux{0.0f}, s_stock_rest_uy{0.0f}, s_stock_res
 std::atomic<int>       s_stock_model_serial{0};      // bumped on every model-tag change
 std::atomic<bool>      s_stock_carry{false};         // the weapon bone was CARRIED to the rig target this live frame
 // LATCHED WHERE HELD: the support wrist's relation to the carried gun on the frame a two-hand hold
-// latched on a weapon whose AUTHORED off hand is not on the gun (the Needler, the plasma pistol --
-// see the grab block). Ridden rigidly until the hold lets go; reset with it.
+// latched on a weapon whose AUTHORED support wrist is nowhere near the gun (over 60 cm from the
+// marker). A FALLBACK ONLY: no weapon measured has one -- the Needler and the plasma pistol, which
+// this was first written for on an unmeasured claim, carry an authored grip 20 cm from the marker
+// like everything else (see the grab block). Ridden rigidly until the hold lets go; reset with it.
 bool     s_grab_rel_valid = false;
 pa::Vec3 s_grab_rel_pos{};
 pa::Mat3 s_grab_rel_basis{};
@@ -2349,6 +2351,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // two_hand_hold_weight(), not _blend_weight(): the latter reads 0 whenever no swing is
         // published, and a hand must not leave the forestock on a frame the barrel needs no bend.
         s_dbg_grab_w = 0.0f;
+        float authored_from_gun_m = -1.0f;      // the authored support wrist's distance from the marker; < 0 = unknown
         if (!plan.is_aim && wpn_delta_valid && map->weapon_marker != pa::kNoNode) {
             // Where the AUTHORED support wrist sits in the carried gun's own frame. The rigid carry
             // cancels out of this, so it is the artist's hand-to-gun relation and nothing else --
@@ -2359,22 +2362,38 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const pa::Vec3 og = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
                 const pa::Vec3 hg0 = pa::transform_vector(pa::transpose(wb0), og - wm0.position);
                 s_dbg_stockhg_x = hg0.x; s_dbg_stockhg_y = hg0.y; s_dbg_stockhg_z = hg0.z;
+                // ...and how far that is from the gun, which is what "the artist put the hand ON
+                // the gun" means (the rigid carry preserves it, so this is the authored distance).
+                const float d = pa::length(hg0) * pa::kMetresPerBlamUnit;
+                if (std::isfinite(d)) authored_from_gun_m = d;
             }
         }
-        // A deny-listed one-hander still takes the hand when the artist posed it ON the gun.
+        // A DENY-LISTED ONE-HANDER TAKES ITS AUTHORED GRIP TOO. The deny list withholds the AIM
+        // SWING on those weapons, not the hand: every weapon measured carries an authored support
+        // grip ON the gun -- the support wrist's distance from the weapon marker, from the rest
+        // rows: Magnum 10.6 cm, SMG 14.5, Needler 19.9, plasma pistol 20.5, rocket launcher 21.1,
+        // assault rifle 27.0, battle rifle 31.8, sniper 35.6, shotgun 38.5.
+        //
+        // CORRECTED 2026-09-18, and the error is worth keeping: this used to require the two
+        // AUTHORED WRISTS within 18 cm of each other -- a proxy tuned on the Magnum alone (12.2 cm)
+        // beside a comment that called the plasma pistol's off arm "free", which nobody had
+        // measured. The plasma pistol's wrists are 24.9 cm apart and the Needler's 21.9, both with
+        // the support hand cupped under the gun ((-6.2, 10.1, -16.7) cm in the gun's frame on the
+        // pistol), so the proxy excluded two weapons that have exactly the grip it was looking
+        // for, and the hold latched for zoom and haptics but never visually. The player saw the
+        // authored grip on both under armdriver=1 and said so. The test is now the thing it means:
+        // is the authored wrist ON THE GUN (within 60 cm of the marker -- every weapon measured is
+        // under 39)?
         bool grab_allowed = g_cfg.pa_grab_weapon >= 2 || !::halo::two_hand_hold_denied();
-        if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim && have_aim_stock) {
-            const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
-            grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
+        if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim) {
+            grab_allowed = authored_from_gun_m >= 0.0f && authored_from_gun_m < 0.60f;
         }
-        // ...AND ONE WHOSE OFF HAND THE ARTIST LEFT FREE (the Needler, the plasma pistol) takes it
-        // WHERE THE PLAYER GRABBED. The authored wrist is nowhere near the gun on those, so pulling
-        // the hand to it would pull it off the gun the player is physically holding; leaving it on
-        // the controller (the old behaviour) gave a hold that latched for zoom and haptics but
-        // never latched visually ("some single-hand weapons do not latch the secondary grip
-        // visually", headset 2026-09-17). So on the frame the hold latches, the wrist's relation to
-        // the carried gun -- the controller's own pose, mapped back through the carry -- is kept
-        // and ridden rigidly, exactly as an authored wrist would be, until the hold lets go.
+        // ...and ONLY a weapon whose authored wrist really is nowhere near the gun -- none has been
+        // measured; this is the fallback, not a case anyone has seen -- takes the hand WHERE THE
+        // PLAYER GRABBED instead: pulling it to a free arm's pose would pull it off the gun the
+        // player is physically holding. On the frame the hold latches, the wrist's relation to the
+        // carried gun (the controller's own pose, mapped back through the carry) is kept and
+        // ridden rigidly until the hold lets go.
         bool grab_where_held = false;
         if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire)) {
@@ -2386,10 +2405,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     s_grab_rel_valid = pa::valid_basis(s_grab_rel_basis) && pa::finite(s_grab_rel_pos);
 #if HALO_VR_DEV
                     if (s_grab_rel_valid)
-                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE GRAB: latched WHERE HELD on %s -- the "
-                                             "authored off hand is not on this gun, so the hand rides the "
-                                             "gun from where the hold caught it",
-                                             ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "?");
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE GRAB: latched WHERE HELD on %s -- its "
+                                             "authored support wrist is %.0f cm from the gun (over the 60 cm "
+                                             "that counts as ON it; every weapon measured so far is under 39), "
+                                             "so the hand rides the gun from where the hold caught it. If this "
+                                             "weapon DOES show an authored grip under armdriver=1, this line is "
+                                             "the bug report.",
+                                             ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "?",
+                                             authored_from_gun_m * 100.0f);
 #endif
                 }
                 grab_where_held = s_grab_rel_valid;

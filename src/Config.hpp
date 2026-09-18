@@ -3974,11 +3974,17 @@ struct Config {
     //       normally be gripping the weapon in flat mode or in rig parented mode"). While the hold
     //       is latched the support wrist takes the AUTHORED wrist carried by the same rigid transform
     //       that placed the gun, eased in over the hold's own ramp; the arm is still IK'd from the
-    //       body shoulder. On a twohanddeny weapon only when the ARTIST put the off hand on the gun
-    //       -- the authored wrists within 18 cm of each other, which is the Magnum's cupped stance
-    //       (12 cm, measured) and not a plasma pistol's free arm. The hold latches on those weapons
-    //       for zoom, and the relaxed zone there is exactly "cup the pistol under your firing hand".
-    //   2 = as 1, on every deny-listed weapon regardless.
+    //       body shoulder. On a twohanddeny weapon TOO: the deny list withholds the aim swing, not
+    //       the hand, and every weapon measured carries an authored support grip on the gun -- the
+    //       support wrist sits 10.6 cm (Magnum) to 38.5 cm (shotgun) from the weapon marker, the
+    //       Needler at 19.9 and the plasma pistol at 20.5. The test is "within 60 cm of the marker".
+    //       CORRECTED 2026-09-18: this read "only when the authored WRISTS are within 18 cm of each
+    //       other ... the Magnum's cupped stance (12 cm) and not a plasma pistol's free arm". The
+    //       free arm was never measured -- the pistol's wrists are 24.9 cm apart with the off hand
+    //       cupped UNDER the gun -- and the proxy shut the Needler and the plasma pistol out of a
+    //       grip they have. A wrist that really is nowhere near the gun (none seen) latches where
+    //       the player grabbed instead of being pulled away.
+    //   2 = as 1, on every deny-listed weapon regardless of where its authored wrist is.
     // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
     // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
     int   pa_grab_weapon   = 1;
