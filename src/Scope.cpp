@@ -296,6 +296,29 @@ void set_world_scale3(API::UObject* comp, double x, double y, double z) {
 
 void set_world_scale(API::UObject* comp, double s) { set_world_scale3(comp, s, s, s); }
 
+// THE PANE'S PLACE ON THE GUN, from the VIRTUAL rig frame (palette route): the same
+// scope_dist/right/up and rot trims rig mode composes against its rig component, composed against
+// the frame the tick handed us and written in WORLD space, because the component the pane is
+// parented to is level in the body frame under this route. Used for the phase-1 mount, and again
+// every tick the pane spends waiting on the rig origin for the socket handshake -- left where the
+// first write put it, the pane sat still on a camera-mounted mesh while the gun moved on, and the
+// KeepWorld conversion then baked that drift into the socket offset ("tracking with whatever
+// offset it had when it engaged").
+void place_pane_from_vrig(API::UObject* pane) {
+    const Vec3 f = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
+    const Vec3 r = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
+    const Vec3 u = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
+    const Vec3 pos{
+        s_vrig_pos.x + f.x * g_cfg.scope_dist + r.x * g_cfg.scope_right + u.x * g_cfg.scope_up,
+        s_vrig_pos.y + f.y * g_cfg.scope_dist + r.y * g_cfg.scope_right + u.y * g_cfg.scope_up,
+        s_vrig_pos.z + f.z * g_cfg.scope_dist + r.z * g_cfg.scope_right + u.z * g_cfg.scope_up};
+    const Quat qw = quat_mul(s_vrig_rot, rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r));
+    float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+    quat_to_rotator(qw.x, qw.y, qw.z, qw.w, &wp, &wy, &wr);
+    set_world_location(pane, pos);
+    set_world_rotation(pane, (double)wp, (double)wy, (double)wr);
+}
+
 // PIN THE CAPTURE'S EXPOSURE.
 //
 // A post-processed capture source (FinalColorHDR / FinalToneCurveHDR) is the only way to get the
@@ -1507,11 +1530,28 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     // interchangeable mid-stream: switching resets the velocity and rest state.
     Vec3  sp{};
     bool  have = false;
+    bool  rest_authoritative = false;
     float S[3] = {0.0f, 0.0f, 0.0f};
+    static int s_serial = -1;
     if (vrig_fresh(tick) && ::halo::palettearm_stock_marker_ue(S)) {
         sp = Vec3{S[0], S[1], S[2]};
         have = true;
-        if (!s_src_palette) { s_src_palette = true; s_prev_valid = false; s_rest_valid = false; }
+        // A weapon MODEL change (the palette says so) is a new bone with a new rest: the velocity
+        // and rest state from the previous weapon must not carry over. Left in place, the 2%/tick
+        // rest average needed seconds to walk over from the old marker to the new one, and the
+        // conversion waited for it -- "tracking of the scope pane doesn't work until after a few
+        // seconds" after every swap.
+        const int serial = ::halo::palettearm_model_serial();
+        if (!s_src_palette || serial != s_serial) {
+            s_src_palette = true; s_serial = serial;
+            s_prev_valid = false; s_rest_valid = false; s_waiting = false;
+        }
+        // The rest the palette already knows (learned, remembered or baked) is the authority; the
+        // slow average below is only the fallback for a model that has never rested yet.
+        float R[3] = {0.0f, 0.0f, 0.0f};
+        if (::halo::palettearm_stock_marker_rest_ue(R)) {
+            s_rest = Vec3{R[0], R[1], R[2]}; s_rest_valid = true; rest_authoritative = true;
+        }
     } else {
         if (s_src_palette) { s_src_palette = false; s_prev_valid = false; s_rest_valid = false; }
         have = (rig != nullptr) && call_socket_location(rig, socket, &sp);
@@ -1534,7 +1574,7 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
 
     // The learned rest pose. Seeded on the first sample so it is never far off at startup.
     if (!s_rest_valid) { s_rest = sp; s_rest_valid = true; }
-    else {
+    else if (!rest_authoritative) {
         s_rest.x += (sp.x - s_rest.x) * kSocketRestEma;
         s_rest.y += (sp.y - s_rest.y) * kSocketRestEma;
         s_rest.z += (sp.z - s_rest.z) * kSocketRestEma;
@@ -3979,18 +4019,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
             // instead of the gun's (the "NOT WHERE IT WAS ASKED FOR" readback below, every time).
             // The socket handshake that follows is KeepWorld, so from here on nothing differs from
             // rig mode, and the same calibration numbers describe the same place on the gun.
-            const Vec3 f = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
-            const Vec3 r = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
-            const Vec3 u = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
-            const Vec3 pos{
-                s_vrig_pos.x + f.x * g_cfg.scope_dist + r.x * g_cfg.scope_right + u.x * g_cfg.scope_up,
-                s_vrig_pos.y + f.y * g_cfg.scope_dist + r.y * g_cfg.scope_right + u.y * g_cfg.scope_up,
-                s_vrig_pos.z + f.z * g_cfg.scope_dist + r.z * g_cfg.scope_right + u.z * g_cfg.scope_up};
-            const Quat qw = quat_mul(s_vrig_rot, rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r));
-            float wp = 0.0f, wy = 0.0f, wr = 0.0f;
-            quat_to_rotator(qw.x, qw.y, qw.z, qw.w, &wp, &wy, &wr);
-            set_world_location(pane, pos);
-            set_world_rotation(pane, (double)wp, (double)wy, (double)wr);
+            place_pane_from_vrig(pane);
         } else {
             set_relative_location(pane, g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up);
             set_relative_rotation(pane, g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
@@ -4117,6 +4146,17 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                              g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up,
                              g_cfg.scope_size, g_cfg.scope_rot_p, g_cfg.scope_rot_y,
                              g_cfg.scope_rot_r);
+    }
+
+    // PALETTE ROUTE, WHILE THE PANE WAITS ON THE RIG ORIGIN FOR THE SOCKET: keep it on the gun.
+    // The rig origin is a camera-mounted, body-frame mesh under this route, so a pane left there
+    // stands still while the gun moves; re-writing it from the virtual frame each tick keeps the
+    // world transform the KeepWorld conversion will read correct at the moment it is taken. Two
+    // reflected calls per tick, only while unsocketed, never during a calibration hold (which
+    // owns the pane) and never on the aim-ray path (which has no rig frame to be wrong about).
+    if (vrig_fresh(tick) && s_pane_anchored && s_attached_socket == nullptr && !s_calib_held &&
+        g_cfg.scope_mount == 1 && !s_relative_rejected) {
+        place_pane_from_vrig(pane);
     }
 
     // Live-tunable brightness, same as the reticule tint path.

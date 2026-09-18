@@ -59,6 +59,14 @@ void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float righ
 // on the stock palette; UE's Y is Blam's -Y) -- in UE axes and centimetres. False when the live
 // drive has not run in the last quarter second. The scope's virtual rig frame is built from it.
 bool palettearm_stock_marker_ue(float out_cm[3]);
+// ...and the marker's REST pose in the same frame and units (learned, remembered or baked -- see
+// RecoilPass); false until one is known. The scope's socket handshake judges "the bone is at rest"
+// against this rather than against a slow average of its own, which after a swap was still
+// remembering the previous weapon for seconds.
+bool palettearm_stock_marker_rest_ue(float out_cm[3]);
+// Bumped every time the weapon MODEL changes (the tag the palette keys its memory by), so a
+// consumer sampling the marker knows its history is from another weapon.
+int  palettearm_model_serial();
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?

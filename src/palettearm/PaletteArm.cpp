@@ -659,6 +659,9 @@ float pad_age_s(const std::atomic<long long>& t) {
 // (palettearm_stock_marker_ue): UE cm, plus the steady_clock ticks it was read at.
 std::atomic<float>     s_stock_marker_x{0.0f}, s_stock_marker_y{0.0f}, s_stock_marker_z{0.0f};
 std::atomic<long long> s_stock_marker_ticks{0};
+std::atomic<float>     s_stock_rest_x{0.0f}, s_stock_rest_y{0.0f}, s_stock_rest_z{0.0f};
+std::atomic<bool>      s_stock_rest_valid{false};
+std::atomic<int>       s_stock_model_serial{0};      // bumped on every model-tag change
 std::int32_t       s_recoil_tag = 0;
 bool               s_recoil_have_tag = false;
 std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
@@ -1429,6 +1432,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 s_stock_marker_x.store(marker_now.x * cmk, std::memory_order_relaxed);
                 s_stock_marker_y.store(-marker_now.y * cmk, std::memory_order_relaxed);
                 s_stock_marker_z.store(marker_now.z * cmk, std::memory_order_relaxed);
+                // ...and its rest pose as of the last frame (the pass below updates it), same frame.
+                if (s_recoil.have_ref) {
+                    s_stock_rest_x.store(s_recoil.ref_pos.x * cmk, std::memory_order_relaxed);
+                    s_stock_rest_y.store(-s_recoil.ref_pos.y * cmk, std::memory_order_relaxed);
+                    s_stock_rest_z.store(s_recoil.ref_pos.z * cmk, std::memory_order_relaxed);
+                }
+                s_stock_rest_valid.store(s_recoil.have_ref, std::memory_order_relaxed);
                 s_stock_marker_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(),
                                            std::memory_order_release);
             }
@@ -1445,6 +1455,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
                     weapon_changed = true;
                     s_bake_stable = 0; s_bake_cls[0] = 0;
+                    s_stock_model_serial.fetch_add(1, std::memory_order_relaxed);
 #if HALO_VR_DEV
                     API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d in hand -- %s",
                                          (int)access.model_tag,
@@ -3159,6 +3170,20 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+bool palettearm_stock_marker_rest_ue(float out_cm[3]) {
+    if (out_cm == nullptr || !s_stock_rest_valid.load(std::memory_order_relaxed)) return false;
+    const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
+    if (t == 0) return false;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (std::chrono::duration<float>(std::chrono::steady_clock::duration(now - t)).count() > 0.25f) return false;
+    out_cm[0] = s_stock_rest_x.load(std::memory_order_relaxed);
+    out_cm[1] = s_stock_rest_y.load(std::memory_order_relaxed);
+    out_cm[2] = s_stock_rest_z.load(std::memory_order_relaxed);
+    return std::isfinite(out_cm[0]) && std::isfinite(out_cm[1]) && std::isfinite(out_cm[2]);
+}
+
+int palettearm_model_serial() { return s_stock_model_serial.load(std::memory_order_relaxed); }
+
 bool palettearm_stock_marker_ue(float out_cm[3]) {
     if (out_cm == nullptr) return false;
     const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
