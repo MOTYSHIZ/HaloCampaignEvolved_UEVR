@@ -753,7 +753,8 @@ done:
 // Driving it
 // ============================================================================================
 
-uint32_t g_next_probe = 0;
+uint32_t g_next_poll   = 0;   // cheap subject re-check gate: base cadence, NEVER decays (2026-09-18)
+uint32_t g_probe_ready = 0;   // expensive probe() gate: decays per-subject (renamed from g_next_probe)
 
 // DECAYING BACKOFF for the primary chain probe (2026-09-17). On a build the walk can decode -- the
 // Steam Win64 binary these offsets were measured against -- g_chain latches on the FIRST attempt,
@@ -934,6 +935,11 @@ int xrsource_chain_crosscheck_state() { return g_crosscheck; }
 
 void xrsource_reset() {
     for (int s = 0; s < XRLAYER_SLOTS; ++s) reset_slot(s);
+    // Reset the probe backoff too, so if this is ever wired to a teardown the re-probe starts fresh
+    // rather than inheriting a decayed interval. (g_chain is deliberately NOT cleared here -- the
+    // offsets are class-level and build-constant; forgetting them would only re-pay the discovery.
+    // The header comment in XrSource.hpp claims otherwise and is stale -- pre-existing, flagged.)
+    g_next_poll = 0; g_probe_ready = 0; g_probe_attempts = 0; g_probe_subject = nullptr;
     set_status("reset");
 }
 
@@ -1101,7 +1107,17 @@ void xrsource_tick(uint32_t tick) {
     // it a release build resolves nothing and shows generated art in place of every piece of game
     // art the layer is supposed to carry. Self-limiting: gated on !g_chain.valid(), so it stops
     // for good once the chain is measured.
-    if (probe_mode > 0 && !g_chain.valid() && (int32_t)(tick - g_next_probe) >= 0) {
+    // TWO CADENCES (2026-09-18 review). The CHEAP subject re-check -- read the widget's render
+    // target and see whether it changed -- runs at base cadence ALWAYS, so a new or re-hosted target
+    // (gameplay handing over the real HUD target after a menu/placeholder, a weapon-pickup re-host)
+    // is noticed within ~1 s and re-arms the walk. The EXPENSIVE probe() decays per-subject when a
+    // PRESENT target keeps failing to decode (the WinGDK case), so it does not stutter -- but a
+    // CHANGED subject never inherits the previous one's decayed interval. The earlier single-cadence
+    // form fixed only the null-subject half of this and would stall re-detection of a decodable
+    // subject for up to the ~42 s ceiling.
+    if (probe_mode > 0 && !g_chain.valid() && (int32_t)(tick - g_next_poll) >= 0) {
+        g_next_poll = tick + kProbeBaseTicks;   // cheap re-check cadence -- never decays
+
         const int want = g_t[XRLAYER_SLOT_RETICULE].want;
         // The widget's own target when it exists, otherwise one we make. The offsets are the same
         // either way; see probe_render_target().
@@ -1118,24 +1134,21 @@ void xrsource_tick(uint32_t tick) {
         if (subject == nullptr && want >= 16 && want <= 4096) subject = probe_render_target(want);
 #endif
 
-        if (subject == nullptr) {
-            // Nothing to walk yet -- the reticule widget / render target is not up (main menu, level
-            // load). This path is cheap (no probe(), so no stutter), so it must NOT decay: keep the
-            // fast cadence and hold attempts at 0. Otherwise a player who lingers pre-widget would
-            // decay the interval, and the crisp reticle would then take up to the ~30 s ceiling to
-            // appear after the widget finally does -- because the block will not re-run to notice the
-            // new subject until g_next_probe. Backoff is for a REAL subject that keeps failing.
-            g_probe_subject  = nullptr;
+        // A new/changed subject re-arms the walk THIS tick: the previous subject's failures and its
+        // decayed interval must never delay a fresh target's first probe. Identity compare only --
+        // g_probe_subject is never dereferenced.
+        if (subject != g_probe_subject) {
+            g_probe_subject  = subject;
             g_probe_attempts = 0;
-            g_next_probe     = tick + kProbeBaseTicks;
-            set_status("no render target to probe (neither the widget's nor a made one)");
-        } else {
-            // A real subject: this is the expensive walk that stutters when it cannot latch. Apply
-            // the decaying backoff, re-arming the fast cadence when the subject render target changes
-            // (a re-host or level load is a fresh chance to succeed).
-            if (subject != g_probe_subject) { g_probe_subject = subject; g_probe_attempts = 0; }
-            g_next_probe = tick + probe_backoff_ticks(++g_probe_attempts);
+            g_probe_ready    = tick;   // due immediately
+        }
 
+        if (subject == nullptr) {
+            set_status("no render target to probe (neither the widget's nor a made one)");
+        } else if ((int32_t)(tick - g_probe_ready) >= 0) {
+            // This subject is due for the expensive walk. It decays only while THIS subject keeps
+            // failing to latch (WinGDK); a subject change above already reset it to base cadence.
+            g_probe_ready = tick + probe_backoff_ticks(++g_probe_attempts);
             probe(subject, want, probe_mode, &g_chain);
             if (g_chain.valid()) {
                 for (auto& t : g_t) t.next_resolve = tick;   // resolve through it next tick
