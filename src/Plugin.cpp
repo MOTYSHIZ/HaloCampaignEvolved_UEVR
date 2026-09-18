@@ -8304,6 +8304,89 @@ void update() {
             const bool want_hidden = g_cfg.enabled &&
                                      ((g_cfg.hide_arms && unarmed_held && !hands_driven) || !g_cfg.show_arms);
 
+            // ---- FORCE THE ARM MESH TO LOD0 (paarmlod0; see Config.hpp). On change only: a new rig
+            // component (every level load, every respawn) or the key flipping. The shell (the
+            // overshield) is the same skeleton, so it gets the same LOD or it would visibly differ.
+            // SetForcedLOD takes LOD+1 (0 = automatic); ForcedLodModel is read back to prove it
+            // LANDED, because a call that no-ops says nothing.
+            {
+                static void* s_lod_rig = nullptr;
+                static int   s_lod_set = -1;
+                const int want = (g_cfg.enabled && g_cfg.arm_driver == 2 && g_cfg.pa_arm_lod0 != 0) ? 1 : 0;
+                if (rig_v != nullptr && (rig_v != s_lod_rig || want != s_lod_set)) {
+                    const bool first = (rig_v != s_lod_rig);
+                    s_lod_rig = rig_v; s_lod_set = want;
+                    if (want == 1 || !first) {   // never touch a fresh mesh just to write the default
+                        auto force = [&](API::UObject* c) -> int {
+                            if (c == nullptr) return -2;
+                            alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+                            *reinterpret_cast<int32_t*>(q) = want;          // NewForcedLOD: 1 = LOD0, 0 = auto
+                            c->call_function(L"SetForcedLOD", q);
+                            auto* f = c->get_property_data<int32_t>(L"ForcedLodModel");
+                            return f != nullptr ? *f : -1;
+                        };
+                        const int r1 = force(rig_v);
+                        const int r2 = force(reinterpret_cast<API::UObject*>(g_shell_component.load()));
+                        API::get()->log_info("[Halo-CampE-UEVR] ARM LOD: SetForcedLOD(%d) -> ForcedLodModel arms=%d shell=%d "
+                                             "(1 = pinned to LOD0, 0 = the game's own LOD; -1 = property not readable, "
+                                             "-2 = no shell). paarmlod0=%d", want, r1, r2, g_cfg.pa_arm_lod0);
+                    }
+                }
+            }
+
+            // ---- FIRST-PERSON SCALE / FOV ON THE PAWN CAMERA (fpscale / fpfov; see Config.hpp). The
+            // camera is found by walking UP the arm mesh's attach chain -- no object-array sweep --
+            // once per rig component. Each value is READ every 64 ticks (a property read, no call)
+            // and written only when it differs: through the setter, then directly if the setter is
+            // absent or did not land. The game's own values are remembered at first sight so a key
+            // set back to 0 hands them back.
+            {
+                static void*         s_fp_for = nullptr;
+                static API::UObject* s_fp_cam = nullptr;
+                static uint32_t      s_fp_last = 0;
+                static float         s_fp_orig_scale = -1.0f, s_fp_orig_fov = -1.0f;
+                static float         s_fp_last_scale_cfg = -2.0f, s_fp_last_fov_cfg = -2.0f;
+                bool due = false;
+                if (rig_v != s_fp_for) {
+                    s_fp_for = rig_v; s_fp_cam = nullptr; due = true;
+                    auto* o = reinterpret_cast<API::UObject*>(rig_v);
+                    for (int depth = 0; o != nullptr && depth < 8; ++depth) {
+                        if (class_name_of(o).find(L"CameraComponent") != std::wstring::npos) { s_fp_cam = o; break; }
+                        auto* ap = o->get_property_data<API::UObject*>(L"AttachParent");
+                        o = (ap != nullptr) ? *ap : nullptr;
+                    }
+                    API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s above the arm mesh",
+                                         s_fp_cam != nullptr ? "found a CameraComponent" : "NO CameraComponent found");
+                }
+                if (g_cfg.fp_scale != s_fp_last_scale_cfg || g_cfg.fp_fov != s_fp_last_fov_cfg) due = true;
+                if (s_fp_cam != nullptr && g_cfg.enabled && (due || (tick - s_fp_last) >= 64u)) {
+                    s_fp_last = tick;
+                    auto apply = [&](const wchar_t* prop, const wchar_t* setter, float cfg, float& orig,
+                                     float& last_cfg, const char* name) {
+                        auto* p = s_fp_cam->get_property_data<float>(prop);
+                        if (p == nullptr) {
+                            if (last_cfg != cfg) API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s is not a property on this build", name);
+                            last_cfg = cfg; return;
+                        }
+                        if (orig < 0.0f && std::isfinite(*p)) orig = *p;              // the game's own, at first sight
+                        const float want = (cfg > 0.0f) ? cfg : orig;
+                        if (!(want > 0.0f) || std::fabs(*p - want) < 1.0e-4f) { last_cfg = cfg; return; }
+                        const float was = *p;
+                        alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
+                        *reinterpret_cast<float*>(q) = want;
+                        s_fp_cam->call_function(setter, q);
+                        const bool via_setter = std::fabs(*p - want) < 1.0e-4f;
+                        if (!via_setter) *p = want;
+                        if (last_cfg != cfg)
+                            API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s %.3f -> %.3f (%s; game's own %.3f; key %.3f)",
+                                                 name, was, *p, via_setter ? "setter" : "direct write", orig, cfg);
+                        last_cfg = cfg;
+                    };
+                    apply(L"FirstPersonScale",       L"SetFirstPersonScale",       g_cfg.fp_scale, s_fp_orig_scale, s_fp_last_scale_cfg, "FirstPersonScale");
+                    apply(L"FirstPersonFieldOfView", L"SetFirstPersonFieldOfView", g_cfg.fp_fov,   s_fp_orig_fov,   s_fp_last_fov_cfg,   "FirstPersonFieldOfView");
+                }
+            }
+
             // A NEW rig component is a different object that we have never touched, so our claim
             // does not carry over to it. Dropping the claim rather than restoring is deliberate:
             // the component we hid is gone, and writing `visible` to its replacement would be

@@ -210,9 +210,14 @@ bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, f
 //   thumb_over  how far PAST the fist the thumb goes (0..1 of `over_gain`): the punch the fist was
 //               taken from holds its thumb beside the fingers, and a clenched fist wraps it over
 //               them. Extrapolated along the thumb's own open->fist arc; only used at thumb curl 1.
+//   thumb_ext   how far PAST the open hand the thumb's outer joints go (0..1+): the recorded open
+//               hand leaves the thumb tip bent, which reads as a limp thumbs-up. Extrapolated along
+//               the thumb's own relaxed->open arc, outer joints only, and only while the thumb is
+//               opening (curl < 0).
 struct HandGesture {
     float curl[5]{0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     float thumb_over{0.0f};
+    float thumb_ext{0.0f};
 };
 // What a controller's three inputs mean on an empty hand. `rest` is the relaxed hand's curl.
 //   grip + trigger + thumb sensor   a fist, thumb clenched over
@@ -221,12 +226,20 @@ struct HandGesture {
 //   grip                            pointing, thumb out
 //   trigger alone                   the relaxed hand with the index pulled in
 //   nothing                         the relaxed hand
-HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest);
+//   point_curl  the index's curl when it POINTS (-1 = the recorded open hand, which lifts it too far
+//               to read as a point; -0.5 sits between that and the relaxed hand).
+//   thumb_ext   the thumb's extension past the open hand when it is OUT (thumbs up, point).
+HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest,
+                               float point_curl = -1.0f, float thumb_ext = 0.0f);
 // Ease `current` toward `target`, finger by finger (tau seconds, first-order).
 void ease_gesture(HandGesture& current, const HandGesture& target, float dt, float tau);
 // `over_gain` = how far past the fist a full thumb_over goes, as a fraction of the open->fist arc.
+// `thumb_out` = how far a CURLED thumb's base joint is turned back toward the open hand (0..1), so a
+//               thumb laid across a fist sits outside the index instead of through it (headset,
+//               2026-09-18: "the thumb down position also needs to be rotated out a little so it
+//               doesn't clip with the index finger when clenching a fist"). Base joint only.
 bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandGesture& gesture,
-                        float authored, float over_gain = 0.35f);
+                        float authored, float over_gain = 0.35f, float thumb_out = 0.0f);
 
 // A rotation part of the way from `a` to `b`, along the SHORT ARC.
 //

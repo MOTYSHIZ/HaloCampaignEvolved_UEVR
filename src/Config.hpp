@@ -4005,11 +4005,43 @@ struct Config {
     // open->fist arc (the fist was taken from a punch that holds the thumb beside the fingers).
     int   pa_gesture       = 1;       // DEV KEY pagesture
     float pa_thumb_over    = 0.35f;   // DEV KEY pathumbover
-    // UNARMED ARMS. hidearms exists because an unarmed viewmodel was a T-pose swinging with the rig
-    // ("a STOPGAP with a known end date ... the moment real hands are driven from the controllers
-    // this should become 'show the VR hands'"). Under armdriver=2 the hands ARE driven, so the
-    // unarmed hide stands down. 0 = keep hiding them. showarms=0 still hides them regardless.
-    int   pa_unarmed_arms  = 1;       // DEV KEY paunarmedarms
+    // First headset pass on the gestures (2026-09-18): "the last segment of the thumb is not out
+    // enough to give a convincing thumbs up" and "the index finger rotates a bit too high up to be
+    // a natural looking pointing gesture". The recorded OPEN hand is a stretched hand: its index
+    // bends up past straight and its thumb tip stays flexed. So a pointing index stops short of it
+    // (papointcurl, -1 = the open hand .. 0 = relaxed) and an out thumb's outer joints go past it
+    // (pathumbext, 0 = the open hand). Both live; both first guesses, to be tuned by eye.
+    float pa_point_curl    = -0.5f;   // DEV KEY papointcurl
+    float pa_thumb_ext     = 0.6f;    // DEV KEY pathumbext
+    // "The thumb down position also needs to be rotated out a little so it doesn't clip with the
+    // index finger when clenching a fist": a CURLED thumb's base joint turned this far back toward
+    // the open hand (0..1, scaled by the curl). Live; a first guess.
+    float pa_thumb_out     = 0.3f;    // DEV KEY pathumbout
+    // FORCE THE ARM MESH TO ITS FULL-DETAIL LOD. On low geometry settings a vertex of the middle
+    // finger follows the INDEX when pointing: the reduced LOD's skinning puts some of it on the index
+    // bone, which the authored animation never separates. SetForcedLOD(1) pins LOD0 -- where the
+    // weights are right -- regardless of the LOD bias. The arms are always at the camera, so at
+    // normal settings they are LOD0 anyway; the cost is only on low settings, and only for two
+    // meshes. Applied on change (a new rig component, or the key), never per tick. 0 = the game's.
+    int   pa_arm_lod0      = 1;       // DEV KEY paarmlod0
+    // UE 5.5 FIRST-PERSON RENDERING on the pawn camera (research doc s.7: FirstPersonFieldOfView 78,
+    // FirstPersonScale 0.15, the enable flags toggled by the game at runtime). FirstPersonScale
+    // squashes first-person primitives TOWARD THE EYE so they never clip walls on a flat screen; in
+    // stereo that is a real depth change, so the arms and gun sit at 15% of their true distance
+    // ("having one other than that for VR doesn't make sense" -- the user, 2026-09-18). fpscale is
+    // written as the value (not the enable flag, which the game flips); 0 = leave the game's.
+    // fpfov is the first-person FOV the arms are drawn through (0 = leave the game's 78) -- exposed
+    // live to find out what it does to the arms in a headset. Both on change + a cheap readback
+    // every 64 ticks (the game may rewrite them), never an engine call per tick.
+    float fp_scale         = 1.0f;    // DEV KEY fpscale
+    float fp_fov           = 0.0f;    // DEV KEY fpfov
+    // UNARMED ARMS. hidearms exists because an unarmed viewmodel was a T-pose swinging with the rig.
+    // Tried SHOWING them under armdriver=2 (2026-09-18) on the theory the palette drives them, and
+    // measured it: while unarmed the game does not build the first-person palette AT ALL -- the
+    // hook's call count stood still for the whole four-minute unarmed opening and resumed the frame
+    // a weapon appeared. There is nothing to drive, so the shown arms were the undriven mesh. Back
+    // to hidden by default; 1 = show them anyway (for looking at what the game does unarmed).
+    int   pa_unarmed_arms  = 0;       // DEV KEY paunarmedarms
     // HAND SHAPES LIFTED FROM THE GAME'S OWN ANIMATIONS (2026-09-17, by request: "a resting open hand
     // pose when we are not attached to the weapon; when grip is held even without gripping the
     // weapon, close into a fist ... the fist from the Magnum left arm punch, the open hand near the

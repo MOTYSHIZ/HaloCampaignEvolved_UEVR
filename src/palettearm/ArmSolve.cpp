@@ -170,8 +170,11 @@ bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, f
     return apply_hand_gesture(palette, arm, g, authored, 0.0f);
 }
 
-HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest) {
-    rest = std::isfinite(rest) ? std::clamp(rest, -1.0f, 1.0f) : 0.0f;
+HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float rest,
+                               float point_curl, float thumb_ext) {
+    rest       = std::isfinite(rest) ? std::clamp(rest, -1.0f, 1.0f) : 0.0f;
+    point_curl = std::isfinite(point_curl) ? std::clamp(point_curl, -1.0f, 1.0f) : -1.0f;
+    thumb_ext  = std::isfinite(thumb_ext) ? std::clamp(thumb_ext, 0.0f, 2.0f) : 0.0f;
     HandGesture g{};
     if (!grip) {
         for (float& c : g.curl) c = rest;
@@ -179,9 +182,10 @@ HandGesture gesture_for_inputs(bool grip, bool trigger, bool thumb_touch, float 
         return g;
     }
     g.curl[1] = g.curl[2] = g.curl[3] = 1.0f;                // middle, ring, pinky: closed on any grip
-    g.curl[0] = trigger ? 1.0f : -1.0f;                      // index: closed, or pointing
+    g.curl[0] = trigger ? 1.0f : point_curl;                 // index: closed, or pointing
     g.curl[4] = thumb_touch ? 1.0f : -1.0f;                  // thumb: down, or out / up
     g.thumb_over = (trigger && thumb_touch) ? 1.0f : 0.0f;   // ...and wrapped over a full fist
+    g.thumb_ext  = thumb_touch ? 0.0f : thumb_ext;           // ...or straightened out to its tip
     return g;
 }
 
@@ -194,13 +198,16 @@ void ease_gesture(HandGesture& current, const HandGesture& target, float dt, flo
     }
     current.thumb_over += (target.thumb_over - current.thumb_over) * k;
     if (!std::isfinite(current.thumb_over)) current.thumb_over = target.thumb_over;
+    current.thumb_ext += (target.thumb_ext - current.thumb_ext) * k;
+    if (!std::isfinite(current.thumb_ext)) current.thumb_ext = target.thumb_ext;
 }
 
 bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandGesture& gesture,
-                        float authored, float over_gain) {
+                        float authored, float over_gain, float thumb_out) {
     if (palette == nullptr) return false;
     authored  = std::clamp(authored, 0.0f, 1.0f);
     over_gain = std::isfinite(over_gain) ? std::clamp(over_gain, 0.0f, 1.0f) : 0.0f;
+    thumb_out = std::isfinite(thumb_out) ? std::clamp(thumb_out, 0.0f, 1.0f) : 0.0f;
     if (authored >= 0.999f) return true;               // the game's own fingers, untouched
 
     const Mat3 wrist_basis = orthonormal_basis(palette[arm.wrist]);
@@ -243,6 +250,19 @@ bool apply_hand_gesture(BlamMatrix4x3* palette, const ArmNodes& arm, const HandG
             if (f == 4 && curl > 0.0f && gesture.thumb_over > 0.0f && over_gain > 0.0f) {
                 const float over = std::clamp(gesture.thumb_over, 0.0f, 1.0f) * over_gain * curl;
                 q = slerp_short(qo, q, 1.0f + over);
+            }
+            // ...and its BASE turned back out toward the open hand, so the curled thumb lies
+            // outside the index rather than through it. Scaled by the curl, so a relaxed thumb is
+            // untouched and the fist gets all of it.
+            if (f == 4 && j == 0 && curl > 0.0f && thumb_out > 0.0f) {
+                q = slerp_short(q, qo, thumb_out * curl);
+            }
+            // ...or PAST THE OPEN HAND at its outer joints, to straighten the tip for a thumbs-up
+            // (the recorded open hand leaves it bent). Joint 0 is left on the open pose: pushing
+            // the base further swings the whole thumb away from the hand.
+            if (f == 4 && j >= 1 && curl < 0.0f && gesture.thumb_ext > 0.0f) {
+                const float ext = std::clamp(gesture.thumb_ext, 0.0f, 2.0f);
+                q = slerp_short(qr, qo, -curl * (1.0f + ext));
             }
             if (authored > 0.001f) q = slerp_short(q, rotation_from_basis(stock_rel[j]), authored);
             const Mat3 rel = rotation_basis(q);
