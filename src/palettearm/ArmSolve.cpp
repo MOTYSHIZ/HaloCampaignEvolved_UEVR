@@ -965,4 +965,32 @@ float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev
     return weight;
 }
 
+void SprintWatch::reset() { *this = SprintWatch{}; }
+
+float SprintWatch::update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    // The sprint animation carries the gun well away from rest for as long as the sprint lasts.
+    // That alone is also what a put-away or a melee looks like, so it counts only with the player
+    // pushing the stick AND having asked for a sprint in the last three seconds (a hold, or a
+    // toggle pressed before setting off). It ends when either the stick or the pose lets go --
+    // the game itself ends a sprint on firing, aiming or stopping -- and never outlives the rest
+    // pose it is measured against.
+    const bool away   = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
+    const bool moving = move_age_s >= 0.0f && move_age_s < 0.2f;
+    const bool asked  = button_age_s >= 0.0f && button_age_s < 3.0f;
+    if (!active) {
+        if (away && moving && asked) { active = true; quiet_s = 0.0f; }
+    } else {
+        if (away && moving) quiet_s = 0.0f; else quiet_s += dt;
+        if (quiet_s > 0.15f || !gun.have_ref) active = false;
+    }
+    const float target = active ? 1.0f : 0.0f;
+    const float tau = target > weight ? 0.08f : 0.15f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
+    return weight;
+}
+
 } // namespace halo::palettearm

@@ -4071,6 +4071,25 @@ struct Config {
     //   2 = plays on both hands, the free support hand joining as for any other action.
     // Live.
     int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
+    // THE SPRINT (headset, same run: "only during sprint, the arms animation can use a specific
+    // mode. There would be a global default, but also a per-weapon override setting, since some
+    // weapons work fine with Player IK on their sprint anims"). The plugin has no sprint state, so
+    // one is inferred (pa::SprintWatch): the gun well away from its rest pose WHILE the movement
+    // stick is pushed AND a sprint was asked for in the last 3 s (pasprintmask, a hold or a toggle);
+    // it ends when the stick or the pose lets go. No rest pose is learned through one, or the
+    // sprint pose would become "rest" in 1.5 s. Modes, in the order they were asked for:
+    //   0 = DEFAULT: the whole sprint animation with the IK on top -- the gun and the aim hand play
+    //       it as they always have and the free support hand joins it
+    //   1 = the gun hand only: the free support hand stays on its controller, a gripping one at
+    //       its rest relation on the gun
+    //   2 = the whole animation and NO tracking: every driven node is eased back to the stock pose
+    //       for the sprint's duration, and comes back to the controllers as it ends
+    //   3 = no sprint animation: the gun and the aim hand are held to their rest pose, the free
+    //       support hand stays on its controller
+    // Live. Per weapon: `pasprintanim@<class substring>=N` (see palettearm_parse_override); the same
+    // works for pameleeanim, pasupequip, pasupanim and pagrenadetrim.
+    int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
+    int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
     // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
     // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
     // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the

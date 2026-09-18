@@ -20,6 +20,7 @@
 #include "uevr/API.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -492,7 +493,40 @@ pa::MeleeGate      s_melee;
 pa::RestRelation   s_aim_rest;
 // The pad, as the game is about to receive it (palettearm_note_pad): steady_clock ticks of the last
 // poll each mask was seen down, 0 = never. Written by the XInput hook, read by the live drive.
-std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0};
+std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0},
+                       s_pad_sprint_ticks{0}, s_pad_move_ticks{0};
+// ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
+// frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
+pa::SprintWatch    s_sprint;
+// ---- PER-WEAPON OVERRIDES (palettearm_parse_override). A handful of lines at most.
+enum class OverrideKey : std::uint8_t { MeleeAnim, SupEquip, SupAnim, GrenadeTrim, SprintAnim };
+struct Override { OverrideKey key; char sub[40]; float value; };
+constexpr std::size_t kMaxOverrides = 48;
+Override      s_overrides[kMaxOverrides];
+std::size_t   s_override_count = 0;
+std::uint32_t s_override_gen   = 0;          // bumped on every table change
+// The preferences in force for the weapon in hand -- the globals unless a line matches its class.
+struct EffectivePrefs { int melee_anim; int sup_equip; int sup_anim; float grenade_trim_s; int sprint_anim; };
+EffectivePrefs resolve_prefs(const char* cls) {
+    EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_sup_equip, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
+                     g_cfg.pa_sprint_anim};
+    if (cls == nullptr || cls[0] == 0 || s_override_count == 0) return e;
+    char low[96]; std::size_t n = 0;
+    for (; cls[n] != 0 && n + 1 < sizeof(low); ++n) low[n] = (char)std::tolower((unsigned char)cls[n]);
+    low[n] = 0;
+    for (std::size_t i = 0; i < s_override_count; ++i) {
+        const Override& o = s_overrides[i];
+        if (std::strstr(low, o.sub) == nullptr) continue;
+        switch (o.key) {
+            case OverrideKey::MeleeAnim:   e.melee_anim     = (int)o.value;  break;
+            case OverrideKey::SupEquip:    e.sup_equip      = (int)o.value;  break;
+            case OverrideKey::SupAnim:     e.sup_anim       = (int)o.value;  break;
+            case OverrideKey::GrenadeTrim: e.grenade_trim_s = o.value;       break;
+            case OverrideKey::SprintAnim:  e.sprint_anim    = (int)o.value;  break;
+        }
+    }
+    return e;
+}
 float pad_age_s(const std::atomic<long long>& t) {
     const long long v = t.load(std::memory_order_relaxed);
     if (v == 0) return -1.0f;
@@ -1172,6 +1206,33 @@ bool drive_palette(const pa::PaletteAccess& access) {
     float    melee_left_w = 0.0f;
     pa::Vec3 gun_eff_pos{};
     pa::Mat3 gun_eff_basis{};
+    // THE PREFERENCES IN FORCE for the weapon in hand (per-weapon overrides over the globals), and
+    // what the sprint asks of this frame. pasprintanim: 0 = the whole animation with the IK on top
+    // (the free hand joins), 1 = the gun hand only (the free hand stays on its controller), 2 = the
+    // whole animation and NO tracking (every driven node eased back to the stock pose), 3 = no
+    // sprint animation (the gun and the aim hand held to rest, the free hand on its controller).
+    // Modes 0/1/3 reuse the melee machinery; mode 2 is a blend back to the stock palette at the end.
+    const EffectivePrefs prefs = resolve_prefs(::halo::weapon_offset_current_class());
+    const float sprint_w = s_sprint.weight;                  // last live update's, same for banks
+    const float sprint_join_w  = (prefs.sprint_anim == 0) ? sprint_w : 0.0f;
+    const float sprint_off_w   = (prefs.sprint_anim == 1 || prefs.sprint_anim == 3) ? sprint_w : 0.0f;
+    const float sprint_stock_w = (prefs.sprint_anim == 2) ? sprint_w : 0.0f;
+    const float sprint_hold_w  = (prefs.sprint_anim == 3) ? sprint_w : 0.0f;
+    // Mode 2 needs the STOCK pose of every driven node as it was before any of this touched it.
+    pa::BlamMatrix4x3 stock_snapshot[pa::kMaxPaletteNodes];
+    std::uint8_t      stock_nodes[pa::kMaxPaletteNodes];
+    std::size_t       stock_count = 0;
+    if (sprint_stock_w > 0.001f) {
+        auto keep = [&](std::uint8_t i) {
+            if (i == 0 || i >= access.node_count || stock_count >= pa::kMaxPaletteNodes) return;
+            for (std::size_t k = 0; k < stock_count; ++k) if (stock_nodes[k] == i) return;
+            stock_nodes[stock_count] = i; stock_snapshot[stock_count] = access.palette[i]; ++stock_count;
+        };
+        for (std::size_t k = 0; k < map->right.shoulder_count; ++k) keep(map->right.shoulder_subtree[k]);
+        for (std::size_t k = 0; k < map->left.shoulder_count;  ++k) keep(map->left.shoulder_subtree[k]);
+        for (std::size_t k = 0; k < map->weapon_count; ++k) keep(map->weapon_nodes[k]);
+        if (chest_route) keep((std::uint8_t)s_pa_chest_node);
+    }
 
     // ---- THE WEAPON BRANCH, carried onto the aim controller. ROUTE (c).
     //
@@ -1226,14 +1287,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const bool live = !access.is_capture_bank;
                 if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
                     s_recoil.reset();
-                    s_action.reset(g_cfg.pa_sup_equip != 0 ? 3.0f : 0.0f);
+                    s_action.reset(prefs.sup_equip != 0 ? 3.0f : 0.0f);
                     s_aim_rest.reset();
+                    s_sprint.reset();
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
+                // ...and NOT while a sprint plays: its pose would become "rest" in a second and a half.
                 kick = s_recoil.update(marker_now, stock_w, frozen ? 0.0f : g_cfg.pa_recoil,
-                                       g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen);
+                                       g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen && !s_sprint.active);
                 if (live) {
                     // The STOCK support wrist in the STOCK marker's frame: neither has been touched
                     // yet (the carry is applied below, the arms after that).
@@ -1244,14 +1307,18 @@ bool drive_palette(const pa::PaletteAccess& access) {
                     const auto&    swn  = access.palette[support_arm.wrist];
                     const pa::Mat3 minv = pa::transpose(stock_w);
                     [[maybe_unused]] const float was = s_action.weight;
+                    // The sprint first: the rest relations below must not learn through one.
+                    s_sprint.update(pad_age_s(s_pad_sprint_ticks), pad_age_s(s_pad_move_ticks), s_recoil, adt);
+                    const bool teach = s_recoil.at_rest() && !s_sprint.active;
                     s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
                                     pa::multiply(minv, pa::orthonormal_basis(swn)),
-                                    g_cfg.pa_sup_anim_gate, adt, g_cfg.pa_sup_equip != 0,
+                                    g_cfg.pa_sup_anim_gate, adt, prefs.sup_equip != 0,
                                     pad_age_s(s_pad_swap_ticks), pad_age_s(s_pad_throw_ticks),
-                                    g_cfg.pa_grenade_trim_s);
-                    // ...the AIM wrist's rest relation, for the melee mode that holds it to the gun...
+                                    prefs.grenade_trim_s);
+                    if (s_sprint.active) s_action.hand.stable = 0;       // no rest is learned through a sprint
+                    // ...the AIM wrist's rest relation, for the modes that hold it to the gun...
                     const auto& awn = access.palette[aim_arm.wrist];
-                    s_aim_rest.learn(s_recoil.at_rest(), pa::transform_vector(minv, awn.position - marker_now),
+                    s_aim_rest.learn(teach, pa::transform_vector(minv, awn.position - marker_now),
                                      pa::multiply(minv, pa::orthonormal_basis(awn)));
                     // ...and the gate itself, off the melee press the game is being handed.
                     s_melee.update(pad_age_s(s_pad_melee_ticks), s_recoil, s_action.hand.dev_m,
@@ -1268,15 +1335,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
                         s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.hand.dev_deg);
                     }
                     if (was <= 0.0f && s_action.weight > 0.0f) s_act_since = tnow;
-                    if (was > 0.0f && s_action.weight <= 0.0f && g_cfg.pa_sup_anim != 0) {
+                    // ...and the sprint's own line, once per sprint.
+                    static bool  s_spr_was = false;
+                    static std::chrono::steady_clock::time_point s_spr_since{};
+                    if (!s_spr_was && s_sprint.active) s_spr_since = tnow;
+                    if (s_spr_was && !s_sprint.active) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE SPRINT: a sprint played for %.2f s "
+                                             "(gun up to %.1f cm / %.0f deg from rest; pasprintanim %d for %s)",
+                                             std::chrono::duration<float>(tnow - s_spr_since).count(),
+                                             s_recoil.last_moved_m * 100.0f, s_recoil.last_turned_deg,
+                                             prefs.sprint_anim,
+                                             ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "");
+                    }
+                    s_spr_was = s_sprint.active;
+                    if (was > 0.0f && s_action.weight <= 0.0f && prefs.sup_anim != 0) {
                         API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
                                              "action for %.2f s (gun up to %.1f cm / %.0f deg from rest, off hand up "
                                              "to %.1f cm / %.0f deg from its hold; gate x%.2f, equip %d, melee mode %d, "
                                              "melee gate %.2f)",
                                              std::chrono::duration<float>(tnow - s_act_since).count(),
                                              s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
-                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, g_cfg.pa_sup_equip,
-                                             g_cfg.pa_melee_anim, s_melee.weight);
+                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, prefs.sup_equip,
+                                             prefs.melee_anim, s_melee.weight);
                         s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
                     }
 #endif
@@ -1312,8 +1392,12 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // kick is faded with it. Modes 0 and 1 keep the support hand off the animation.
             gun_eff_pos   = marker_now;
             gun_eff_basis = stock_w;
-            melee_gun_w   = (g_cfg.pa_melee_anim <= 0 && s_recoil.have_ref) ? s_melee.weight : 0.0f;
-            melee_left_w  = (g_cfg.pa_melee_anim <= 1) ? s_melee.weight : 0.0f;
+            melee_gun_w   = (prefs.melee_anim <= 0 && s_recoil.have_ref) ? s_melee.weight : 0.0f;
+            melee_left_w  = (prefs.melee_anim <= 1) ? s_melee.weight : 0.0f;
+            // ...and the sprint's: mode 3 holds the gun like melee mode 0, modes 1 and 3 keep the
+            // free hand off like melee mode 1.
+            if (s_recoil.have_ref) melee_gun_w = (std::max)(melee_gun_w, sprint_hold_w);
+            melee_left_w = (std::max)(melee_left_w, sprint_off_w);
             if (melee_gun_w > 0.001f) {
                 gun_eff_pos   = marker_now + (s_recoil.ref_pos - marker_now) * melee_gun_w;
                 gun_eff_basis = pa::slerp_basis(stock_w, s_recoil.ref_basis, melee_gun_w);
@@ -2002,7 +2086,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
             !s_hfreeze_active.load(std::memory_order_acquire)) {
             float w = (g_cfg.pa_grab_weapon != 0 && grab_allowed) ? ::halo::two_hand_hold_weight() : 0.0f;
             // ...the action hand-over, less whatever the melee preference keeps off it.
-            if (g_cfg.pa_sup_anim != 0) w = (std::max)(w, s_action.weight * (1.0f - melee_left_w));
+            if (prefs.sup_anim != 0) w = (std::max)(w, s_action.weight * (1.0f - melee_left_w));
+            w = (std::max)(w, sprint_join_w);                    // pasprintanim 0: the whole animation
             if (w > 0.0f) {
                 const pa::Vec3 on_gun_pos =
                     wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
@@ -2261,6 +2346,21 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                                map->left, map->right,
                                                map->weapon_nodes, map->weapon_count);
         HALO_VR_DEV_ONLY(if (hid) ++s_hands_applied;);
+    }
+
+    // ---- pasprintanim 2: THE WHOLE ANIMATION, NO TRACKING. Everything this drive did is eased back
+    // out toward the stock pose snapped at the top -- the arms and the gun play the sprint as the
+    // game authored it, in the mesh's own frame, and come back to the controllers as it ends.
+    if (sprint_stock_w > 0.001f && stock_count > 0) {
+        for (std::size_t k = 0; k < stock_count; ++k) {
+            pa::BlamMatrix4x3&       m = access.palette[stock_nodes[k]];
+            const pa::BlamMatrix4x3& s = stock_snapshot[k];
+            const pa::Mat3 drv = pa::orthonormal_basis(m), stk = pa::orthonormal_basis(s);
+            if (!pa::valid_basis(drv) || !pa::valid_basis(stk)) continue;
+            const pa::Mat3 b = pa::slerp_basis(drv, stk, sprint_stock_w);
+            m.forward = b.forward; m.left = b.left; m.up = b.up;
+            m.position = m.position + (s.position - m.position) * sprint_stock_w;
+        }
     }
 
     // ---- Capture the live solve for the banks (see s_bank_mirror_on): the driven nodes only --
@@ -2787,6 +2887,7 @@ std::atomic<uint32_t> g_pa_torso_seq{0};
 // the hierarchy) does reach both rendered shoulders (node 4), but the translation anchor already
 // does the job. -1 = off.
 bool palettearm_parse_key(const char* key, double v) {
+    if (std::strchr(key, '@') != nullptr) return palettearm_parse_override(key, v);
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
     else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
@@ -2808,12 +2909,43 @@ bool palettearm_parse_key(const char* key, double v) {
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
-void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down) {
-    if (!melee_down && !swap_down && !throw_down) return;
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving) {
+    if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving) return;
     const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
-    if (melee_down) s_pad_melee_ticks.store(now, std::memory_order_relaxed);
-    if (swap_down)  s_pad_swap_ticks.store(now, std::memory_order_relaxed);
-    if (throw_down) s_pad_throw_ticks.store(now, std::memory_order_relaxed);
+    if (melee_down)  s_pad_melee_ticks.store(now, std::memory_order_relaxed);
+    if (swap_down)   s_pad_swap_ticks.store(now, std::memory_order_relaxed);
+    if (throw_down)  s_pad_throw_ticks.store(now, std::memory_order_relaxed);
+    if (sprint_down) s_pad_sprint_ticks.store(now, std::memory_order_relaxed);
+    if (moving)      s_pad_move_ticks.store(now, std::memory_order_relaxed);
+}
+
+bool palettearm_parse_override(const char* key, double value) {
+    if (key == nullptr) return false;
+    const char* at = std::strchr(key, '@');
+    if (at == nullptr || at == key || at[1] == 0) return false;
+    const std::size_t base_len = (std::size_t)(at - key);
+    OverrideKey which;
+    if      (_strnicmp(key, "pameleeanim",   base_len) == 0 && base_len == 11) which = OverrideKey::MeleeAnim;
+    else if (_strnicmp(key, "pasupequip",    base_len) == 0 && base_len == 10) which = OverrideKey::SupEquip;
+    else if (_strnicmp(key, "pasupanim",     base_len) == 0 && base_len == 9)  which = OverrideKey::SupAnim;
+    else if (_strnicmp(key, "pagrenadetrim", base_len) == 0 && base_len == 13) which = OverrideKey::GrenadeTrim;
+    else if (_strnicmp(key, "pasprintanim",  base_len) == 0 && base_len == 12) which = OverrideKey::SprintAnim;
+    else return false;
+    if (s_override_count >= kMaxOverrides) return true;      // accepted, silently full
+    Override& o = s_overrides[s_override_count];
+    o.key = which; o.value = (float)value;
+    std::size_t n = 0;
+    for (const char* c = at + 1; *c != 0 && *c != '\r' && *c != '\n' && n + 1 < sizeof(o.sub); ++c)
+        o.sub[n++] = (char)std::tolower((unsigned char)*c);
+    o.sub[n] = 0;
+    if (n == 0) return true;
+    ++s_override_count; ++s_override_gen;
+    return true;
+}
+
+void palettearm_overrides_clear() {
+    if (s_override_count != 0) ++s_override_gen;
+    s_override_count = 0;
 }
 
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],

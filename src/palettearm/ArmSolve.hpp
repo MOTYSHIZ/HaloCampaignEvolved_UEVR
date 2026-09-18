@@ -354,4 +354,19 @@ struct MeleeGate {
     float update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg, float dt);
 };
 
+// IS A SPRINT PLAYING? The sprint animation holds the gun well away from rest for the whole sprint,
+// which is also what a put-away or a melee looks like -- so it counts only with the stick pushed
+// (`move_age_s`: seconds since the movement stick was last past half travel) and a sprint asked for
+// within the last three seconds (`button_age_s`: the sprint mask, a hold or a toggle). Ends when the
+// stick or the pose lets go, or the rest pose is lost. The caller must stop teaching rest poses
+// while this is active, or the sprint pose becomes "rest" after a second and a half.
+struct SprintWatch {
+    bool  active{false};
+    float quiet_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt);
+};
+
 } // namespace halo::palettearm

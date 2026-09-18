@@ -1347,6 +1347,8 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pasupequip")    == 0) { g_cfg.pa_sup_equip      = (int)v;   return true; }
     if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
     if (_stricmp(key, "pameleeanim")   == 0) { g_cfg.pa_melee_anim     = (int)v;   return true; }
+    if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }
+    if (_stricmp(key, "pasprintmask")  == 0) { g_cfg.pa_sprint_mask    = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }
     if (_stricmp(key, "pastretchshare") == 0) { g_cfg.pa_stretch_share = (float)v; return true; }
     if (_stricmp(key, "parecoil")      == 0) { g_cfg.pa_recoil         = (float)v; return true; }
@@ -1987,6 +1989,9 @@ void load_config() {
 
     g_cfg = Config{};
     g_cfg.blam_aim = keep_blam_aim;
+    // The palette arms' per-weapon overrides live outside g_cfg (PaletteArm.cpp); a deleted
+    // `key@weapon=` line must go away like any other.
+    palettearm_overrides_clear();
     // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset
     // here -- without it a deleted twohand* key kept its last value until the game restarted.
     two_hand_tuning_reset();
