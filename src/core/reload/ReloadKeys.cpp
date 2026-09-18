@@ -30,9 +30,7 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadhidearms") == 0) { g_cfg.reload_hide_arms = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "zonehandrel")    == 0) { g_cfg.zone_hand_rel = (int)v; return true; }
     if (_stricmp(key, "reloadmagasset") == 0) { g_cfg.reload_mag_asset = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "zonesnapshot")   == 0) { g_cfg.zone_snapshot = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "zonesnapshotstill")  == 0) { g_cfg.zone_snapshot_still  = clampf((float)v, 0.0f, 0.30f); return true; }
-    if (_stricmp(key, "zonesnapshotsteady") == 0) { g_cfg.zone_snapshot_steady = clampf((float)v, 0.0f, 0.30f); return true; }
+    if (_stricmp(key, "zonesnap")       == 0) { g_cfg.zone_snap = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "maghide")     == 0) { g_cfg.mag_hide = (v != 0.0); return true; }
     if (_stricmp(key, "maghidename") == 0) { strncpy_s(g_cfg.mag_hide_name, val, _TRUNCATE); return true; }
     if (_stricmp(key, "animvarset")  == 0) { strncpy_s(g_cfg.anim_var_set, val, _TRUNCATE); return true; }

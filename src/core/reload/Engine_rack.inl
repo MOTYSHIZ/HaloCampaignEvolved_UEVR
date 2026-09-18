@@ -138,35 +138,35 @@ Vec3 reload_world_room(const Vec3& world, const Vec3& head_room) {
 // seat point tracks the RENDERED gun instead of the game's own sprint animation. The alpha
 // (0.2/tick at ~32 Hz, ~150 ms) kills the bob but follows a real weapon swap instantly through
 // the snap guard.
-// THE LOW PASS IS ZONESNAPSHOT'S BUSINESS NOW, BUT IT IS NOT REMOVED. A filter cannot fix the
-// frame mix -- that error is a BIAS proportional to player speed, and a lag filter only delays a
-// bias, which is why 0.2/tick (~150 ms at 32 Hz) left the zone chasing. What the filter genuinely
-// buys is killing the weapon animation's bob and the recoil, and with the bias gone it needs far
-// less lag to do that: mode 1 runs 0.5/tick (~2 ticks, ~62 ms), which still halves the bob every
-// tick. Mode 3 removes both without any lag at all by learning the offset and holding it, which
-// is why it is the shipped default. Mode 0 keeps the inherited filter exactly.
-float zone_offset_alpha() { return (g_cfg.zone_snapshot == 0) ? 0.2f : 0.5f; }
-// MODE 3: LEARN THE HAND-FRAME OFFSET, THEN HOLD IT. Learning is allowed only while the player is
-// not moving the camera much (the sprint animation only plays while he is) and the offset is
-// steady tick to tick. Both gates are MEASURED, not inferred: the camera's own per-tick travel is
-// what gesture_game_cam already integrates from GetCameraLocation, and the steadiness is this
-// value's own first difference. Four consecutive steady ticks before it is taken as learned, so a
-// single quiet frame mid-sprint cannot re-learn a displaced offset.
-struct ZoneHold { void* key = nullptr; Vec3 loc{}; bool have = false; int steady = 0; };
-bool zone_offset_hold(ZoneHold& h, void* comp_key, const Vec3& loc, Vec3* out) {
-    if (g_cfg.zone_snapshot != 3) return false;
-    const float dx = loc.x - h.loc.x, dy = loc.y - h.loc.y, dz = loc.z - h.loc.z;
-    const float step = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (comp_key != h.key || !h.have) { h.key = comp_key; h.loc = loc; h.have = true; h.steady = 0; *out = loc; return true; }
-    const bool still  = s_snap.cam_travel <= g_cfg.zone_snapshot_still;
-    const bool steady = step <= g_cfg.zone_snapshot_steady;
-    if (still && steady) { if (h.steady < 4) ++h.steady; }
-    else                 h.steady = 0;
-    // Learn while the gates hold OR while nothing has been learned yet (the first seconds on a
-    // fresh weapon must converge even if the player picked it up on the run); hold otherwise.
-    if ((still && steady) || h.steady < 4) h.loc = loc;
-    *out = h.loc;
-    return true;
+// THE TRUSTED OFFSET. One function for both consumers, matching the play build's
+// zone_snap_smooth exactly so the same key value means the same thing in either build.
+//
+// THE FILTER STAYS AT 0.2/tick IN EVERY MODE. A filter cannot fix the frame mix: that error is a
+// BIAS proportional to player speed, and a lag filter only delays a bias, which is why the filter
+// alone left the zone chasing. What it genuinely buys is killing tracker noise and the weapon
+// animation's bob, and the snapshot does not change how good it is at that -- so it is left where
+// it was tuned rather than opened up, which would hand the bob straight to the grab point.
+//
+// MODE 3 adds the one thing a filter cannot do: it refuses to LEARN from a sample the game's
+// animation is moving. The detector is MEASURED, not guessed -- the raw offset's own per-tick
+// delta. An idle weapon holds its component still, so the delta sits near zero; the sprint
+// animation drives it several cm per tick. Below 1 cm/tick the sample updates the trusted offset,
+// above it the offset is held.
+//
+// THE STATE IS THE CALLER'S, never a static in here: the rack zone and the mag well each keep
+// their own trusted offset, and one shared between them would snap-guard against the other's
+// value on every call.
+struct ZoneSmooth { void* key = nullptr; Vec3 loc{}; bool have = false; };
+Vec3 zone_snap_smooth(ZoneSmooth& st, const Vec3& raw, void* key, int mode) {
+    const float dx = raw.x - st.loc.x, dy = raw.y - st.loc.y, dz = raw.z - st.loc.z;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (key != st.key || !st.have || d2 > 0.25f) {   // 0.5 m: a weapon swap, not a bob
+        st.key = key; st.loc = raw; st.have = true;
+        return st.loc;
+    }
+    const bool settled = (d2 <= 0.0001f);            // 1 cm/tick: the animation is not driving it
+    if (mode != 3 || settled) { const float a = 0.2f; st.loc.x += dx * a; st.loc.y += dy * a; st.loc.z += dz * a; }
+    return st.loc;
 }
 Vec3 reload_well_stabilize(void* comp_key, const Vec3& well_world, const Vec3& head_room) {
     if (g_cfg.zone_hand_rel == 0) return well_world;
@@ -192,13 +192,8 @@ Vec3 reload_well_stabilize(void* comp_key, const Vec3& well_world, const Vec3& h
     const Vec3 loc{rel.x * r.x + rel.y * r.y + rel.z * r.z,
                    rel.x * u.x + rel.y * u.y + rel.z * u.z,
                    rel.x * f.x + rel.y * f.y + rel.z * f.z};
-    static ZoneHold s_hold;
-    static void* s_key = nullptr; static Vec3 s_loc{}; static bool s_have = false;
-    if (!zone_offset_hold(s_hold, comp_key, loc, &s_loc)) {
-        const float dx = loc.x - s_loc.x, dy = loc.y - s_loc.y, dz = loc.z - s_loc.z;
-        if (comp_key != s_key || !s_have || dx * dx + dy * dy + dz * dz > 0.25f) { s_key = comp_key; s_loc = loc; s_have = true; }
-        else { const float a = zone_offset_alpha(); s_loc.x += dx * a; s_loc.y += dy * a; s_loc.z += dz * a; }
-    }
+    static ZoneSmooth s_well_sm;
+    const Vec3 s_loc = zone_snap_smooth(s_well_sm, loc, comp_key, g_cfg.zone_snap);
     const Vec3 room{ap.x + r.x * s_loc.x + u.x * s_loc.y + f.x * s_loc.z,
                     ap.y + r.y * s_loc.x + u.y * s_loc.y + f.y * s_loc.z,
                     ap.z + r.z * s_loc.x + u.z * s_loc.y + f.z * s_loc.z};
@@ -383,7 +378,7 @@ void slide_update(const Vec3& head) {
     // first-person mesh, not its place. So the slide is where the rendered gun is: slideoff
     // metres from the aim hand in the aim-fixed frame (right, up, forward), the same recipe as
     // the reload well's fallback. The pull is measured along the aim direction in room space.
-    // ONE SNAPSHOT (zonesnapshot, doctrine and the measured numbers in ConfigFields.inl). With the
+    // ONE SNAPSHOT (zonesnap, doctrine and the measured numbers in ConfigFields.inl). With the
     // key on, every quantity below comes from the tick's own snapshot -- the head, both hands, the
     // camera and the rack part's world centre, all sampled at one instant and carrying one
     // sequence number -- and nothing in this path reads a newest value. With the key off it is
@@ -405,7 +400,7 @@ void slide_update(const Vec3& head) {
         // own axes rather than the hand's: quat_forward is the barrel (UE +X under the room map
         // x=ue.y, y=ue.z, z=-ue.x), room +Y is the gun's up (UE +Z) and room +X its right (UE +Y).
         // The game component leaves the path entirely -- the slide_zone==1 branch below is skipped.
-        if (g_cfg.zone_snapshot == 2 && s_snap.wpn_ok) {
+        if (g_cfg.zone_snap == 2 && s_snap.wpn_ok) {
             const Quat wq = s_snap.wpn_q;
             f = quat_forward(wq);
             u = quat_rotate(wq, Vec3{0.0f, 1.0f, 0.0f});
@@ -426,7 +421,7 @@ void slide_update(const Vec3& head) {
     Vec3 zone{ap.x + r.x * g_cfg.slide_off[0] + u.x * g_cfg.slide_off[1] + f.x * g_cfg.slide_off[2],
               ap.y + r.y * g_cfg.slide_off[0] + u.y * g_cfg.slide_off[1] + f.y * g_cfg.slide_off[2],
               ap.z + r.z * g_cfg.slide_off[0] + u.z * g_cfg.slide_off[1] + f.z * g_cfg.slide_off[2]};
-    const bool drawn_gun_zone = snap && g_cfg.zone_snapshot == 2 && s_snap.wpn_ok;
+    const bool drawn_gun_zone = snap && g_cfg.zone_snap == 2 && s_snap.wpn_ok;
     const bool part_ok = snap ? s_snap.part_ok : g_sl_part_valid.load(std::memory_order_relaxed);
     if (g_cfg.slide_zone == 1 && part_ok && !drawn_gun_zone) {
         // The part's own rendered centre, brought into room space, then a little further back
@@ -442,16 +437,10 @@ void slide_update(const Vec3& head) {
             const Vec3 loc{rel.x * r.x + rel.y * r.y + rel.z * r.z,
                            rel.x * u.x + rel.y * u.y + rel.z * u.z,
                            rel.x * f.x + rel.y * f.y + rel.z * f.z};
-            static ZoneHold s_zhold;
-            static Vec3 s_zl{}; static bool s_zh = false;
-            // MODE 3 learns this offset while the sprint animation is not playing and holds it;
-            // every other mode keeps the filter, opened to 1.0 by zone_offset_alpha under the
-            // snapshot because the lag it bought was only hiding the frame mix.
-            if (!zone_offset_hold(s_zhold, s_snap.part_key, loc, &s_zl)) {
-                const float dx = loc.x - s_zl.x, dy = loc.y - s_zl.y, dz = loc.z - s_zl.z;
-                if (!s_zh || dx * dx + dy * dy + dz * dz > 0.25f) { s_zl = loc; s_zh = true; }
-                else { const float a = zone_offset_alpha(); s_zl.x += dx * a; s_zl.y += dy * a; s_zl.z += dz * a; }
-            }
+            // THIS ZONE'S OWN trusted offset, through the shared smoother. Keyed on the component
+            // the snapshot read the centre from, so a weapon swap re-learns rather than easing.
+            static ZoneSmooth s_rack_sm;
+            const Vec3 s_zl = zone_snap_smooth(s_rack_sm, loc, snap ? s_snap.part_key : (void*)&s_rack_sm, g_cfg.zone_snap);
             pr = Vec3{ap.x + r.x * s_zl.x + u.x * s_zl.y + f.x * s_zl.z,
                       ap.y + r.y * s_zl.x + u.y * s_zl.y + f.y * s_zl.z,
                       ap.z + r.z * s_zl.x + u.z * s_zl.y + f.z * s_zl.z};
@@ -500,7 +489,7 @@ void slide_update(const Vec3& head) {
         if ((s_n++ % 30u) == 0u)
             API::get()->log_info("[Halo-CampE-UEVR] SLIDE hand-to-zone=%.0fcm held=%d pull=%.4f | snap=%u mode=%d camtravel=%.0fcm src=%s",
                                  dist_m * 100.0f, (int)s_sl_held, g_slide_pull.load(),
-                                 snap ? s_snap.seq : 0u, g_cfg.zone_snapshot, s_snap.cam_travel * 100.0f,
+                                 snap ? s_snap.seq : 0u, g_cfg.zone_snap, s_snap.cam_travel * 100.0f,
                                  drawn_gun_zone ? "drawn gun" : (part_ok && g_cfg.slide_zone == 1 ? "part" : "slideoff"));
     }
     // THE PUMP WITH THE HOLD (from the headset, 2026-09-06: two-handing and pumping work together): while

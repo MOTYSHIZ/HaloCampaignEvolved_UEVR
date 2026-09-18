@@ -1665,61 +1665,56 @@
     // nothing to hand-tune. 0 = raw component positions (the old behaviour).
     int   zone_hand_rel = 1;
     // ONE SNAPSHOT COMPUTES EVERYTHING (from the headset, 2026-09-17: "sprinting right I have to hold
-    // my hand well to the left of the slide, in the air, to rack it" -- his rule, verbatim:
+    // my hand well to the left of the slide, in the air, to rack it". His rule, verbatim:
     // "everything should be computed in the same frame / tick / etc", "one snapshot computes
     // everything? everythin in the same exact frame?").
     //
     // reloadframe=1 above put the hand and the component positions on ONE CAMERA. It did not put
-    // them at one INSTANT, and that is the error left. The three sources in the rack path have
-    // three different ages: the rack part's world centre is published by slide_part_tick, which
-    // runs AFTER slide_update consumes it, so the zone is built on a position one whole engine
-    // tick old (~31 ms); the hand poses are read fresh, once for the grip pose and again inside
-    // the hand-relative conversion for the aim pose, so two reads in one decision can straddle
-    // two or three render frames; and the camera is ms-keyed, which is one tick, not one instant.
-    // Sprinting, those ages are a LATERAL displacement, not a wobble: the whole rendered gun has
-    // moved with the player since the component was sampled, so the zone sits behind the slide by
-    // player speed times the age, always on the same side, which is exactly the report.
+    // them at one INSTANT, and that is the error left. The rack part's world centre is published by
+    // slide_part_tick, which the engine's tick list runs AFTER slide_update has consumed it, so the
+    // zone was built on a position one whole engine tick old; the hand poses were read fresh, once
+    // for the grip pose and again inside the hand-frame conversion for the aim pose, so two reads
+    // in one decision can return two different predictions; and the camera is ms-keyed, which is
+    // one tick and not one instant. Sprinting, those ages are a LATERAL displacement and not a
+    // wobble: the rendered gun has moved with the player since the component was sampled, always
+    // the same way, which is exactly the report.
     //
-    // THE NUMBERS. The engine tick measures ~31 ms (32 Hz), the sprint is 6.65 m/s at full
+    // THE NUMBERS. The engine tick measures ~31 ms (32 Hz) and the sprint is 6.65 m/s at full
     // throttle (the roomscale throttle's own measured scale). One tick of skew is 0.0313 s *
-    // 6.65 m/s = 20.8 cm, and the rack gate is slideradius 16 cm: the zone leaves the hand's reach
-    // outright, which is why it has to be held in the air beside the gun. A second pose read
-    // 11 ms (one 90 Hz frame) later adds 7.4 cm. The same 20.8 cm lands on the seat test against a
-    // 7 cm reloadseat gate, so a sprinting reload cannot seat at all.
+    // 6.65 m/s = 20.8 cm against a 16 cm slideradius, so the zone leaves the hand's reach outright,
+    // which is why it has to be held in the air beside the gun. A second pose read one 90 Hz frame
+    // later adds 7.4 cm. The same 20.8 cm lands on the seat test against a 7 cm reloadseat.
     //
+    // Three DIFFERENT mechanisms, not switches on one. Same key name, same values and the same
+    // meanings as the play build's zonesnap, so one cfg line means one thing in either build.
     //   1  SAME SNAPSHOT COMPARE. One instant per tick, carrying a sequence number: the head, the
     //      aim hand's aim pose, the other hand's grip pose, the game camera, the rack part's world
     //      centre and the magazine component's world transform are all sampled together, and the
-    //      zone, the seat, the grab test and the markers are built from that alone. No newest
-    //      value read anywhere in the path. zonehandrel's hand-frame conversion is kept, with its
-    //      low pass shortened from 0.2/tick (~150 ms) to 0.5/tick (~62 ms): a filter cannot fix
-    //      the frame mix, because that error is a BIAS proportional to player speed and a lag
-    //      filter only delays a bias, which is why the long one left the zone chasing. What the
-    //      filter genuinely buys is killing the weapon animation's bob and the recoil, and with
-    //      the bias gone it needs far less lag to do that.
+    //      zone, the seat, the grab test and both markers are built from that alone. No newest
+    //      value read anywhere in the path. Only the HAND-FRAME offset crosses a tick boundary,
+    //      and that quantity is frame-invariant. zonehandrel's low pass is kept as it was, 0.2 per
+    //      tick: with the bias gone by construction its only remaining job is killing the weapon
+    //      animation's bob, which is what it was always good at  [default]
     //   2  ZONE FROM THE DRAWN GUN. The placement owns the rendered pose, so the zone is built in
-    //      the DRAWN weapon's own rotation frame (the palette's published pose) on the snapshot's
-    //      hand, and the game component leaves the path entirely. Needs the placement (palettewpn);
-    //      falls back to mode 1 when nothing publishes a drawn pose.
-    //   3  FROZEN PER WEAPON OFFSET. Mode 1, and the hand-frame offset is LEARNED only while the
-    //      sprint animation is not playing and the offset is steady, then held for that weapon.
-    //      Detection, both measured and neither guessed: the game camera's own per-tick travel
-    //      (gesture_game_cam already integrates it) below zonesnapshotstill metres, and the
-    //      offset's per-tick change below zonesnapshotsteady metres for four consecutive ticks.
-    //      Either condition failing freezes the offset where learning left it. SHIPPED, because
-    //      it is the only one of the three that answers BOTH halves of the report with no lag at
-    //      all: the snapshot removes the speed bias, and the hold removes the animation the
-    //      player cannot see (the rendered gun is placed by the palette and never plays the
-    //      sprint animation, so the offset learned while still is the right one to hold). Until
-    //      it has learned it tracks live, so a weapon picked up on the run is never stuck on a
-    //      stale value  [default]
+    //      the DRAWN weapon's own rotation frame, composed the way aimbore composes the drawn
+    //      barrel, and the game component leaves the path entirely -- neither a camera nor the
+    //      game's sprint animation can reach it. Costs the component's per-weapon accuracy, which
+    //      is why it is not the default. Needs the placement (palettewpn); with nothing publishing
+    //      a drawn pose it falls back to mode 1.
+    //   3  FROZEN OFFSET. Mode 1's snapshot, and the trusted offset is only LEARNED from SETTLED
+    //      samples, held otherwise. Settled is MEASURED, not guessed: the raw offset's own
+    //      per-tick delta. An idle weapon holds its component still so the delta sits near zero,
+    //      while the sprint animation drives it several cm per tick; below 1 cm/tick the sample
+    //      updates the trusted offset, above it the offset is held. The 50 cm snap guard still
+    //      adopts a weapon swap whole.
     //   0  off: the inherited newest-value reads (the behaviour before this key)
-    int   zone_snapshot = 3;
-    // Mode 3's two learning gates, metres: the camera may travel this far in a tick and still
-    // count as "not sprinting", and the hand-frame offset may change this much in a tick and still
-    // count as steady. Defaults measured off the camera travel the game reports at a walk.
-    float zone_snapshot_still = 0.04f;
-    float zone_snapshot_steady = 0.01f;
+    //
+    // Modes 1-3 all apply to the rack zone AND the mag well seat test, and each MARKER is drawn
+    // from the same value its own test used. The belt magazine's zone is NOT in this list, and
+    // that is stated because it was checked rather than assumed: both sides of it come off one
+    // tick's poses in the author's body frame, and the body-frame image of the point the mesh is
+    // drawn at is his belt offset identically, for every yaw and every anchor.
+    int   zone_snap = 1;
     // WPNERR (from the headset, 2026-09-11: "lets get err down to 0"). The weapon-vs-controller error
     // instrument. Every rendered frame the sampler compares the controller's FRESH raw pose
     // against the raw pose the palette publisher last sent (and the hook last consumed), in room

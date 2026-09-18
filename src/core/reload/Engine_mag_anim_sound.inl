@@ -189,7 +189,7 @@ void mag_hide_enforce() {
     }
 }
 
-// THE WELL IN THE SNAPSHOT (zonesnapshot). The magazine component the hide just found IS the
+// THE WELL IN THE SNAPSHOT (zonesnap). The magazine component the hide just found IS the
 // rendered magazine sitting in its well, so its world transform is the per-weapon insert point.
 // Read HERE, inside the snapshot, so the seat test compares it against hand poses taken at the
 // same instant instead of against poses read later in the tick.
@@ -233,7 +233,7 @@ void reload_well_marker_update(bool show, const Vec3& world) {
     holster_marker_show(m, true);
     {   // the one solve: room-anchored like everything else, re-placed per frame (Markers.hpp)
         //
-        // THE RING IS DRAWN FROM THE SNAPSHOT THAT DECIDED THE SEAT (zonesnapshot). This used to
+        // THE RING IS DRAWN FROM THE SNAPSHOT THAT DECIDED THE SEAT (zonesnap). This used to
         // read the head pose AGAIN and invert through holster_world_to_room, which is the
         // RENDERED camera -- while `world` had been built through the GAME camera (reloadframe=1).
         // Two cameras and two head reads for one point: the ring the player aims the magazine at

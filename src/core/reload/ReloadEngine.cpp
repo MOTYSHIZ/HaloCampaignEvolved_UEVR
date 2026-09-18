@@ -85,10 +85,10 @@ bool s_reload_on = true;   // one release on the off edge (at a boot with reload
 // here because reload_release_windows (the reload state fragment) sets it and the press test below reads it.
 bool s_reset_drop_tap = false;
 
-// ================================================================ THE SNAPSHOT (zonesnapshot)
+// ================================================================ THE SNAPSHOT (zonesnap)
 //
 // ONE INSTANT, ONE SEQUENCE NUMBER, EVERY DECISION. Doctrine and the measured numbers are in
-// ConfigFields.inl on zonesnapshot. Everything the rack zone, the magazine well and their two
+// ConfigFields.inl on zonesnap. Everything the rack zone, the magazine well and their two
 // markers need is sampled here, once per engine tick, before the reload state machine runs; the
 // tests then read this and nothing else, so no decision can mix two moments. Declared before the
 // engine's own fragments because both of them consume it (the well marker in
@@ -111,7 +111,7 @@ struct ZoneSnap {
 };
 ZoneSnap s_snap;
 // Whether the snapshot rule is in force. Off = every consumer keeps its inherited newest-value reads.
-bool zone_snapshot_on() { return g_cfg.zone_snapshot != 0; }
+bool zone_snapshot_on() { return g_cfg.zone_snap != 0; }
 // Filled by the fragments below (each owns the objects it reads).
 bool sl_part_world_now(Vec3* out, void** key);
 bool mag_well_world_now(Vec3* loc, Vec3* rot, bool* rot_ok);
@@ -174,7 +174,7 @@ void reload_engine_tick_begin(float dt, bool active) {
     reload_anim_rate_tick();
     reload_state_hold_tick();
     if (!active) return;
-    // THE SNAPSHOT, FIRST (zonesnapshot). Before the reload state machine, before the rack, before
+    // THE SNAPSHOT, FIRST (zonesnap). Before the reload state machine, before the rack, before
     // the holster's belt magazine: one instant, taken once, and every decision in this tick reads
     // it instead of sampling for itself. This is also the reason it lives at the top of the tick
     // rather than inside any one test -- a test that took its own snapshot would still disagree
@@ -365,7 +365,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     // reload_well_fwd along the aim direction from the aim hand. And the LIFT GATE either
     // way: the mag must have risen since it was grabbed. Without both, the log
     // (2026-08-16 12:07) shows the reload firing 214-224 ms after the belt grab, at the hip.
-    // ONE SNAPSHOT (zonesnapshot, doctrine in ConfigFields.inl). The magazine component's world
+    // ONE SNAPSHOT (zonesnap, doctrine in ConfigFields.inl). The magazine component's world
     // position used to be read HERE, live, while the hand poses arrived from the caller's own
     // reads and reload_well_stabilize then took a THIRD read of the aim hand for itself: three
     // moments in one 7 cm gate. With the key on the component transform comes from the tick's
@@ -417,7 +417,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
             API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f) | snap=%u mode=%d well=%s",
                                  join * 100.0f, (hand_l.y - s_grab_y) * 100.0f,
                                  g_cfg.reload_seat_dist * 100.0f, g_cfg.reload_lift * 100.0f,
-                                 use_snap ? s_snap.seq : 0u, g_cfg.zone_snapshot,
+                                 use_snap ? s_snap.seq : 0u, g_cfg.zone_snap,
                                  have_well_world ? "component" : "reloadwellfwd fallback");
     }
     // THE SLIDE, in place of the old four-tick debounce. Inside the capture radius (and
