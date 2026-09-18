@@ -668,11 +668,11 @@ void holster_update(float dt) {
         // The fetch hand's distance to the belt point, published for Gesture's grab test. Gated on
         // MAG_OUT so a hand idling at the hip between reloads publishes nothing.
         bool in = false;
-        const Vec3 mz = features_holster_mag_zone_point(mo, anchor, c, s);
         if (rs == ReloadState::MagOut && ghand_ok) {
-            const float ddx = ghand.x - mz.x, ddy = ghand.y - mz.y, ddz = ghand.z - mz.z;
+            const float ddx = ghand.x - mo.x, ddy = ghand.y - mo.y, ddz = ghand.z - mo.z;
             const float d = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
             in = d <= g_cfg.reload_mag_radius;
+            features_holster_mag_zone_measured(d, ghand, mo, anchor, c, s);
             if (g_cfg.reload_log) {
                 static uint32_t s_ml = 0;
                 if ((s_ml++ % 15u) == 0u)

@@ -807,27 +807,42 @@ void reload_engine_mag_drawn(API::UObject* m, bool wanted) {
 
 Vec3 reload_engine_mag_belt_point() { return mag_belt_point(); }
 
-// THE BELT MAGAZINE'S ZONE IS THE POINT THE BELT MAGAZINE IS DRAWN AT (zonesnapshot). The belt
-// point is a BODY-FRAME offset (x right, y up, z back, from the body anchor). The drawn magazine
-// is placed at anchor + that offset turned by the body yaw; the grab zone, five lines earlier in
-// the same block, subtracted the raw offset from a ROOM-space hand -- no anchor, no yaw. Two
-// frames for one point: what the player reaches for was never where the magazine hangs, and the
-// error was the whole anchor (about head height plus the yaw rotation of the offset), not a
-// tracking wobble. This returns the exact expression the marker is placed with, off the same
-// anchor and the same yaw, in the same tick, so the zone and the mesh are one point.
-Vec3 reload_engine_mag_zone_point(const Vec3& belt, const Vec3& anchor, float yaw_cos, float yaw_sin) {
-    if (g_cfg.zone_snapshot == 0) return belt;
-    return Vec3{anchor.x + belt.x * yaw_cos + belt.z * yaw_sin,
-                anchor.y + belt.y,
-                anchor.z + (-belt.x * yaw_sin + belt.z * yaw_cos)};
+// THE BELT MAGAZINE'S ZONE, AND THE PROOF THAT IT IS ALREADY ONE FRAME. This was read the wrong
+// way round once and must not be again, so the algebra is written out and the log checks it at
+// runtime. The belt point is a BODY-FRAME offset (x right, y up, z back, from the body anchor).
+// The fetch hand arriving here is body frame too: Holster builds it as R(-yaw) * (hand_room -
+// anchor). The drawn magazine is placed at room = anchor + R(+yaw) * belt, and the body-frame
+// image of that room point is R(-yaw) * (room - anchor) = R(-yaw) * R(+yaw) * belt = belt,
+// identically, for every yaw and every anchor. So |hand_body - belt| IS the distance from the
+// hand to the drawn mesh, it is rotation invariant, and it carries no anchor term. Turning the
+// belt point into a room point for the compare would have subtracted a room position from a body
+// position: not a distance at all, and one that grows with the anchor, which on an origin
+// carrying floor height would stop the grab firing and deadlock the reload in MAG_OUT.
+//
+// The log prints both sides with their frames named, and re-derotates the drawn point so the
+// identity above is a measured number in the owner's log rather than a claim in a comment.
+void reload_engine_mag_zone_measured(float dist_m, const Vec3& hand_body, const Vec3& belt_body,
+                                     const Vec3& anchor, float yaw_cos, float yaw_sin) {
+    if (!g_cfg.reload_vr_log) return;
+    static uint32_t s_n = 0;
+    if ((s_n++ % 15u) != 0u) return;
+    const Vec3 room{anchor.x + belt_body.x * yaw_cos + belt_body.z * yaw_sin,
+                    anchor.y + belt_body.y,
+                    anchor.z + (-belt_body.x * yaw_sin + belt_body.z * yaw_cos)};
+    const float rx = room.x - anchor.x, ry = room.y - anchor.y, rz = room.z - anchor.z;
+    const Vec3 back{rx * yaw_cos + rz * (-yaw_sin), ry, rx * yaw_sin + rz * yaw_cos};
+    const float err = std::sqrt((back.x - belt_body.x) * (back.x - belt_body.x)
+                              + (back.y - belt_body.y) * (back.y - belt_body.y)
+                              + (back.z - belt_body.z) * (back.z - belt_body.z));
+    API::get()->log_info("[Halo-CampE-UEVR] RELOAD magzone: hand-to-belt=%.1fcm (need <=%.1f) | hand[body]=(%.3f %.3f %.3f) "
+                         "belt[body]=(%.3f %.3f %.3f) -- ONE frame | drawn[room]=(%.3f %.3f %.3f) derotated back to "
+                         "[body]=(%.3f %.3f %.3f), identity error %.4fcm | anchor[room]=(%.3f %.3f %.3f)",
+                         dist_m * 100.0f, g_cfg.reload_mag_radius * 100.0f,
+                         hand_body.x, hand_body.y, hand_body.z, belt_body.x, belt_body.y, belt_body.z,
+                         room.x, room.y, room.z, back.x, back.y, back.z, err * 100.0f,
+                         anchor.x, anchor.y, anchor.z);
 }
 
-// The survey HAS candidates and every one is a dead handle -- a level transition recycled them.
-// The caller must re-survey on that, or the fallback chain bottoms out at the frag mesh and the
-// belt mag renders as a grenade (field report, 2026-08-31). An empty list is "never surveyed".
-// EXCEPT for a shell loader, a dead list is a level transition, and the once-per-key guard must not
-// hold -- it is exactly how the belt mag ended up rendering as a frag grenade. rank 4 = the weapon's own
-// component, no survey involved.
 bool reload_engine_mag_cands_stale(int rank) {
     if (rank >= 4) return false;
     const auto& hs = host::g_holster_state;
