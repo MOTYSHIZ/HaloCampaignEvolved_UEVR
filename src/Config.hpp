@@ -1790,6 +1790,20 @@ struct Config {
     // Canonical: present the game's OWN reticle render target rather than our generated ring. This
     // is what gives the layer real per-weapon art and live firing/reload animation.
     bool  xr_layer_src = true;
+    // LAX DESCRIPTOR ACCEPTANCE (2026-09-17). The probe finds extent-matching candidates, then
+    // gates on desc_plausible() -- bytes it READS as FRHITextureDesc's mips/samples/dimension/format
+    // at FIXED sub-offsets. Those sub-offsets are the Steam Win64 build's layout; the Microsoft
+    // Store / Game Pass (WinGDK) build lays the descriptor out differently, so desc_plausible reads
+    // garbage and rejects every candidate -- the reticle never resolves there. This lets the probe,
+    // when NO plausible candidate was accepted, fall through to the AUTHORITATIVE check on the
+    // extent-matching candidates it rejected: validate_native() calls UEVR's get_native_resource()
+    // and reads the REAL D3D12 GetDesc, which is build-agnostic. Self-gating -- it never runs on a
+    // build that already accepted one (Steam), so it cannot change Steam's result -- and bounded by
+    // MAX_ATTEMPTS with the same vtable guard, so it is the guarded call on a few more candidates,
+    // not a blind one. Default on; set 0 to force the strict pre-filter (the pre-2026-09-17
+    // behaviour) if the guarded fallthrough is ever suspected on some build. UNVERIFIED on WinGDK:
+    // it is the mechanism by which that build COULD resolve, but confirming it needs a Game Pass run.
+    bool  xr_layer_src_lax = true;
     // ms. HOW LONG THE LAYER KEEPS SHOWING THE LAST CAPTURED CROSSHAIR once the game thread stops
     // capturing, before it gives up and draws the generated ring instead.
     //

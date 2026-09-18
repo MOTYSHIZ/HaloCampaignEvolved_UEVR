@@ -654,6 +654,14 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
     void* first_native = nullptr;
 
+    // LAX FALLTHROUGH RECORD: extent matches that FAIL desc_plausible. On a build whose descriptor
+    // layout desc_plausible cannot read (WinGDK), the real render target hides among these. Tried
+    // only if the strict pass accepts nothing AND xrlayersrclax is on. Each rhi here already passed
+    // looks_like_object below, so the guarded virtual call on it is as safe as on a plausible one.
+    struct LaxRec { void* rhi; int32_t o1, o2, oe; };
+    LaxRec lax[MAX_ATTEMPTS] = {};
+    int    lax_n = 0;
+
     // 0x28 skips the UObject header (vtable, flags, index, outer, name, class), none of which can
     // be an FTextureResource pointer.
     for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim; o1 += 8) {
@@ -693,7 +701,16 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 // EVERY extent match is LOGGED; only a plausible one is CALLED. Filtering the log
                 // as well would hide the evidence that says what the layout actually is -- which is
                 // the only thing that made this gate writable in the first place.
-                if (!plausible) continue;
+                if (!plausible) {
+                    // Record it for the lax pass instead of discarding: on a build whose descriptor
+                    // layout we cannot read, this is exactly where the real target is. rhi passed
+                    // looks_like_object above, so it is safe to hand to the guarded call later.
+                    if (g_cfg.xr_layer_src_lax && lax_n < MAX_ATTEMPTS) {
+                        lax[lax_n].rhi = rhi; lax[lax_n].o1 = o1; lax[lax_n].o2 = o2; lax[lax_n].oe = oe;
+                        ++lax_n;
+                    }
+                    continue;
+                }
 
                 bool seen = false;
                 for (int i = 0; i < tried_n; ++i) if (tried[i] == rhi) { seen = true; break; }
@@ -742,6 +759,50 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
     }
 
 done:
+    // THE LAX PASS. The strict pass accepted nothing, but it rejected extent matches only on the
+    // GUESSED descriptor bytes. validate_native() reads the resource's REAL D3D12 GetDesc through
+    // UEVR's get_native_resource(), which does not depend on this build's FRHITextureDesc layout --
+    // so it is the authoritative, platform-agnostic check. Try it on the recorded candidates, with
+    // the same tried/attempt budget and the same corroboration/ambiguity rules as the strict pass.
+    // Self-gated to accepted == 0, so a build that already resolved (Steam) never reaches this.
+    if (accepted == 0 && g_cfg.xr_layer_src_lax && lax_n > 0 && mode >= 2) {
+        logf("PROBE: strict pass accepted none of %d candidate%s; %d had an unreadable descriptor -- "
+             "trying UEVR get_native_resource() on those (xrlayersrclax, the WinGDK path).",
+             candidates, candidates == 1 ? "" : "s", lax_n);
+        for (int i = 0; i < lax_n && attempts < MAX_ATTEMPTS; ++i) {
+            bool seen = false;
+            for (int j = 0; j < tried_n; ++j) if (tried[j] == lax[i].rhi) { seen = true; break; }
+            if (seen) continue;
+            tried[tried_n++] = lax[i].rhi;
+            ++attempts;
+
+            int dim_out = 0;
+            uint32_t fmt_out = 0;
+            void* native = validate_native(lax[i].rhi, want, /*loud=*/true, &dim_out, &fmt_out);
+            if (native == nullptr) continue;
+
+            ++accepted;
+            logf("ACCEPTED (lax): chain rt+0x%X res+0x%X rhi+0x%X -> ID3D12Resource %p, %dx%d, "
+                 "DXGI format %u. The real GetDesc agrees with aimwidgetdraw though the descriptor "
+                 "bytes did not -- this build lays FRHITextureDesc out differently (e.g. WinGDK).",
+                 (unsigned)lax[i].o1, (unsigned)lax[i].o2, (unsigned)lax[i].oe,
+                 native, dim_out, dim_out, fmt_out);
+
+            if (first_native == nullptr) {
+                first_native = native;
+                out->off_res = lax[i].o1;
+                out->off_rhi = lax[i].o2;
+                out->off_ext = lax[i].oe;
+            } else if (native != first_native) {
+                logf("AMBIGUOUS (lax): a second chain validated a DIFFERENT resource (%p vs %p). "
+                     "Refusing to latch either -- re-probe with a more distinctive aimwidgetdraw.",
+                     native, first_native);
+                *out = Chain{};
+                return;
+            }
+        }
+    }
+
     logf("PROBE done: %d candidate%s, %d accepted, %d call%s attempted.%s",
          candidates, candidates == 1 ? "" : "s", accepted, attempts, attempts == 1 ? "" : "s",
          (mode < 2 && candidates > 0)
