@@ -46,6 +46,21 @@ struct WeaponAdjust {
 };
 constexpr int kMaxWeaponAdjust = 24;
 
+// One per-weapon ANIMATION preference line (the palette arms' pasprintanim / pameleeanim /
+// pasupequip / pagrenadetrim / pasupanim, for one weapon). Positional like wpnoff, everything after
+// the match optional; a blank field, or '-', leaves that setting on its global. `set` says which
+// fields were given. Lives in halo_vr_weapons.cfg by request ("cleaner to put them there and match
+// their naming standard ... all animation settings for a particular weapon on a single line"), and
+// the writer of that file carries every line parsed FROM it back out, so a hand-written line
+// survives the captures that rewrite the file.
+struct WeaponAnim {
+    char     match[64] = "";
+    float    sprint = 0.0f, melee = 0.0f, equip = 0.0f, grenade_trim = 0.0f, sup_anim = 0.0f;
+    unsigned set = 0;                  // bit 0 sprint, 1 melee, 2 equip, 3 grenade_trim, 4 sup_anim
+    bool     from_weapons_file = false;
+};
+constexpr int kMaxWeaponAnim = 32;
+
 // One per-weapon SCOPE trim. Deltas on the global scope fit, not replacements -- see
 // ScopeOffset.hpp. d_zoom is a PLAIN MULTIPLIER: 1.5 = 1.5x the global magnification. ZERO means
 // UNSET rather than 0x -- the parser is positional, so a line naming only a weapon leaves every
@@ -4086,8 +4101,8 @@ struct Config {
     //       for the sprint's duration, and comes back to the controllers as it ends
     //   3 = no sprint animation: the gun and the aim hand are held to their rest pose, the free
     //       support hand stays on its controller
-    // Live. Per weapon: `pasprintanim@<class substring>=N` (see palettearm_parse_override); the same
-    // works for pameleeanim, pasupequip, pasupanim and pagrenadetrim.
+    // Live. Per weapon: a wpnanim line in halo_vr_weapons.cfg (see WeaponAnim), which covers this
+    // key and pameleeanim, pasupequip, pagrenadetrim and pasupanim on one line.
     int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
     int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
     // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
@@ -4384,6 +4399,9 @@ struct Config {
     bool  wpn_log         = false;
     WeaponAdjust wpn[kMaxWeaponAdjust];
     int   wpn_count       = 0;
+    // wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- see WeaponAnim.
+    WeaponAnim wpn_anim[kMaxWeaponAnim];
+    int   wpn_anim_count  = 0;
 
     // ---- PER-WEAPON SCOPE TRIMS (ScopeOffset.hpp) -------------------------------------------
     // Zoom and pane placement as DELTAS on the global scope fit, so one calibration still does

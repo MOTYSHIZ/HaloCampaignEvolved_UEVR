@@ -498,32 +498,30 @@ std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ti
 // ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
 // frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
 pa::SprintWatch    s_sprint;
-// ---- PER-WEAPON OVERRIDES (palettearm_parse_override). A handful of lines at most.
-enum class OverrideKey : std::uint8_t { MeleeAnim, SupEquip, SupAnim, GrenadeTrim, SprintAnim };
-struct Override { OverrideKey key; char sub[40]; float value; };
-constexpr std::size_t kMaxOverrides = 48;
-Override      s_overrides[kMaxOverrides];
-std::size_t   s_override_count = 0;
-std::uint32_t s_override_gen   = 0;          // bumped on every table change
-// The preferences in force for the weapon in hand -- the globals unless a line matches its class.
+// The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
+// its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
+// the way wpnoff is matched). A few strstr calls a frame.
 struct EffectivePrefs { int melee_anim; int sup_equip; int sup_anim; float grenade_trim_s; int sprint_anim; };
 EffectivePrefs resolve_prefs(const char* cls) {
     EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_sup_equip, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
                      g_cfg.pa_sprint_anim};
-    if (cls == nullptr || cls[0] == 0 || s_override_count == 0) return e;
+    if (cls == nullptr || cls[0] == 0 || g_cfg.wpn_anim_count == 0) return e;
     char low[96]; std::size_t n = 0;
     for (; cls[n] != 0 && n + 1 < sizeof(low); ++n) low[n] = (char)std::tolower((unsigned char)cls[n]);
     low[n] = 0;
-    for (std::size_t i = 0; i < s_override_count; ++i) {
-        const Override& o = s_overrides[i];
-        if (std::strstr(low, o.sub) == nullptr) continue;
-        switch (o.key) {
-            case OverrideKey::MeleeAnim:   e.melee_anim     = (int)o.value;  break;
-            case OverrideKey::SupEquip:    e.sup_equip      = (int)o.value;  break;
-            case OverrideKey::SupAnim:     e.sup_anim       = (int)o.value;  break;
-            case OverrideKey::GrenadeTrim: e.grenade_trim_s = o.value;       break;
-            case OverrideKey::SprintAnim:  e.sprint_anim    = (int)o.value;  break;
-        }
+    for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
+        const WeaponAnim& a = g_cfg.wpn_anim[i];
+        if (a.match[0] == 0) continue;
+        char m[64]; std::size_t k = 0;
+        for (; a.match[k] != 0 && k + 1 < sizeof(m); ++k) m[k] = (char)std::tolower((unsigned char)a.match[k]);
+        m[k] = 0;
+        if (std::strstr(low, m) == nullptr) continue;
+        if (a.set & 1u)  e.sprint_anim    = (int)a.sprint;
+        if (a.set & 2u)  e.melee_anim     = (int)a.melee;
+        if (a.set & 4u)  e.sup_equip      = (int)a.equip;
+        if (a.set & 8u)  e.grenade_trim_s = a.grenade_trim;
+        if (a.set & 16u) e.sup_anim       = (int)a.sup_anim;
+        break;
     }
     return e;
 }
@@ -2887,7 +2885,6 @@ std::atomic<uint32_t> g_pa_torso_seq{0};
 // the hierarchy) does reach both rendered shoulders (node 4), but the translation anchor already
 // does the job. -1 = off.
 bool palettearm_parse_key(const char* key, double v) {
-    if (std::strchr(key, '@') != nullptr) return palettearm_parse_override(key, v);
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
     else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
@@ -2917,35 +2914,6 @@ void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool 
     if (throw_down)  s_pad_throw_ticks.store(now, std::memory_order_relaxed);
     if (sprint_down) s_pad_sprint_ticks.store(now, std::memory_order_relaxed);
     if (moving)      s_pad_move_ticks.store(now, std::memory_order_relaxed);
-}
-
-bool palettearm_parse_override(const char* key, double value) {
-    if (key == nullptr) return false;
-    const char* at = std::strchr(key, '@');
-    if (at == nullptr || at == key || at[1] == 0) return false;
-    const std::size_t base_len = (std::size_t)(at - key);
-    OverrideKey which;
-    if      (_strnicmp(key, "pameleeanim",   base_len) == 0 && base_len == 11) which = OverrideKey::MeleeAnim;
-    else if (_strnicmp(key, "pasupequip",    base_len) == 0 && base_len == 10) which = OverrideKey::SupEquip;
-    else if (_strnicmp(key, "pasupanim",     base_len) == 0 && base_len == 9)  which = OverrideKey::SupAnim;
-    else if (_strnicmp(key, "pagrenadetrim", base_len) == 0 && base_len == 13) which = OverrideKey::GrenadeTrim;
-    else if (_strnicmp(key, "pasprintanim",  base_len) == 0 && base_len == 12) which = OverrideKey::SprintAnim;
-    else return false;
-    if (s_override_count >= kMaxOverrides) return true;      // accepted, silently full
-    Override& o = s_overrides[s_override_count];
-    o.key = which; o.value = (float)value;
-    std::size_t n = 0;
-    for (const char* c = at + 1; *c != 0 && *c != '\r' && *c != '\n' && n + 1 < sizeof(o.sub); ++c)
-        o.sub[n++] = (char)std::tolower((unsigned char)*c);
-    o.sub[n] = 0;
-    if (n == 0) return true;
-    ++s_override_count; ++s_override_gen;
-    return true;
-}
-
-void palettearm_overrides_clear() {
-    if (s_override_count != 0) ++s_override_gen;
-    s_override_count = 0;
 }
 
 void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],

@@ -939,6 +939,49 @@ static bool parse_weapon_offset(const char* val) {
     return true;
 }
 
+// wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- the palette arms' animation
+// preferences for one weapon (pasprintanim / pameleeanim / pasupequip / pagrenadetrim / pasupanim).
+//
+// One line per weapon, repeatable, positional, everything after the match optional -- and unlike
+// wpnoff an EMPTY field (or '-') means "leave that one on its global", so "wpnanim=FP_Shotgun,3"
+// sets only the sprint mode and "wpnanim=FP_Magnum,,2" only the melee mode. strtok would swallow
+// the empty field, so this splits by hand. Replace by match, like the other per-weapon tables.
+static bool parse_weapon_anim(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.wpn_anim_count >= kMaxWeaponAnim) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    WeaponAnim w{};
+    float* fields[] = { &w.sprint, &w.melee, &w.equip, &w.grenade_trim, &w.sup_anim };
+    int field = -1;                        // -1 = the match, 0.. = the settings
+    const char* p = buf;
+    while (true) {
+        const char* comma = strchr(p, ',');
+        const size_t len = (comma != nullptr) ? (size_t)(comma - p) : strlen(p);
+        if (field < 0) {
+            if (len == 0) return true;      // no match, no entry
+            strncpy_s(w.match, sizeof(w.match), p, len < sizeof(w.match) - 1 ? len : sizeof(w.match) - 1);
+        } else if (field < 5) {
+            size_t k = 0;
+            while (k < len && (unsigned char)p[k] <= ' ') ++k;
+            if (k < len && p[k] != '-') { *fields[field] = (float)atof(p + k); w.set |= (1u << field); }
+        }
+        ++field;
+        if (comma == nullptr) break;
+        p = comma + 1;
+    }
+    w.from_weapons_file = s_wpnfix_from_capture;
+
+    for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
+        if (_stricmp(g_cfg.wpn_anim[i].match, w.match) == 0) { g_cfg.wpn_anim[i] = w; return true; }
+    }
+    g_cfg.wpn_anim[g_cfg.wpn_anim_count++] = w;
+    return true;
+}
+
 // wpnfix=<match>,qx,qy,qz,qw,tx,ty,tz -- the PALETTE path's per-weapon rigid delta.
 //
 // Two sources feed this one table: the shipped baseline in halo_vr.cfg and the player's captures in
@@ -1421,6 +1464,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopeoffsets")  == 0) { g_cfg.scope_offsets = (v != 0.0); return true; }
     if (_stricmp(key, "scopewpnlog")   == 0) { g_cfg.scope_wpn_log = (v != 0.0); return true; }
     if (_stricmp(key, "wpnfix")        == 0) { return parse_weapon_fix(val); }
+    if (_stricmp(key, "wpnanim")       == 0) { return parse_weapon_anim(val); }
     // Per-weapon support-hand grip offset for two-handed aiming, and its two switches.
     // gripfixaim is separate from gripoffsets on purpose: the zone half cannot move a shot,
     // the aim half can. See WeaponGrip in Config.hpp.
@@ -1989,9 +2033,6 @@ void load_config() {
 
     g_cfg = Config{};
     g_cfg.blam_aim = keep_blam_aim;
-    // The palette arms' per-weapon overrides live outside g_cfg (PaletteArm.cpp); a deleted
-    // `key@weapon=` line must go away like any other.
-    palettearm_overrides_clear();
     // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset
     // here -- without it a deleted twohand* key kept its last value until the game restarted.
     two_hand_tuning_reset();

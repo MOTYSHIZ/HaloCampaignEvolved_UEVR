@@ -107,13 +107,7 @@ bool palettearm_weapon_calib_owns();
 void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down,
                          bool moving);
 
-// PER-WEAPON OVERRIDES of the animation preferences: a config line `key@substring=value`, matched
-// case-insensitively against the class name of the weapon in hand (weapon_offset_current_class(),
-// the same names the wpnoff table uses). Accepted for pameleeanim, pasupequip, pasupanim,
-// pagrenadetrim and pasprintanim. The last matching line wins. Cleared on every config reload
-// (palettearm_overrides_clear, called from load_config), so a deleted line really goes away.
-bool palettearm_parse_override(const char* key, double value);
-void palettearm_overrides_clear();
+
 
 // Can the SUPPORT-HAND calibration gesture do anything?
 //

@@ -220,8 +220,10 @@ void wpn_calib_write_file() {
     if (g_wpn_calib_path[0] != 0 && fopen_s(&f, g_wpn_calib_path, "wb") == 0 && f != nullptr) {
         fprintf(f, "# halo_vr - PER-WEAPON CALIBRATION. Written by the per-weapon capture key.\r\n"
                    "# Machine-owned: this file is rewritten in full on every capture, so do not\r\n"
-                   "# hand-edit it. Hand-written wpnoff lines belong in halo_vr.cfg, which keeps\r\n"
-                   "# its comments; both are loaded into the same table.\r\n"
+                   "# hand-edit the calibration lines. Hand-written wpnoff lines belong in\r\n"
+                   "# halo_vr.cfg, which keeps its comments; both are loaded into the same table.\r\n"
+                   "# The ONE hand-written line that belongs here is wpnanim (at the bottom): every\r\n"
+                   "# wpnanim line read from this file is written back out, so it survives.\r\n"
                    "#\r\n"
                    "# wpnoff=<match>,<dx>,<dy>,<dz>,<dgrip>,<dyaw>,<droll>  -- DELTAS on the\r\n"
                    "# calibration in halo_vr_calib.cfg, not absolute values.\r\n"
@@ -306,6 +308,32 @@ void wpn_calib_write_file() {
             const auto& gp = g_cfg.wpn_grip[i];
             if (gp.match[0] == 0 || !gp.captured) continue;
             fprintf(f, "wpngrip=%s,%.2f,%.2f,%.2f\r\n", gp.match, gp.off_y, gp.off_z, gp.at_x);
+        }
+
+        // ---- PER-WEAPON ANIMATION PREFERENCES (the palette arms). HAND-WRITTEN, and the only such
+        // lines this file carries: by request they live here with the other per-weapon lines, so
+        // the rewrite has to carry them through. Only lines parsed FROM this file are written back
+        // -- one in halo_vr_user.cfg or the dev catalog stays where it was written, rather than
+        // being copied here to outlive it.
+        fprintf(f, "\r\n# wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>  -- the palette\r\n"
+                   "# arms' animation preferences for ONE weapon, over the globals pasprintanim /\r\n"
+                   "# pameleeanim / pasupequip / pagrenadetrim / pasupanim (see halo_vr_dev.cfg).\r\n"
+                   "# Positional; a blank field or '-' keeps the global: wpnanim=FP_Shotgun,3 sets\r\n"
+                   "# only the sprint mode, wpnanim=FP_Magnum,,2 only the melee mode. Hand-written\r\n"
+                   "# lines here are kept across captures. Delete a line to drop that weapon's overrides.\r\n\r\n");
+        for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
+            const auto& a = g_cfg.wpn_anim[i];
+            if (a.match[0] == 0 || !a.from_weapons_file || a.set == 0) continue;
+            char line[192]; int n = sprintf_s(line, sizeof(line), "wpnanim=%s", a.match);
+            const float vals[5] = { a.sprint, a.melee, a.equip, a.grenade_trim, a.sup_anim };
+            int last = -1;
+            for (int k = 0; k < 5; ++k) if (a.set & (1u << k)) last = k;
+            for (int k = 0; k <= last && n > 0 && n < (int)sizeof(line) - 16; ++k) {
+                if (a.set & (1u << k)) n += (k == 3) ? sprintf_s(line + n, sizeof(line) - n, ",%.2f", vals[k])
+                                                     : sprintf_s(line + n, sizeof(line) - n, ",%d", (int)vals[k]);
+                else                   n += sprintf_s(line + n, sizeof(line) - n, ",");
+            }
+            fprintf(f, "%s\r\n", line);
         }
         fclose(f);
     }
