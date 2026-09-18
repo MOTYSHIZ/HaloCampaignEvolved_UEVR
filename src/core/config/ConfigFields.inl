@@ -1648,6 +1648,53 @@
     // exactly like the slideoff fallback, but with the component's per-weapon accuracy and
     // nothing to hand-tune. 0 = raw component positions (the old behaviour).
     int   zone_hand_rel = 1;
+    // ONE SNAPSHOT COMPUTES EVERYTHING (from the headset, 2026-09-17: "sprinting right I have to hold
+    // my hand well to the left of the slide, in the air, to rack it" -- his rule, verbatim:
+    // "everything should be computed in the same frame / tick / etc", "one snapshot computes
+    // everything? everythin in the same exact frame?").
+    //
+    // reloadframe=1 above put the hand and the component positions on ONE CAMERA. It did not put
+    // them at one INSTANT, and that is the error left. The three sources in the rack path have
+    // three different ages: the rack part's world centre is published by slide_part_tick, which
+    // runs AFTER slide_update consumes it, so the zone is built on a position one whole engine
+    // tick old (~31 ms); the hand poses are read fresh, once for the grip pose and again inside
+    // the hand-relative conversion for the aim pose, so two reads in one decision can straddle
+    // two or three render frames; and the camera is ms-keyed, which is one tick, not one instant.
+    // Sprinting, those ages are a LATERAL displacement, not a wobble: the whole rendered gun has
+    // moved with the player since the component was sampled, so the zone sits behind the slide by
+    // player speed times the age, always on the same side, which is exactly the report.
+    //
+    // THE NUMBERS. The engine tick measures ~31 ms (32 Hz), the sprint is 6.65 m/s at full
+    // throttle (the roomscale throttle's own measured scale). One tick of skew is 0.0313 s *
+    // 6.65 m/s = 20.8 cm, and the rack gate is slideradius 16 cm: the zone leaves the hand's reach
+    // outright, which is why it has to be held in the air beside the gun. A second pose read
+    // 11 ms (one 90 Hz frame) later adds 7.4 cm. The same 20.8 cm lands on the seat test against a
+    // 7 cm reloadseat gate, so a sprinting reload cannot seat at all.
+    //
+    //   1  SAME SNAPSHOT COMPARE. One instant per tick, carrying a sequence number: the head, the
+    //      aim hand's aim pose, the other hand's grip pose, the game camera, the rack part's world
+    //      centre and the magazine component's world transform are all sampled together, and the
+    //      zone, the seat, the grab test and the markers are built from that alone. No newest
+    //      value read anywhere in the path. zonehandrel's hand-frame conversion is kept, with its
+    //      low pass opened to 1.0 -- the 0.2/tick filter existed to hide this frame mix, and with
+    //      one snapshot a lag filter can only put the lag back  [default]
+    //   2  ZONE FROM THE DRAWN GUN. The placement owns the rendered pose, so the zone is built in
+    //      the DRAWN weapon's own rotation frame (the palette's published pose) on the snapshot's
+    //      hand, and the game component leaves the path entirely. Needs the placement (palettewpn);
+    //      falls back to mode 1 when nothing publishes a drawn pose.
+    //   3  FROZEN PER WEAPON OFFSET. Mode 1, and the hand-frame offset is LEARNED only while the
+    //      sprint animation is not playing and the offset is steady, then held for that weapon.
+    //      Detection, both measured and neither guessed: the game camera's own per-tick travel
+    //      (gesture_game_cam already integrates it) below zonesnapshotstill metres, and the
+    //      offset's per-tick change below zonesnapshotsteady metres for four consecutive ticks.
+    //      Either condition failing freezes the offset where learning left it.
+    //   0  off: the inherited newest-value reads (the behaviour before this key)
+    int   zone_snapshot = 1;
+    // Mode 3's two learning gates, metres: the camera may travel this far in a tick and still
+    // count as "not sprinting", and the hand-frame offset may change this much in a tick and still
+    // count as steady. Defaults measured off the camera travel the game reports at a walk.
+    float zone_snapshot_still = 0.04f;
+    float zone_snapshot_steady = 0.01f;
     // WPNERR (from the headset, 2026-09-11: "lets get err down to 0"). The weapon-vs-controller error
     // instrument. Every rendered frame the sampler compares the controller's FRESH raw pose
     // against the raw pose the palette publisher last sent (and the hook last consumed), in room

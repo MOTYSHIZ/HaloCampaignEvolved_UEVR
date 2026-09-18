@@ -82,6 +82,41 @@ bool s_restoring_mag_out = false;   // set_state must not drop a second magazine
 static float            s_grab_y = 0.0f;         // left-hand height (VR y) at the belt grab
 bool s_reload_on = true;   // one release on the off edge (at a boot with reloadvr 0 there is nothing to release)
 
+// ================================================================ THE SNAPSHOT (zonesnapshot)
+//
+// ONE INSTANT, ONE SEQUENCE NUMBER, EVERY DECISION. Doctrine and the measured numbers are in
+// ConfigFields.inl on zonesnapshot. Everything the rack zone, the magazine well and their two
+// markers need is sampled here, once per engine tick, before the reload state machine runs; the
+// tests then read this and nothing else, so no decision can mix two moments. Declared before the
+// engine's own fragments because both of them consume it (the well marker in
+// Engine_mag_anim_sound.inl, the rack in Engine_rack.inl).
+struct ZoneSnap {
+    unsigned seq = 0;            // which snapshot this is: a consumer logs it, never re-samples
+    bool  poses_ok = false;      // the head and both hands resolved: the tests may use this snapshot
+    Vec3  head{};                // HMD, room metres
+    Vec3  aim{};  Quat aim_q{};  // the AIMING hand, aim pose (the frame the weapon is placed on)
+    Quat  aim_fix{};             // the placement's own fix on that pose, resolved once here
+    Vec3  r{}, u{}, f{};         // the aim-fixed frame: right, up, forward
+    Vec3  off{};  Quat off_q{};  // the OTHER hand, grip pose (the hand that racks and fetches)
+    Vec3  cam{};  bool cam_ok = false;     // the game camera at this instant
+    Vec3  part{}; bool part_ok = false;    // the rack part's world centre, read IN this snapshot
+    void* part_key = nullptr;              // which component that centre came from (the learn key)
+    Vec3  well{}; bool well_ok = false;    // the magazine component's world location, read IN this snapshot
+    Vec3  well_rot{}; bool well_rot_ok = false;
+    bool  wpn_ok = false; Quat wpn_q{};    // the DRAWN weapon's rotation as the placement published it (mode 2)
+    float cam_travel = 0.0f;     // the camera's travel since the previous snapshot, metres (mode 3)
+};
+ZoneSnap s_snap;
+// Whether the snapshot rule is in force. Off = every consumer keeps its inherited newest-value reads.
+bool zone_snapshot_on() { return g_cfg.zone_snapshot != 0; }
+// Filled by the fragments below (each owns the objects it reads).
+bool sl_part_world_now(Vec3* out, void** key);
+bool mag_well_world_now(Vec3* loc, Vec3* rot, bool* rot_ok);
+// The room<->world pair the gesture tests share, declared here because the well marker (the
+// fragment above) draws through it and it is defined in the rack fragment below.
+Vec3 reload_hand_world(const Vec3& hand_room, const Vec3& head_room);
+Vec3 reload_world_room(const Vec3& world, const Vec3& head_room);
+
 #include "core/reload/Engine_mag_anim_sound.inl"   // the weapon's own magazine, the well marker, the holds, the sound
 
 #include "core/reload/Engine_rack.inl"   // the rack, the montage, slide fire, chamber and phantom, the parts
@@ -136,6 +171,12 @@ void reload_engine_tick_begin(float dt, bool active) {
     reload_anim_rate_tick();
     reload_state_hold_tick();
     if (!active) return;
+    // THE SNAPSHOT, FIRST (zonesnapshot). Before the reload state machine, before the rack, before
+    // the holster's belt magazine: one instant, taken once, and every decision in this tick reads
+    // it instead of sampling for itself. This is also the reason it lives at the top of the tick
+    // rather than inside any one test -- a test that took its own snapshot would still disagree
+    // with the next test's.
+    zone_snapshot_take();
     g_ak_engine_on.store(true, std::memory_order_relaxed);
     mag_dump_probe();
     anim_dump_tick();
@@ -318,13 +359,24 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     // reload_well_fwd along the aim direction from the aim hand. And the LIFT GATE either
     // way: the mag must have risen since it was grabbed. Without both, the log
     // (2026-08-16 12:07) shows the reload firing 214-224 ms after the belt grab, at the hip.
+    // ONE SNAPSHOT (zonesnapshot, doctrine in ConfigFields.inl). The magazine component's world
+    // position used to be read HERE, live, while the hand poses arrived from the caller's own
+    // reads and reload_well_stabilize then took a THIRD read of the aim hand for itself: three
+    // moments in one 7 cm gate. With the key on the component transform comes from the tick's
+    // snapshot, beside the poses it is compared against, and the head is the snapshot's too.
+    const bool use_snap = zone_snapshot_on();
+    const Vec3 head_s = use_snap && s_snap.poses_ok ? s_snap.head : head;
     float join = 1e9f;
     Vec3  well_world{}; bool have_well_world = false;
     if (auto* mc = s_mag_hidden.get()) {
-        if (call_ret_vec3(mc, L"K2_GetComponentLocation", &well_world)) {
+        Vec3 wl{};
+        const bool got = use_snap ? s_snap.well_ok : call_ret_vec3(mc, L"K2_GetComponentLocation", &wl);
+        if (use_snap && got) wl = s_snap.well;
+        if (got) {
+            well_world = wl;
             have_well_world = true;
-            well_world = reload_well_stabilize(mc, well_world, head);
-            const Vec3 hlw = reload_hand_world(hand_l, head);
+            well_world = reload_well_stabilize(mc, well_world, head_s);
+            const Vec3 hlw = reload_hand_world(hand_l, head_s);
             const float wdx = hlw.x - well_world.x, wdy = hlw.y - well_world.y,
                         wdz = hlw.z - well_world.z;
             join = std::sqrt(wdx * wdx + wdy * wdy + wdz * wdz) / 100.0f;  // cm -> m
@@ -332,27 +384,35 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     }
     if (!have_well_world) {
         Vec3 well = hand_r;
-        const auto ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
-                                              : API::VR::get_right_controller_index();
-        Vec3 apos{}; Quat aq{};
-        if (ridx >= 0 && get_pose(ridx, &apos, &aq, /*use_aim=*/true)) {
-            const Vec3 f = quat_forward(placement_aim_fix(aq));
-            well = Vec3{hand_r.x + f.x * g_cfg.reload_well_fwd,
-                        hand_r.y + f.y * g_cfg.reload_well_fwd,
-                        hand_r.z + f.z * g_cfg.reload_well_fwd};
+        if (use_snap && s_snap.poses_ok) {
+            well = Vec3{hand_r.x + s_snap.f.x * g_cfg.reload_well_fwd,
+                        hand_r.y + s_snap.f.y * g_cfg.reload_well_fwd,
+                        hand_r.z + s_snap.f.z * g_cfg.reload_well_fwd};
+        } else {
+            const auto ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                  : API::VR::get_right_controller_index();
+            Vec3 apos{}; Quat aq{};
+            if (ridx >= 0 && get_pose(ridx, &apos, &aq, /*use_aim=*/true)) {
+                const Vec3 f = quat_forward(placement_aim_fix(aq));
+                well = Vec3{hand_r.x + f.x * g_cfg.reload_well_fwd,
+                            hand_r.y + f.y * g_cfg.reload_well_fwd,
+                            hand_r.z + f.z * g_cfg.reload_well_fwd};
+            }
         }
         const float ddx = hand_l.x - well.x, ddy = hand_l.y - well.y, ddz = hand_l.z - well.z;
         join = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-        well_world = holster_room_to_world(well, head);
+        well_world = use_snap ? reload_hand_world(well, head_s) : holster_room_to_world(well, head_s);
     }
     reload_well_marker_update(true, well_world);
     const bool lifted = (hand_l.y - s_grab_y) >= g_cfg.reload_lift;
     if (g_cfg.reload_vr_log) {
         static uint32_t s_rl = 0;
         if ((s_rl++ % 15u) == 0u)
-            API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f)",
+            API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f) | snap=%u mode=%d well=%s",
                                  join * 100.0f, (hand_l.y - s_grab_y) * 100.0f,
-                                 g_cfg.reload_seat_dist * 100.0f, g_cfg.reload_lift * 100.0f);
+                                 g_cfg.reload_seat_dist * 100.0f, g_cfg.reload_lift * 100.0f,
+                                 use_snap ? s_snap.seq : 0u, g_cfg.zone_snapshot,
+                                 have_well_world ? "component" : "reloadwellfwd fallback");
     }
     // THE SLIDE, in place of the old four-tick debounce. Inside the capture radius (and
     // lifted) the magazine leaves the hand and travels into the well over reload_slide_ms;
@@ -369,8 +429,13 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
         bool rot_ok = false;
         if (have_well_world) {
             if (auto* mc = s_mag_hidden.get()) {
+                // The seated magazine's own rotation, from the SAME snapshot its position came
+                // from: the insert axis below is built out of it, so a second read here would put
+                // the axis in a different moment than the point it passes through.
                 Vec3 wrot{};
-                if (call_ret_vec3(mc, L"K2_GetComponentRotation", &wrot)) {
+                bool grot = use_snap ? s_snap.well_rot_ok : call_ret_vec3(mc, L"K2_GetComponentRotation", &wrot);
+                if (use_snap && grot) wrot = s_snap.well_rot;
+                if (grot) {
                     g_reload_slide_pitch.store(wrot.x, std::memory_order_relaxed);
                     g_reload_slide_yaw.store(wrot.y,   std::memory_order_relaxed);
                     g_reload_slide_roll.store(wrot.z,  std::memory_order_relaxed);
@@ -391,7 +456,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                                             g_reload_slide_roll.load(std::memory_order_relaxed));
             Vec3 up = quat_rotate(qs, Vec3{0.0f, 0.0f, 1.0f});
             up = Vec3{up.x * g_cfg.reload_insert_sign, up.y * g_cfg.reload_insert_sign, up.z * g_cfg.reload_insert_sign};
-            const Vec3 hw = reload_hand_world(hand_l, head);
+            const Vec3 hw = reload_hand_world(hand_l, head_s);
             const Vec3 r{hw.x - well_world.x, hw.y - well_world.y, hw.z - well_world.z};
             d_axis_cm = r.x * up.x + r.y * up.y + r.z * up.z;
             const Vec3 lat{r.x - up.x * d_axis_cm, r.y - up.y * d_axis_cm, r.z - up.z * d_axis_cm};
@@ -432,7 +497,7 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                                                 g_reload_slide_roll.load(std::memory_order_relaxed));
                 Vec3 up = quat_rotate(qs, Vec3{0.0f, 0.0f, 1.0f});
                 up = Vec3{up.x * g_cfg.reload_insert_sign, up.y * g_cfg.reload_insert_sign, up.z * g_cfg.reload_insert_sign};
-                const Vec3 hw = reload_hand_world(hand_l, head);
+                const Vec3 hw = reload_hand_world(hand_l, head_s);
                 const float d = (hw.x - well_world.x) * up.x + (hw.y - well_world.y) * up.y + (hw.z - well_world.z) * up.z;   // cm along the axis, negative = below the seat
                 const float travel = reload_insert_for_weapon() * 100.0f;
                 float along = d; if (along > 0.0f) along = 0.0f; if (along < -travel) along = -travel;
@@ -741,6 +806,21 @@ void reload_engine_mag_drawn(API::UObject* m, bool wanted) {
 }
 
 Vec3 reload_engine_mag_belt_point() { return mag_belt_point(); }
+
+// THE BELT MAGAZINE'S ZONE IS THE POINT THE BELT MAGAZINE IS DRAWN AT (zonesnapshot). The belt
+// point is a BODY-FRAME offset (x right, y up, z back, from the body anchor). The drawn magazine
+// is placed at anchor + that offset turned by the body yaw; the grab zone, five lines earlier in
+// the same block, subtracted the raw offset from a ROOM-space hand -- no anchor, no yaw. Two
+// frames for one point: what the player reaches for was never where the magazine hangs, and the
+// error was the whole anchor (about head height plus the yaw rotation of the offset), not a
+// tracking wobble. This returns the exact expression the marker is placed with, off the same
+// anchor and the same yaw, in the same tick, so the zone and the mesh are one point.
+Vec3 reload_engine_mag_zone_point(const Vec3& belt, const Vec3& anchor, float yaw_cos, float yaw_sin) {
+    if (g_cfg.zone_snapshot == 0) return belt;
+    return Vec3{anchor.x + belt.x * yaw_cos + belt.z * yaw_sin,
+                anchor.y + belt.y,
+                anchor.z + (-belt.x * yaw_sin + belt.z * yaw_cos)};
+}
 
 // The survey HAS candidates and every one is a dead handle -- a level transition recycled them.
 // The caller must re-survey on that, or the fallback chain bottoms out at the frag mesh and the

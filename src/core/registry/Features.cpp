@@ -166,7 +166,7 @@ const FeatureRow kFeatures[] = {
       "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
       "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagasset,reloadmagbelt,reloadmagoffw,reloadresetholds,"
       "reloadroomanchor,reloadseat,reloadslidems,reloadstate,reloadstatedeath,reloadstatedrop,"
-      "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker",
+      "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker,zonesnapshot",
       "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"
       "akmimic4event,akmutenames,akpostrva,akrtpc,akrtpcglobal,akrtpcrestore,akrtpcvalue,akstack,akvtcount,"
       "akvtdump,akvtglobal,ammoscrub,ammoseq,animdump,animobjs,animseqset,animvars,animvarset,coopauto,"
@@ -175,7 +175,7 @@ const FeatureRow kFeatures[] = {
       "reloadinsertsign,reloadmaskms,reloadmutems,reloadmutevariant,reloadpauseanim,reloadpressat,"
       "reloadpressms,reloadpressmscoop,reloadshotgunlog,reloadskipweapons,reloadstatelog,reloadstepsound,"
       "reloadstepvariant,reloadstepvia,reloadvrlog,reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,"
-      "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel",
+      "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel,zonesnapshotsteady,zonesnapshotstill",
       "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",

@@ -189,6 +189,19 @@ void mag_hide_enforce() {
     }
 }
 
+// THE WELL IN THE SNAPSHOT (zonesnapshot). The magazine component the hide just found IS the
+// rendered magazine sitting in its well, so its world transform is the per-weapon insert point.
+// Read HERE, inside the snapshot, so the seat test compares it against hand poses taken at the
+// same instant instead of against poses read later in the tick.
+bool mag_well_world_now(Vec3* loc, Vec3* rot, bool* rot_ok) {
+    if (rot_ok != nullptr) *rot_ok = false;
+    auto* mc = s_mag_hidden.get();
+    if (mc == nullptr) return false;
+    if (!call_ret_vec3(mc, L"K2_GetComponentLocation", loc)) return false;
+    if (rot != nullptr && rot_ok != nullptr) *rot_ok = call_ret_vec3(mc, L"K2_GetComponentRotation", rot);
+    return true;
+}
+
 // ---- THE WELL MARKER: a small ring at the insert point while the magazine is in hand. The
 // seat test has always known where the well is; the player could not see it (a tester video,
 // 2026-09-01: testers had no idea where the mag goes). TrackedObject + paced respawn, the same
@@ -219,9 +232,21 @@ void reload_well_marker_update(bool show, const Vec3& world) {
     holster_marker_place(m, world);
     holster_marker_show(m, true);
     {   // the one solve: room-anchored like everything else, re-placed per frame (Markers.hpp)
-        Vec3 hp{}; Quat hr{};
-        if (get_pose(API::VR::get_hmd_index(), &hp, &hr, /*use_aim=*/false))
-            marker_render_anchor(m, holster_world_to_room(world, hp));
+        //
+        // THE RING IS DRAWN FROM THE SNAPSHOT THAT DECIDED THE SEAT (zonesnapshot). This used to
+        // read the head pose AGAIN and invert through holster_world_to_room, which is the
+        // RENDERED camera -- while `world` had been built through the GAME camera (reloadframe=1).
+        // Two cameras and two head reads for one point: the ring the player aims the magazine at
+        // was not where the seat test measured. reload_world_room is the exact mirror of the
+        // transform the test used, on the snapshot's own head and camera, so the ring lands on the
+        // point the test compares against, bit for bit.
+        if (zone_snapshot_on()) {
+            marker_render_anchor(m, reload_world_room(world, s_snap.head));
+        } else {
+            Vec3 hp{}; Quat hr{};
+            if (get_pose(API::VR::get_hmd_index(), &hp, &hr, /*use_aim=*/false))
+                marker_render_anchor(m, holster_world_to_room(world, hp));
+        }
     }
 }
 

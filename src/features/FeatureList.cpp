@@ -450,6 +450,9 @@ bool features_two_hand_support_blocked() {
 uevr::API::UObject* features_holster_mag_mesh(int* out_rank) { return reload_manual_available() ? reload_engine_mag_mesh(out_rank) : nullptr; }
 Vec3 features_holster_mag_belt_point(const Vec3& his_offset) { return reload_manual_available() ? reload_engine_mag_belt_point() : his_offset; }
 bool features_holster_mag_cands_stale(int rank) { return reload_manual_available() && reload_engine_mag_cands_stale(rank); }
+Vec3 features_holster_mag_zone_point(const Vec3& belt, const Vec3& anchor, float yaw_cos, float yaw_sin) {
+    return reload_manual_available() ? reload_engine_mag_zone_point(belt, anchor, yaw_cos, yaw_sin) : belt;
+}
 bool features_holster_mag_survey_off() { return reload_manual_available() && reload_engine_mag_survey_off(); }
 bool features_holster_mag_resurvey(int rank) {
     return reload_manual_available() ? reload_engine_mag_resurvey(rank) : (rank < 3);

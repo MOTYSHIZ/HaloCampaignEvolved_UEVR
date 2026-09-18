@@ -43,6 +43,9 @@ const char* features_holster_putback_text(const char* his_text, bool in_pouch);
 uevr::API::UObject* features_holster_mag_mesh(int* out_rank);
 // holster_update, the belt magazine block: the belt point for the weapon in hand (the author's offset in).
 Vec3 features_holster_mag_belt_point(const Vec3& his_offset);
+// holster_update, the belt magazine's grab zone: the point the hand's distance is measured to (the author's
+// body-frame offset, his body anchor and his body yaw's cos/sin in).
+Vec3 features_holster_mag_zone_point(const Vec3& belt, const Vec3& anchor, float yaw_cos, float yaw_sin);
 // holster_update, the magazine mesh pick, after the resurvey guard: true = re-arm it (every candidate is dead).
 bool features_holster_mag_cands_stale(int rank);
 // mag_mesh_for_weapon, after the component path: true = the author's name survey (its "ammo" and "clip"

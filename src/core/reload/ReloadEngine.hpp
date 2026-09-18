@@ -72,6 +72,9 @@ bool reload_engine_reload_busy();
 // weapon has none (plasma weapons) or nothing is held. Exact per weapon, no survey.
 uevr::API::UObject* reload_engine_mag_mesh(int* out_rank);   // rank 4
 Vec3 reload_engine_mag_belt_point();
+// zonesnapshot: the belt point as the ROOM point the magazine is drawn at, so the grab zone and the
+// mesh are one point (the author's body anchor and body yaw in).
+Vec3 reload_engine_mag_zone_point(const Vec3& belt, const Vec3& anchor, float yaw_cos, float yaw_sin);
 bool reload_engine_mag_cands_stale(int rank);
 // reloadmagasset: the four gates on the author's name survey, and the tick's last word on the marker.
 bool reload_engine_mag_survey_off();
