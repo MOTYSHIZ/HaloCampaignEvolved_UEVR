@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 
 using uevr::API;
@@ -505,6 +506,81 @@ std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ti
 // ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
 // frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
 pa::SprintWatch    s_sprint;
+// ---- WHAT EACH WEAPON MODEL TAUGHT, kept across swaps (2026-09-17). Every rest pose above is
+// learned off the live slot per model, and the model tag changes far more often than a player
+// swaps weapons: a headset log showed the Magnum's tag going to a second model and back six
+// times in half a minute (each change re-spawns the weapon actor -- the fact Scope.cpp records
+// for reloads and cutscenes), and every change threw all of it away. Until the new model had
+// rested for a third of a second there was no rest pose, no hand relation and so no hand-over,
+// which is why the free hand's reload played "sometimes": a reload straight after any of that
+// is the common case. So a model's rest poses are banked as it goes and adopted back when it
+// returns (pa::RecoilPass::adopt); only a model never seen before starts from nothing.
+struct Taught {
+    std::int32_t tag{0};
+    bool         used{false};
+    unsigned     stamp{0};                          // recency, for eviction
+    bool         have_gun{false}; pa::Vec3 gun_pos{}; pa::Mat3 gun_basis{};
+    bool         have_sup{false}; pa::Vec3 sup_pos{}; pa::Mat3 sup_basis{};
+    bool         have_aim{false}; pa::Vec3 aim_pos{}; pa::Mat3 aim_basis{};
+    bool         have_aim_fingers{false}, have_sup_fingers{false};
+    pa::RestNode aim_fingers[pa::kMaxPaletteNodes];
+    pa::RestNode sup_fingers[pa::kMaxPaletteNodes];
+};
+constexpr std::size_t kTaughtSlots = 8;             // the campaign carries two; the rest is churn
+// ON THE HEAP, once, at the first weapon change -- not a static array. The finger tables make a
+// slot ~25 KB, and Taught is not trivially constructible (Vec3/Mat3 carry initialisers), so a
+// static array of them is emitted by MSVC as 200 KB of zeros in .data: the DLL grew by 236 KB
+// on the first build of this, which is exactly the kind of thing the release-size sanity check
+// in CLAUDE.md exists to catch. One allocation on the game thread, never per frame.
+Taught*  s_taught = nullptr;
+unsigned s_taught_stamp = 0;
+
+Taught* taught_slots() {
+    if (s_taught == nullptr) s_taught = new (std::nothrow) Taught[kTaughtSlots];
+    return s_taught;
+}
+Taught* taught_find(std::int32_t tag) {
+    Taught* slots = taught_slots();
+    if (slots == nullptr) return nullptr;
+    for (std::size_t i = 0; i < kTaughtSlots; ++i) if (slots[i].used && slots[i].tag == tag) return &slots[i];
+    return nullptr;
+}
+// Bank what the model in hand has taught. Called as the tag changes, BEFORE the state is reset,
+// so what is banked is the old model's.
+void taught_bank(std::int32_t tag) {
+    if (!s_recoil.have_ref && !s_action.hand.have && !s_aim_rest.have) return;   // nothing to keep
+    Taught* slots = taught_slots();
+    if (slots == nullptr) return;                                   // no memory: learn afresh, as before
+    Taught* t = taught_find(tag);
+    if (t == nullptr) {
+        t = &slots[0];
+        for (std::size_t i = 0; i < kTaughtSlots; ++i) {
+            Taught& c = slots[i];
+            if (!c.used) { t = &c; break; }
+            if (c.stamp < t->stamp) t = &c;
+        }
+        *t = Taught{}; t->tag = tag; t->used = true;
+    }
+    t->stamp = ++s_taught_stamp;
+    if (s_recoil.have_ref)  { t->have_gun = true; t->gun_pos = s_recoil.ref_pos;   t->gun_basis = s_recoil.ref_basis; }
+    if (s_action.hand.have) { t->have_sup = true; t->sup_pos = s_action.hand.pos;  t->sup_basis = s_action.hand.basis; }
+    if (s_aim_rest.have)    { t->have_aim = true; t->aim_pos = s_aim_rest.pos;     t->aim_basis = s_aim_rest.basis; }
+    if (s_aim_fingers_have) { t->have_aim_fingers = true; for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) t->aim_fingers[i] = s_aim_fingers[i]; }
+    if (s_sup_fingers_have) { t->have_sup_fingers = true; for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) t->sup_fingers[i] = s_sup_fingers[i]; }
+}
+// Start the model now in hand from what it taught before, or from nothing. True = it was known.
+bool taught_adopt(std::int32_t tag) {
+    s_recoil.reset(); s_action.reset(); s_aim_rest.reset();
+    s_aim_fingers_have = s_sup_fingers_have = false;
+    const Taught* t = taught_find(tag);
+    if (t == nullptr) return false;
+    if (t->have_gun) s_recoil.adopt(t->gun_pos, t->gun_basis);
+    if (t->have_sup) s_action.hand.adopt(t->sup_pos, t->sup_basis);
+    if (t->have_aim) s_aim_rest.adopt(t->aim_pos, t->aim_basis);
+    if (t->have_aim_fingers) { for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) s_aim_fingers[i] = t->aim_fingers[i]; s_aim_fingers_have = true; }
+    if (t->have_sup_fingers) { for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) s_sup_fingers[i] = t->sup_fingers[i]; s_sup_fingers_have = true; }
+    return t->have_gun;
+}
 // The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
 // its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
 // the way wpnoff is matched). A few strstr calls a frame.
@@ -1307,13 +1383,21 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const bool live = !access.is_capture_bank;
                 bool weapon_changed = false;
                 if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
-                    s_recoil.reset();
-                    s_action.reset();
-                    s_aim_rest.reset();
+                    // The model changed: bank what the old one taught, start the new one from
+                    // what it taught before (see Taught), or from nothing if it never has.
+                    if (s_recoil_have_tag) taught_bank(s_recoil_tag);
+                    const bool known = taught_adopt(access.model_tag);
                     s_sprint.reset();
-                    s_aim_fingers_have = s_sup_fingers_have = false;
                     s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
-                    weapon_changed = s_recoil_have_tag;
+                    weapon_changed = true;
+#if HALO_VR_DEV
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d in hand -- %s",
+                                         (int)access.model_tag,
+                                         known ? "its rest pose, hand relations and finger shapes adopted from earlier"
+                                               : "never seen before, learning from nothing");
+#else
+                    (void)known;
+#endif
                 }
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
@@ -1349,10 +1433,18 @@ bool drive_palette(const pa::PaletteAccess& access) {
                         s_aim_fingers_have = pa::capture_hand_rest(access.palette, aim_arm, s_aim_fingers, pa::kMaxPaletteNodes) || s_aim_fingers_have;
                     if (teach && s_action.hand.have && s_action.hand.dev_m < 0.005f && s_action.hand.stable >= 20)
                         s_sup_fingers_have = pa::capture_hand_rest(access.palette, support_arm, s_sup_fingers, pa::kMaxPaletteNodes) || s_sup_fingers_have;
-                    // ...and the gates themselves, off the presses the game is being handed.
-                    s_melee.update(pad_age_s(s_pad_melee_ticks), s_recoil, s_action.hand.dev_m,
-                                   s_action.hand.dev_deg, adt);
-                    s_equip.update(pad_age_s(s_pad_swap_ticks), weapon_changed, s_recoil, adt);
+                    // ...and the gates themselves, off the presses the game is being handed. Each
+                    // also ends on the OTHER actions' presses: a reload asked for after the swing,
+                    // or straight off the draw, is a reload, and the gate would otherwise hold the
+                    // free hand off it until the pose rested -- which a reload never lets it do.
+                    const float melee_age  = pad_age_s(s_pad_melee_ticks);
+                    const float reload_age = pad_age_s(s_pad_reload_ticks);
+                    const float throw_age  = pad_age_s(s_pad_throw_ticks);
+                    const auto  youngest   = [](float a, float b) { return a < 0.0f ? b : (b < 0.0f ? a : (std::min)(a, b)); };
+                    s_melee.update(melee_age, s_recoil, s_action.hand.dev_m, s_action.hand.dev_deg, adt,
+                                   youngest(reload_age, throw_age));
+                    s_equip.update(pad_age_s(s_pad_swap_ticks), weapon_changed, s_recoil, adt,
+                                   youngest(youngest(reload_age, throw_age), melee_age));
 #if HALO_VR_DEV
                     // One line as the hand is taken and one as it is given back, with what tripped
                     // it -- the way to tell, from a headset log, whether plain SHOTS tug the hand.
@@ -1365,19 +1457,47 @@ bool drive_palette(const pa::PaletteAccess& access) {
                         s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.hand.dev_deg);
                     }
                     if (was <= 0.0f && s_action.weight > 0.0f) s_act_since = tnow;
-                    // ...and the sprint's own line, once per sprint.
+                    // ...and the sprint's own line, once per sprint (the PEAK over the sprint: the
+                    // value as it ends is the gun nearly home again, and read as "2 cm" once).
                     static bool  s_spr_was = false;
+                    static float s_spr_peak_m = 0.0f, s_spr_peak_deg = 0.0f;
                     static std::chrono::steady_clock::time_point s_spr_since{};
-                    if (!s_spr_was && s_sprint.active) s_spr_since = tnow;
+                    if (!s_spr_was && s_sprint.active) { s_spr_since = tnow; s_spr_peak_m = s_spr_peak_deg = 0.0f; }
+                    if (s_sprint.active) {
+                        s_spr_peak_m   = (std::max)(s_spr_peak_m,   s_recoil.last_moved_m);
+                        s_spr_peak_deg = (std::max)(s_spr_peak_deg, s_recoil.last_turned_deg);
+                    }
                     if (s_spr_was && !s_sprint.active) {
                         API::get()->log_info("[Halo-CampE-UEVR] PALETTE SPRINT: a sprint played for %.2f s "
                                              "(gun up to %.1f cm / %.0f deg from rest; pasprintanim %d for %s)",
                                              std::chrono::duration<float>(tnow - s_spr_since).count(),
-                                             s_recoil.last_moved_m * 100.0f, s_recoil.last_turned_deg,
+                                             s_spr_peak_m * 100.0f, s_spr_peak_deg,
                                              prefs.sprint_anim,
                                              ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "");
                     }
                     s_spr_was = s_sprint.active;
+                    // One line per RELOAD press with everything the free hand's hand-over depends
+                    // on, so a headset log can say WHY a reload did not take the hand ("sometimes
+                    // it will play when I am not gripping with left hand, sometimes it does").
+                    static float s_reload_age_was = -1.0f;
+                    {
+                        const bool edge = reload_age >= 0.0f && reload_age < 0.05f &&
+                                          (s_reload_age_was < 0.0f || s_reload_age_was > 0.3f);
+                        if (edge) {
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE RELOAD PRESS: rest pose %s, hand relation %s, "
+                                                 "action w=%.2f%s, melee gate %.2f, equip gate %.2f%s, sprint %d | "
+                                                 "off %.2f hold %.2f join %.2f (pasupanim %d, melee %d equip %d sprint %d) | model %d",
+                                                 !s_recoil.have_ref ? "NONE" : (s_recoil.remembered ? "remembered" : "learned"),
+                                                 !s_action.hand.have ? "NONE" : (s_action.hand.remembered ? "remembered" : "learned"),
+                                                 s_action.weight, s_action.home_cut ? " (cut, waiting for home)" : "",
+                                                 s_melee.weight, s_equip.weight,
+                                                 !s_equip.active ? "" : (s_equip.draw ? " (draw)" : " (put-away)"),
+                                                 s_sprint.active ? 1 : 0, off_w, hold_w, join_w,
+                                                 prefs.sup_anim, prefs.melee_anim, prefs.equip_anim, prefs.sprint_anim,
+                                                 (int)access.model_tag);
+                        }
+                        s_reload_age_was = reload_age;
+                    }
                     if (was > 0.0f && s_action.weight <= 0.0f && prefs.sup_anim != 0) {
                         API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
                                              "action for %.2f s (gun up to %.1f cm / %.0f deg from rest, off hand up "

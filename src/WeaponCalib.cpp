@@ -225,6 +225,32 @@ void wpn_calib_write_file() {
                    "# The ONE hand-written line that belongs here is wpnanim (at the bottom): every\r\n"
                    "# wpnanim line read from this file is written back out, so it survives.\r\n"
                    "#\r\n"
+                   // THE LEGEND (by request, 2026-09-17: "I wouldn't know what to put in the weapon
+                   // cfg for each"). Every per-weapon line matches by a case-insensitive SUBSTRING of
+                   // the weapon's class name, BP_FP_<name>_WeaponActor_C, so the short keys are the
+                   // class names less that wrapping. Names from the game's own pak inventory (the 17
+                   // BP_FP_*_WeaponActor blueprints); 15 of them also seen in hand in session logs.
+                   // Two have no underscore before WeaponActor (NeedleRifle, SentinelBeam), which is
+                   // why the keys stop short of it. Regenerate this list if a patch adds a weapon.
+                   "# WHICH NAME TO USE FOR <match> in any line below. A line matches the weapon in\r\n"
+                   "# hand by a case-insensitive SUBSTRING of its class name (first match wins), so\r\n"
+                   "# these short keys are what to write -- the class names less the BP_ ... _WeaponActor_C\r\n"
+                   "# the game wraps them in:\r\n"
+                   "#   FP_AssaultRifle      Assault Rifle         FP_PlasmaPistol      Plasma Pistol\r\n"
+                   "#   FP_BattleRifle       Battle Rifle          FP_PlasmaRifle_W     Plasma Rifle (see below)\r\n"
+                   "#   FP_BeamRifle         Beam Rifle            FP_PlasmaRifle_Red   Brute Plasma Rifle\r\n"
+                   "#   FP_EnergySword       Energy Sword          FP_RocketLauncher    Rocket Launcher\r\n"
+                   "#   FP_FlakCannon        Fuel Rod Gun          FP_SentinelBeam      Sentinel Beam\r\n"
+                   "#   FP_Magnum            Magnum                FP_Shotgun           Shotgun\r\n"
+                   "#   FP_NeedleRifle       Needle Rifle          FP_SMG               SMG\r\n"
+                   "#   FP_Needler           Needler               FP_SniperRifle       Sniper Rifle\r\n"
+                   "#                                              FP_SpikeRifle        Spiker\r\n"
+                   "# Because it is a substring, FP_PlasmaRifle on its own matches BOTH plasma rifles\r\n"
+                   "# (BP_FP_PlasmaRifle_WeaponActor_C and BP_FP_PlasmaRifle_Red_WeaponActor_C): write\r\n"
+                   "# FP_PlasmaRifle_W for the blue one alone, FP_PlasmaRifle_Red for the Brute one.\r\n"
+                   "# The full class name of whatever is in hand is in the mod's log.txt\r\n"
+                   "# (\"twohand: ... on BP_FP_..._WeaponActor_C\").\r\n"
+                   "#\r\n"
                    "# wpnoff=<match>,<dx>,<dy>,<dz>,<dgrip>,<dyaw>,<droll>  -- DELTAS on the\r\n"
                    "# calibration in halo_vr_calib.cfg, not absolute values.\r\n"
                    "# Delete a line to send that weapon back to the plain calibration.\r\n\r\n");
@@ -337,6 +363,20 @@ void wpn_calib_write_file() {
         }
         fclose(f);
     }
+}
+
+// Create halo_vr_weapons.cfg on launch IF IT DOES NOT EXIST (by request, 2026-09-17: "generate on
+// launch with a comment that lists the appropriate names to use in keys for each weapon ... only
+// if there is no weapons cfg present already, so that settings are not overridden"). Same rule
+// as ensure_user_cfg_template(): an existing file is never touched, whatever it holds. Called
+// before the tables are loaded, so the rewrite above produces the commented sections and the
+// weapon-name legend with no lines under them -- the file a player opens to write their first
+// wpnanim line. Nothing in it changes behaviour.
+void ensure_weapons_cfg_template() {
+    if (g_wpn_calib_path[0] == 0) return;
+    FILE* f = nullptr;
+    if (fopen_s(&f, g_wpn_calib_path, "rb") == 0 && f != nullptr) { fclose(f); return; }   // theirs: leave it
+    wpn_calib_write_file();
 }
 
 bool wpn_calib_capture() {

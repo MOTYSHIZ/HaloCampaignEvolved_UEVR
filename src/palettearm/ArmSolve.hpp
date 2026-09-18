@@ -271,11 +271,17 @@ struct RecoilPass {
     Mat3  prev_basis{};
     int   stable{0};
     int   latches{0};            // times a rest pose was first learned (diagnostics)
+    bool  remembered{false};     // the rest pose was adopted, not learned: see adopt()
     float last_back_m{0.0f};     // what the last update let through, metres (diagnostics)
     float last_moved_m{0.0f};    // how far the marker is from its rest pose, metres...
     float last_turned_deg{0.0f}; // ...and how far it has turned (both 0 until a rest pose is known)
 
     void reset();
+    // Start from a rest pose this model taught EARLIER (the caller keeps one per weapon model):
+    // known at once, so everything measured from rest works from the first frame, but held loosely
+    // -- the first learn re-anchors it in a third of a second whatever the distance, since an
+    // idle sway can leave two learns of the same weapon a few centimetres apart.
+    void adopt(const Vec3& pos, const Mat3& basis);
     Vec3 update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m, bool learn);
     // Known, holding still, and where it was learned: the only state rest RELATIONS are learned in.
     bool at_rest() const;
@@ -295,10 +301,14 @@ struct RestRelation {
     Vec3  prev_pos{};
     Mat3  prev_basis{};
     int   stable{0};
+    bool  remembered{false};     // adopted from an earlier session with this model: see adopt()
     float dev_m{0.0f};
     float dev_deg{0.0f};
 
     void reset();
+    // Start from a relation learned earlier for this model (as RecoilPass::adopt): known at once,
+    // re-anchored by the first learn in a third of a second whatever the distance.
+    void adopt(const Vec3& p, const Mat3& b);
     void learn(bool gun_at_rest, const Vec3& p, const Mat3& b);
 };
 
@@ -340,6 +350,9 @@ struct ActionWatch {
 
 // IS AN EQUIP ANIMATION PLAYING? The put-away (the gun leaving rest within a second of a swap being
 // asked for) and the draw (from the weapon model changing until the new weapon rests, 3 s at most).
+// `other_age_s` = seconds since ANY OTHER action was asked for (the reload, melee or throw mask;
+// negative = never): a press that arrives after the gate opened ends it, because the game does not
+// take one during a swap -- a reload straight off the draw is a reload, and the draw is over.
 struct EquipGate {
     bool  active{false};
     bool  draw{false};
@@ -347,7 +360,8 @@ struct EquipGate {
     float weight{0.0f};          // eased 0..1
 
     void  reset();
-    float update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt);
+    float update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt,
+                 float other_age_s = -1.0f);
 };
 
 // A HAND'S REST SHAPE: every wrist-subtree node's relation to the wrist. Captured off the stock
@@ -362,14 +376,17 @@ bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestN
 // a reload overlap in every magnitude -- but a melee is always ASKED for: the swing gesture presses
 // the melee button, and so does a thumb. So this is keyed off the press (`press_age_s`: seconds
 // since the melee mask was last seen going to the game, negative = never), which also leads the
-// animation by a few frames, and stays up until the pose is back at rest (4 s at most).
+// animation by a few frames, and stays up until the pose is back at rest (4 s at most) -- or until
+// another action is asked for (`other_age_s`: the reload or throw mask, negative = never), since a
+// reload pressed after the swing is a reload, and the melee's business is over.
 struct MeleeGate {
     bool  active{false};
     float since_s{0.0f};
     float weight{0.0f};          // eased 0..1
 
     void  reset();
-    float update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg, float dt);
+    float update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg, float dt,
+                 float other_age_s = -1.0f);
 };
 
 // IS A SPRINT PLAYING? The sprint animation holds the gun well away from rest for the whole sprint,

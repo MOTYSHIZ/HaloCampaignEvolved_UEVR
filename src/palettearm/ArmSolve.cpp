@@ -757,8 +757,10 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
         // not a third of one: an animation that pauses (a shell-by-shell reload holds the gun tilted
         // between shells) must not teach its pause as the rest pose, or everything measured from
         // rest -- the kick below, and the action watch -- would read zero in the middle of it.
+        // A REMEMBERED rest pose (adopt) is held loosely: the first learn takes it wherever the
+        // gun now rests, in the short time, so a memory a sway's width off does not cost 1.5 s.
         int need = 20;
-        if (have_ref) {
+        if (have_ref && !remembered) {
             float near_align = dot(ref_basis.forward, marker_basis.forward);
             near_align = std::min(near_align, dot(ref_basis.left, marker_basis.left));
             near_align = std::min(near_align, dot(ref_basis.up, marker_basis.up));
@@ -767,12 +769,13 @@ Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float 
             if (!near_rest) need = 90;
         }
         if (stable >= need) {
-            if (!have_ref) { ref_pos = marker_pos; ref_basis = marker_basis; have_ref = true; ++latches; }
+            if (!have_ref || remembered) { ref_pos = marker_pos; ref_basis = marker_basis; have_ref = true; ++latches; }
             else {
                 ref_pos   = ref_pos + (marker_pos - ref_pos) * 0.2f;
                 ref_basis = blend_basis(ref_basis, marker_basis, 0.2f);
                 if (!valid_basis(ref_basis)) ref_basis = marker_basis;
             }
+            remembered = false;
         }
     }
     // HOW FAR THE GUN IS FROM REST, for anyone who asks (the action watch does) -- whatever the
@@ -819,7 +822,19 @@ bool RecoilPass::at_rest() const {
     return have_ref && stable >= 20 && last_moved_m < 0.005f && last_turned_deg < 2.0f;
 }
 
+void RecoilPass::adopt(const Vec3& pos, const Mat3& basis) {
+    reset();
+    if (!finite(pos) || !valid_basis(basis)) return;
+    ref_pos = pos; ref_basis = basis; have_ref = true; remembered = true;
+}
+
 void RestRelation::reset() { *this = RestRelation{}; }
+
+void RestRelation::adopt(const Vec3& p, const Mat3& b) {
+    reset();
+    if (!finite(p) || !valid_basis(b)) return;
+    pos = p; basis = b; have = true; remembered = true;
+}
 
 void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
     dev_m = 0.0f; dev_deg = 0.0f;
@@ -843,16 +858,18 @@ void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
         dev_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
     }
     // Only ever learned while the GUN is at rest, and -- like the gun's own rest pose -- a relation
-    // far from the known one has to hold for 1.5 s before it is believed.
+    // far from the known one has to hold for 1.5 s before it is believed. A REMEMBERED one (adopt)
+    // is re-anchored by the first learn in the short time, whatever the distance.
     if (!gun_at_rest) return;
-    const bool near_rest = !have || (dev_m < 0.015f && dev_deg < 5.0f);
+    const bool near_rest = !have || remembered || (dev_m < 0.015f && dev_deg < 5.0f);
     if (stable < (near_rest ? 20 : 90)) return;
-    if (!have) { pos = p; basis = b; have = true; }
+    if (!have || remembered) { pos = p; basis = b; have = true; }
     else {
         pos   = pos + (p - pos) * 0.2f;
         basis = blend_basis(basis, b, 0.2f);
         if (!valid_basis(basis)) basis = b;
     }
+    remembered = false;
 }
 
 void ActionWatch::reset() {
@@ -947,7 +964,8 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
 
 void EquipGate::reset() { *this = EquipGate{}; }
 
-float EquipGate::update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt) {
+float EquipGate::update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt,
+                        float other_age_s) {
     if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
     // THE PUT-AWAY: the gun leaving rest within a second of a swap being asked for. THE DRAW: from
     // the weapon model changing until the new weapon has come to rest (3 s at most). Neither can
@@ -955,11 +973,19 @@ float EquipGate::update(float swap_age_s, bool weapon_changed, const RecoilPass&
     // are what make them equip.
     const bool away = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
     if (weapon_changed) { active = true; draw = true; since_s = 0.0f; }
-    else if (!active && swap_age_s >= 0.0f && swap_age_s < 1.0f && away) { active = true; draw = false; since_s = 0.0f; }
+    else if (!active && swap_age_s >= 0.0f && swap_age_s < 1.0f && away &&
+             !(other_age_s >= 0.0f && other_age_s < swap_age_s)) {      // ...unless something else was asked for since
+        active = true; draw = false; since_s = 0.0f;
+    }
     if (active) {
         since_s += dt;
         if (draw) { if ((gun.have_ref && gun.at_rest()) || since_s > 3.0f) active = false; }
         else      { if (!away || since_s > 2.0f) active = false; }
+        // ANOTHER ACTION ASKED FOR since this began ends it: the game takes no reload, melee or
+        // throw during a swap, so the press means the swap is over -- and a reload straight off
+        // the draw (the common one: swap to the empty gun, reload it) would otherwise sit behind
+        // this gate until the gun rested, which a reload never lets it do.
+        if (other_age_s >= 0.0f && other_age_s < since_s) active = false;
     }
     const float target = active ? 1.0f : 0.0f;
     const float tau = target > weight ? 0.06f : 0.12f;
@@ -1012,7 +1038,7 @@ bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestN
 void MeleeGate::reset() { *this = MeleeGate{}; }
 
 float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg,
-                        float dt) {
+                        float dt, float other_age_s) {
     if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
     const bool pressed = press_age_s >= 0.0f && press_age_s < 0.4f;
     // "Still going" is read off the same two signals the action watch uses, at a much lower bar:
@@ -1023,10 +1049,16 @@ float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev
         ? (gun.last_moved_m > 0.02f || gun.last_turned_deg > 3.0f || hand_dev_m > 0.02f || hand_dev_deg > 5.0f)
         : (since_s < 1.2f);
     if (!active) {
-        if (pressed) { active = true; since_s = 0.0f; }
+        // ...and a melee press only opens it while nothing else has been asked for since, or
+        // the press that closed it below would reopen it on the next frame.
+        if (pressed && !(other_age_s >= 0.0f && other_age_s < press_age_s)) { active = true; since_s = 0.0f; }
     } else {
         since_s += dt;
         if ((!pressed && !busy && since_s > 0.15f) || since_s > 4.0f) active = false;
+        // A reload or a throw asked for after the swing ends it: "busy" cannot tell the melee's
+        // own return from the reload that follows it, and would hold the free hand off that
+        // reload for the whole 4 s cap.
+        if (other_age_s >= 0.0f && other_age_s < since_s) active = false;
     }
     const float target = active ? 1.0f : 0.0f;
     // In AHEAD of the animation -- the press leads it by a few frames, which is the whole point of

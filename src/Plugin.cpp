@@ -11266,6 +11266,7 @@ public:
         sprintf_s(g_status_path, MAX_PATH, "%s\\halo_vr_status.txt", g_data_dir);
 
         ensure_user_cfg_template();   // all-comment template; never touches an existing file
+        ensure_weapons_cfg_template();// the per-weapon file's sections + weapon-name legend; same rule
         load_config();                // writes a commented default halo_vr.cfg if none exists
 
         // Every override layer now ships or is template-created, so file EXISTENCE says nothing --
