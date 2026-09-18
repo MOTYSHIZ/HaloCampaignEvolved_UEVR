@@ -46,6 +46,21 @@ struct WeaponAdjust {
 };
 constexpr int kMaxWeaponAdjust = 24;
 
+// One per-weapon ANIMATION preference line (the palette arms' pasprintanim / pameleeanim /
+// paequipanim / pagrenadetrim / pasupanim, for one weapon). Positional like wpnoff, everything after
+// the match optional; a blank field, or '-', leaves that setting on its global. `set` says which
+// fields were given. Lives in halo_vr_weapons.cfg by request ("cleaner to put them there and match
+// their naming standard ... all animation settings for a particular weapon on a single line"), and
+// the writer of that file carries every line parsed FROM it back out, so a hand-written line
+// survives the captures that rewrite the file.
+struct WeaponAnim {
+    char     match[64] = "";
+    float    sprint = 0.0f, melee = 0.0f, equip = 0.0f, grenade_trim = 0.0f, sup_anim = 0.0f;
+    unsigned set = 0;                  // bit 0 sprint, 1 melee, 2 equip, 3 grenade_trim, 4 sup_anim
+    bool     from_weapons_file = false;
+};
+constexpr int kMaxWeaponAnim = 32;
+
 // One per-weapon SCOPE trim. Deltas on the global scope fit, not replacements -- see
 // ScopeOffset.hpp. d_zoom is a PLAIN MULTIPLIER: 1.5 = 1.5x the global magnification. ZERO means
 // UNSET rather than 0x -- the parser is positional, so a line naming only a weapon leaves every
@@ -138,7 +153,13 @@ constexpr int kWeaponFixSchema = 1;
 // Same idea, same reasoning, for the SUPPORT-HAND rigid fix (`handfix` in halo_vr_calib.cfg): the
 // stamp is file-borne and a line under any other stamp is dropped at parse. One number, not two --
 // the hand fix has a single writer and a single reader, so there is no second tier to version.
-constexpr int kHandFixSchema = 1;
+//
+// 2 (2026-09-17): the pose the fix TRIMS changed. The free support hand used to be the controller
+// composed with the wrist's AUTHORED convention (a hand under a forestock); it is now the mirror of
+// the aim hand's relation to its own controller (pasupmirror). A v1 fix was solved against the old
+// baseline -- typically 90-160 degrees of roll that the new baseline no longer needs -- so applying it
+// on top would rotate the hand by exactly the error it used to cancel. v1 lines are dropped at parse.
+constexpr int kHandFixSchema = 2;
 
 // ---- THE ONE PER-WEAPON LOOKUP -----------------------------------------------------------------
 //
@@ -3748,7 +3769,80 @@ struct Config {
     //       palette space is already view-relative it double-counts the head and the arms rotate
     //       EXTRA as you yaw -- which is what was observed.
     //   2 = root composed with the inverse HEAD, i.e. actively removing head yaw.
-    int   pa_torso_frame  = 6;
+    int   pa_torso_frame  = 7;   // 7 since 2026-09-16: mode 6 plus the camera pitch. Measured (SimVR, world-space probe): yaw S 0.35 like mode 4, pitch S 0.1-0.4 vs 0.85-1.0 for modes 4/6.
+
+    // TORSO FRAME A/B INSTRUMENT. Off by default; costs one atomic load and a branch per tick.
+    //
+    // Modes 3 and 4 are the same rotation and its negation, and PaletteArm.cpp says outright that
+    // which one is right is a coin-flip settled only in a headset. The previous attempt to settle
+    // it failed on the READOUT rather than the test: "which felt steadier" cannot separate nearly
+    // right from exactly right, and cannot be handed to anyone else.
+    //
+    // With this on, the tick reports R = sum|d torso| / sum|d aim| over ticks where the controller
+    // turned and the body (stick-turn yaw) did not: ~0 = locked to the BODY (the goal), ~1 = follows
+    // the AIM uncorrected (mode 0, the control), ~2 = correction with the WRONG sign. Magnitudes on
+    // purpose -- a signed comparison between Blam's basis and UE rotators would carry the same
+    // handedness ambiguity this test exists to settle. See its site in Plugin.cpp for the rest.
+    bool  pa_torso_ab     = false;
+
+    // ARM WORLD PROBE. Off by default; when on, four reflection calls per tick (camera position and
+    // three rig sockets) plus a one-shot bone enumeration per rig -- a diagnostic, not for play.
+    //
+    // Answers "which part of the arm swings with the aim?" in UE WORLD space, read from the
+    // RENDERED skeleton: the shoulder joint, the elbow, or only the arm's direction. Reports
+    // S = 0 (world-fixed) .. 1 (rotates rigidly with the aim) per joint, and carries three controls
+    // that can fail -- a synthetic metric check, an IK-visible check (push the gun forward and back
+    // with the aim held still), and a bone-resolution check. Replaces pa_torso_ab, which measured in
+    // the palette's own space and was shown by its own control to be unable to answer. See its site
+    // in Plugin.cpp.
+    bool  pa_world_probe  = false;
+    // With paworld=1: log this many consecutive ticks of RAW rendered joint positions (camera-
+    // relative, cm) beside the palette's own joints -- to see with the eye whether the rendered
+    // pose alternates between ours and the stock pose. 0 = off. DEV KEY paworldraw.
+    int   pa_world_raw    = 0;
+    // PALETTE ROUTE: STAND THE UE MESH PLACEMENT DOWN (2026-09-16). This is the fix that made the
+    // palette route's body-locked shoulders finally RENDER (raw per-tick dump: rendered joints
+    // track the palette's within ~1 cm, shoulder world-fixed across a sweep). The UeRig driver's component
+    // placement (Plugin.cpp rig block: world rotation + relative location, plus the render-rate
+    // re-apply) was gated only on the weapon drives, so it kept running under armdriver=2 and
+    // pinned the whole mesh so its PrimaryWeapon socket sat on the controller. The palette records
+    // are camera-local and assume the mesh sits where the game puts it -- so every palette node
+    // swung about the controller by the socket lever whatever the torso frame did. With this ON
+    // the palette route owns the component too: no UeRig writes, and the rig's stock relative
+    // transform (captured at acquisition) is restored on entry.
+    // Measured 2026-09-16 with the world-space probe: the shoulder-armour bone read S=1.2-1.7 in
+    // every torso mode with the writes on, 1.02 (the mode-0 control's expected value) with them off.
+    // DEV KEY pameshdown. 0 = legacy (both drivers write; for A/B only).
+    bool  pa_mesh_standdown = true;
+    // HOLD THE ARM MESH IN THE BODY FRAME AT RENDER RATE (2026-09-16, from the first headset run).
+    // The mesh hangs off the aim-driven camera, so the palette had to subtract the aim (lock gap +
+    // camera pitch) -- but the palette is rebuilt at ~35-45 Hz while the camera turns every rendered
+    // frame, so between rebuilds the arms rode the camera and were then corrected back: reported as
+    // "the hands are jittery when I move my controllers" and "the left hand jitters when I move the
+    // right, like it wants to follow and gets corrected". This is the project's two-clocks rule:
+    // recompose against a frame the render path can rebuild. With this ON the render callback
+    // writes the mesh's world rotation = (pitch 0, locked view yaw, roll 0) every frame, and the
+    // palette solves with NO gap and NO pitch term -- the aim never enters the arm chain at all.
+    // Needs pameshdown. DEV KEY pameshbody. 0 = mesh rides the camera, palette subtracts the aim.
+    bool  pa_mesh_body    = true;
+    // THE WEAPON IS CARRIED BY THE UeRig SOLUTION (2026-09-16, second headset run: "make the weapon
+    // track the same way relative to my controller as it does in rig mode ... that would respect my
+    // calibrations"). The rig block still solves where rig mode would put the gun every tick -- the
+    // mesh world rotation q_gun and the weapon target parent + pose_off + R_ctrl*mount -- it just
+    // does not write them under the stand-down. This hands that solution to the palette: the weapon
+    // nodes get the ONE rigid transform that lands the authored PrimaryWeapon node on the rig's
+    // target with the rig's orientation, so grip trim, mount offset, per-weapon offsets, the
+    // two-hand swing and the End calibration hold all apply exactly as they do in rig mode, and the
+    // shot-point aim (which reconstructs the bore on the same q_gun) points down the drawn barrel.
+    // The palette route's own trims (pawpnyaw/pitch/roll, wpnfix, the barrel lock) are bypassed.
+    // Needs rigmode=3 (the shipped default). DEV KEY pawpnrig. 0 = the old controller carry.
+    bool  pa_wpn_rig      = true;
+    // THE AIM HAND RIDES THE GUN. With the gun placed by the rig calibration, the hand that holds it
+    // takes the AUTHORED wrist carried by the same rigid transform -- the hand sits on the grip the
+    // way the artist posed it, exactly as it does in rig mode -- and the arm is IK'd from the body
+    // shoulder to it. 0 = the aim hand IKs to the controller (it then only sits on the gun as well
+    // as the two calibrations happen to agree). The support hand is unaffected. DEV KEY pahandgun.
+    bool  pa_hand_on_gun  = true;
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends
@@ -3758,7 +3852,7 @@ struct Config {
     // drive yaws the camera by t both terms counter-rotate by -t and the torso stays world-fixed.
     // That makes this construction aim-independent BY CONSTRUCTION rather than by subtracting a
     // correction -- which is why it needs no view-lock term, unlike modes 3/4/5.
-    float pa_head_shoulders_yaw_influence = 0.5f;
+    float pa_head_shoulders_yaw_influence = 1.0f;   // 1 = the torso faces where the HEAD faces (MCC VR); 0 = the hands. Was 0.5 until 2026-09-16.
 
     // PALETTE WEAPON DRIVE -- carry the weapon branch (nodes 7, 8, 22) onto the aim controller with
     // ONE rigid transform, so the stock animation inside the branch survives.
@@ -3891,13 +3985,181 @@ struct Config {
     // patgtframe=1 reverts the orientation half live; 0 reverts both.
     int   pa_target_frame  = 2;
 
-    // Does the SUPPORT hand ride the weapon while two-handing? 0 = no (default), 1 = yes.
-    //
-    // 0 follows pancreations MCC VR, who never attach it: the support arm is solved onto its own
-    // controller and the hands couple ONE WAY, through the aim basis only. Attaching it makes the
-    // hand inherit everything the weapon inherits, including the aim hand rotation, which is why
-    // "grabbing" kept surfacing as a separate complaint from the arm itself.
-    int   pa_grab_weapon   = 0;
+    // Does the SUPPORT hand ride the weapon while two-handing?
+    //   0 = no: the support arm is solved onto its own controller throughout (pancreations MCC VR).
+    //   1 = yes, on weapons that TAKE a two-handed hold (DEFAULT since 2026-09-17, by request: "when
+    //       we 2-hand aim, the left hand snaps to its authored position -- where the hand would
+    //       normally be gripping the weapon in flat mode or in rig parented mode"). While the hold
+    //       is latched the support wrist takes the AUTHORED wrist carried by the same rigid transform
+    //       that placed the gun, eased in over the hold's own ramp; the arm is still IK'd from the
+    //       body shoulder. On a twohanddeny weapon only when the ARTIST put the off hand on the gun
+    //       -- the authored wrists within 18 cm of each other, which is the Magnum's cupped stance
+    //       (12 cm, measured) and not a plasma pistol's free arm. The hold latches on those weapons
+    //       for zoom, and the relaxed zone there is exactly "cup the pistol under your firing hand".
+    //   2 = as 1, on every deny-listed weapon regardless.
+    // It was 0 while the gun was carried by a second calibration of its own; with pawpnrig the gun is
+    // where rig mode draws it, so the authored hand-to-gun relation is the right one to restore.
+    int   pa_grab_weapon   = 1;
+    // HAND SHAPES LIFTED FROM THE GAME'S OWN ANIMATIONS (2026-09-17, by request: "a resting open hand
+    // pose when we are not attached to the weapon; when grip is held even without gripping the
+    // weapon, close into a fist ... the fist from the Magnum left arm punch, the open hand near the
+    // end of the grenade throw"). Both were recorded off the stock palette (pahandrec) and are stored
+    // as parent-relative joint rotations, which this rig shares between its two hands.
+    //   free support hand  -> the RELAXED hand (pahandrest moves it: see below)
+    //   grip held, no gun  -> the fist
+    //   riding the gun     -> the AUTHORED fingers (eased by the two-hand hold's own ramp)
+    // The aim hand is always on the gun and keeps its authored grip. DEV KEY pahandpose. 0 = the
+    // authored grip on both hands always (the behaviour to date).
+    bool  pa_hand_pose     = true;
+    // THE REST POSE IS ITS OWN RECORDED HAND (2026-09-17, headset: "the open palm pose is a bit more
+    // tense than I was expecting"). The first rest pose was the grenade-release hand blended 22 percent
+    // toward the fist, and a hand at full stretch stays splayed however far it is curled. The rest
+    // pose is now a third recording -- the free left hand of the weapon-draw animation, every finger
+    // gently curved -- and pahandrest moves AWAY from it: -1 = the stretched open hand (the old
+    // look is about -0.8) .. 0 = the relaxed hand .. 1 = the fist. Live.
+    float pa_hand_rest     = 0.0f;    // DEV KEY pahandrest
+    // FOREARM ROLL (2026-09-17, headset: "the hand can twist unnaturally in its socket ... a live
+    // tunable for the forearm roll influence"). The solve turns the hand to the controller and leaves
+    // the forearm as the elbow carries it, so all of a controller roll lands on the wrist joint. This
+    // rig has two twist bones per forearm and the game's own animations drive them at 0.31 and 0.72
+    // of the hand's twist (measured over 5149 recorded frames, both arms, fit error 2-5 degrees), so
+    // the roll THE SOLVE ADDED is spread over them by that same rule, times this gain. The authored
+    // hand-to-forearm relation is the zero: a hand in its authored pose adds nothing, so the support
+    // pose on the gun looks exactly as it did. Both arms. Live.
+    //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 2 = cap
+    //       (raised from 1.5 on request after the first headset run)
+    float pa_forearm_roll  = 1.0f;    // DEV KEY paforearmroll
+    // ...AND THE FOREARM ARMOUR GOES ROUND WITH IT (headset, same run: "make it so that the forearm
+    // armor piece follows the rotation of the forearm"). The gauntlet nodes hang 10-13 cm off the
+    // bone and the game carries them rigidly with the elbow -- fine for its own animations, wrong
+    // under a tracked hand, where the sleeve visibly turns inside a plate that does not. Each plate
+    // now takes the forearm's roll AT ITS OWN STATION along the bone (the gauntlet sits at t = 0.33,
+    // beside the near twist bone, so it turns with that bone) and orbits the axis with it. Live.
+    //   0 = rigid with the elbow (the game's way) .. 1 = with the forearm beside it (DEFAULT) ..
+    //   3 = cap (2.3 puts the gauntlet on the wrist-end twist bone's roll)
+    float pa_forearm_armor = 1.0f;    // DEV KEY paforearmarmor
+    // ...WHICH TURNED OUT TO CARRY NOTHING VISIBLE (headset, next run, at paforearmarmor=3 with the
+    // roll at 2: "I did not notice any change in behavior there"). The skeleton tag names them:
+    // 20/24 = elbowarmor_r/l, 34/35 = elbowarmorend_r/l, and the first-person armour is not skinned
+    // to them at all -- it is six separate static meshes on the sockets ElbowPart2_L/R,
+    // ShoulderArmor_L/R and Wrist_L/R, and ElbowPart2 is the FAR twist bone, which has rolled since
+    // the twist went in. What is left that does not roll is whatever is skinned to the forearm bone
+    // proper (elbow_r/l), and by elimination that is the plate the player is watching. So the elbow
+    // node itself now takes the near twist bone's share of the roll, about its own origin (the joint
+    // does not move; twist bones, plates and hand are model-space nodes and are not dragged along).
+    //   0 = the forearm bone never rolls (the game's way) .. 1 = as much as the near twist bone
+    //   (DEFAULT, keeps the roll monotonic elbow -> wrist) .. 3 = cap. Live.
+    float pa_forearm_bone  = 1.0f;    // DEV KEY paforearmbone
+    // THE FREE SUPPORT HAND JOINS THE GAME'S ACTIONS (2026-09-17, headset: "the reload animations
+    // worked great when my left hand was gripping the weapon ... can you make it so that the
+    // animation plays regardless of whether or not I am gripping the weapon with my left hand? Same
+    // with melee animations"). Gripping, the hand rides the transform that carries the gun, so it
+    // performs whatever the game animates; free, it followed the controller and a reload swapped a
+    // magazine with nobody holding it. There is no reload or melee event to subscribe to, so the
+    // stock palette is watched instead (pa::ActionWatch): the gun leaving its learned rest pose
+    // (8-16 cm, 20-35 deg) or the authored off hand moving RELATIVE TO THE GUN (3-8 cm, 12-30 deg).
+    // In the recording every melee / reload / grenade throw is 3-20x past those bands and nothing
+    // else comes near them (the rifle's burst: 4 cm, 0.6 deg, hand 0.1 cm). While one plays the
+    // support wrist is handed to the authored pose exactly as for a two-hand hold -- same carry,
+    // shoulder still on the body, authored fingers -- in over ~0.06 s, out over ~0.12 s. Aim is not
+    // touched: no hold is latched. On every weapon, deny-listed or not. Right-handed aim only.
+    //   pasupanim      0 = off (the hand stays on its controller, as before) .. 1 = on (DEFAULT)
+    //   pasupanimgate  scales every threshold. 1 = as measured. Raise it (1.5, 2) if plain SHOTS tug
+    //                  the free hand on some weapon -- the dev line 'PALETTE ANIM' says what tripped.
+    // RETUNED after the first headset run with it (2026-09-17 evening, 54 hand-overs logged): the
+    // action signal is now the OFF HAND alone -- above all its TURN relative to the gun, which
+    // separates every action (44-176 deg) from a weapon's put-away (1-5 deg) -- and the gun leaving
+    // rest on its own is the EQUIP half below. Both live.
+    int   pa_sup_anim      = 1;       // DEV KEY pasupanim
+    float pa_sup_anim_gate = 1.0f;    // DEV KEY pasupanimgate
+    // THE ANIMATION PREFERENCES: MELEE, EQUIP, SPRINT -- ONE SCHEME (headset, 2026-09-17: "I think the
+    // melee animation playing is actually a preference when it comes to physical melee", "the left
+    // hand playing equip animations ... should default to off, since switching weapons over the
+    // shoulder currently causes the left hand to snap to its position", "only during sprint, the arms
+    // animation can use a specific mode ... per-weapon override", and "reach parity and standardize
+    // the value settings with the sprint anim options for equip and melee"). Each is a GATE the pose
+    // cannot supply on its own, keyed off what the game is handed on the pad:
+    //   melee  the melee mask (the swing gesture presses it, so does a thumb), a few frames AHEAD of
+    //          the animation, up until the pose is back at rest (pa::MeleeGate, 4 s cap)
+    //   equip  the put-away (the gun leaving rest within 1 s of the swap mask) and the draw (from
+    //          the weapon model changing until the new weapon rests, 3 s cap) (pa::EquipGate)
+    //   sprint the gun well away from rest WHILE the stick is pushed AND the sprint mask was seen in
+    //          the last 3 s (pasprintmask); ends when stick or pose lets go (pa::SprintWatch). The
+    //          plugin has no sprint state of its own; no rest pose is learned through a sprint, or
+    //          the sprint pose would become "rest" in 1.5 s
+    // and each takes the same four values:
+    //   0 = the whole animation with the IK on top: the free support hand JOINS it
+    //   1 = the gun hand only: the gun and the aim hand play it as they always have, the free
+    //       support hand stays on its controller, a gripping one at its rest relation on the gun
+    //   2 = the whole animation and NO tracking: every driven node is eased back to the stock pose
+    //       for the animation's duration and comes back to the controllers as it ends
+    //   3 = no animation: the gun and the aim hand are held to their rest pose (weapon nodes moved
+    //       onto the eased rest marker before the carry, the aim wrist and its FINGERS to their rest
+    //       relation, the kick faded), the support hand stays on its controller. Needs a rest pose,
+    //       so the DRAW of a new weapon plays as 1 until the weapon has rested once.
+    // Defaults: melee 1 (a physical swing is the melee), equip 1 (the swap is the player's reach
+    // over the shoulder), sprint 0. All live. Per weapon: a wpnanim line in halo_vr_weapons.cfg
+    // (see WeaponAnim) -- one line covers these three, pagrenadetrim and pasupanim.
+    int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
+    int   pa_equip_anim    = 1;       // DEV KEY paequipanim
+    int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
+    int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
+    // THE GRENADE THROW'S TAIL (headset, same run: "a live tunable for how many seconds to trim off
+    // the end of the grenade throw anim. It has a notify or something that tells the left hand to go
+    // back to the support grip, and that might confuse some players"). The authored throw is
+    // 1.35-1.40 s: release at ~0.15 s, the arm out to ~0.75 s, the hand back on the forestock by
+    // ~1.0 s. A hand-over that began within 0.6 s of a throw being asked for (the trigger gesture or
+    // the button the game reads as throw) is cut this many seconds before the authored end, and not
+    // taken again until the authored hand is home. 0.6 = let go as the return begins. 0 = off. Live.
+    // The RETURN of every other action is cut by its shape (ActionWatch): a melee on its first
+    // sustained approach after the peak, a reload -- or anything not asked for -- only once the gun
+    // is nearly home too, because a reload's magazine coming in looks like a return at its onset.
+    float pa_grenade_trim_s = 0.6f;   // DEV KEY pagrenadetrim
+    // OVER-REACH GOES DOWN THE ARM (2026-09-17, headset: "the hand stretches from the wrist when it
+    // gets too far from the body ... pass some of that stretch down the IK chain to forearm and
+    // upperarm"). It is not a rare case: hand targets live in rig-scaled metres (x1.312) and the
+    // authored arm is 63.5 cm, so a real arm at full stretch asks for ~85 cm. In the round-5 headset
+    // log the support hand's target was past the authored reach in 26% of samples (max 1.42x); the
+    // shoulder's 12 cm slide absorbed most, and everything beyond it opened as one gap at the wrist.
+    // Now both bones lengthen by up to pastretch, every helper node between the joints sliding out
+    // by its station (this rig has them at 1/3 and 2/3 of both bones, so the skin stretches evenly),
+    // and pastretchshare says how much of the extension the bones take before the wrist gets the
+    // rest. Both live (pastretch used to be a sticky key with a default of 1.0 = off).
+    //   pastretch       1 = off (all of it at the wrist, the behaviour to date) .. 1.5 (DEFAULT)
+    //   pastretchshare  0 = wrist only .. 0.85 (DEFAULT: about the same strain along the arm as
+    //                   across the hand) .. 1 = the arm takes everything up to pastretch
+    float pa_stretch       = 1.5f;    // DEV KEY pastretch
+    float pa_stretch_share = 0.85f;   // DEV KEY pastretchshare
+    // RECOIL TRANSLATION (2026-09-17, headset: "the main one we are losing is the direct backwards
+    // recoil translation ... when shooting the AR, the weapon barely moves"). The rig carry lands the
+    // weapon's authored marker ON the rig's target every frame, which cancels every translation the
+    // game animates into that marker while leaving its rotation -- so the Magnum's flip survives and
+    // the Assault Rifle's kick, which is 2-4 cm straight back and under a degree of rotation
+    // (measured), does not. The carry now leaves in the part of the marker's displacement from its
+    // learned rest pose that is a KICK: the component back along the barrel, while the marker has
+    // turned less than 8-20 degrees from rest and moved less than parecoilmax..2x that. Everything
+    // else (draw, reload, melee, swap) still cancels, to within a 1-3 cm brush at its start and end;
+    // the grenade throw pulls the gun hand back with little rotation and shows most of that pull.
+    // The hands ride the same transform, so they kick with the gun. Both live.
+    //   parecoil     0 = cancel everything (the behaviour to date) .. 1 = the authored kick .. 2 = cap
+    //   parecoilmax  the most that is ever let through, cm
+    float pa_recoil        = 1.0f;    // DEV KEY parecoil
+    float pa_recoil_max_cm = 8.0f;    // DEV KEY parecoilmax
+    // THE FREE SUPPORT HAND MIRRORS THE AIM HAND. The aim hand's pose relative to ITS controller is
+    // the product of the player's own weapon calibration and the artist's grip -- and the player
+    // confirmed it in a headset. Controllers are mirror images held mirror-image, so the free support
+    // hand takes the mirror of that relation (orientation and wrist offset) off its own GRIP pose.
+    // Before this it was the controller composed with the wrist's authored convention, i.e. a hand
+    // posed for the underside of a forestock: 90-160 degrees of roll out, by the player's own
+    // calibration attempts. Measured only while the aim hand rides the gun, not two-handing and not
+    // calibrating, and latched only when it has held still, so neither recoil nor a reload reaches
+    // the other hand. DEV KEY pasupmirror. 0 = the authored convention (the behaviour to date).
+    bool  pa_support_mirror = true;
+    // DEV: record the STOCK first-person palette (every node, before this route edits it) to
+    // <profile>\data\handrec.bin, one frame per live build, while > 0. The value is a cap in frames
+    // (60/s), so a forgotten key cannot fill the disk. Used to lift hand shapes (open hand, fist)
+    // out of the game's own animations rather than inventing them. DEV KEY pahandrec.
+    int   pa_hand_rec      = 0;
 
     int   pa_arm_rest_lift = 1;
 
@@ -4147,6 +4409,9 @@ struct Config {
     bool  wpn_log         = false;
     WeaponAdjust wpn[kMaxWeaponAdjust];
     int   wpn_count       = 0;
+    // wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- see WeaponAnim.
+    WeaponAnim wpn_anim[kMaxWeaponAnim];
+    int   wpn_anim_count  = 0;
 
     // ---- PER-WEAPON SCOPE TRIMS (ScopeOffset.hpp) -------------------------------------------
     // Zoom and pane placement as DELTAS on the global scope fit, so one calibration still does

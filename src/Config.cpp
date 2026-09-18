@@ -939,6 +939,49 @@ static bool parse_weapon_offset(const char* val) {
     return true;
 }
 
+// wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- the palette arms' animation
+// preferences for one weapon (pasprintanim / pameleeanim / paequipanim / pagrenadetrim / pasupanim).
+//
+// One line per weapon, repeatable, positional, everything after the match optional -- and unlike
+// wpnoff an EMPTY field (or '-') means "leave that one on its global", so "wpnanim=FP_Shotgun,3"
+// sets only the sprint mode and "wpnanim=FP_Magnum,,2" only the melee mode. strtok would swallow
+// the empty field, so this splits by hand. Replace by match, like the other per-weapon tables.
+static bool parse_weapon_anim(const char* val) {
+    if (val == nullptr || val[0] == 0) return false;
+    if (g_cfg.wpn_anim_count >= kMaxWeaponAnim) return true;   // full: ignore rather than overflow
+
+    char buf[256] = {0};
+    strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
+    for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
+
+    WeaponAnim w{};
+    float* fields[] = { &w.sprint, &w.melee, &w.equip, &w.grenade_trim, &w.sup_anim };
+    int field = -1;                        // -1 = the match, 0.. = the settings
+    const char* p = buf;
+    while (true) {
+        const char* comma = strchr(p, ',');
+        const size_t len = (comma != nullptr) ? (size_t)(comma - p) : strlen(p);
+        if (field < 0) {
+            if (len == 0) return true;      // no match, no entry
+            strncpy_s(w.match, sizeof(w.match), p, len < sizeof(w.match) - 1 ? len : sizeof(w.match) - 1);
+        } else if (field < 5) {
+            size_t k = 0;
+            while (k < len && (unsigned char)p[k] <= ' ') ++k;
+            if (k < len && p[k] != '-') { *fields[field] = (float)atof(p + k); w.set |= (1u << field); }
+        }
+        ++field;
+        if (comma == nullptr) break;
+        p = comma + 1;
+    }
+    w.from_weapons_file = s_wpnfix_from_capture;
+
+    for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
+        if (_stricmp(g_cfg.wpn_anim[i].match, w.match) == 0) { g_cfg.wpn_anim[i] = w; return true; }
+    }
+    g_cfg.wpn_anim[g_cfg.wpn_anim_count++] = w;
+    return true;
+}
+
 // wpnfix=<match>,qx,qy,qz,qw,tx,ty,tz -- the PALETTE path's per-weapon rigid delta.
 //
 // Two sources feed this one table: the shipped baseline in halo_vr.cfg and the player's captures in
@@ -1122,7 +1165,19 @@ static bool parse_hand_fix(const char* val) {
 
     // THE STAMP GATE, AT PARSE -- so by the time anything reads g_cfg.hand_fix_* it is a value this
     // build vouches for, with no second rule for a consumer to get wrong.
-    if (s_handfix_file_ver != kHandFixSchema) return true;
+    if (s_handfix_file_ver != kHandFixSchema) {
+        // SAY SO, once. A calibration that silently stops applying reads as "my capture was lost".
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            API::get()->log_info("[Halo-CampE-UEVR] HANDFIX: a stored support-hand fix stamped v%d was "
+                                 "NOT applied -- this build's baseline is v%d (the free support hand now "
+                                 "mirrors the aim hand). Recapture it from the menu if the hand still "
+                                 "needs a trim; the old line is left in the file untouched.",
+                                 s_handfix_file_ver, kHandFixSchema);
+        }
+        return true;
+    }
 
     char buf[128] = {0};
     strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
@@ -1328,6 +1383,24 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paarmrest")     == 0) { g_cfg.pa_arm_rest_lift = (int)v; return true; }
     if (_stricmp(key, "patgtframe")    == 0) { g_cfg.pa_target_frame   = (int)v; return true; }
     if (_stricmp(key, "pagrabwpn")     == 0) { g_cfg.pa_grab_weapon    = (int)v; return true; }
+    if (_stricmp(key, "pahandrec")     == 0) { g_cfg.pa_hand_rec       = (int)v; return true; }
+    if (_stricmp(key, "pahandpose")    == 0) { g_cfg.pa_hand_pose      = (v != 0.0); return true; }
+    if (_stricmp(key, "pahandrest")    == 0) { g_cfg.pa_hand_rest      = (float)v; return true; }
+    if (_stricmp(key, "paforearmroll") == 0) { g_cfg.pa_forearm_roll   = (float)v; return true; }
+    if (_stricmp(key, "paforearmarmor") == 0) { g_cfg.pa_forearm_armor = (float)v; return true; }
+    if (_stricmp(key, "paforearmbone") == 0) { g_cfg.pa_forearm_bone   = (float)v; return true; }
+    if (_stricmp(key, "pasupanim")     == 0) { g_cfg.pa_sup_anim       = (int)v;   return true; }
+    if (_stricmp(key, "pasupanimgate") == 0) { g_cfg.pa_sup_anim_gate  = (float)v; return true; }
+    if (_stricmp(key, "paequipanim")   == 0) { g_cfg.pa_equip_anim     = (int)v;   return true; }
+    if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
+    if (_stricmp(key, "pameleeanim")   == 0) { g_cfg.pa_melee_anim     = (int)v;   return true; }
+    if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }
+    if (_stricmp(key, "pasprintmask")  == 0) { g_cfg.pa_sprint_mask    = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }
+    if (_stricmp(key, "pastretchshare") == 0) { g_cfg.pa_stretch_share = (float)v; return true; }
+    if (_stricmp(key, "parecoil")      == 0) { g_cfg.pa_recoil         = (float)v; return true; }
+    if (_stricmp(key, "parecoilmax")   == 0) { g_cfg.pa_recoil_max_cm  = (float)v; return true; }
+    if (_stricmp(key, "pasupmirror")   == 0) { g_cfg.pa_support_mirror = (v != 0.0); return true; }
     if (_stricmp(key, "pawpnlift")     == 0) { g_cfg.pa_wpn_lift      = (int)v; return true; }
     if (_stricmp(key, "pawpnyaw")      == 0) { g_cfg.pa_wpn_yaw       = (float)v; return true; }
     if (_stricmp(key, "pawpnpitch")    == 0) { g_cfg.pa_wpn_pitch     = (float)v; return true; }
@@ -1341,7 +1414,14 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pawpn")         == 0) { g_cfg.pa_weapon       = (v != 0.0); return true; }
     if (_stricmp(key, "paarms")         == 0) { g_cfg.pa_arms       = (int)clampf((float)v, 0.0f, 3.0f); return true; }
     if (_stricmp(key, "headshouldersyawinfluence") == 0) { g_cfg.pa_head_shoulders_yaw_influence = clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "patorsoframe")   == 0) { g_cfg.pa_torso_frame= (int)clampf((float)v, 0.0f, 6.0f); return true; }   // 0..4: adding a mode means widening THIS clamp too -- 3 and 4 silently became 2 for a whole session
+    if (_stricmp(key, "patorsoframe")   == 0) { g_cfg.pa_torso_frame= (int)clampf((float)v, 0.0f, 7.0f); return true; }   // 0..4: adding a mode means widening THIS clamp too -- 3 and 4 silently became 2 for a whole session
+    if (_stricmp(key, "patorsoab")      == 0) { g_cfg.pa_torso_ab   = (v != 0.0); return true; }
+    if (_stricmp(key, "paworld")        == 0) { g_cfg.pa_world_probe = (v != 0.0); return true; }
+    if (_stricmp(key, "pameshdown")     == 0) { g_cfg.pa_mesh_standdown = (v != 0.0); return true; }
+    if (_stricmp(key, "pameshbody")     == 0) { g_cfg.pa_mesh_body = (v != 0.0); return true; }
+    if (_stricmp(key, "pawpnrig")       == 0) { g_cfg.pa_wpn_rig = (v != 0.0); return true; }
+    if (_stricmp(key, "pahandgun")      == 0) { g_cfg.pa_hand_on_gun = (v != 0.0); return true; }
+    if (_stricmp(key, "paworldraw")     == 0) { g_cfg.pa_world_raw = (int)v; return true; }
     if (_stricmp(key, "twohand")        == 0) { g_cfg.two_hand      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "twohandaim")     == 0) { g_cfg.two_hand_aim  = (v != 0.0); return true; }
     if (_stricmp(key, "twohandrig")     == 0) { g_cfg.two_hand_rig  = (v != 0.0); return true; }
@@ -1388,6 +1468,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopeoffsets")  == 0) { g_cfg.scope_offsets = (v != 0.0); return true; }
     if (_stricmp(key, "scopewpnlog")   == 0) { g_cfg.scope_wpn_log = (v != 0.0); return true; }
     if (_stricmp(key, "wpnfix")        == 0) { return parse_weapon_fix(val); }
+    if (_stricmp(key, "wpnanim")       == 0) { return parse_weapon_anim(val); }
     // Per-weapon support-hand grip offset for two-handed aiming, and its two switches.
     // gripfixaim is separate from gripoffsets on purpose: the zone half cannot move a shot,
     // the aim half can. See WeaponGrip in Config.hpp.
@@ -1699,7 +1780,9 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "aimorigin") == 0) g_cfg.aim_origin = (v != 0.0) ? 1 : 0;
         // aimhand=left|right, also accepting 1/0 so it behaves like every other key here.
         else if (_stricmp(key, "aimhand")  == 0) {
-            g_cfg.aim_left_hand = (_stricmp(val, "left") == 0) || (_stricmp(val, "l") == 0) ||
+            // First character only: a CRLF file hands this "left\r", which matched neither spelling
+            // and silently parsed as right-handed (found 2026-09-17).
+            g_cfg.aim_left_hand = (val[0] == 'l') || (val[0] == 'L') ||
                                   (val[0] >= '1' && val[0] <= '9');
         }
         else if (_stricmp(key, "turnmode")  == 0) g_cfg.turn_mode  = (int)v;

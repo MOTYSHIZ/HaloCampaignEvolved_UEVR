@@ -5,6 +5,32 @@
 namespace halo::palettearm {
 namespace {
 
+bool in_list(const std::uint8_t* list, std::size_t count, std::uint8_t node) {
+    for (std::size_t i = 0; i < count; ++i) if (list[i] == node) return true;
+    return false;
+}
+
+// STRETCH A BONE, NOT A JOINT. Slides every node that hangs BETWEEN two joints out along the bone
+// in proportion to its station: a node a third of the way down a bone stretched by k moves a third
+// of the extra length. `nodes` is the upper joint's subtree, `below` the lower joint's (left alone
+// here -- the caller moves it as one piece), `joint` the upper joint itself.
+//
+// Without this a stretched bone keeps every helper node at its authored distance and opens the
+// whole extension as ONE gap in front of the lower joint, which is exactly the "the hand stretches
+// from the wrist" look one joint further up. This rig has helper bones at 1/3 and 2/3 of both the
+// upper arm and the forearm (measured), so the skin is asked to stretch evenly along each.
+void spread_along_bone(BlamMatrix4x3* palette, const std::uint8_t* nodes, std::size_t count,
+                       const std::uint8_t* below, std::size_t below_count, std::uint8_t joint,
+                       const Vec3& origin, const Vec3& dir, float bone_length, float k) {
+    if (!(k > 1.0f) || !(bone_length > 1.0e-5f)) return;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::uint8_t node = nodes[i];
+        if (node == joint || in_list(below, below_count, node)) continue;
+        const float t = std::clamp(dot(palette[node].position - origin, dir) / bone_length, 0.0f, 1.0f);
+        palette[node].position = palette[node].position + dir * (t * bone_length * (k - 1.0f));
+    }
+}
+
 // Turn `rotation` down to `scale` of its angle. Used to rotate a finger joint PART of the way onto
 // the open line: the open pose is derived, so the in-between poses have to be too.
 Quat scaled_rotation(const Quat& rotation, float scale) {
@@ -85,7 +111,113 @@ bool apply_finger_openness(BlamMatrix4x3* palette, std::uint8_t wrist,
     return true;
 }
 
+// Recorded 2026-09-17 with pahandrec from the LEFT hand: open = the grenade throw's release, fist =
+// the Magnum's off-hand punch. (x, y, z, w), parent-relative.
+constexpr float kHandPoseOpen[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{0.075015f, 0.016572f, -0.153967f, 0.985085f}, {0.000000f, -0.045626f, 0.000000f, 0.998959f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.022462f, 0.034487f, -0.041689f, 0.998283f}, {-0.004730f, 0.056643f, -0.083164f, 0.994914f}, {0.000000f, 0.000000f, 0.000092f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.129555f, -0.041293f, -0.006470f, 0.990691f}, {0.002106f, 0.008393f, 0.244637f, 0.969576f}, {-0.000000f, 0.000000f, -0.055178f, 0.998477f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.171560f, 0.024386f, 0.343507f, 0.923025f}, {-0.000000f, 0.064578f, 0.000000f, 0.997913f}, {0.000000f, -0.000000f, 0.000397f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.508638f, -0.554387f, 0.021364f, 0.658397f}, {-0.015809f, -0.033632f, 0.063236f, 0.997306f}, {-0.012269f, 0.031587f, 0.284404f, 0.958105f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+constexpr float kHandPoseFist[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{-0.001221f, -0.028718f, 0.624083f, 0.780829f}, {-0.031007f, -0.033479f, 0.678559f, 0.733127f}, {0.000000f, 0.000000f, 0.663460f, 0.748212f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.038302f, -0.034029f, 0.714581f, 0.697674f}, {0.038240f, 0.042086f, 0.671417f, 0.738895f}, {0.000000f, -0.000000f, 0.482743f, 0.875762f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.092383f, 0.058048f, 0.693067f, 0.712569f}, {0.006897f, 0.005249f, 0.795702f, 0.605627f}, {0.000000f, -0.000000f, 0.477532f, 0.878614f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.066658f, 0.102658f, 0.696254f, 0.707283f}, {0.044253f, 0.047031f, 0.683818f, 0.726789f}, {0.000000f, -0.000000f, 0.638589f, 0.769548f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.390557f, -0.579899f, 0.080174f, 0.710461f}, {-0.022431f, -0.034395f, 0.162879f, 0.985791f}, {-0.021149f, 0.028138f, 0.519217f, 0.853917f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+
+// The RELAXED hand, recorded the same way: a frame of the weapon-draw animation where the left hand
+// hangs free -- every finger gently curved (about 20 / 35 / 5 degrees down the joints), no splay, the
+// thumb lying alongside. The grenade-release pose above is a hand at full stretch, and a rest pose
+// blended from it toward the fist kept that stretch's splay: "more tense than I was expecting".
+constexpr float kHandPoseRest[5][4][4] = {   // index, middle, ring, pinky, thumb; joint 0 is relative to the WRIST
+    {{0.053774f, -0.011139f, 0.123295f, 0.990849f}, {-0.012482f, -0.043886f, 0.273359f, 0.960829f}, {0.000000f, -0.000000f, 0.056704f, 0.998391f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.002167f, -0.037356f, 0.167307f, 0.985195f}, {0.015076f, 0.054812f, 0.264876f, 0.962605f}, {-0.000000f, -0.000000f, 0.000122f, 1.000000f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.122442f, 0.045046f, 0.139990f, 0.981520f}, {0.003266f, 0.008026f, 0.378679f, 0.925487f}, {-0.000000f, -0.000000f, -0.058871f, 0.998266f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{-0.183623f, 0.000775f, 0.254334f, 0.949524f}, {0.023652f, 0.060061f, 0.365522f, 0.928562f}, {0.000000f, 0.000000f, -0.021089f, 0.999778f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+    {{0.413511f, -0.588510f, -0.112556f, 0.685563f}, {-0.020540f, -0.034212f, 0.134255f, 0.990143f}, {0.008271f, 0.037203f, 0.004822f, 0.999262f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
+};
+
+Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
+    Quat b = b_in;
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0.0f) { b = Quat{-b.x, -b.y, -b.z, -b.w}; d = -d; }
+    if (d > 0.9995f) {
+        return normalized(Quat{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t,
+                               a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t});
+    }
+    const float th = std::acos(std::clamp(d, -1.0f, 1.0f));
+    const float s  = std::sin(th);
+    const float wa = std::sin((1.0f - t) * th) / s, wb = std::sin(t * th) / s;
+    return normalized(Quat{a.x * wa + b.x * wb, a.y * wa + b.y * wb,
+                           a.z * wa + b.z * wb, a.w * wa + b.w * wb});
+}
+
 } // namespace
+
+Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight) {
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (!valid_basis(a) || !valid_basis(b)) return weight < 0.5f ? a : b;
+    const Mat3 out = rotation_basis(slerp_short(rotation_from_basis(a), rotation_from_basis(b), weight));
+    return valid_basis(out) ? out : (weight < 0.5f ? a : b);
+}
+
+bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored) {
+    if (palette == nullptr) return false;
+    curl     = std::clamp(curl, -1.0f, 1.0f);
+    authored = std::clamp(authored, 0.0f, 1.0f);
+    if (authored >= 0.999f) return true;               // the game's own fingers, untouched
+
+    const Mat3 wrist_basis = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wrist_basis)) return false;
+    const Vec3 wrist_pos = palette[arm.wrist].position;
+
+    const FingerChain* chains[5] = {&arm.index, &arm.middle, &arm.ring, &arm.pinky, &arm.thumb};
+    for (std::size_t f = 0; f < 5; ++f) {
+        const FingerChain& ch = *chains[f];
+        // MEASURE the authored chain first -- every joint's rotation and offset in its parent's
+        // frame -- because rebuilding joint j overwrites the frame joint j+1 was measured in.
+        Mat3 stock_rel[4];
+        Vec3 stock_off[4];
+        Mat3 pb = wrist_basis;
+        Vec3 pp = wrist_pos;
+        for (std::size_t j = 0; j < ch.size(); ++j) {
+            const Mat3 nb = orthonormal_basis(palette[ch[j]]);
+            if (!valid_basis(nb)) return false;
+            const Mat3 pinv = transpose(pb);
+            stock_rel[j] = multiply(pinv, nb);
+            stock_off[j] = transform_vector(pinv, palette[ch[j]].position - pp);
+            pb = nb;
+            pp = palette[ch[j]].position;
+        }
+        pb = wrist_basis;
+        pp = wrist_pos;
+        for (std::size_t j = 0; j < ch.size(); ++j) {
+            const Quat qo{kHandPoseOpen[f][j][0], kHandPoseOpen[f][j][1],
+                          kHandPoseOpen[f][j][2], kHandPoseOpen[f][j][3]};
+            const Quat qf{kHandPoseFist[f][j][0], kHandPoseFist[f][j][1],
+                          kHandPoseFist[f][j][2], kHandPoseFist[f][j][3]};
+            const Quat qr{kHandPoseRest[f][j][0], kHandPoseRest[f][j][1],
+                          kHandPoseRest[f][j][2], kHandPoseRest[f][j][3]};
+            // Three key poses on one axis, the relaxed hand in the middle: a grip press travels
+            // rest -> fist and never passes through the stretched hand on the way.
+            Quat q = (curl >= 0.0f) ? slerp_short(qr, qf, curl) : slerp_short(qr, qo, -curl);
+            if (authored > 0.001f) q = slerp_short(q, rotation_from_basis(stock_rel[j]), authored);
+            const Mat3 rel = rotation_basis(q);
+            if (!valid_basis(rel)) return false;
+            const Mat3 nb = multiply(pb, rel);
+            const Vec3 np = pp + transform_vector(pb, stock_off[j]);
+            BlamMatrix4x3& m = palette[ch[j]];
+            m.forward = nb.forward; m.left = nb.left; m.up = nb.up;
+            m.position = np;
+            pb = nb;
+            pp = np;
+        }
+    }
+    return true;
+}
 
 void apply_rigid_delta(BlamMatrix4x3* palette, const std::uint8_t* nodes, std::size_t count,
                        const Mat3& rotation, const Vec3& pivot) {
@@ -236,8 +368,9 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     // Left undone on purpose: with pa_target_frame=1 the target no longer flies out of reach (hand
     // excursion 102 cm -> 0.002 cm), so over-reach went from constant to rare, and a half-built
     // stretch is worse than an honest clamp.
-    const float minimum_reach    = std::fabs(upper_length - lower_length) + 1.0e-4f;
-    const float maximum_reach    = upper_length + lower_length - 1.0e-4f;
+    float minimum_reach = std::fabs(upper_length - lower_length) + 1.0e-4f;
+    float maximum_reach = upper_length + lower_length - 1.0e-4f;
+    float solve_upper = upper_length, solve_lower = lower_length, stretch_k = 1.0f;
 
     // Clavicle assist: rather than stopping the hand at the reach sphere, slide the whole arm root
     // toward an out-of-reach target the way a real shoulder rolls into an overreach. Whatever is
@@ -251,6 +384,24 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
         shoulder_position = shoulder_position + offset;
         elbow_position    = elbow_position + offset;
         target_distance  -= assist;
+    }
+
+    // STRETCH, DONE PROPERLY (2026-09-16): pancreations' rule, with the POSITION move the 2026-08-31
+    // attempt lacked. Whatever the clavicle assist could not absorb scales BOTH solve lengths by
+    // k <= stretch_max, and after the shoulder rotation below the elbow subtree is TRANSLATED onto
+    // the stretched elbow, so the forearm's end lands on the hand instead of short of it.
+    //
+    // SHARED WITH THE WRIST (stretch_share). The bones take `share` of the extension the target
+    // asks for, up to the cap; whatever is left still opens at the wrist when the hand is snapped
+    // onto the controller. 1 = the arm takes all of it until the cap, 0 = the old clamp.
+    if (tuning.stretch_max > 1.0f && tuning.stretch_share > 0.0f && target_distance > maximum_reach) {
+        const float needed = target_distance / (upper_length + lower_length);
+        stretch_k     = std::min(1.0f + (needed - 1.0f) * std::min(tuning.stretch_share, 1.0f),
+                                 tuning.stretch_max);
+        solve_upper   = upper_length * stretch_k;
+        solve_lower   = lower_length * stretch_k;
+        minimum_reach = std::fabs(solve_upper - solve_lower) + 1.0e-4f;
+        maximum_reach = solve_upper + solve_lower - 1.0e-4f;
     }
 
     target_distance = std::clamp(target_distance, minimum_reach, maximum_reach);
@@ -302,9 +453,9 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
 
     // Law of cosines: distance along the target line to the elbow's projection, and its height
     // off that line.
-    const float along = (target_distance * target_distance + upper_length * upper_length -
-                         lower_length * lower_length) / (2.0f * target_distance);
-    const float height_squared = std::max(upper_length * upper_length - along * along, 0.0f);
+    const float along = (target_distance * target_distance + solve_upper * solve_upper -
+                         solve_lower * solve_lower) / (2.0f * target_distance);
+    const float height_squared = std::max(solve_upper * solve_upper - along * along, 0.0f);
     const Vec3  elbow_target =
         shoulder_position + target_direction * along + pole * std::sqrt(height_squared);
 
@@ -313,6 +464,19 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
     if (!valid_basis(shoulder_rotation)) return false;
     apply_rigid_delta(palette, arm.shoulder_subtree, arm.shoulder_count,
                       shoulder_rotation, shoulder_position);
+    if (stretch_k > 1.0f) {
+        // The rotation above put the elbow at its AUTHORED length along the solved direction;
+        // slide everything from the elbow down onto the stretched elbow -- and the upper arm's own
+        // helper nodes out along the bone with it, each by its station.
+        const Vec3 upper_dir = normalized(palette[arm.elbow].position - shoulder_position);
+        if (length_squared(upper_dir) > 0.8f) {
+            spread_along_bone(palette, arm.shoulder_subtree, arm.shoulder_count,
+                              arm.elbow_subtree, arm.elbow_count, arm.shoulder,
+                              shoulder_position, upper_dir, upper_length, stretch_k);
+        }
+        const Vec3 stretch_shift = elbow_target - palette[arm.elbow].position;
+        apply_rigid_offset(palette, arm.elbow_subtree, arm.elbow_count, stretch_shift);
+    }
 
     const Vec3 moved_elbow = palette[arm.elbow].position;
     const Vec3 moved_wrist = palette[arm.wrist].position;
@@ -320,6 +484,20 @@ bool solve_two_bone_arm(BlamMatrix4x3* palette, const ArmNodes& arm,
         rotation_between(moved_wrist - moved_elbow, wrist_target - moved_elbow);
     if (!valid_basis(elbow_rotation)) return false;
     apply_rigid_delta(palette, arm.elbow_subtree, arm.elbow_count, elbow_rotation, moved_elbow);
+    if (stretch_k > 1.0f) {
+        // THE FOREARM'S HALF, which the 2026-09-16 stretch left out: the solve above used a
+        // stretched forearm LENGTH, but a rotation cannot lengthen anything, so the wrist still
+        // sat at its authored distance and the whole forearm extension opened at the wrist. Carry
+        // the hand out to the stretched length and spread the forearm's nodes behind it.
+        const Vec3 fore_dir = normalized(palette[arm.wrist].position - moved_elbow);
+        if (length_squared(fore_dir) > 0.8f) {
+            spread_along_bone(palette, arm.elbow_subtree, arm.elbow_count,
+                              arm.wrist_subtree, arm.wrist_count, arm.elbow,
+                              moved_elbow, fore_dir, lower_length, stretch_k);
+            apply_rigid_offset(palette, arm.wrist_subtree, arm.wrist_count,
+                               fore_dir * (lower_length * (stretch_k - 1.0f)));
+        }
+    }
 
     const Vec3 final_wrist_position = palette[arm.wrist].position;
     const Mat3 current_wrist_basis  = orthonormal_basis(palette[arm.wrist]);
@@ -377,6 +555,548 @@ bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const Hand
            apply_finger_openness(palette, arm.wrist, arm.ring,   curl.grip)  &&
            apply_finger_openness(palette, arm.wrist, arm.pinky,  curl.grip)  &&
            apply_finger_openness(palette, arm.wrist, arm.thumb,  curl.thumb);
+}
+
+// ---- FOREARM TWIST ------------------------------------------------------------------------------
+
+namespace {
+
+float wrap_degrees(float d) {
+    if (!std::isfinite(d)) return 0.0f;
+    d = std::fmod(d + 180.0f, 360.0f);
+    if (d < 0.0f) d += 360.0f;
+    return d - 180.0f;
+}
+
+// The signed angle, about `axis`, from `u` to `v` once both are flattened against it. False when
+// either has too little left after flattening for the angle to mean anything.
+bool signed_angle_about(const Vec3& u, const Vec3& v, const Vec3& axis, float& out_deg) {
+    const Vec3 uf = u - axis * dot(u, axis);
+    const Vec3 vf = v - axis * dot(v, axis);
+    if (length_squared(uf) < 0.04f * length_squared(u) || length_squared(vf) < 0.04f * length_squared(v))
+        return false;
+    const Vec3 un = normalized(uf), vn = normalized(vf);
+    if (length_squared(un) < 0.8f || length_squared(vn) < 0.8f) return false;
+    out_deg = std::atan2(dot(cross(un, vn), axis), dot(un, vn)) * 57.2957795131f;
+    return std::isfinite(out_deg);
+}
+
+// How much of the hand's roll a bone at fraction `t` of the way from the elbow to the wrist takes.
+// MEASURED off this rig's own animations (5149 recorded frames, both arms): the bone a third of
+// the way down carries 0.308 of the hand's twist and the one two thirds down carries 0.718-0.720,
+// with a worst-case fit error of 2.2 degrees on the right arm and 5.0 on the left. Piecewise-linear
+// through those points, so a derived node map with differently placed twist bones still gets a
+// sensible share.
+float twist_share(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    constexpr float kT[4] = {0.0f, 0.3333f, 0.6667f, 1.0f};
+    constexpr float kS[4] = {0.0f, 0.308f,  0.719f,  1.0f};
+    for (int i = 0; i < 3; ++i) {
+        if (t <= kT[i + 1]) return kS[i] + (kS[i + 1] - kS[i]) * (t - kT[i]) / (kT[i + 1] - kT[i]);
+    }
+    return 1.0f;
+}
+
+// Roll the forearm follows 1:1 out to `kTwistFull` degrees either side of the thumb-up neutral,
+// then hands back by the time the hand is thumb-DOWN -- the one roll no forearm reaches. Periodic
+// and continuous, so the 180-degree seam of the twist angle lands where this is already zero.
+constexpr float kTwistFull = 135.0f;
+float twist_follow(float from_neutral_deg) {
+    const float a = std::fabs(from_neutral_deg);
+    if (a <= kTwistFull) return from_neutral_deg;
+    const float back = kTwistFull * (180.0f - a) / (180.0f - kTwistFull);
+    return from_neutral_deg < 0.0f ? -back : back;
+}
+
+} // namespace
+
+ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm) {
+    ForearmStock s{};
+    if (palette == nullptr) return s;
+    s.elbow_basis = orthonormal_basis(palette[arm.elbow]);
+    s.wrist_basis = orthonormal_basis(palette[arm.wrist]);
+    const Vec3 along = normalized(palette[arm.wrist].position - palette[arm.elbow].position);
+    if (!valid_basis(s.elbow_basis) || !valid_basis(s.wrist_basis) || length_squared(along) < 0.8f)
+        return s;
+    s.axis_local = transform_vector(transpose(s.elbow_basis), along);
+    s.valid = true;
+    return s;
+}
+
+bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
+                              const Vec3& thumb_up_hint, float gain, float plate_gain, float bone_gain,
+                              ForearmTwistResult* result) {
+    if (result != nullptr) *result = ForearmTwistResult{};
+    if (palette == nullptr || !stock.valid || !std::isfinite(gain) || !std::isfinite(plate_gain) ||
+        !std::isfinite(bone_gain)) return false;
+    gain       = std::clamp(gain, 0.0f, 2.0f);
+    plate_gain = std::clamp(plate_gain, 0.0f, 3.0f);
+    bone_gain  = std::clamp(bone_gain, 0.0f, 3.0f);
+
+    const Mat3 elbow_now = orthonormal_basis(palette[arm.elbow]);
+    const Mat3 wrist_now = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(elbow_now) || !valid_basis(wrist_now)) return false;
+
+    // The forearm's own long axis, carried by the elbow -- NOT elbow-to-wrist as drawn. The twist
+    // bones sit on the first by construction; the second bends away from it whenever the reach
+    // clamp or the stretch lets the placed wrist leave the solved one.
+    const Vec3 axis = normalized(transform_vector(elbow_now, stock.axis_local));
+    if (length_squared(axis) < 0.8f) return false;
+
+    // Where the hand WOULD be had it kept its authored relation to this forearm, and the rotation
+    // from there to where it is. Its twist about the forearm is the roll the solve added.
+    const Mat3 wrist_ref = multiply(elbow_now, multiply(transpose(stock.elbow_basis), stock.wrist_basis));
+    const Mat3 added     = multiply(wrist_now, transpose(wrist_ref));
+    if (!valid_basis(wrist_ref) || !valid_basis(added)) return false;
+    Quat q = rotation_from_basis(added);
+    if (q.w < 0.0f) q = Quat{-q.x, -q.y, -q.z, -q.w};
+    const float hand_deg =
+        2.0f * std::atan2(q.x * axis.x + q.y * axis.y + q.z * axis.z, q.w) * 57.2957795131f;
+
+    // ...measured from the AUTHORED roll, but followed from the THUMB-UP NEUTRAL. The authored
+    // support hand is a palm-up hold about 100 degrees of supination from neutral (measured on the
+    // Assault Rifle), so a free hand turned palm-DOWN is ~190 degrees from it -- past the seam of
+    // any twist angle, where a forearm that simply followed would snap a third of a turn. Putting
+    // the seam at thumb-down instead moves it to a pose no arm makes, and twist_follow() is already
+    // zero there. Subtracting the authored pose's own term keeps "authored hand = no added twist"
+    // exact wherever that pose sits.
+    float neutral_deg = 0.0f;
+    {
+        const Vec3 radial_now = palette[arm.index[0]].position - palette[arm.pinky[0]].position;
+        const Vec3 radial_ref = transform_vector(transpose(added), radial_now);
+        float c = 0.0f;
+        if (length_squared(radial_now) > 1.0e-10f && signed_angle_about(radial_ref, thumb_up_hint, axis, c))
+            neutral_deg = c;
+    }
+    const float follow_deg = twist_follow(wrap_degrees(hand_deg - neutral_deg)) -
+                             twist_follow(wrap_degrees(-neutral_deg));
+
+    if (result != nullptr) {
+        result->hand_deg    = wrap_degrees(hand_deg);
+        result->neutral_deg = neutral_deg;
+        result->follow_deg  = follow_deg;
+    }
+    if (gain <= 0.0f || std::fabs(follow_deg) < 0.01f) return true;
+
+    const Vec3  elbow_pos = palette[arm.elbow].position;
+    const float fore_len  = length(palette[arm.wrist].position - elbow_pos);
+    if (!std::isfinite(fore_len) || fore_len < 1.0e-4f) return false;
+
+    int turned = 0, plates = 0;
+    for (std::size_t i = 0; i < arm.elbow_count; ++i) {
+        const std::uint8_t node = arm.elbow_subtree[i];
+        if (node == arm.elbow || in_list(arm.wrist_subtree, arm.wrist_count, node)) continue;
+        // A twist bone lies ON the forearm's axis, between the joints. Everything else hanging off
+        // the elbow is ARMOUR (the gauntlet plates, 10-13 cm out on this rig). The game carries those
+        // rigidly with the elbow and never rolls them -- which reads fine under its own animations,
+        // where the forearm seldom rolls far, and wrong under a tracked hand: the sleeve turns
+        // inside a plate that does not ("make the forearm armor piece follow the rotation of the
+        // forearm"). So a plate takes the roll of the forearm AT ITS OWN STATION along the bone --
+        // the gauntlet sits at t = 0.33, beside the near twist bone, and turns with it -- orbiting
+        // the axis as it goes, times plate_gain.
+        const Vec3  rel    = palette[node].position - elbow_pos;
+        const float t      = dot(rel, axis) / fore_len;
+        const float radial = length(rel - axis * dot(rel, axis)) * kMetresPerBlamUnit;
+        const bool  bone   = (t > 0.08f && t < 0.95f) && (radial < 0.015f);
+        const bool  plate  = !bone && (t > 0.0f && t < 1.0f) && (radial >= 0.015f) && plate_gain > 0.0f;
+        if (!bone && !plate) continue;
+
+        const float half = gain * (plate ? plate_gain : 1.0f) * twist_share(t) * follow_deg *
+                           0.00872664626f;                                        // half angle, rad
+        const float s    = std::sin(half);
+        const Mat3  roll = rotation_basis(Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)});
+        if (!valid_basis(roll)) continue;
+        apply_rigid_delta(palette, &node, 1, roll, elbow_pos);
+        if (plate) ++plates; else ++turned;
+    }
+    // THE FOREARM BONE ITSELF. Everything above turns nodes that hang OFF the elbow; whatever is
+    // skinned to the elbow node proper -- on this rig, by elimination, the big forearm armour: the
+    // twist bones visibly roll the sleeve, the armour nodes turned out to carry nothing visible, and
+    // the plate the player watches did not move -- still rides the elbow rigidly. It takes the near
+    // twist bone's share (so the roll stays monotonic elbow -> wrist at bone_gain <= 1), about its
+    // own origin, which is on the axis: the joint does not move, the twist bones and the hand are
+    // model-space nodes of their own and are not carried along.
+    if (bone_gain > 0.0f) {
+        const float half = gain * bone_gain * twist_share(1.0f / 3.0f) * follow_deg * 0.00872664626f;
+        const float s    = std::sin(half);
+        const Mat3  roll = rotation_basis(Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)});
+        if (valid_basis(roll)) {
+            apply_rigid_delta(palette, &arm.elbow, 1, roll, elbow_pos);
+            if (result != nullptr) result->bone_deg = gain * bone_gain * twist_share(1.0f / 3.0f) * follow_deg;
+        }
+    }
+    if (result != nullptr) { result->nodes = turned; result->plates = plates; }
+    return true;
+}
+
+// ---- RECOIL PASS-THROUGH ------------------------------------------------------------------------
+
+void RecoilPass::reset() { *this = RecoilPass{}; }
+
+Vec3 RecoilPass::update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m,
+                        bool learn) {
+    last_back_m = 0.0f;
+    if (!finite(marker_pos) || !valid_basis(marker_basis)) { if (learn) stable = 0; return {}; }
+
+    if (learn) {
+        // "Holding still" is judged frame to frame, so a slow idle sway still counts as rest and the
+        // reference follows it; a burst never does -- the Assault Rifle's kick cycle moves the
+        // marker 0.6-2 cm on four frames of every six.
+        bool still = false;
+        if (have_prev) {
+            const float step_m = length(marker_pos - prev_pos) * kMetresPerBlamUnit;
+            float align = dot(prev_basis.forward, marker_basis.forward);
+            align = std::min(align, dot(prev_basis.left, marker_basis.left));
+            align = std::min(align, dot(prev_basis.up, marker_basis.up));
+            still = step_m < 0.0006f && align > 0.999986f;          // 0.6 mm, 0.3 degrees
+        }
+        prev_pos = marker_pos; prev_basis = marker_basis; have_prev = true;
+        stable = still ? std::min(stable + 1, 1000000) : 0;
+        // A pose FAR from the known rest has to hold for a second and a half before it is believed,
+        // not a third of one: an animation that pauses (a shell-by-shell reload holds the gun tilted
+        // between shells) must not teach its pause as the rest pose, or everything measured from
+        // rest -- the kick below, and the action watch -- would read zero in the middle of it.
+        // A REMEMBERED rest pose (adopt) is held loosely: the first learn takes it wherever the
+        // gun now rests, in the short time, so a memory a sway's width off does not cost 1.5 s.
+        int need = 20;
+        if (have_ref && !remembered) {
+            float near_align = dot(ref_basis.forward, marker_basis.forward);
+            near_align = std::min(near_align, dot(ref_basis.left, marker_basis.left));
+            near_align = std::min(near_align, dot(ref_basis.up, marker_basis.up));
+            const bool near_rest = length(marker_pos - ref_pos) * kMetresPerBlamUnit < 0.015f &&
+                                   near_align > 0.99619f;                      // 1.5 cm, 5 degrees
+            if (!near_rest) need = 90;
+        }
+        if (stable >= need) {
+            if (!have_ref || remembered) { ref_pos = marker_pos; ref_basis = marker_basis; have_ref = true; ++latches; }
+            else {
+                ref_pos   = ref_pos + (marker_pos - ref_pos) * 0.2f;
+                ref_basis = blend_basis(ref_basis, marker_basis, 0.2f);
+                if (!valid_basis(ref_basis)) ref_basis = marker_basis;
+            }
+            remembered = false;
+        }
+    }
+    // HOW FAR THE GUN IS FROM REST, for anyone who asks (the action watch does) -- whatever the
+    // recoil gain is, so switching the kick off does not blind it.
+    last_moved_m = 0.0f; last_turned_deg = 0.0f;
+    if (!have_ref) return {};
+    {
+        float a = dot(ref_basis.forward, marker_basis.forward);
+        a = std::min(a, dot(ref_basis.left, marker_basis.left));
+        a = std::min(a, dot(ref_basis.up, marker_basis.up));
+        last_moved_m    = length(marker_pos - ref_pos) * kMetresPerBlamUnit;
+        last_turned_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
+    }
+    if (!(gain > 0.0f) || !(max_m > 0.0f) || !std::isfinite(gain) || !std::isfinite(max_m))
+        return {};
+
+    // BACK ALONG THE BARREL, and nothing else. The authored marker carries the gun's long axis as
+    // its LEFT axis (measured on the Assault Rifle and the Magnum: left = +X, the view's forward),
+    // so "back" is its negative; a marker authored some other way falls back to the view's own
+    // backward, which is where every first-person gun points to within a few degrees.
+    Vec3 back_axis = ref_basis.left * -1.0f;
+    if (back_axis.x > -0.7f) back_axis = Vec3{-1.0f, 0.0f, 0.0f};
+
+    const Vec3  moved  = marker_pos - ref_pos;
+    const float back   = dot(moved, back_axis);
+    if (!(back > 0.0f)) return {};
+
+    // A KICK IS A TRANSLATION. Every other animation that moves the marker turns it as well --
+    // measured: the rifle's burst stays within 0.64 degrees of rest, while the draw, reload, melee,
+    // grenade and swap animations turn it 24 to 177 degrees -- and travels several times further.
+    // Both fades are smooth so an animation passing through the band eases the gun rather than
+    // popping it.
+    const float weight = (1.0f - smoothstep(8.0f, 20.0f, last_turned_deg)) *
+                         (1.0f - smoothstep(max_m, 2.0f * max_m, last_moved_m));
+    const float out_m = std::min(back * kMetresPerBlamUnit, max_m) * weight * std::min(gain, 2.0f);
+    if (!(out_m > 0.0f) || !std::isfinite(out_m)) return {};
+    last_back_m = out_m;
+    return back_axis * (out_m / kMetresPerBlamUnit);
+}
+
+// ---- REST RELATIONS, THE ACTION WATCH, THE MELEE GATE ------------------------------------------
+
+bool RecoilPass::at_rest() const {
+    return have_ref && stable >= 20 && last_moved_m < 0.005f && last_turned_deg < 2.0f;
+}
+
+void RecoilPass::adopt(const Vec3& pos, const Mat3& basis) {
+    reset();
+    if (!finite(pos) || !valid_basis(basis)) return;
+    ref_pos = pos; ref_basis = basis; have_ref = true; remembered = true;
+}
+
+void RestRelation::reset() { *this = RestRelation{}; }
+
+void RestRelation::adopt(const Vec3& p, const Mat3& b) {
+    reset();
+    if (!finite(p) || !valid_basis(b)) return;
+    pos = p; basis = b; have = true; remembered = true;
+}
+
+void RestRelation::learn(bool gun_at_rest, const Vec3& p, const Mat3& b) {
+    dev_m = 0.0f; dev_deg = 0.0f;
+    if (!finite(p) || !valid_basis(b)) { stable = 0; have_prev = false; return; }
+
+    bool still = false;
+    if (have_prev) {
+        float a = dot(prev_basis.forward, b.forward);
+        a = std::min(a, dot(prev_basis.left, b.left));
+        a = std::min(a, dot(prev_basis.up, b.up));
+        still = length(p - prev_pos) * kMetresPerBlamUnit < 0.0006f && a > 0.999986f;
+    }
+    prev_pos = p; prev_basis = b; have_prev = true;
+    stable = still ? std::min(stable + 1, 1000000) : 0;
+
+    if (have) {
+        float a = dot(basis.forward, b.forward);
+        a = std::min(a, dot(basis.left, b.left));
+        a = std::min(a, dot(basis.up, b.up));
+        dev_m   = length(p - pos) * kMetresPerBlamUnit;
+        dev_deg = std::acos(std::clamp(a, -1.0f, 1.0f)) * 57.2957795131f;
+    }
+    // Only ever learned while the GUN is at rest, and -- like the gun's own rest pose -- a relation
+    // far from the known one has to hold for 1.5 s before it is believed. A REMEMBERED one (adopt)
+    // is re-anchored by the first learn in the short time, whatever the distance.
+    if (!gun_at_rest) return;
+    const bool near_rest = !have || remembered || (dev_m < 0.015f && dev_deg < 5.0f);
+    if (stable < (near_rest ? 20 : 90)) return;
+    if (!have || remembered) { pos = p; basis = b; have = true; }
+    else {
+        pos   = pos + (p - pos) * 0.2f;
+        basis = blend_basis(basis, b, 0.2f);
+        if (!valid_basis(basis)) basis = b;
+    }
+    remembered = false;
+}
+
+void ActionWatch::reset() {
+    const float keep = weight;                 // the hand must not pop because the weapon changed
+    *this = ActionWatch{};
+    weight = keep;
+}
+
+float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis,
+                          float gate, float dt, float melee_age_s, float reload_age_s, float grenade_age_s,
+                          float grenade_trim_s) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    gate = std::isfinite(gate) ? std::clamp(gate, 0.25f, 4.0f) : 1.0f;
+    const float prev_dev = hand.have ? hand.dev_m : 0.0f;
+    hand.learn(gun.at_rest(), hand_pos, hand_basis);
+
+    // WHAT COUNTS AS AN ACTION. Two bodies of evidence: the recording (Magnum + Assault Rifle, 5149
+    // frames) and a headset session's PALETTE ANIM lines (54 hand-overs across the whole arsenal).
+    //
+    //                               gun from rest          off hand RELATIVE TO THE GUN
+    //   melee / reload / grenade    13-87 cm, 19-178 deg   14-108 cm,  44-176 deg
+    //   a weapon's PUT-AWAY         25-46 cm, 27-55 deg    0.6-10.4 cm, 1-5 deg
+    //   a big kick (one weapon)     16-17 cm,  5-6 deg     0.9-1.4 cm,  1-3 deg
+    //   the rifle's burst, idle     <= 4.6 cm, <= 5.8 deg  <= 0.7 cm,   <= 4 deg
+    //
+    // So the OFF HAND is the action signal -- above all its TURN, which separates an action from a
+    // put-away by 44 against 5 degrees. The gun leaving rest on its own means only "this weapon
+    // is going away" (or kicked hard), and is the EquipGate's business, not this one's. The bands
+    // are smoothsteps so a borderline case tugs rather than throws; `gate` scales them.
+    float target = 0.0f;
+    if (gun.have_ref && hand.have) {
+        target = std::max(smoothstep(0.12f * gate, 0.20f * gate, hand.dev_m),
+                          smoothstep(12.0f * gate, 30.0f * gate, hand.dev_deg));
+    }
+
+    // WHICH ACTION, from the press that asked for it (a throw, a reload and a melee are always
+    // asked for -- by a gesture that presses the mask, or a thumb).
+    if (target > 0.0f && !engaged) {
+        engaged = true; since_onset_s = 0.0f; peak_m = 0.0f; descending = 0;
+        kind = Kind::Other;
+        if      (grenade_age_s >= 0.0f && grenade_age_s < 0.6f) kind = Kind::Grenade;
+        else if (reload_age_s  >= 0.0f && reload_age_s  < 0.6f) kind = Kind::Reload;
+        else if (melee_age_s   >= 0.0f && melee_age_s   < 0.6f) kind = Kind::Melee;
+    }
+    if (engaged) {
+        since_onset_s += dt;
+        peak_m = std::max(peak_m, hand.dev_m);
+        descending = (hand.dev_m < prev_dev - 0.008f) ? descending + 1 : 0;     // 0.8 cm a frame
+    }
+
+    // THE RETURN TO THE GRIP. Every action ends with the authored off hand coming home onto the
+    // forestock; played on a free hand that walks the player's hand onto the gun and drops it back
+    // at the controller from there ("a notify or something that tells the left hand to go back to
+    // the support grip, and that might confuse some players"). Measured on the recording:
+    //   * a melee is one peak: out, held, and a single 0.2-0.3 s return (the punch: 107 cm held,
+    //     then 98 / 76 / 52 / 10 cm on consecutive 4-frame steps) -- so the FIRST sustained approach
+    //     after the peak is the return, and the hand lets go there;
+    //   * a reload has a return in the MIDDLE that looks the same at its onset -- the hand bringing
+    //     the magazine in while the gun untilts (105 -> 68 cm with the gun still 89 deg over), then
+    //     out again -- so for a reload, and for anything not asked for (an auto-reload on an empty
+    //     magazine has no press), the approach only counts once the gun is nearly home itself;
+    //   * a throw's final return is too quick to catch by its shape (42 -> 16 cm in four frames after
+    //     a 0.4 s hang), so it keeps its time trim: cut `grenade_trim_s` before the authored end
+    //     (1.35 s: release ~0.15, arm out to ~0.75, home by ~1.0).
+    // A cut holds until the authored hand is home, so the hand is not taken again on the way in.
+    if (engaged && !home_cut) {
+        const bool past_peak  = hand.dev_m < 0.85f * peak_m && hand.dev_m > 0.20f * gate;
+        const bool approaching = descending >= 3 && past_peak;
+        const bool gun_home    = gun.last_moved_m < 0.25f && gun.last_turned_deg < 40.0f;
+        switch (kind) {
+            case Kind::Grenade: if (grenade_trim_s > 0.0f && since_onset_s > kThrowSeconds - grenade_trim_s) home_cut = true; break;
+            case Kind::Melee:   if (approaching) home_cut = true; break;
+            case Kind::Reload:
+            case Kind::Other:   if (approaching && gun_home) home_cut = true; break;
+        }
+    }
+    if (home_cut) {
+        if (target <= 0.0f) home_cut = false;                   // the authored hand is home again
+        target = 0.0f;
+    }
+    last_target = target;
+
+    // In quickly (a melee lands within a quarter second), out at the two-hand hold's own pace.
+    const float tau = target > weight ? 0.06f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && target <= 0.0f) weight = 0.0f;
+    if (weight <= 0.0f && target <= 0.0f) { engaged = false; kind = Kind::Other; }
+    return weight;
+}
+
+void EquipGate::reset() { *this = EquipGate{}; }
+
+float EquipGate::update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt,
+                        float other_age_s) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    // THE PUT-AWAY: the gun leaving rest within a second of a swap being asked for. THE DRAW: from
+    // the weapon model changing until the new weapon has come to rest (3 s at most). Neither can
+    // be told from a melee or a big kick by the pose alone -- the swap press and the model change
+    // are what make them equip.
+    const bool away = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
+    if (weapon_changed) { active = true; draw = true; since_s = 0.0f; }
+    else if (!active && swap_age_s >= 0.0f && swap_age_s < 1.0f && away &&
+             !(other_age_s >= 0.0f && other_age_s < swap_age_s)) {      // ...unless something else was asked for since
+        active = true; draw = false; since_s = 0.0f;
+    }
+    if (active) {
+        since_s += dt;
+        if (draw) { if ((gun.have_ref && gun.at_rest()) || since_s > 3.0f) active = false; }
+        else      { if (!away || since_s > 2.0f) active = false; }
+        // ANOTHER ACTION ASKED FOR since this began ends it: the game takes no reload, melee or
+        // throw during a swap, so the press means the swap is over -- and a reload straight off
+        // the draw (the common one: swap to the empty gun, reload it) would otherwise sit behind
+        // this gate until the gun rested, which a reload never lets it do.
+        if (other_age_s >= 0.0f && other_age_s < since_s) active = false;
+    }
+    const float target = active ? 1.0f : 0.0f;
+    const float tau = target > weight ? 0.06f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
+    return weight;
+}
+
+bool capture_hand_rest(const BlamMatrix4x3* palette, const ArmNodes& arm, RestNode* out, std::size_t out_count) {
+    if (palette == nullptr || out == nullptr || out_count < arm.wrist_count) return false;
+    const Mat3 wb = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wb)) return false;
+    const Mat3 winv = transpose(wb);
+    const Vec3 wp   = palette[arm.wrist].position;
+    for (std::size_t i = 0; i < arm.wrist_count; ++i) {
+        const BlamMatrix4x3& n = palette[arm.wrist_subtree[i]];
+        const Mat3 nb = orthonormal_basis(n);
+        if (!valid_basis(nb)) return false;
+        out[i].pos   = transform_vector(winv, n.position - wp);
+        out[i].basis = multiply(winv, nb);
+    }
+    return true;
+}
+
+bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestNode* rest, std::size_t rest_count,
+                        float weight) {
+    if (palette == nullptr || rest == nullptr || rest_count < arm.wrist_count) return false;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight <= 0.0f) return true;
+    const Mat3 wb = orthonormal_basis(palette[arm.wrist]);
+    if (!valid_basis(wb)) return false;
+    const Vec3 wp = palette[arm.wrist].position;
+    for (std::size_t i = 0; i < arm.wrist_count; ++i) {
+        const std::uint8_t node = arm.wrist_subtree[i];
+        if (node == arm.wrist) continue;
+        BlamMatrix4x3& n = palette[node];
+        const Mat3 live = orthonormal_basis(n);
+        const Mat3 want = multiply(wb, rest[i].basis);
+        if (!valid_basis(live) || !valid_basis(want)) continue;
+        const Mat3 b = slerp_basis(live, want, weight);
+        const Vec3 p = wp + transform_vector(wb, rest[i].pos);
+        n.forward = b.forward; n.left = b.left; n.up = b.up;
+        n.position = n.position + (p - n.position) * weight;
+    }
+    return true;
+}
+
+void MeleeGate::reset() { *this = MeleeGate{}; }
+
+float MeleeGate::update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg,
+                        float dt, float other_age_s) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    const bool pressed = press_age_s >= 0.0f && press_age_s < 0.4f;
+    // "Still going" is read off the same two signals the action watch uses, at a much lower bar:
+    // this is not deciding WHETHER something is an action, only whether the one a melee press
+    // started has come back to rest. Without a rest pose to measure from (a melee straight after a
+    // swap) it is a plain timer.
+    const bool busy = gun.have_ref
+        ? (gun.last_moved_m > 0.02f || gun.last_turned_deg > 3.0f || hand_dev_m > 0.02f || hand_dev_deg > 5.0f)
+        : (since_s < 1.2f);
+    if (!active) {
+        // ...and a melee press only opens it while nothing else has been asked for since, or
+        // the press that closed it below would reopen it on the next frame.
+        if (pressed && !(other_age_s >= 0.0f && other_age_s < press_age_s)) { active = true; since_s = 0.0f; }
+    } else {
+        since_s += dt;
+        if ((!pressed && !busy && since_s > 0.15f) || since_s > 4.0f) active = false;
+        // A reload or a throw asked for after the swing ends it: "busy" cannot tell the melee's
+        // own return from the reload that follows it, and would hold the free hand off that
+        // reload for the whole 4 s cap.
+        if (other_age_s >= 0.0f && other_age_s < since_s) active = false;
+    }
+    const float target = active ? 1.0f : 0.0f;
+    // In AHEAD of the animation -- the press leads it by a few frames, which is the whole point of
+    // keying this off the press rather than off the pose -- and out at the hand-over's own pace.
+    const float tau = target > weight ? 0.03f : 0.12f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
+    return weight;
+}
+
+void SprintWatch::reset() { *this = SprintWatch{}; }
+
+float SprintWatch::update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt) {
+    if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+    // The sprint animation carries the gun well away from rest for as long as the sprint lasts.
+    // That alone is also what a put-away or a melee looks like, so it counts only with the player
+    // pushing the stick AND having asked for a sprint in the last three seconds (a hold, or a
+    // toggle pressed before setting off). It ends when either the stick or the pose lets go --
+    // the game itself ends a sprint on firing, aiming or stopping -- and never outlives the rest
+    // pose it is measured against.
+    const bool away   = gun.have_ref && (gun.last_moved_m > 0.06f || gun.last_turned_deg > 12.0f);
+    const bool moving = move_age_s >= 0.0f && move_age_s < 0.2f;
+    const bool asked  = button_age_s >= 0.0f && button_age_s < 3.0f;
+    if (!active) {
+        if (away && moving && asked) { active = true; quiet_s = 0.0f; }
+    } else {
+        if (away && moving) quiet_s = 0.0f; else quiet_s += dt;
+        if (quiet_s > 0.15f || !gun.have_ref) active = false;
+    }
+    const float target = active ? 1.0f : 0.0f;
+    const float tau = target > weight ? 0.08f : 0.15f;
+    weight += (target - weight) * (1.0f - std::exp(-dt / tau));
+    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::clamp(weight, 0.0f, 1.0f);
+    if (weight < 0.001f && !active) weight = 0.0f;
+    return weight;
 }
 
 } // namespace halo::palettearm

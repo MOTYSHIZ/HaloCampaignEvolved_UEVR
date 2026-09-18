@@ -11,6 +11,9 @@
 
 #pragma once
 
+#include <atomic>    // g_pa_torso_yaw / g_pa_torso_seq
+#include <cstdint>
+
 namespace halo {
 
 // Game thread, once per tick. Installs or removes the hook to match the mode, advances the
@@ -34,6 +37,28 @@ const char* palettearm_status();
 // Second status line: the last drive's geometry -- root, wrist target, achieved wrist, and
 // how far the solver missed by. For diagnosing a pose that is WRONG rather than absent.
 const char* palettearm_status_geom();
+// Palette-space position of the AIM arm's shoulder node after anchoring (Blam units, root frame),
+// for the world-space probe to log beside the rendered bones. Zeros until the drive has run.
+void palettearm_dbg_shoulder(float* x, float* y, float* z);
+// The aim arm's shoulder / elbow / achieved wrist after the solve (palette units, root frame).
+void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]);
+
+// THE UeRig WEAPON SOLUTION, handed to the palette route (pawpnrig). Game thread, once per tick,
+// from the rig block. Everything is in the BODY frame -- level, yaw = locked view yaw + turn, origin
+// at the rig's attach parent (the camera) -- in UE axes (+X forward, +Y right, +Z up) and UE cm:
+//   fwd/right/up  the images of the mesh's axes under rig mode's mesh rotation q_gun
+//   wpn_cm        where rig mode puts the weapon (the PrimaryWeapon attach point)
+// valid=false whenever rig mode itself would not place the gun (origin hold, a rig mode other than
+// 3). Ages out on its own if the rig block stops running.
+// frozen = a weapon calibration hold is pinning the gun in the world: the target is still valid for
+// the carry, but it no longer describes how the gun sits on the controller.
+void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
+                                const float up[3], const float wpn_cm[3], bool frozen);
+// The STOCK weapon marker this frame -- the weapon socket's offset from the FP model's root as
+// rig mode measures it (the Magnum: (61.2,13.1,-23.5) cm measured on the rig, (61.5,-13.1,-23.5)
+// on the stock palette; UE's Y is Blam's -Y) -- in UE axes and centimetres. False when the live
+// drive has not run in the last quarter second. The scope's virtual rig frame is built from it.
+bool palettearm_stock_marker_ue(float out_cm[3]);
 const char* palettearm_status_jitter();
 
 // Has this route given up for the session?
@@ -52,6 +77,14 @@ const char* palettearm_status_jitter();
 // same trap.
 bool palettearm_unavailable();
 
+// The solved torso yaw in degrees -- the frame the shoulders hang from -- and a publish counter.
+// Published so the tick can answer "does this basis stay with the body, or follow the aim?" against
+// the two view yaws, which keep internal linkage in Plugin.cpp. Only meaningful while the palette
+// arm driver is running. Check the counter before trusting the yaw: a stale yaw reads as a torso
+// that is perfectly still, which is the answer the A/B is hoping for.
+extern std::atomic<float>    g_pa_torso_yaw;
+extern std::atomic<uint32_t> g_pa_torso_seq;
+
 // True when the palette owns the weapon, so the legacy MESH drive must stand down -- otherwise the
 // container displaces the gun and the palette displaces it again, and the two compose.
 //
@@ -60,6 +93,26 @@ bool palettearm_unavailable();
 // that flickers is what made the wpndrive engage edge stomp the arms fifteen times in one session.
 // Ownership is a decision about configuration; success is a decision about a frame.
 bool palettearm_weapon_owns();
+
+// Does the palette route keep its OWN weapon calibration (wpnfix, captured by its own freeze)?
+//
+// NOT under pawpnrig. There the gun is placed by the RIG's solution, so the rig's fitted grip and
+// mount ARE the weapon's chain, and the rig's gestures -- the menu/End pose match, the per-weapon
+// wpnoff capture -- are the ones that move it. Found headless 2026-09-17, and reported from a headset
+// the same night as "it tends to snap back and not save the value": WeaponCalib claimed every release
+// for the palette driver on the old premise that the rig's calibration was not in the chain, so the
+// solve ran, nothing was written or adopted, and WeaponOffset put the old fit back on the next tick.
+// ONE predicate for both sides of the hand-over, for the reason palettearm_weapon_owns() gives.
+bool palettearm_weapon_calib_owns();
+
+// What the game is about to be TOLD on the pad, after every remap and injection of ours: is the
+// melee / swap-weapon / throw-grenade mask down? Called from the XInput hook each poll; any thread.
+// The palette arms key the melee-animation preference, the equip hand-over and the grenade tail
+// off these, because none of those actions can be told apart from the pose alone.
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down,
+                         bool moving, bool reload_down);
+
+
 
 // Can the SUPPORT-HAND calibration gesture do anything?
 //

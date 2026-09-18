@@ -77,6 +77,10 @@ bool wpn_calib_capture();
 // entries and hand-written ones end up in the same list.
 void wpn_calib_write_file();
 
+// Write halo_vr_weapons.cfg on launch if there is none: the commented sections and the legend of
+// weapon names to use for <match>, no lines. Never touches an existing file (it is user-owned).
+void ensure_weapons_cfg_template();
+
 void wpn_calib_load();
 
 // The weapon in hand, as both tables key it ("FP_AssaultRifle", "FP_Magnum"); empty if none.

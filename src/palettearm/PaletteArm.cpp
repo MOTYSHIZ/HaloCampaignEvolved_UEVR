@@ -20,8 +20,12 @@
 #include "uevr/API.hpp"
 
 #include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 
 using uevr::API;
@@ -76,6 +80,18 @@ pa::Quat from_math(const ::halo::Quat& q) { return {q.x, q.y, q.z, q.w}; }
 // module now CONSUMES the swing that owner publishes, the same one the aim path and the
 // rendered weapon use. If you are about to add a second TwoHandHold here, you want that one.
 pa::ArmTuning    s_arm_tuning;
+// The palette node treated as the CHEST for the chest route (-1 = off); see the comment above
+// palettearm_parse_key() for the measurement that made it necessary.
+int              s_pa_chest_node = -1;
+// paaimlead -- see the top of drive_palette().
+bool             s_aim_lead = true;    // DEFAULT ON since 2026-09-16: yaw S 0.16-0.26 vs 0.31-0.44 without it (round 3); pitch unchanged.
+// WORLD SCALE (paworldscale, 2026-09-16). The hand offset off the head and the shoulder offsets are
+// real-world METRES, and the world is rendered at UEVR's world scale: the UeRig route was calibrated
+// to rig_scale = 131.2 UE cm per metre so the gun sits on the hand IN THE HEADSET. The palette route
+// mapped metres at 100 cm/m -- the probe's HAND-CTRL readout put the rendered wrist exactly 8.3 cm
+// (the wrist-behind-grip offset) from the controller at 100 cm/m and 18.7 cm from it at the rig
+// scale: the rendered hand fell short of the real controller by ~24 %. 0 = rig_scale / 100.
+float            s_pa_world_scale = 0.0f;
 
 // WHICH INDEX IS WHICH BONE, resolved rather than remembered. Rung 1 derives the map from the
 // palette the hook just handed us; rung 2 is elliotttate's measured table; rung 3 is arms stay
@@ -333,6 +349,24 @@ addrcascade::TierReporter s_map_reporter;
 // WristConvention already takes this precaution one level down, sampling the stock wrist "BEFORE
 // this arm is touched" -- this is the same rule applied to the map itself.
 const pa::NodeMap* s_map_cached    = nullptr;
+
+// ONE SOLVE, MIRRORED INTO BOTH CAPTURE BANKS (pabankmirror, default on). The hook drives the live
+// slot and then each capture bank the renderer interpolates between. Re-solving per bank was not
+// deterministic: the 25 percent stock-pose share of the elbow pole reads each bank's OWN stock
+// pose, and the two banks hold different animation ticks, so the two interpolation endpoints
+// disagreed at the elbow -- measured 2026-09-16 as the rendered elbow wobbling +/-2 cm every tick
+// while the palette elbow (live slot) sat still and the stock arms with no driver did not wobble at
+// all. The shoulder and wrist, which depend only on the tracking snapshot, did not wobble. So the
+// live solve is captured here and the DRIVEN records are copied into each bank verbatim -- the
+// same idea as pancreations' stereo cache: pose once, view twice. Stock nodes in the banks are left
+// to interpolate as before. Invalidated at every live entry so a bank can never take a stale pose.
+bool           s_bank_mirror_on  = true;
+bool           s_mirror_valid    = false;
+std::int32_t   s_mirror_tag      = 0;
+std::uint32_t  s_mirror_count    = 0;
+std::uint32_t  s_mirror_n        = 0;
+std::uint8_t   s_mirror_idx[pa::kMaxPaletteNodes];
+pa::BlamMatrix4x3 s_mirror_rec[pa::kMaxPaletteNodes];
 std::int32_t       s_map_key_tag   = -1;
 std::uint32_t      s_map_key_nodes = 0;
 
@@ -350,12 +384,292 @@ struct TrackingSnapshot {
     pa::Quat aim_aim_rotation{};
     pa::Vec3 support_grip_position{};
     pa::Quat support_grip_rotation{};
+    pa::Quat support_aim_rotation{};  // the support controller's POINTING pose, like the aim hand uses
     bool     valid = false;
     bool     support_valid = false;
 };
 
 TrackingSnapshot s_tracking{};
 std::atomic_bool s_tracking_ready{false};
+bool capture_tracking_into(TrackingSnapshot& snap);   // defined with capture_tracking()
+
+// From the first headset run (2026-09-16). All three are STICKY like the other palettearm keys.
+//   pafreshpose  sample the poses INSIDE the drive instead of using the game tick's snapshot: the
+//                builder runs ~1.1-1.4x per tick, so a tick-latched pose gave it uneven steps.
+//   patgthead    0 = the hand targets live in the BODY-BASE frame (stage frame, no head yaw). The
+//                hand offset is already a stage-frame vector; putting it through the head-facing
+//                torso basis rotated it by the head yaw a second time -- "the IK hand targets yaw
+//                with my head". 1 = the old behaviour.
+//   pasupaim     1 = the support hand takes its ORIENTATION from its controller's aim (pointing)
+//                pose, as the aim hand does; the grip pose is tilted against it, which is why the
+//                left hand "does not feel proper like the right hand". 0 = grip pose (old).
+// ---- THE UeRig WEAPON SOLUTION (see palettearm_note_rig_weapon). Written on the tick, read in the
+// detour -- the same thread in practice; the seq guards the one case where it is not.
+struct RigWeaponTarget {
+    pa::Mat3 basis{};      // Blam axes, body frame: the rig's mesh rotation
+    pa::Vec3 position{};   // Blam units, body frame, from the mesh origin: the weapon attach point
+};
+RigWeaponTarget            s_rigw{};
+std::atomic<std::uint32_t> s_rigw_seq{0};       // odd while being written
+std::atomic_bool           s_rigw_valid{false};
+std::atomic<int>           s_rigw_age{1000};    // ticks since the last note; aged by palettearm_update
+std::atomic_bool           s_rigw_used{false};  // the last live drive carried the gun this way
+std::atomic_bool           s_rigw_frozen{false};// a calibration hold is pinning the gun (see the note)
+
+// ---- THE AIM HAND'S RELATION TO ITS CONTROLLER, for the free support hand to mirror
+// (pasupmirror; see Config.hpp). basis = the wrist in the controller's GRIP frame, offset = the
+// wrist from the grip position in that frame (Blam units). Measured against the TICK's controller
+// sample, because the rig target it is differenced with is a tick value -- a fresh pose here would
+// put the two samples a few ms apart and the difference would shake with every fast rotation, which
+// is precisely the right-hand-moves-the-left coupling this whole lane exists to remove.
+//
+// LATCHED ONLY WHEN IT HOLDS STILL. The relation is calibration x authored grip, constant while the
+// weapon idles; recoil, reloads, melee and swaps all move the authored wrist, and none of that may
+// reach the other hand. A new value has to repeat for half a second, then it is EASED in, so a
+// weapon swap or a recalibration arrives as a drift rather than a pop.
+//
+// STARTS FROM A BAKED DEFAULT, not from "none". Measured 2026-09-17 with the Assault Rifle on the
+// shipped calibration (two settles agreed to 0.8 deg / 0.1 cm). The relation is calibration x
+// authored grip -- it does not depend on the runtime or on how the controller happens to be held --
+// so the default is right wherever the shipped fit is in use and close everywhere else, and the
+// first real measurement is EASED onto it. Without it the hand spent the first half second of every
+// session in the old convention and then popped, and a weapon whose idle never holds still enough
+// to latch would have kept the old convention for good.
+struct GripRelation {
+    pa::Mat3 basis{ pa::Vec3{0.07812f, -0.98184f, -0.17286f},
+                    pa::Vec3{0.31734f,  0.18886f, -0.92931f},
+                    pa::Vec3{0.94509f,  0.01774f,  0.32633f} };
+    pa::Vec3 offset{ -0.002f / 304.8f, -7.553f / 304.8f, 6.262f / 304.8f };   // cm -> Blam units
+    bool     have = true;
+    pa::Mat3 cand_basis{};
+    pa::Vec3 cand_offset{};
+    int      stable = 0;
+
+    void observe(const pa::Mat3& b, const pa::Vec3& o) {
+        if (!pa::valid_basis(b) || !pa::finite(o)) { stable = 0; return; }
+        const float af = pa::dot(cand_basis.forward, b.forward);
+        const float al = pa::dot(cand_basis.left,    b.left);
+        const float au = pa::dot(cand_basis.up,      b.up);
+        float align = af; if (al < align) align = al; if (au < align) align = au;
+        const float moved = pa::length(o - cand_offset) * pa::kMetresPerBlamUnit;
+        if (align > 0.99990f && moved < 0.004f) {            // ~0.8 deg, 4 mm
+            if (++stable >= 30) {
+                if (!have) { basis = cand_basis; offset = cand_offset; have = true; }
+                else {
+                    basis  = pa::blend_basis(basis, cand_basis, 0.15f);
+                    offset = offset + (cand_offset - offset) * 0.15f;
+                }
+                if (stable > 1000000) stable = 30;
+#if HALO_VR_DEV
+                if (stable == 60) {      // settled on this candidate: say what it is, once per settle
+                    const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MIRROR RELATION settled: fwd=(%.5f,%.5f,%.5f) "
+                        "left=(%.5f,%.5f,%.5f) up=(%.5f,%.5f,%.5f) offset=(%.3f,%.3f,%.3f) cm",
+                        cand_basis.forward.x, cand_basis.forward.y, cand_basis.forward.z,
+                        cand_basis.left.x, cand_basis.left.y, cand_basis.left.z,
+                        cand_basis.up.x, cand_basis.up.y, cand_basis.up.z,
+                        cand_offset.x * cm, cand_offset.y * cm, cand_offset.z * cm);
+                }
+#endif
+            }
+        } else {
+            cand_basis = b; cand_offset = o; stable = 0;
+        }
+    }
+    void reset() { have = false; stable = 0; cand_basis = pa::Mat3{}; cand_offset = pa::Vec3{}; }
+};
+GripRelation s_aim_relation;
+std::atomic<float> s_dbg_mirror_pos_cm{-1.0f}, s_dbg_mirror_rot_deg{-1.0f};   // dev: left vs mirrored right
+float s_sup_curl = 0.0f;                        // the support hand's current curl, eased (0 = relaxed)
+// ---- THE KICK THE RIG CARRY LEAVES IN (parecoil; see Config.hpp and pa::RecoilPass). Learned off the
+// live slot only, per weapon model: a swap starts from nothing, and lets nothing through, until the
+// new weapon has rested.
+pa::RecoilPass     s_recoil;
+// ---- ...AND THE ACTION THE FREE SUPPORT HAND JOINS (pasupanim; see Config.hpp and pa::ActionWatch).
+pa::ActionWatch    s_action;
+// ---- ...THE MELEE GATE (pameleeanim) and the AIM wrist's rest relation to the gun, which the
+// "melee does not play" mode holds the right hand and the gun to while a swing plays out.
+pa::MeleeGate      s_melee;
+pa::EquipGate      s_equip;
+pa::RestRelation   s_aim_rest;
+// Each hand's REST SHAPE (every wrist-subtree node's relation to its wrist), captured off the stock
+// palette while the gun rests, for the modes that hold a hand still: placed rigidly from the live
+// pose, "the fingers still animate" otherwise.
+pa::RestNode       s_aim_fingers[pa::kMaxPaletteNodes];
+pa::RestNode       s_sup_fingers[pa::kMaxPaletteNodes];
+bool               s_aim_fingers_have = false, s_sup_fingers_have = false;
+// The pad, as the game is about to receive it (palettearm_note_pad): steady_clock ticks of the last
+// poll each mask was seen down, 0 = never. Written by the XInput hook, read by the live drive.
+std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0},
+                       s_pad_sprint_ticks{0}, s_pad_move_ticks{0}, s_pad_reload_ticks{0};
+// ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
+// frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
+pa::SprintWatch    s_sprint;
+// ---- WHAT EACH WEAPON MODEL TAUGHT, kept across swaps (2026-09-17). Every rest pose above is
+// learned off the live slot per model, and the model tag changes far more often than a player
+// swaps weapons: a headset log showed the Magnum's tag going to a second model and back six
+// times in half a minute (each change re-spawns the weapon actor -- the fact Scope.cpp records
+// for reloads and cutscenes), and every change threw all of it away. Until the new model had
+// rested for a third of a second there was no rest pose, no hand relation and so no hand-over,
+// which is why the free hand's reload played "sometimes": a reload straight after any of that
+// is the common case. So a model's rest poses are banked as it goes and adopted back when it
+// returns (pa::RecoilPass::adopt); only a model never seen before starts from nothing.
+struct Taught {
+    std::int32_t tag{0};
+    bool         used{false};
+    unsigned     stamp{0};                          // recency, for eviction
+    bool         have_gun{false}; pa::Vec3 gun_pos{}; pa::Mat3 gun_basis{};
+    bool         have_sup{false}; pa::Vec3 sup_pos{}; pa::Mat3 sup_basis{};
+    bool         have_aim{false}; pa::Vec3 aim_pos{}; pa::Mat3 aim_basis{};
+    bool         have_aim_fingers{false}, have_sup_fingers{false};
+    pa::RestNode aim_fingers[pa::kMaxPaletteNodes];
+    pa::RestNode sup_fingers[pa::kMaxPaletteNodes];
+};
+constexpr std::size_t kTaughtSlots = 8;             // the campaign carries two; the rest is churn
+// ON THE HEAP, once, at the first weapon change -- not a static array. The finger tables make a
+// slot ~25 KB, and Taught is not trivially constructible (Vec3/Mat3 carry initialisers), so a
+// static array of them is emitted by MSVC as 200 KB of zeros in .data: the DLL grew by 236 KB
+// on the first build of this, which is exactly the kind of thing the release-size sanity check
+// in CLAUDE.md exists to catch. One allocation on the game thread, never per frame.
+Taught*  s_taught = nullptr;
+unsigned s_taught_stamp = 0;
+
+Taught* taught_slots() {
+    if (s_taught == nullptr) s_taught = new (std::nothrow) Taught[kTaughtSlots];
+    return s_taught;
+}
+Taught* taught_find(std::int32_t tag) {
+    Taught* slots = taught_slots();
+    if (slots == nullptr) return nullptr;
+    for (std::size_t i = 0; i < kTaughtSlots; ++i) if (slots[i].used && slots[i].tag == tag) return &slots[i];
+    return nullptr;
+}
+// Bank what the model in hand has taught. Called as the tag changes, BEFORE the state is reset,
+// so what is banked is the old model's.
+void taught_bank(std::int32_t tag) {
+    if (!s_recoil.have_ref && !s_action.hand.have && !s_aim_rest.have) return;   // nothing to keep
+    Taught* slots = taught_slots();
+    if (slots == nullptr) return;                                   // no memory: learn afresh, as before
+    Taught* t = taught_find(tag);
+    if (t == nullptr) {
+        t = &slots[0];
+        for (std::size_t i = 0; i < kTaughtSlots; ++i) {
+            Taught& c = slots[i];
+            if (!c.used) { t = &c; break; }
+            if (c.stamp < t->stamp) t = &c;
+        }
+        *t = Taught{}; t->tag = tag; t->used = true;
+    }
+    t->stamp = ++s_taught_stamp;
+    if (s_recoil.have_ref)  { t->have_gun = true; t->gun_pos = s_recoil.ref_pos;   t->gun_basis = s_recoil.ref_basis; }
+    if (s_action.hand.have) { t->have_sup = true; t->sup_pos = s_action.hand.pos;  t->sup_basis = s_action.hand.basis; }
+    if (s_aim_rest.have)    { t->have_aim = true; t->aim_pos = s_aim_rest.pos;     t->aim_basis = s_aim_rest.basis; }
+    if (s_aim_fingers_have) { t->have_aim_fingers = true; for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) t->aim_fingers[i] = s_aim_fingers[i]; }
+    if (s_sup_fingers_have) { t->have_sup_fingers = true; for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) t->sup_fingers[i] = s_sup_fingers[i]; }
+}
+// Start the model now in hand from what it taught before, or from nothing. True = it was known.
+bool taught_adopt(std::int32_t tag) {
+    s_recoil.reset(); s_action.reset(); s_aim_rest.reset();
+    s_aim_fingers_have = s_sup_fingers_have = false;
+    const Taught* t = taught_find(tag);
+    if (t == nullptr) return false;
+    if (t->have_gun) s_recoil.adopt(t->gun_pos, t->gun_basis);
+    if (t->have_sup) s_action.hand.adopt(t->sup_pos, t->sup_basis);
+    if (t->have_aim) s_aim_rest.adopt(t->aim_pos, t->aim_basis);
+    if (t->have_aim_fingers) { for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) s_aim_fingers[i] = t->aim_fingers[i]; s_aim_fingers_have = true; }
+    if (t->have_sup_fingers) { for (std::size_t i = 0; i < pa::kMaxPaletteNodes; ++i) s_sup_fingers[i] = t->sup_fingers[i]; s_sup_fingers_have = true; }
+    return t->have_gun;
+}
+// ---- BAKED REST POSES, per weapon CLASS (2026-09-17, headset, first thing on the memory build:
+// "had first offhand reload fail, then had a second one succeed" -- the PALETTE RELOAD PRESS line
+// read "rest pose NONE, hand relation NONE": the press came 2.8 s after the shotgun's model was
+// first seen, and the rest was learned 3 s after that). Memory cannot cover the FIRST time a model
+// is seen in a session, and "learned" means the gun held still for a third of a second, which it
+// never does while the player moves. But the marker's rest pose and the two wrists' relations to
+// it are AUTHORED, model-space data, the same for every player -- the recording's Magnum rests its
+// marker at (61.5,-13.1,-23.5) cm, the live sessions learn 61.3-64.5 -- so they can be baked per
+// class and adopted (remembered, so the first learn re-anchors them) the first time a class is
+// held. Positions in Blam units; bases as forward / left / up. Rows come from the replay tool
+// (Tools\handrec\replay, section D) and from the dev line PALETTE REST BAKE, printed the first
+// time a session LEARNS all three for a class -- paste new rows in as they appear in logs.
+struct BakedRest {
+    const char* cls;
+    float marker[3], mf[3], ml[3], mu[3];      // the stock weapon marker at rest
+    float sup[3],    sf[3], sl[3], su[3];      // the support wrist in the marker's frame
+    float aim[3],    af[3], al[3], au[3];      // the aim wrist in the marker's frame
+};
+constexpr BakedRest kBakedRest[] = {
+    { "BP_FP_Magnum_WeaponActor_C",       {0.201766f,-0.042830f,-0.077090f}, {-0.000051f,-0.999999f,0.001119f}, {0.999999f,-0.000050f,0.001225f}, {-0.001225f,0.001119f,0.999999f},  {-0.021474f,-0.026848f,-0.005833f}, {0.969820f,-0.052432f,0.238117f}, {-0.067541f,-0.996159f,0.055735f}, {0.234280f,-0.070136f,-0.969636f},  {0.015034f,-0.042510f,-0.000976f}, {0.920774f,-0.097749f,0.377653f}, {0.017840f,0.977636f,0.209546f}, {-0.389690f,-0.186207f,0.901925f} },
+    { "BP_FP_AssaultRifle_WeaponActor_C", {0.077603f,-0.041554f,-0.086049f}, {-0.001633f,-0.999999f,-0.000057f}, {0.999991f,-0.001633f,0.003800f}, {-0.003800f,-0.000051f,0.999993f},  {-0.013816f,0.087310f,0.005125f}, {0.235192f,-0.153203f,0.959799f}, {-0.660931f,-0.749250f,0.042362f}, {0.712639f,-0.644324f,-0.277474f},  {0.015143f,-0.029309f,0.003382f}, {0.998724f,0.029651f,0.040890f}, {-0.034980f,0.990025f,0.136482f}, {-0.036436f,-0.137738f,0.989798f} },
+};
+const BakedRest* baked_rest_for(const char* cls) {
+    if (cls == nullptr || cls[0] == 0) return nullptr;
+    for (const auto& b : kBakedRest) if (std::strcmp(b.cls, cls) == 0) return &b;
+    return nullptr;
+}
+void adopt_baked(const BakedRest& b) {
+    auto V = [](const float* f) { return pa::Vec3{f[0], f[1], f[2]}; };
+    auto B = [&](const float* f, const float* l, const float* u) { pa::Mat3 m; m.forward = V(f); m.left = V(l); m.up = V(u); return m; };
+    s_recoil.adopt(V(b.marker), B(b.mf, b.ml, b.mu));
+    s_action.hand.adopt(V(b.sup), B(b.sf, b.sl, b.su));
+    s_aim_rest.adopt(V(b.aim), B(b.af, b.al, b.au));
+}
+// The class has to read the SAME, non-empty, for this many frames before a baked rest is adopted:
+// it blips empty at every actor swap, and the class is published by the game tick while the
+// palette runs on the animation update, so the frame the model changes may still carry the old
+// weapon's class -- adopting the Magnum's rest onto the rifle would hand the free hand over to
+// an idle. Reset on every model change.
+char s_bake_cls[128] = {0};
+int  s_bake_stable   = 0;
+// The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
+// its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
+// the way wpnoff is matched). A few strstr calls a frame.
+struct EffectivePrefs { int melee_anim; int equip_anim; int sup_anim; float grenade_trim_s; int sprint_anim; };
+EffectivePrefs resolve_prefs(const char* cls) {
+    EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_equip_anim, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
+                     g_cfg.pa_sprint_anim};
+    if (cls == nullptr || cls[0] == 0 || g_cfg.wpn_anim_count == 0) return e;
+    char low[96]; std::size_t n = 0;
+    for (; cls[n] != 0 && n + 1 < sizeof(low); ++n) low[n] = (char)std::tolower((unsigned char)cls[n]);
+    low[n] = 0;
+    for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
+        const WeaponAnim& a = g_cfg.wpn_anim[i];
+        if (a.match[0] == 0) continue;
+        char m[64]; std::size_t k = 0;
+        for (; a.match[k] != 0 && k + 1 < sizeof(m); ++k) m[k] = (char)std::tolower((unsigned char)a.match[k]);
+        m[k] = 0;
+        if (std::strstr(low, m) == nullptr) continue;
+        if (a.set & 1u)  e.sprint_anim    = (int)a.sprint;
+        if (a.set & 2u)  e.melee_anim     = (int)a.melee;
+        if (a.set & 4u)  e.equip_anim     = (int)a.equip;
+        if (a.set & 8u)  e.grenade_trim_s = a.grenade_trim;
+        if (a.set & 16u) e.sup_anim       = (int)a.sup_anim;
+        break;
+    }
+    return e;
+}
+float pad_age_s(const std::atomic<long long>& t) {
+    const long long v = t.load(std::memory_order_relaxed);
+    if (v == 0) return -1.0f;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::chrono::duration<float>(std::chrono::steady_clock::duration(now - v)).count();
+}
+// The stock weapon marker, published every live frame for the scope's virtual rig frame
+// (palettearm_stock_marker_ue): UE cm, plus the steady_clock ticks it was read at.
+std::atomic<float>     s_stock_marker_x{0.0f}, s_stock_marker_y{0.0f}, s_stock_marker_z{0.0f};
+std::atomic<long long> s_stock_marker_ticks{0};
+std::int32_t       s_recoil_tag = 0;
+bool               s_recoil_have_tag = false;
+std::atomic<float> s_dbg_recoil_peak_cm{0.0f};  // dev: most let through since the last report
+// dev: what the forearm twist saw on the last live drive, per hand (aim, support)
+std::atomic<float> s_dbg_twist_hand[2]{}, s_dbg_twist_neutral[2]{}, s_dbg_twist_follow[2]{};
+std::atomic<int>   s_dbg_twist_nodes[2]{};
+std::atomic<float> s_dbg_grab_w{0.0f};          // the support hand's ride-the-gun weight, last drive
+std::atomic<float> s_dbg_stockhg_x{0.0f}, s_dbg_stockhg_y{0.0f}, s_dbg_stockhg_z{0.0f};
+bool s_fresh_poses  = true;
+bool s_target_head  = false;
+bool s_support_aim  = true;
 
 char s_status[256] = "palettearm: off";
 // 512, not 256: this line has grown field by field and snprintf TRUNCATES SILENTLY -- a sweep
@@ -439,6 +753,7 @@ std::atomic<uint64_t>    s_drive_ok{0};
 std::atomic<float> s_dbg_root_x{0.0f}, s_dbg_root_y{0.0f}, s_dbg_root_z{0.0f};
 std::atomic<float> s_dbg_tgt_x{0.0f},  s_dbg_tgt_y{0.0f},  s_dbg_tgt_z{0.0f};
 std::atomic<float> s_dbg_got_x{0.0f},  s_dbg_got_y{0.0f},  s_dbg_got_z{0.0f};
+std::atomic<float> s_dbg_el_x{0.0f},   s_dbg_el_y{0.0f},   s_dbg_el_z{0.0f};     // aim elbow after the solve
 std::atomic<float> s_dbg_miss_cm{0.0f};
 std::atomic<float> s_dbg_reach_cm{0.0f};
 // Where the STOCK aim wrist sat before we moved it, and the root's forward axis. Together these
@@ -501,12 +816,116 @@ void dump_palette(const pa::PaletteAccess& access) {
 #endif
 }
 
+// ---- DEV: THE STOCK PALETTE RECORDER (pahandrec; see Config.hpp). Raw frames, analysed offline:
+// header "HREC1" + node count, then per frame { u32 frame, i32 model_tag, u8 grip, u8 latched,
+// u8 pad[2], float[node_count * 13] } with each node as scale, forward, left, up, position -- the
+// engine's own layout. Runs BEFORE this route edits anything, so what is recorded is the game's
+// animation and nothing of ours.
+void hand_rec_frame(const pa::PaletteAccess& access) {
+#if HALO_VR_DEV
+    static std::FILE*   s_f = nullptr;
+    static std::uint32_t s_n = 0;
+    static bool          s_said_full = false;
+    if (g_cfg.pa_hand_rec <= 0) {
+        if (s_f != nullptr) {
+            std::fclose(s_f); s_f = nullptr;
+            API::get()->log_info("[Halo-CampE-UEVR] HANDREC: closed after %u frames", s_n);
+        }
+        s_n = 0; s_said_full = false;
+        return;
+    }
+    if (s_n >= (std::uint32_t)g_cfg.pa_hand_rec) {
+        if (!s_said_full) {
+            s_said_full = true;
+            if (s_f != nullptr) { std::fclose(s_f); s_f = nullptr; }
+            API::get()->log_info("[Halo-CampE-UEVR] HANDREC: frame cap %d reached -- file closed. "
+                                 "Set pahandrec=0 then a new value to record again.", g_cfg.pa_hand_rec);
+        }
+        return;
+    }
+    if (s_f == nullptr) {
+        char appdata[512] = {0};
+        const DWORD n = GetEnvironmentVariableA("APPDATA", appdata, (DWORD)sizeof(appdata));
+        if (n == 0 || n >= sizeof(appdata)) return;
+        char path[768];
+        std::snprintf(path, sizeof(path), "%s\\UnrealVRMod\\HaloCampaignEvolved\\data", appdata);
+        CreateDirectoryA(path, nullptr);
+        std::snprintf(path, sizeof(path),
+                      "%s\\UnrealVRMod\\HaloCampaignEvolved\\data\\handrec.bin", appdata);
+        s_f = std::fopen(path, "wb");
+        if (s_f == nullptr) return;
+        const char magic[8] = {'H','R','E','C','1',0,0,0};
+        const std::uint32_t nc = access.node_count;
+        std::fwrite(magic, 1, sizeof(magic), s_f);
+        std::fwrite(&nc, sizeof(nc), 1, s_f);
+        API::get()->log_info("[Halo-CampE-UEVR] HANDREC: recording the stock palette (%u nodes) to %s",
+                             nc, path);
+    }
+    const std::uint32_t frame = s_n++;
+    const std::int32_t  tag   = access.model_tag;
+    const std::uint8_t  flags[4] = { (std::uint8_t)(::halo::two_hand_support_grip_held() ? 1 : 0),
+                                     (std::uint8_t)(::halo::two_hand_latched() ? 1 : 0), 0, 0 };
+    std::fwrite(&frame, sizeof(frame), 1, s_f);
+    std::fwrite(&tag,   sizeof(tag),   1, s_f);
+    std::fwrite(flags, 1, sizeof(flags), s_f);
+    std::fwrite(access.palette, sizeof(pa::BlamMatrix4x3), access.node_count, s_f);
+    if ((frame % 120u) == 0u) std::fflush(s_f);
+#else
+    (void)access;
+#endif
+}
+
 bool drive_palette(const pa::PaletteAccess& access) {
     if (!s_tracking_ready.load(std::memory_order_acquire)) {
         s_drive_stage = "no tracking snapshot"; return false;
     }
-    const TrackingSnapshot tracking = s_tracking;
+    TrackingSnapshot tracking = s_tracking;
+    if (s_fresh_poses && !access.is_capture_bank) {
+        TrackingSnapshot fresh{};
+        if (capture_tracking_into(fresh)) tracking = fresh;
+    }
+
+    // THE AIM THE PALETTE IS CORRECTED AGAINST. Default: the lock delta and camera pitch as the
+    // last render callback saw them -- so the correction trails the camera by up to a tick, which
+    // the world-space probe reads as a per-step blip (S ~0.3 on a body-locked joint). Under direct
+    // drive the camera follows the controller within a write cycle, so the aim the NEXT frame will
+    // render is, to a good approximation, the controller's desired aim right now: paaimlead=1
+    // rebuilds the gap from that (locked view yaw minus desired yaw) and takes the desired pitch,
+    // which should land the correction in the same frame the camera turns. Experiment.
+    float lock_delta_deg = ::halo::g_view_lock_delta.load();
+    float cam_pitch_deg  = ::halo::g_view_pitch.load();
+    // Metres of real-world reach -> world metres (see s_pa_world_scale).
+    const float wscale = (s_pa_world_scale > 0.0f) ? s_pa_world_scale : (g_cfg.rig_scale / 100.0f);
+    pa::ArmTuning tuning_w = s_arm_tuning;             // body offsets in WORLD metres for this drive
+    tuning_w.shoulder_back_m    *= wscale;
+    tuning_w.shoulder_down_m    *= wscale;
+    tuning_w.shoulder_lateral_m *= wscale;
+    tuning_w.clavicle_assist_m  *= wscale;
+    tuning_w.stretch_max   = g_cfg.pa_stretch;          // live, not sticky -- see Config.hpp
+    tuning_w.stretch_share = g_cfg.pa_stretch_share;
+    if (s_aim_lead) {
+        float dy = 0.0f, dp = 0.0f;
+        if (::halo::desired_aim_now(&dy, &dp)) {
+            float d = ::halo::g_view_out_yaw.load() - dy;
+            while (d >  180.0f) d -= 360.0f;
+            while (d < -180.0f) d += 360.0f;
+            lock_delta_deg = d;
+            cam_pitch_deg  = dp;
+        }
+    }
+    // The render path is holding the mesh in the BODY frame (pameshbody): the palette's frame then
+    // carries neither the aim yaw nor the aim pitch, so the frame maps below subtract nothing. The
+    // TRUE aim is kept for the one consumer that needs the aim itself -- the barrel lock.
+    const float aim_delta_deg = lock_delta_deg;
+    const float aim_pitch_deg = cam_pitch_deg;
+    const bool  mesh_body = g_cfg.pa_mesh_body &&
+                            ::halo::g_mesh_body_active.load(std::memory_order_relaxed);
+    if (mesh_body) {
+        lock_delta_deg = 0.0f;
+        cam_pitch_deg  = 0.0f;
+    }
     if (!tracking.valid) { s_drive_stage = "tracking snapshot invalid"; return false; }
+    if (!access.is_capture_bank) hand_rec_frame(access);
 
     // THE DUMP FIRES BEFORE THE GUARD, deliberately: the case we most need numbers for is exactly
     // the one where the map is about to be refused, and running it after would print only on the
@@ -563,6 +982,22 @@ bool drive_palette(const pa::PaletteAccess& access) {
             "%u nodes left stock as unattributable).",
             pa::nodemap_tier_name(s_node_map.tier()), access.node_count,
             map->right.wrist, map->left.wrist, (unsigned)s_node_map.unattributed());
+    }
+
+    // ---- ONE SOLVE, BOTH BANKS -- see s_bank_mirror_on. A bank drive copies the live solve.
+    if (access.is_capture_bank) {
+        if (s_bank_mirror_on && s_mirror_valid && s_mirror_tag == access.model_tag &&
+            s_mirror_count == access.node_count) {
+            for (std::uint32_t k = 0; k < s_mirror_n; ++k) {
+                const std::uint8_t i = s_mirror_idx[k];
+                if (i < access.node_count) access.palette[i] = s_mirror_rec[i];
+            }
+            s_drive_ok.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        // No live solve to mirror this call (it bailed): fall through to the per-bank solve.
+    } else {
+        s_mirror_valid = false;                                  // the live solve decides below
     }
 
     // ---- SMOKE TEST. Shove everything but the root straight up and see whether the screen cares.
@@ -662,7 +1097,24 @@ bool drive_palette(const pa::PaletteAccess& access) {
     //
     // Shortest-arc, not a raw lerp: blending 179 and -179 the naive way sweeps the torso the long
     // way round through zero.
-    if (g_cfg.pa_torso_frame == 6) {
+    // ---- 7: MODE 6 PLUS THE CAMERA PITCH -- the FULL camera -> body map. ---------------------
+    //
+    // The camera pitches 1:1 with the aim (measured 2026-08-30) and the palette is camera-local,
+    // so a yaw-only torso still tilts with the aim: torso_basis_from_root() takes "up" from the
+    // palette's +Z, which IS the pitched camera's up. Every consumer of torso_basis -- the
+    // shoulder's 22 cm drop, the hand offset off the head, the elbow pole -- then rides the aim
+    // pitch. pancreations avoid this by building their torso about a MEASURED world up; here the
+    // camera pitch is known exactly (g_view_pitch), so the map is composed directly:
+    //
+    //     torso = root o pitch(-p) o yaw(camera - view) o yaw(head/hands blend)
+    //
+    // which is the inverse camera rotation (yaw a, pitch p) followed by the body heading -- the
+    // same construction arm_gap already uses for the rest lift, now carrying the head term too and
+    // used for EVERYTHING. It is a rotation, so it is used as the torso basis directly rather than
+    // flattened (flattening is what threw the pitch term away).
+    pa::Mat3 stage_source = root_basis;      // the BODY-BASE frame: aim removed, NO head/hands yaw
+    bool     have_stage_source = false;
+    if (g_cfg.pa_torso_frame == 6 || g_cfg.pa_torso_frame == 7) {
         float yaw_head = 0.0f;
         bool  have_head = false;
         if (pa::valid_basis(head_basis)) {
@@ -711,14 +1163,28 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // Mode 3's sign was judged in-headset while BOTH the weapon and the arms were still
         // double-counting the aim, so that judgement was made through two known-broken terms and
         // is not evidence for anything.
-        const float gap = -::halo::g_view_lock_delta.load() * 0.01745329252f;
+        const float gap = -lock_delta_deg * 0.01745329252f;
         const float cg = std::cos(gap), sg = std::sin(gap);
         const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                              pa::Vec3{0.0f, 0.0f, 1.0f} };
         const float cy = std::cos(yaw), sy = std::sin(yaw);
         const pa::Mat3 blendm{ pa::Vec3{ cy, sy, 0.0f}, pa::Vec3{-sy, cy, 0.0f},
                                pa::Vec3{0.0f, 0.0f, 1.0f} };
-        torso_source = pa::multiply(root_basis, pa::multiply(gapm, blendm));
+        if (g_cfg.pa_torso_frame == 7) {
+            // Same sign as pa_arm_pitch=2, the one confirmed in-headset: nose-DOWN by the camera
+            // pitch, i.e. the inverse of the camera's own pitch.
+            const float gp = -cam_pitch_deg * 0.01745329252f;
+            const float cp = std::cos(gp), sp = std::sin(gp);
+            const pa::Mat3 pitch_gap{ pa::Vec3{ cp, 0.0f, sp}, pa::Vec3{0.0f, 1.0f, 0.0f},
+                                      pa::Vec3{-sp, 0.0f, cp} };
+            torso_source = pa::multiply(root_basis,
+                                        pa::multiply(pitch_gap, pa::multiply(gapm, blendm)));
+            stage_source = pa::multiply(root_basis, pa::multiply(pitch_gap, gapm));
+        } else {
+            torso_source = pa::multiply(root_basis, pa::multiply(gapm, blendm));
+            stage_source = pa::multiply(root_basis, gapm);
+        }
+        have_stage_source = true;
         s_dbg_yaw_hands = yaw * 57.2957795f;
         s_dbg_yaw_head  = yaw_head * 57.2957795f;
     }
@@ -735,7 +1201,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // the shoulders -- elliotttate's original intent ("follows the head's position and yaw but
     // never its pitch or roll"), and the reason looking down does not fold the arms into the view.
     if (g_cfg.pa_torso_frame == 5 && pa::valid_basis(head_basis)) {
-        const float gap = ::halo::g_view_lock_delta.load() * 0.01745329252f;
+        const float gap = lock_delta_deg * 0.01745329252f;
         const float cg = std::cos(gap), sg = std::sin(gap);
         const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                              pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -743,7 +1209,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
     }
 
     if (g_cfg.pa_torso_frame == 3 || g_cfg.pa_torso_frame == 4) {
-        float d = ::halo::g_view_lock_delta.load();
+        float d = lock_delta_deg;
         if (g_cfg.pa_torso_frame == 4) d = -d;
         const float a = d * 0.01745329252f;
         const float c = std::cos(a), sn = std::sin(a);
@@ -753,10 +1219,62 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                  pa::Vec3{0.0f, 0.0f, 1.0f} };
         torso_source = pa::multiply(root_basis, yaw_only);
     }
-    const pa::Mat3 torso_basis = pa::torso_basis_from_root(torso_source);
+    // Mode 7 is a full rotation and must NOT be flattened -- that would discard its pitch term.
+    const pa::Mat3 torso_basis = (g_cfg.pa_torso_frame == 7)
+                                     ? torso_source
+                                     : pa::torso_basis_from_root(torso_source);
     if (!pa::valid_basis(torso_basis)) {
         s_drive_stage = "torso basis invalid";
         return false;
+    }
+    // Where the HAND TARGETS live. The shoulders hang off the head-facing torso; the hands do not:
+    // their offsets and orientations are stage-frame quantities already (see s_target_head).
+    pa::Mat3 stage_basis = torso_basis;
+    if (have_stage_source && !s_target_head) {
+        const pa::Mat3 sb = (g_cfg.pa_torso_frame == 7) ? stage_source
+                                                        : pa::torso_basis_from_root(stage_source);
+        if (pa::valid_basis(sb)) stage_basis = sb;
+    }
+
+    // PUBLISH THE TORSO YAW SO THE A/B CAN BE MEASURED RATHER THAN FELT.
+    //
+    // The question patorsoframe 3-vs-4 exists to answer -- which sign converts aim frame to body
+    // frame -- is a coin-flip the code cannot settle by reading itself, and "which felt steadier"
+    // has already cost one headset round-trip.
+    //
+    // WRITTEN HERE, IN THE DETOUR -- not in palettearm_update(). An earlier version of this note
+    // claimed the tick read all three yaws "at one instant on one clock"; it does not. This runs
+    // on the game's palette build, later in the frame, while the tick samples whatever was last
+    // written. The consumer is therefore built to be insensitive to a small lag (it compares sums
+    // of MAGNITUDES over a sweep, which a one-frame shift does not change) rather than pretending
+    // the lag is not there.
+    //
+    // THE SEQUENCE COUNTER IS NOT DECORATION. A torso that stops being published reads a delta of
+    // exactly zero -- which is indistinguishable from a perfectly body-locked torso, i.e. the
+    // RIGHT answer. Without a freshness check the instrument's failure mode is to report success.
+    // Yaw first, then the counter, so a reader that sees a new count gets the new yaw.
+    g_pa_torso_yaw.store(std::atan2(torso_basis.forward.y, torso_basis.forward.x) * 57.2957795f,
+                         std::memory_order_relaxed);
+    g_pa_torso_seq.fetch_add(1, std::memory_order_relaxed);
+
+    // ---- THE CHEST ROUTE: rotate the chest node by the torso frame (see s_pa_chest_node).
+    // Position untouched (it sits at the root); only its basis turns, so every UE bone that hangs
+    // off it -- both shoulders, through their reference offsets -- swings into the body frame.
+    // The arms themselves are rotated about this same pivot in the per-hand loop below.
+    const bool     chest_route = (s_pa_chest_node >= 0 && s_pa_chest_node < (int)access.node_count &&
+                                  s_pa_chest_node != (int)map->root);
+    const pa::Vec3 chest_pivot = chest_route ? access.palette[s_pa_chest_node].position
+                                             : root_position;
+    if (chest_route) {
+        const std::uint8_t chest_idx = (std::uint8_t)s_pa_chest_node;
+        pa::apply_rigid_delta(access.palette, &chest_idx, 1, torso_basis, chest_pivot);
+        static bool s_chest_said = false;
+        if (!s_chest_said) {
+            s_chest_said = true;
+            API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: chest route ON -- node %d rotated "
+                                 "by the torso frame; arms rotated about it (translation anchor off)",
+                                 s_pa_chest_node);
+        }
     }
 
     // Which physical hand aims. Asked once, so left-handed play needs no second code path.
@@ -793,7 +1311,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         { &aim_arm,     pa::Quat{aim_q.x, aim_q.y, aim_q.z, aim_q.w},
           tracking.aim_grip_position,
           aim_is_right ? &s_conv_right : &s_conv_left, !aim_is_right, true },
-        { &support_arm, tracking.support_grip_rotation,
+        { &support_arm,
+          (g_cfg.pa_support_mirror && s_aim_relation.have) ? tracking.support_grip_rotation
+          : (s_support_aim ? tracking.support_aim_rotation : tracking.support_grip_rotation),
           tracking.support_grip_position,
           aim_is_right ? &s_conv_left : &s_conv_right, aim_is_right, false },
     };
@@ -804,6 +1324,56 @@ bool drive_palette(const pa::PaletteAccess& access) {
     pa::Mat3 wpn_delta_basis{};
     pa::Vec3 wpn_delta_pos{};
     bool     wpn_delta_valid = false;
+    // THE ANIMATION PREFERENCES (pameleeanim / paequipanim / pasprintanim; see Config.hpp), for the
+    // weapon in hand (a wpnanim line over the globals). Three gates -- a melee, an equip, a sprint
+    // -- each carrying an eased 0..1 weight from the LAST live update (the same for the banks), and
+    // one four-mode scheme for all three:
+    //   0 = the whole animation with the IK on top: the free support hand JOINS it
+    //   1 = the gun hand only: the free support hand stays on its controller, a gripping one at its
+    //       rest relation on the gun
+    //   2 = the whole animation and NO tracking: every driven node eased back to the stock pose
+    //   3 = no animation: the gun and the aim hand HELD to their rest pose, the support hand off
+    // Folded into four weights: join / off / stock / hold. `gun_eff_*` is the marker the hands are
+    // placed against -- the live marker, or the live marker eased toward its rest pose by `hold`.
+    const EffectivePrefs prefs = resolve_prefs(::halo::weapon_offset_current_class());
+    float join_w = 0.0f, off_w = 0.0f, stock_w_all = 0.0f, hold_w = 0.0f;
+    {
+        const struct { int mode; float w; } gates[3] = {
+            { prefs.melee_anim,  s_melee.weight },
+            { prefs.equip_anim,  s_equip.weight },
+            { prefs.sprint_anim, s_sprint.weight },
+        };
+        for (const auto& g : gates) {
+            switch (g.mode) {
+                case 0:  join_w = (std::max)(join_w, g.w); break;
+                case 2:  stock_w_all = (std::max)(stock_w_all, g.w); break;
+                case 3:  hold_w = (std::max)(hold_w, g.w); off_w = (std::max)(off_w, g.w); break;
+                default: off_w = (std::max)(off_w, g.w); break;                        // 1
+            }
+        }
+    }
+    float    melee_gun_w  = 0.0f;                            // `hold`, once the rest pose is known
+    float    melee_left_w = off_w;                           // `off`
+    pa::Vec3 gun_eff_pos{};
+    pa::Mat3 gun_eff_basis{};
+    const float sprint_join_w  = join_w;
+    const float sprint_stock_w = stock_w_all;
+    const float sprint_hold_w  = hold_w;
+    // Mode 2 needs the STOCK pose of every driven node as it was before any of this touched it.
+    pa::BlamMatrix4x3 stock_snapshot[pa::kMaxPaletteNodes];
+    std::uint8_t      stock_nodes[pa::kMaxPaletteNodes];
+    std::size_t       stock_count = 0;
+    if (sprint_stock_w > 0.001f) {
+        auto keep = [&](std::uint8_t i) {
+            if (i == 0 || i >= access.node_count || stock_count >= pa::kMaxPaletteNodes) return;
+            for (std::size_t k = 0; k < stock_count; ++k) if (stock_nodes[k] == i) return;
+            stock_nodes[stock_count] = i; stock_snapshot[stock_count] = access.palette[i]; ++stock_count;
+        };
+        for (std::size_t k = 0; k < map->right.shoulder_count; ++k) keep(map->right.shoulder_subtree[k]);
+        for (std::size_t k = 0; k < map->left.shoulder_count;  ++k) keep(map->left.shoulder_subtree[k]);
+        for (std::size_t k = 0; k < map->weapon_count; ++k) keep(map->weapon_nodes[k]);
+        if (chest_route) keep((std::uint8_t)s_pa_chest_node);
+    }
 
     // ---- THE WEAPON BRANCH, carried onto the aim controller. ROUTE (c).
     //
@@ -816,7 +1386,310 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // half of the design, and it is why this path needs no grip calibration of its own.
     //
     // Done BEFORE the arms below, so the aim hand IKs to a weapon that has already moved.
-    if (g_cfg.pa_weapon && map->weapon_count > 0 && map->weapon_marker != pa::kNoNode) {
+    // ---- ROUTE (d): THE UeRig SOLUTION (pawpnrig; see Config.hpp). One rigid transform again, but
+    // its target is where RIG MODE would put the gun, not a second calibration of our own. The rig
+    // publishes its mesh rotation and weapon point in the BODY frame; stage_basis is the map from
+    // that frame into the palette (identity while the mesh is held in the body frame, the inverse
+    // camera rotation otherwise), so both mesh modes land the gun in the same place in the world.
+    bool rig_carry_done = false;
+    if (g_cfg.pa_weapon && g_cfg.pa_wpn_rig && map->weapon_count > 0 &&
+        map->weapon_marker != pa::kNoNode) {
+        rig_carry_done = true;          // this route OWNS the gun: no fallback to a different fit,
+        s_wpn_driven   = false;         // or the gun would hop between two calibrations
+        s_wcarry_valid.store(false, std::memory_order_release);   // wpnfix has nothing to capture here
+        RigWeaponTarget rt{};
+        bool have_rt = false;
+        if (s_rigw_valid.load(std::memory_order_acquire) &&
+            s_rigw_age.load(std::memory_order_relaxed) <= 4) {
+            for (int attempt = 0; attempt < 3 && !have_rt; ++attempt) {
+                const std::uint32_t s0 = s_rigw_seq.load(std::memory_order_acquire);
+                if (s0 & 1u) continue;
+                rt = s_rigw;
+                have_rt = (s_rigw_seq.load(std::memory_order_acquire) == s0);
+            }
+        }
+        const pa::Mat3 stock_w = pa::orthonormal_basis(access.palette[map->weapon_marker]);
+        if (have_rt && pa::valid_basis(rt.basis) && pa::valid_basis(stock_w)) {
+            // Rig mode rotates the whole MESH by q_gun and lets the engine put the attach point's
+            // own authored rotation on top; rotating every weapon node by the same delta is that.
+            //
+            // FROM THE MESH ORIGIN, not from root_position: the rig measures its weapon point from
+            // the attach parent, which is where the mesh origin sits (stock relative location is
+            // zero), and that is the palette's own origin -- whatever the root NODE happens to hold.
+            const pa::Mat3 delta_basis = pa::multiply(stage_basis, rt.basis);
+            const pa::Vec3 desired_pos = pa::transform_vector(stage_basis, rt.position);
+            // THE KICK STAYS IN (parecoil). Landing the LIVE marker on the target would cancel the
+            // game's recoil translation along with everything else; landing the marker LESS ITS KICK
+            // there leaves the kick standing, in the gun's own carried frame. Not while a calibration
+            // hold pins the gun, and only the live slot teaches the rest pose.
+            const pa::Vec3 marker_now = access.palette[map->weapon_marker].position;
+            if (!access.is_capture_bank) {
+                // ...published for the scope's virtual rig frame (UE axes: Blam's +Y left -> -Y).
+                const float cmk = pa::kMetresPerBlamUnit * 100.0f;
+                s_stock_marker_x.store(marker_now.x * cmk, std::memory_order_relaxed);
+                s_stock_marker_y.store(-marker_now.y * cmk, std::memory_order_relaxed);
+                s_stock_marker_z.store(marker_now.z * cmk, std::memory_order_relaxed);
+                s_stock_marker_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                                           std::memory_order_release);
+            }
+            pa::Vec3 kick{};
+            {
+                const bool live = !access.is_capture_bank;
+                bool weapon_changed = false;
+                if (live && (!s_recoil_have_tag || s_recoil_tag != access.model_tag)) {
+                    // The model changed: bank what the old one taught, start the new one from
+                    // what it taught before (see Taught), or from nothing if it never has.
+                    if (s_recoil_have_tag) taught_bank(s_recoil_tag);
+                    const bool known = taught_adopt(access.model_tag);
+                    s_sprint.reset();
+                    s_recoil_tag = access.model_tag; s_recoil_have_tag = true;
+                    weapon_changed = true;
+                    s_bake_stable = 0; s_bake_cls[0] = 0;
+#if HALO_VR_DEV
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d in hand -- %s",
+                                         (int)access.model_tag,
+                                         known ? "its rest pose, hand relations and finger shapes adopted from earlier"
+                                               : "never seen before, learning from nothing");
+#else
+                    (void)known;
+#endif
+                }
+                // A model never seen before starts from the BAKED rest for its weapon class (see
+                // kBakedRest), once the class has read the same, non-empty, for 10 frames.
+                if (live && !s_recoil.have_ref && !s_action.hand.have) {
+                    const char* cls = ::halo::weapon_offset_current_class();
+                    if (cls != nullptr && cls[0] != 0 && std::strncmp(cls, s_bake_cls, sizeof(s_bake_cls) - 1) == 0) {
+                        if (++s_bake_stable == 10) {
+                            if (const BakedRest* b = baked_rest_for(cls)) {
+                                adopt_baked(*b);
+#if HALO_VR_DEV
+                                API::get()->log_info("[Halo-CampE-UEVR] PALETTE MEMORY: model %d is %s -- baked rest pose "
+                                                     "and hand relations adopted (re-anchored by the first still third of a second)",
+                                                     (int)access.model_tag, cls);
+#endif
+                            }
+                        }
+                    } else {
+                        std::strncpy(s_bake_cls, cls != nullptr ? cls : "", sizeof(s_bake_cls) - 1);
+                        s_bake_cls[sizeof(s_bake_cls) - 1] = 0;
+                        s_bake_stable = 0;
+                    }
+                }
+                const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
+                const bool had    = s_recoil.have_ref;
+                // ...and NOT while a sprint plays: its pose would become "rest" in a second and a half.
+                kick = s_recoil.update(marker_now, stock_w, frozen ? 0.0f : g_cfg.pa_recoil,
+                                       g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen && !s_sprint.active);
+                if (live) {
+                    // The STOCK support wrist in the STOCK marker's frame: neither has been touched
+                    // yet (the carry is applied below, the arms after that).
+                    static std::chrono::steady_clock::time_point s_act_t{};
+                    const auto  tnow = std::chrono::steady_clock::now();
+                    const float adt  = std::chrono::duration<float>(tnow - s_act_t).count();
+                    s_act_t = tnow;
+                    const auto&    swn  = access.palette[support_arm.wrist];
+                    const pa::Mat3 minv = pa::transpose(stock_w);
+                    [[maybe_unused]] const float was = s_action.weight;
+                    // The sprint first: the rest relations below must not learn through one.
+                    s_sprint.update(pad_age_s(s_pad_sprint_ticks), pad_age_s(s_pad_move_ticks), s_recoil, adt);
+                    const bool teach = s_recoil.at_rest() && !s_sprint.active;
+                    s_action.update(s_recoil, pa::transform_vector(minv, swn.position - marker_now),
+                                    pa::multiply(minv, pa::orthonormal_basis(swn)),
+                                    g_cfg.pa_sup_anim_gate, adt, pad_age_s(s_pad_melee_ticks),
+                                    pad_age_s(s_pad_reload_ticks), pad_age_s(s_pad_throw_ticks),
+                                    prefs.grenade_trim_s);
+                    if (s_sprint.active) s_action.hand.stable = 0;       // no rest is learned through a sprint
+                    // ...the AIM wrist's rest relation, for the modes that hold it to the gun...
+                    const auto& awn = access.palette[aim_arm.wrist];
+                    s_aim_rest.learn(teach, pa::transform_vector(minv, awn.position - marker_now),
+                                     pa::multiply(minv, pa::orthonormal_basis(awn)));
+                    // ...both hands' rest SHAPES, refreshed whenever the gun and that hand are at rest
+                    // (a shape captured mid-animation would be held instead of the grip)...
+                    if (teach && s_aim_rest.have && s_aim_rest.dev_m < 0.005f && s_aim_rest.stable >= 20)
+                        s_aim_fingers_have = pa::capture_hand_rest(access.palette, aim_arm, s_aim_fingers, pa::kMaxPaletteNodes) || s_aim_fingers_have;
+                    if (teach && s_action.hand.have && s_action.hand.dev_m < 0.005f && s_action.hand.stable >= 20)
+                        s_sup_fingers_have = pa::capture_hand_rest(access.palette, support_arm, s_sup_fingers, pa::kMaxPaletteNodes) || s_sup_fingers_have;
+                    // ...and the gates themselves, off the presses the game is being handed. Each
+                    // also ends on the OTHER actions' presses: a reload asked for after the swing,
+                    // or straight off the draw, is a reload, and the gate would otherwise hold the
+                    // free hand off it until the pose rested -- which a reload never lets it do.
+                    const float melee_age  = pad_age_s(s_pad_melee_ticks);
+                    const float reload_age = pad_age_s(s_pad_reload_ticks);
+                    const float throw_age  = pad_age_s(s_pad_throw_ticks);
+                    const auto  youngest   = [](float a, float b) { return a < 0.0f ? b : (b < 0.0f ? a : (std::min)(a, b)); };
+                    s_melee.update(melee_age, s_recoil, s_action.hand.dev_m, s_action.hand.dev_deg, adt,
+                                   youngest(reload_age, throw_age));
+                    s_equip.update(pad_age_s(s_pad_swap_ticks), weapon_changed, s_recoil, adt,
+                                   youngest(youngest(reload_age, throw_age), melee_age));
+#if HALO_VR_DEV
+                    // One line as the hand is taken and one as it is given back, with what tripped
+                    // it -- the way to tell, from a headset log, whether plain SHOTS tug the hand.
+                    static float s_act_peak_m = 0.0f, s_act_peak_deg = 0.0f, s_act_peak_hm = 0.0f, s_act_peak_hd = 0.0f;
+                    static std::chrono::steady_clock::time_point s_act_since{};
+                    if (s_action.weight > 0.0f) {
+                        s_act_peak_m   = (std::max)(s_act_peak_m,   s_recoil.last_moved_m);
+                        s_act_peak_deg = (std::max)(s_act_peak_deg, s_recoil.last_turned_deg);
+                        s_act_peak_hm  = (std::max)(s_act_peak_hm,  s_action.hand.dev_m);
+                        s_act_peak_hd  = (std::max)(s_act_peak_hd,  s_action.hand.dev_deg);
+                    }
+                    if (was <= 0.0f && s_action.weight > 0.0f) s_act_since = tnow;
+                    // ...and the sprint's own line, once per sprint (the PEAK over the sprint: the
+                    // value as it ends is the gun nearly home again, and read as "2 cm" once).
+                    static bool  s_spr_was = false;
+                    static float s_spr_peak_m = 0.0f, s_spr_peak_deg = 0.0f;
+                    static std::chrono::steady_clock::time_point s_spr_since{};
+                    if (!s_spr_was && s_sprint.active) { s_spr_since = tnow; s_spr_peak_m = s_spr_peak_deg = 0.0f; }
+                    if (s_sprint.active) {
+                        s_spr_peak_m   = (std::max)(s_spr_peak_m,   s_recoil.last_moved_m);
+                        s_spr_peak_deg = (std::max)(s_spr_peak_deg, s_recoil.last_turned_deg);
+                    }
+                    if (s_spr_was && !s_sprint.active) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE SPRINT: a sprint played for %.2f s "
+                                             "(gun up to %.1f cm / %.0f deg from rest; pasprintanim %d for %s)",
+                                             std::chrono::duration<float>(tnow - s_spr_since).count(),
+                                             s_spr_peak_m * 100.0f, s_spr_peak_deg,
+                                             prefs.sprint_anim,
+                                             ::halo::weapon_offset_current_class() ? ::halo::weapon_offset_current_class() : "");
+                    }
+                    s_spr_was = s_sprint.active;
+                    // One line per RELOAD press with everything the free hand's hand-over depends
+                    // on, so a headset log can say WHY a reload did not take the hand ("sometimes
+                    // it will play when I am not gripping with left hand, sometimes it does").
+                    static float s_reload_age_was = -1.0f;
+                    {
+                        const bool edge = reload_age >= 0.0f && reload_age < 0.05f &&
+                                          (s_reload_age_was < 0.0f || s_reload_age_was > 0.3f);
+                        if (edge) {
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE RELOAD PRESS: rest pose %s, hand relation %s, "
+                                                 "action w=%.2f%s, melee gate %.2f, equip gate %.2f%s, sprint %d | "
+                                                 "off %.2f hold %.2f join %.2f (pasupanim %d, melee %d equip %d sprint %d) | model %d",
+                                                 !s_recoil.have_ref ? "NONE" : (s_recoil.remembered ? "remembered" : "learned"),
+                                                 !s_action.hand.have ? "NONE" : (s_action.hand.remembered ? "remembered" : "learned"),
+                                                 s_action.weight, s_action.home_cut ? " (cut, waiting for home)" : "",
+                                                 s_melee.weight, s_equip.weight,
+                                                 !s_equip.active ? "" : (s_equip.draw ? " (draw)" : " (put-away)"),
+                                                 s_sprint.active ? 1 : 0, off_w, hold_w, join_w,
+                                                 prefs.sup_anim, prefs.melee_anim, prefs.equip_anim, prefs.sprint_anim,
+                                                 (int)access.model_tag);
+                        }
+                        s_reload_age_was = reload_age;
+                    }
+                    // The row kBakedRest is filled from: once per weapon class per session, the
+                    // first time all three rest poses are LEARNED (not adopted). Paste it in.
+                    static char s_bake_said[128] = {0};
+                    if (s_recoil.have_ref && !s_recoil.remembered && s_action.hand.have && !s_action.hand.remembered &&
+                        s_aim_rest.have && !s_aim_rest.remembered) {
+                        const char* cls = ::halo::weapon_offset_current_class();
+                        if (cls != nullptr && cls[0] != 0 && std::strncmp(cls, s_bake_said, sizeof(s_bake_said) - 1) != 0) {
+                            std::strncpy(s_bake_said, cls, sizeof(s_bake_said) - 1);
+                            s_bake_said[sizeof(s_bake_said) - 1] = 0;
+                            char v[12][48];
+                            const pa::Vec3 vs[12] = {
+                                s_recoil.ref_pos, s_recoil.ref_basis.forward, s_recoil.ref_basis.left, s_recoil.ref_basis.up,
+                                s_action.hand.pos, s_action.hand.basis.forward, s_action.hand.basis.left, s_action.hand.basis.up,
+                                s_aim_rest.pos, s_aim_rest.basis.forward, s_aim_rest.basis.left, s_aim_rest.basis.up };
+                            for (int k = 0; k < 12; ++k) std::snprintf(v[k], sizeof(v[k]), "{%.6ff,%.6ff,%.6ff}", vs[k].x, vs[k].y, vs[k].z);
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE REST BAKE: { \"%s\", %s, %s, %s, %s,  %s, %s, %s, %s,  %s, %s, %s, %s },",
+                                                 cls, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+                        }
+                    }
+                    if (was > 0.0f && s_action.weight <= 0.0f && prefs.sup_anim != 0) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE ANIM: the support hand joined an authored "
+                                             "action for %.2f s (gun up to %.1f cm / %.0f deg from rest, off hand up "
+                                             "to %.1f cm / %.0f deg from its hold; gate x%.2f, equip %d, melee mode %d, "
+                                             "melee gate %.2f)",
+                                             std::chrono::duration<float>(tnow - s_act_since).count(),
+                                             s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
+                                             s_act_peak_hd, g_cfg.pa_sup_anim_gate, prefs.equip_anim,
+                                             prefs.melee_anim, s_melee.weight);
+                        s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
+                    }
+#endif
+                }
+#if HALO_VR_DEV
+                if (live) {
+                    const float cmk = pa::kMetresPerBlamUnit * 100.0f;
+                    if (!had && s_recoil.have_ref) {
+                        API::get()->log_info("[Halo-CampE-UEVR] PALETTE RECOIL: rest pose learned for model "
+                                             "%d: marker at (%.1f,%.1f,%.1f) cm; kicks back along the barrel "
+                                             "now ride through the carry (parecoil=%.2f, max %.1f cm)",
+                                             (int)access.model_tag, s_recoil.ref_pos.x * cmk,
+                                             s_recoil.ref_pos.y * cmk, s_recoil.ref_pos.z * cmk,
+                                             g_cfg.pa_recoil, g_cfg.pa_recoil_max_cm);
+                    }
+                    const float out_cm = s_recoil.last_back_m * 100.0f;
+                    if (out_cm > s_dbg_recoil_peak_cm.load(std::memory_order_relaxed))
+                        s_dbg_recoil_peak_cm.store(out_cm, std::memory_order_relaxed);
+                    static std::uint32_t s_rn = 0;
+                    if (((++s_rn) % 180u) == 0u) {
+                        const float peak = s_dbg_recoil_peak_cm.exchange(0.0f, std::memory_order_relaxed);
+                        if (peak > 0.2f)
+                            API::get()->log_info("[Halo-CampE-UEVR] PALETTE RECOIL: up to %.1f cm let through "
+                                                 "in the last 3 s (parecoil=%.2f, max %.1f cm)",
+                                                 peak, g_cfg.pa_recoil, g_cfg.pa_recoil_max_cm);
+                    }
+                }
+#endif
+            }
+            // MODE 3, applied: the gun held to its rest pose while the animation plays. The weapon
+            // nodes are moved from the live marker onto the eased one BEFORE the carry (a rigid
+            // transform, so whatever animates inside the gun keeps doing so) and the kick is faded
+            // with it. Needs a rest pose: the draw of a new weapon has none yet, so it plays.
+            gun_eff_pos   = marker_now;
+            gun_eff_basis = stock_w;
+            melee_gun_w   = s_recoil.have_ref ? sprint_hold_w : 0.0f;
+            if (melee_gun_w > 0.001f) {
+                gun_eff_pos   = marker_now + (s_recoil.ref_pos - marker_now) * melee_gun_w;
+                gun_eff_basis = pa::slerp_basis(stock_w, s_recoil.ref_basis, melee_gun_w);
+                const pa::Mat3 tb = pa::multiply(gun_eff_basis, pa::transpose(stock_w));
+                const pa::Vec3 tp = gun_eff_pos - pa::transform_vector(tb, marker_now);
+                if (pa::valid_basis(tb) && pa::finite(tp)) {
+                    pa::apply_rigid_transform(access.palette, map->weapon_nodes, map->weapon_count, tb, tp);
+                    kick = kick * (1.0f - melee_gun_w);
+                } else {
+                    gun_eff_pos = marker_now; gun_eff_basis = stock_w; melee_gun_w = 0.0f;
+                }
+            }
+            const pa::Vec3 carried =
+                pa::transform_vector(delta_basis, gun_eff_pos - kick);
+            const pa::Vec3 delta_pos{desired_pos.x - carried.x, desired_pos.y - carried.y,
+                                     desired_pos.z - carried.z};
+            const float reach = pa::length(desired_pos - root_position);
+            if (pa::valid_basis(delta_basis) && std::isfinite(reach) && reach < kWeaponReachMax) {
+                pa::apply_rigid_transform(access.palette, map->weapon_nodes, map->weapon_count,
+                                          delta_basis, delta_pos);
+                s_dbg_wpn_x = desired_pos.x; s_dbg_wpn_y = desired_pos.y;
+                s_dbg_wpn_z = desired_pos.z; s_dbg_wpn_ok = true;
+                wpn_delta_basis = delta_basis;
+                wpn_delta_pos   = delta_pos;
+                wpn_delta_valid = true;
+                s_wpn_driven = true;
+                s_dbg_wpn_reach = reach * pa::kMetresPerBlamUnit * 100.0f;
+            }
+        }
+        if (!access.is_capture_bank) {
+            const bool now = wpn_delta_valid;
+            if (now != s_rigw_used.exchange(now, std::memory_order_relaxed)) {
+                if (now) {
+                    const pa::Vec3& am = access.palette[map->weapon_marker].position;   // already carried
+                    const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE RIG CARRY: attach node now at "
+                                         "(%.1f,%.1f,%.1f) cm, rig target (%.1f,%.1f,%.1f) cm, palette "
+                                         "root node at (%.1f,%.1f,%.1f) cm  [Blam axes: +Y is LEFT]",
+                                         am.x * cm, am.y * cm, am.z * cm,
+                                         rt.position.x * cm, rt.position.y * cm, rt.position.z * cm,
+                                         root_position.x * cm, root_position.y * cm, root_position.z * cm);
+                }
+                API::get()->log_info(now
+                    ? "[Halo-CampE-UEVR] PALETTE RIG CARRY: the weapon is placed by the UeRig solution "
+                      "(grip trim, mount and per-weapon offsets apply as in rig mode)"
+                    : "[Halo-CampE-UEVR] PALETTE RIG CARRY: no rig weapon target (origin hold, rigmode "
+                      "!= 3, or the rig block is not running) -- the gun stays at its stock pose");
+            }
+        }
+    }
+    if (!rig_carry_done &&
+        g_cfg.pa_weapon && map->weapon_count > 0 && map->weapon_marker != pa::kNoNode) {
         const pa::Mat3 wctrl = xr_rotation_to_blam_basis(
             pa::normalized(composition * pa::Quat{aim_q.x, aim_q.y, aim_q.z, aim_q.w}));
         const pa::Mat3 stock_w = pa::orthonormal_basis(access.palette[map->weapon_marker]);
@@ -914,9 +1787,18 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 // would lock to the VIEW's forward instead of the CAMERA's, and those differ by the
                 // lock gap -- measured at 98-125 degrees on this title, not a rounding error.
                 const float bl_gap = (g_cfg.pa_wpn_lift != 0)
-                    ? -::halo::g_view_lock_delta.load() * 0.01745329252f
+                    ? -lock_delta_deg * 0.01745329252f
                     : 0.0f;
-                const pa::Vec3 aim_stage{std::cos(bl_gap), -std::sin(bl_gap), 0.0f};
+                pa::Vec3 aim_stage{std::cos(bl_gap), -std::sin(bl_gap), 0.0f};
+                if (mesh_body) {
+                    // BODY-FRAME PALETTE: the stage frame is the palette frame, level, so the aim
+                    // ray is the camera's own direction in it -- the lock gap as a yaw AND the
+                    // camera pitch, neither of which the frame carries any more.
+                    const float ay = aim_delta_deg * 0.01745329252f;
+                    const float ap = aim_pitch_deg * 0.01745329252f;
+                    aim_stage = pa::Vec3{std::cos(ap) * std::cos(ay), std::cos(ap) * std::sin(ay),
+                                         std::sin(ap)};
+                }
                 const pa::Vec3 barrel_stage = pa::transform_vector(wgrip_w, beta);
                 const pa::Mat3 locked = pa::multiply(
                     pa::barrel_lock_correction(barrel_stage, aim_stage,
@@ -997,7 +1879,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // because our own aim drive wrote that camera yaw from this same controller.
             pa::Mat3 lifted = wgrip_w;
             if (g_cfg.pa_wpn_lift != 0) {
-                const float gap = -::halo::g_view_lock_delta.load() * 0.01745329252f;  // camera-view
+                const float gap = -lock_delta_deg * 0.01745329252f;  // camera-view
                 const float cg = std::cos(gap), sg = std::sin(gap);
                 const pa::Mat3 gapm{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                                      pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1018,7 +1900,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // The arms already got both halves (see arm_gap below); the weapon only got one.
             pa::Vec3 dbl = stage_pos;
             if (g_cfg.pa_wpn_lift != 0) {
-                const float gp = -::halo::g_view_lock_delta.load() * 0.01745329252f;
+                const float gp = -lock_delta_deg * 0.01745329252f;
                 const float cp = std::cos(gp), sp = std::sin(gp);
                 const pa::Mat3 gpm{ pa::Vec3{ cp, sp, 0.0f}, pa::Vec3{-sp, cp, 0.0f},
                                     pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1056,6 +1938,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
     }
 
     bool any_posed = false;
+    bool support_posed = false;
+    pa::Vec3 aim_stock_wrist{};          // the AIM hand's authored wrist, for the cupped-stance test
+    bool     have_aim_stock = false;
     for (int i = 0; i < 2; ++i) {
         const HandPlan& plan = plans[i];
         const int arm_bit = plan.is_aim ? 1 : 2;
@@ -1073,7 +1958,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // (basis + offset) to act on in the same frame, before either gap rotates it. The lift is
         // re-applied at the original site and nothing about the aim hand changes.
         pa::Vec3 stage_off =
-            xr_to_blam(pa::rotate(composition, plan.grip_position - tracking.hmd_position)) /
+            xr_to_blam(pa::rotate(composition, plan.grip_position - tracking.hmd_position)) * wscale /
             pa::kMetresPerBlamUnit;
 
         // ---- THE SUPPORT-HAND RIGID FIX, and its capture freeze. SUPPORT HAND ONLY.
@@ -1116,7 +2001,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // with the gapped controller would apply the same rotation twice.
         const pa::Mat3 controller_raw = controller;
         if (g_cfg.pa_arm_lift != 0) {
-            const float g = -::halo::g_view_lock_delta.load() * 0.01745329252f;   // camera - view
+            const float g = -lock_delta_deg * 0.01745329252f;   // camera - view
             const float cg = std::cos(g), sg = std::sin(g);
             arm_gap = pa::Mat3{ pa::Vec3{ cg, sg, 0.0f}, pa::Vec3{-sg, cg, 0.0f},
                                 pa::Vec3{0.0f, 0.0f, 1.0f} };
@@ -1137,7 +2022,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // The measurement that signed this off could not have caught it: that sweep was run with
             // the HMD LEVEL, where hmd_pitch is 0 and the two formulas are arithmetically identical.
             // A control that pins the suspect variable at zero does not test it.
-            float gp = ::halo::g_view_pitch.load() * 0.01745329252f;
+            float gp = cam_pitch_deg * 0.01745329252f;
             if (g_cfg.pa_arm_pitch == 2) gp = -gp;
             const float cp = std::cos(gp), sp = std::sin(gp);
             const pa::Mat3 pitch_gap{ pa::Vec3{ cp, 0.0f, sp}, pa::Vec3{0.0f, 1.0f, 0.0f},
@@ -1153,6 +2038,29 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // so where it sits is where our target OUGHT to land. Recording it next to the computed
         // target turns "the hand is in the wrong place" into a measured error vector.
         const pa::Vec3 stock_wrist_pos = access.palette[plan.arm->wrist].position;
+        const pa::Mat3 stock_wrist_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
+        // ...and the authored hand-to-forearm relation with it: the zero the forearm twist is
+        // measured from (paforearmroll).
+        const pa::ForearmStock forearm_stock = pa::capture_forearm_stock(access.palette, *plan.arm);
+        // THE AUTHORED WRIST THE GUN PLACEMENTS USE. Normally the stock one; under the melee
+        // preference a hand held to its REST relation on the effective marker instead -- the aim
+        // hand in mode 0 (the gun is held too), the support hand in modes 0 and 1 (a gripping left
+        // hand stays on the gun where it was, rather than punching or bracing with the animation).
+        pa::Vec3 gun_wrist_pos   = stock_wrist_pos;
+        pa::Mat3 gun_wrist_basis = stock_wrist_basis;
+        {
+            const float hw = plan.is_aim ? melee_gun_w : melee_left_w;
+            const pa::RestRelation& rr = plan.is_aim ? s_aim_rest : s_action.hand;
+            if (hw > 0.001f && rr.have && wpn_delta_valid) {
+                const pa::Vec3 rp = gun_eff_pos + pa::transform_vector(gun_eff_basis, rr.pos);
+                const pa::Mat3 rb = pa::multiply(gun_eff_basis, rr.basis);
+                if (pa::finite(rp) && pa::valid_basis(rb)) {
+                    gun_wrist_pos   = stock_wrist_pos + (rp - stock_wrist_pos) * hw;
+                    gun_wrist_basis = pa::slerp_basis(stock_wrist_basis, rb, hw);
+                }
+            }
+        }
+        if (plan.is_aim) { aim_stock_wrist = stock_wrist_pos; have_aim_stock = true; }
         if (!plan.is_aim && !access.is_capture_bank) {
             const pa::Vec3 sh0 = access.palette[plan.arm->shoulder].position;
             const pa::Vec3 srel{stock_wrist_pos.x - sh0.x, stock_wrist_pos.y - sh0.y,
@@ -1185,8 +2093,33 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // it needs a human's eyes before it can become the default.
         pa::Mat3 desired_wrist =
             (g_cfg.pa_target_frame >= 2)
-                ? pa::multiply(pa::multiply(torso_basis, controller_raw), plan.conv->latched)
+                ? pa::multiply(pa::multiply(stage_basis, controller_raw), plan.conv->latched)
                 : pa::multiply(pa::multiply(root_basis, controller), plan.conv->latched);
+        // ---- THE FREE SUPPORT HAND MIRRORS THE AIM HAND (pasupmirror; see Config.hpp and
+        // GripRelation). The rig mirrors its hands by BEHAVIOUR: corresponding bones differ by a
+        // half turn about the lateral axis (every offset of one hand is the negative of the other's,
+        // measured), so the mirror image of a wrist basis across the controller's own sagittal
+        // plane is each of its axes with X and Z negated; a vector mirrors by negating Y.
+        const bool mirror_free = !plan.is_aim && g_cfg.pa_support_mirror && s_aim_relation.have &&
+                                 g_cfg.pa_target_frame >= 2;
+        pa::Vec3 mirror_offset{};
+        if (mirror_free) {
+            // The relation is a RIGHT hand's (it is only ever measured off a right aim hand, and the
+            // baked default is one). A LEFT support hand takes its mirror image; a RIGHT support
+            // hand -- left-handed aim -- takes it as it stands.
+            const pa::Mat3& r = s_aim_relation.basis;
+            if (plan.left_side) {
+                const pa::Mat3 mirrored{ pa::Vec3{-r.forward.x, r.forward.y, -r.forward.z},
+                                         pa::Vec3{-r.left.x,    r.left.y,    -r.left.z},
+                                         pa::Vec3{-r.up.x,      r.up.y,      -r.up.z} };
+                desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), mirrored);
+                mirror_offset = pa::Vec3{s_aim_relation.offset.x, -s_aim_relation.offset.y,
+                                         s_aim_relation.offset.z};
+            } else {
+                desired_wrist = pa::multiply(pa::multiply(stage_basis, controller_raw), r);
+                mirror_offset = s_aim_relation.offset;
+            }
+        }
         if (!pa::valid_basis(desired_wrist)) { HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[4];); continue; }
 
         // The POSITION half of the same lift. Rotating only the orientation would leave the hand
@@ -1220,13 +2153,21 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // game-yaw refs) precisely so a live camera cannot throw the hand.
         pa::Vec3 wrist_target =
             (g_cfg.pa_target_frame >= 1)
-                ? (root_position + pa::transform_vector(torso_basis, stage_off) +
-                   pa::transform_vector(pa::multiply(torso_basis, controller_raw), wrist_local))
+                ? (root_position + pa::transform_vector(stage_basis, stage_off) +
+                   pa::transform_vector(pa::multiply(stage_basis, controller_raw),
+                                        mirror_free ? mirror_offset : wrist_local))
                 : (root_position + pa::transform_vector(root_basis, delta_blam) +
                    pa::transform_vector(pa::multiply(root_basis, controller), wrist_local));
 
-        if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
-                                          plan.left_side, s_arm_tuning)) {
+        if (chest_route) {
+            // pancreations' armRoot o unmod: the authored rest arm, re-expressed in the torso
+            // frame, pivoting on the chest. One rigid rotation places the shoulder where the UE
+            // hierarchy will put it anyway (chest o reference offset) AND carries the rest pose
+            // into the body frame -- so no translation anchor and no separate rest lift.
+            pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
+                                  plan.arm->shoulder_count, torso_basis, chest_pivot);
+        } else if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
+                                                 plan.left_side, tuning_w)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[6];);
             continue;
         }
@@ -1254,9 +2195,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // body-anchored (ArmTuning::pole_body_fraction), so it may no longer be earning the
         // mismatch it causes. pa_arm_rest_lift gates ONLY this, leaving the target lift alone --
         // pa_arm_lift=0 would disable both and bring back the arms-follow-the-aim problem.
-        if (g_cfg.pa_arm_lift != 0 && g_cfg.pa_arm_rest_lift != 0) {
+        if (!chest_route && g_cfg.pa_arm_lift != 0 && g_cfg.pa_arm_rest_lift != 0) {
+            // Mode 7: the torso basis IS the full camera -> body map (pitch, lock gap AND the
+            // head heading), so the authored rest pose is carried into that frame by it directly;
+            // arm_gap lacks the head term and would leave the rest pose facing the base yaw.
             pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
-                                  plan.arm->shoulder_count, arm_gap,
+                                  plan.arm->shoulder_count,
+                                  (g_cfg.pa_torso_frame == 7) ? torso_basis : arm_gap,
                                   access.palette[plan.arm->shoulder].position);
         }
         if (!plan.is_aim && !access.is_capture_bank) {
@@ -1310,28 +2255,126 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // controller, and the only coupling between the hands runs one-way through the aim basis.
         // That is the cleaner dependency, and it matches the report that grabbing behaves as a
         // separate concern from the arm itself.
-        if (g_cfg.pa_grab_weapon != 0 && !plan.is_aim && wpn_delta_valid &&
+        // ---- THE AIM HAND RIDES THE GUN (pahandgun; see Config.hpp). The AUTHORED wrist -- read
+        // before this arm was anchored or lifted -- carried by the very transform that placed the
+        // gun, so the hand sits on the grip exactly as it does when rig mode moves the whole mesh.
+        // RIGHT-HANDED AIM ONLY. The game's poses are authored right-handed -- right hand on the
+        // grip, left on the forestock -- so with the LEFT hand aiming, "the aim arm's authored
+        // wrist" is the forestock, and carrying it put both hands 80 cm out pointing at the floor
+        // (measured headless, aimhand=1). Until the authored pair is mirrored across the gun for
+        // that case, a left-handed aim hand stays on its controller.
+        if (g_cfg.pa_hand_on_gun && aim_is_right && plan.is_aim && wpn_delta_valid) {
+            const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
+            if (pa::valid_basis(on_gun_basis)) {
+                wrist_target  = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
+                desired_wrist = on_gun_basis;
+
+                // ...and MEASURE how that hand sits on its controller, for the other hand to mirror.
+                // Only off the rig carry (the calibrated one), never while a two-hand swing or a
+                // calibration hold has the gun somewhere the controller alone would not put it.
+                if (!access.is_capture_bank && g_cfg.pa_support_mirror && s_rigw_used.load() &&
+                    !s_rigw_frozen.load(std::memory_order_relaxed) &&
+                    ::halo::two_hand_hold_weight() <= 0.0f) {
+                    const TrackingSnapshot tk = s_tracking;          // the TICK's sample, see GripRelation
+                    const pa::Quat tcomp = pa::normalized(tk.stage_rotation);
+                    const pa::Mat3 g_tick = xr_rotation_to_blam_basis(
+                        pa::normalized(tcomp * tk.aim_grip_rotation));
+                    if (tk.valid && pa::valid_basis(g_tick)) {
+                        const pa::Mat3 sinv = pa::transpose(stage_basis);
+                        const pa::Mat3 ginv = pa::transpose(g_tick);
+                        const pa::Vec3 c_stage =
+                            xr_to_blam(pa::rotate(tcomp, tk.aim_grip_position - tk.hmd_position)) *
+                            wscale / pa::kMetresPerBlamUnit;
+                        const pa::Vec3 w_stage = pa::transform_vector(sinv, wrist_target - root_position);
+                        s_aim_relation.observe(pa::multiply(ginv, pa::multiply(sinv, desired_wrist)),
+                                               pa::transform_vector(ginv, w_stage - c_stage));
+                    }
+                }
+            }
+        }
+        //
+        // THE AUTHORED WRIST IS THE ONE READ BEFORE THIS ARM WAS TOUCHED (stock_wrist_*). This block
+        // used to read the wrist node HERE, after the shoulder anchor and the rest lift had already
+        // moved it, so "the artist's pose on the gun" was really that pose dragged to the body
+        // shoulder and turned by the torso frame. It was gated off, so nobody saw it.
+        //
+        // two_hand_hold_weight(), not _blend_weight(): the latter reads 0 whenever no swing is
+        // published, and a hand must not leave the forestock on a frame the barrel needs no bend.
+        s_dbg_grab_w = 0.0f;
+        if (!plan.is_aim && wpn_delta_valid && map->weapon_marker != pa::kNoNode) {
+            // Where the AUTHORED support wrist sits in the carried gun's own frame. The rigid carry
+            // cancels out of this, so it is the artist's hand-to-gun relation and nothing else --
+            // the number the achieved `handgun` has to equal while the hand rides the gun.
+            const auto&    wm0 = access.palette[map->weapon_marker];
+            const pa::Mat3 wb0 = pa::orthonormal_basis(wm0);
+            if (pa::valid_basis(wb0)) {
+                const pa::Vec3 og = wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_wrist_pos);
+                const pa::Vec3 hg0 = pa::transform_vector(pa::transpose(wb0), og - wm0.position);
+                s_dbg_stockhg_x = hg0.x; s_dbg_stockhg_y = hg0.y; s_dbg_stockhg_z = hg0.z;
+            }
+        }
+        // A deny-listed one-hander still takes the hand when the artist posed it ON the gun.
+        bool grab_allowed = g_cfg.pa_grab_weapon >= 2 || !::halo::two_hand_hold_denied();
+        if (!grab_allowed && g_cfg.pa_grab_weapon == 1 && !plan.is_aim && have_aim_stock) {
+            const float sep_m = pa::length(stock_wrist_pos - aim_stock_wrist) * pa::kMetresPerBlamUnit;
+            grab_allowed = std::isfinite(sep_m) && sep_m < 0.18f;
+        }
+        // ...OR AN AUTHORED ACTION IS PLAYING (pasupanim; see Config.hpp). The same hand-over, by the
+        // action watch's weight instead of the hold's, and on EVERY weapon: the deny list says which
+        // guns take a two-hand HOLD, not which ones have a reload.
+        if (aim_is_right && !plan.is_aim && wpn_delta_valid &&
             !s_hfreeze_active.load(std::memory_order_acquire)) {
-            const float w = ::halo::two_hand_blend_weight();
+            float w = (g_cfg.pa_grab_weapon != 0 && grab_allowed) ? ::halo::two_hand_hold_weight() : 0.0f;
+            // ...the action hand-over, less whatever the melee preference keeps off it.
+            if (prefs.sup_anim != 0) w = (std::max)(w, s_action.weight * (1.0f - melee_left_w));
+            w = (std::max)(w, sprint_join_w);                    // pasprintanim 0: the whole animation
             if (w > 0.0f) {
-                const pa::Vec3 stock_pos   = access.palette[plan.arm->wrist].position;
-                const pa::Mat3 stock_basis = pa::orthonormal_basis(access.palette[plan.arm->wrist]);
                 const pa::Vec3 on_gun_pos =
-                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, stock_pos);
-                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, stock_basis);
+                    wpn_delta_pos + pa::transform_vector(wpn_delta_basis, gun_wrist_pos);
+                const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
                 if (pa::valid_basis(on_gun_basis)) {
                     wrist_target  = wrist_target + (on_gun_pos - wrist_target) * w;
-                    desired_wrist = pa::blend_basis(desired_wrist, on_gun_basis, w);
+                    // Short-arc, not a normalised lerp: a free hand handed to an action can start
+                    // from ANY orientation, and a lerp has no answer half way between opposites.
+                    desired_wrist = pa::slerp_basis(desired_wrist, on_gun_basis, w);
+                    s_dbg_grab_w  = w;
                 }
             }
         }
 
+        // The body-anchored pole direction: torso up (the port's original) or pancreations'
+        // out-and-down in the torso frame -- see ArmTuning::pole_out_down.
+        pa::Vec3 pole_dir = torso_basis.up;
+        if (s_arm_tuning.pole_out_down) {
+            const float out = plan.left_side ? 1.0f : -1.0f;
+            pole_dir = torso_basis.left * out - torso_basis.up * s_arm_tuning.pole_down;
+        }
         if (!pa::solve_arm_for_tracked_wrist(access.palette, *plan.arm, wrist_target,
-                                             desired_wrist, torso_basis.up, s_arm_tuning)) {
+                                             desired_wrist, pole_dir, tuning_w)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[5];);
             continue;
         }
         any_posed = true;
+        if (!plan.is_aim) support_posed = true;
+
+        // ---- THE FOREARM TAKES ITS SHARE OF THE ROLL (paforearmroll; see Config.hpp). After the
+        // solve and the exact wrist placement, because it reads the hand the player will see. The
+        // hint is "up for a thumb" in the body frame, leaning back so an arm raised straight up
+        // still has one. Twist bones only: the wrist and everything below it do not move.
+        {
+            pa::ForearmTwistResult tw{};
+            const pa::Vec3 thumb_up = torso_basis.up - torso_basis.forward * 0.5f;
+            pa::distribute_forearm_twist(access.palette, *plan.arm, forearm_stock, thumb_up,
+                                         g_cfg.pa_forearm_roll, g_cfg.pa_forearm_armor,
+                                         g_cfg.pa_forearm_bone, &tw);
+            if (!access.is_capture_bank) {
+                const int h = plan.is_aim ? 0 : 1;
+                s_dbg_twist_hand[h].store(tw.hand_deg, std::memory_order_relaxed);
+                s_dbg_twist_neutral[h].store(tw.neutral_deg, std::memory_order_relaxed);
+                s_dbg_twist_follow[h].store(tw.follow_deg, std::memory_order_relaxed);
+                s_dbg_twist_nodes[h].store(tw.nodes, std::memory_order_relaxed);
+            }
+        }
         HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_posed;);
 
         if (!plan.is_aim && !access.is_capture_bank && map->weapon_marker != pa::kNoNode) {
@@ -1343,6 +2386,30 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                    gotw.z - wm.position.z};
                 const pa::Vec3 hg = pa::transform_vector(pa::transpose(wb), wrel);
                 s_dbg_handgun_x = hg.x; s_dbg_handgun_y = hg.y; s_dbg_handgun_z = hg.z;
+#if HALO_VR_DEV
+                // THE GRAB, MEASURED: achieved hand-in-gun-frame against the authored one. Logged
+                // while the hold ramps or the grip is down, ~once a second -- never at rest.
+                {
+                    static std::uint32_t s_gn = 0;
+                    const float gw = s_dbg_grab_w.load(std::memory_order_relaxed);
+                    const bool  gr = ::halo::two_hand_support_grip_held();
+                    if ((gw > 0.0f || gr) && ((++s_gn) % 60u) == 1u) {
+                        const float cm = pa::kMetresPerBlamUnit * 100.0f;
+                        const float ex = hg.x - s_dbg_stockhg_x.load(), ey = hg.y - s_dbg_stockhg_y.load(),
+                                    ez = hg.z - s_dbg_stockhg_z.load();
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PALETTE GRAB: w=%.2f grip=%d latched=%d denied=%d | hand in gun "
+                            "frame (%.1f,%.1f,%.1f) cm, authored (%.1f,%.1f,%.1f) cm, off by %.1f cm | "
+                            "wrist miss %.1f cm",
+                            gw, (int)gr, (int)::halo::two_hand_latched(), (int)::halo::two_hand_hold_denied(),
+                            hg.x * cm, hg.y * cm, hg.z * cm,
+                            s_dbg_stockhg_x.load() * cm, s_dbg_stockhg_y.load() * cm,
+                            s_dbg_stockhg_z.load() * cm,
+                            std::sqrt(ex * ex + ey * ey + ez * ez) * cm,
+                            pa::length(gotw - wrist_target) * cm);
+                    }
+                }
+#endif
             }
             s_dbg_blend = ::halo::two_hand_blend_weight();
             {
@@ -1427,6 +2494,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
             s_dbg_got_x  = got.x;
             s_dbg_got_y  = got.y;
             s_dbg_got_z  = got.z;
+            s_dbg_el_x   = access.palette[plan.arm->elbow].position.x;
+            s_dbg_el_y   = access.palette[plan.arm->elbow].position.y;
+            s_dbg_el_z   = access.palette[plan.arm->elbow].position.z;
             s_dbg_miss_cm  = pa::length(got - wrist_target) * pa::kMetresPerBlamUnit * 100.0f;
             s_dbg_reach_cm = pa::length(wrist_target -
                                         access.palette[plan.arm->shoulder].position) *
@@ -1447,6 +2517,75 @@ bool drive_palette(const pa::PaletteAccess& access) {
     pa::apply_hand_openness(access.palette, aim_arm, closed);
     if (tracking.support_valid) pa::apply_hand_openness(access.palette, support_arm, closed);
 
+    // ---- THE SUPPORT HAND'S SHAPE (pahandpose; see Config.hpp). Eased here, on the live drive's own
+    // clock, so a grip press closes the hand over ~90 ms instead of snapping; the banks take the
+    // result through the mirror like every other driven node.
+    if (g_cfg.pa_hand_pose && tracking.support_valid && support_posed) {
+        if (!access.is_capture_bank) {
+            static std::chrono::steady_clock::time_point s_shape_t{};
+            const auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - s_shape_t).count();
+            s_shape_t = now;
+            if (!(dt > 0.0f) || dt > 0.1f) dt = 0.1f;
+            const float rest   = g_cfg.pa_hand_rest < -1.0f ? -1.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
+            const float target = ::halo::two_hand_support_grip_held() ? 1.0f : rest;
+            const float k      = 1.0f - std::exp(-dt / 0.045f);
+            s_sup_curl += (target - s_sup_curl) * k;
+        }
+        pa::apply_hand_shape(access.palette, support_arm, s_sup_curl,
+                             s_dbg_grab_w.load(std::memory_order_relaxed));
+    }
+    // ---- THE HANDS HELD STILL: a hand placed rigidly from the live pose keeps the live FINGERS,
+    // so under mode 3 "the fingers still animate". The aim hand's shape goes to its rest by the
+    // hold weight; the support hand's by the off weight, but only as far as it is on the gun (a
+    // free hand keeps the shape given above).
+    if (melee_gun_w > 0.001f && s_aim_fingers_have)
+        pa::blend_hand_to_rest(access.palette, aim_arm, s_aim_fingers, pa::kMaxPaletteNodes, melee_gun_w);
+    if (melee_left_w > 0.001f && s_sup_fingers_have && tracking.support_valid) {
+        const float on_gun = s_dbg_grab_w.load(std::memory_order_relaxed);
+        if (on_gun > 0.001f)
+            pa::blend_hand_to_rest(access.palette, support_arm, s_sup_fingers, pa::kMaxPaletteNodes, melee_left_w * on_gun);
+    }
+#if HALO_VR_DEV
+    if (g_cfg.two_hand_log && !access.is_capture_bank && tracking.support_valid && support_posed) {
+        static std::uint32_t s_mn = 0;
+        if (((++s_mn) % 90u) == 1u) {
+            const pa::Mat3 sinv = pa::transpose(stage_basis);
+            const auto& wr = access.palette[aim_arm.wrist];
+            const auto& wl = access.palette[support_arm.wrist];
+            const pa::Vec3 pr = pa::transform_vector(sinv, wr.position - root_position);
+            const pa::Vec3 pl = pa::transform_vector(sinv, wl.position - root_position);
+            const pa::Vec3 dpos{pl.x - pr.x, pl.y + pr.y, pl.z - pr.z};
+            const pa::Mat3 br = pa::multiply(sinv, pa::orthonormal_basis(wr));
+            const pa::Mat3 bl = pa::multiply(sinv, pa::orthonormal_basis(wl));
+            const pa::Mat3 bm{ pa::Vec3{-br.forward.x, br.forward.y, -br.forward.z},
+                               pa::Vec3{-br.left.x,    br.left.y,    -br.left.z},
+                               pa::Vec3{-br.up.x,      br.up.y,      -br.up.z} };
+            float tr = pa::dot(bl.forward, bm.forward) + pa::dot(bl.left, bm.left) + pa::dot(bl.up, bm.up);
+            float ca = (tr - 1.0f) * 0.5f; ca = ca < -1.0f ? -1.0f : (ca > 1.0f ? 1.0f : ca);
+            // The support wrist's OWN pose in the stage frame: with the support controller held
+            // still these must not change when only the aim controller moves.
+            const float cm = pa::kMetresPerBlamUnit * 100.0f;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] PALETTE MIRROR: support wrist vs the mirror image of the aim wrist: "
+                "%.1f cm, %.1f deg | relation latched=%d stable=%d | curl=%.2f grabw=%.2f | support "
+                "wrist stage pos=(%.2f,%.2f,%.2f)cm fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) | forearm "
+                "roll x%.2f: aim hand %.0f deg added (authored is %.0f short of thumb-up) -> follows %.0f on "
+                "%d bones; support %.0f (%.0f) -> %.0f on %d",
+                pa::length(dpos) * cm, std::acos(ca) * 57.2957795f,
+                (int)s_aim_relation.have, s_aim_relation.stable, s_sup_curl,
+                s_dbg_grab_w.load(std::memory_order_relaxed),
+                pl.x * cm, pl.y * cm, pl.z * cm,
+                bl.forward.x, bl.forward.y, bl.forward.z, bl.up.x, bl.up.y, bl.up.z,
+                g_cfg.pa_forearm_roll,
+                s_dbg_twist_hand[0].load(), s_dbg_twist_neutral[0].load(), s_dbg_twist_follow[0].load(),
+                s_dbg_twist_nodes[0].load(),
+                s_dbg_twist_hand[1].load(), s_dbg_twist_neutral[1].load(), s_dbg_twist_follow[1].load(),
+                s_dbg_twist_nodes[1].load());
+        }
+    }
+#endif
+
     // ---- HANDS-ONLY, last of all. Everything above has already run, so this only decides what is
     // VISIBLE -- see Config.hpp pa_hands_only. Fails visible: a false return leaves the arms shown.
     HALO_VR_DEV_ONLY(
@@ -1460,6 +2599,47 @@ bool drive_palette(const pa::PaletteAccess& access) {
         HALO_VR_DEV_ONLY(if (hid) ++s_hands_applied;);
     }
 
+    // ---- pasprintanim 2: THE WHOLE ANIMATION, NO TRACKING. Everything this drive did is eased back
+    // out toward the stock pose snapped at the top -- the arms and the gun play the sprint as the
+    // game authored it, in the mesh's own frame, and come back to the controllers as it ends.
+    if (sprint_stock_w > 0.001f && stock_count > 0) {
+        for (std::size_t k = 0; k < stock_count; ++k) {
+            pa::BlamMatrix4x3&       m = access.palette[stock_nodes[k]];
+            const pa::BlamMatrix4x3& s = stock_snapshot[k];
+            const pa::Mat3 drv = pa::orthonormal_basis(m), stk = pa::orthonormal_basis(s);
+            if (!pa::valid_basis(drv) || !pa::valid_basis(stk)) continue;
+            const pa::Mat3 b = pa::slerp_basis(drv, stk, sprint_stock_w);
+            m.forward = b.forward; m.left = b.left; m.up = b.up;
+            m.position = m.position + (s.position - m.position) * sprint_stock_w;
+        }
+    }
+
+    // ---- Capture the live solve for the banks (see s_bank_mirror_on): the driven nodes only --
+    // both arms' subtrees, the chest node when that route is on, and everything but the root when
+    // hands-only has scaled the rest. Fingers sit inside the wrist subtrees already.
+    if (!access.is_capture_bank && s_bank_mirror_on) {
+        s_mirror_n = 0;
+        auto add = [&](std::uint8_t i) {
+            if (i == 0 || i >= access.node_count || s_mirror_n >= pa::kMaxPaletteNodes) return;
+            for (std::uint32_t k = 0; k < s_mirror_n; ++k) if (s_mirror_idx[k] == i) return;
+            s_mirror_idx[s_mirror_n++] = i;
+            s_mirror_rec[i] = access.palette[i];
+        };
+        if (g_cfg.pa_hands_only != 0) {
+            for (std::uint32_t i = 1; i < access.node_count; ++i) add((std::uint8_t)i);
+        } else {
+            for (std::size_t k = 0; k < map->right.shoulder_count; ++k) add(map->right.shoulder_subtree[k]);
+            for (std::size_t k = 0; k < map->left.shoulder_count;  ++k) add(map->left.shoulder_subtree[k]);
+            if (chest_route) add((std::uint8_t)s_pa_chest_node);
+            // The weapon carry (pawpn=1) rewrites the weapon nodes on the live slot; without them in
+            // the mirror the banks keep the stock, camera-glued gun and the carry never shows.
+            if (g_cfg.pa_weapon) for (std::size_t k = 0; k < map->weapon_count; ++k) add(map->weapon_nodes[k]);
+        }
+        s_mirror_tag   = access.model_tag;
+        s_mirror_count = access.node_count;
+        s_mirror_valid = (s_mirror_n > 0);
+    }
+
     s_drive_stage = "DRIVING";
     s_drive_ok.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -1467,15 +2647,10 @@ bool drive_palette(const pa::PaletteAccess& access) {
 
 // ---- POSE CAPTURE, on the tick -----------------------------------------------------------------
 
-void capture_tracking() {
-    TrackingSnapshot snap{};
-
+bool capture_tracking_into(TrackingSnapshot& snap) {
     const auto hmd = API::VR::get_hmd_index();
     ::halo::Vec3 p{}; ::halo::Quat q{};
-    if (hmd < 0 || !get_pose(hmd, &p, &q, /*use_aim=*/false)) {
-        s_tracking_ready.store(false, std::memory_order_release);
-        return;
-    }
+    if (hmd < 0 || !get_pose(hmd, &p, &q, /*use_aim=*/false)) return false;
     snap.hmd_position = from_math(p);
     snap.hmd_rotation = from_math(q);
 
@@ -1498,12 +2673,9 @@ void capture_tracking() {
                                                     : API::VR::get_right_controller_index();
     const int32_t support_idx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
                                                     : API::VR::get_left_controller_index();
-    if (aim_idx < 0) { s_tracking_ready.store(false, std::memory_order_release); return; }
+    if (aim_idx < 0) return false;
 
-    if (!get_pose(aim_idx, &p, &q, /*use_aim=*/false)) {
-        s_tracking_ready.store(false, std::memory_order_release);
-        return;
-    }
+    if (!get_pose(aim_idx, &p, &q, /*use_aim=*/false)) return false;
     snap.aim_grip_position = from_math(p);
     snap.aim_grip_rotation = from_math(q);
     if (get_pose(aim_idx, &p, &q, /*use_aim=*/true)) snap.aim_aim_rotation = from_math(q);
@@ -1512,10 +2684,21 @@ void capture_tracking() {
     if (get_pose(support_idx, &p, &q, /*use_aim=*/false)) {
         snap.support_grip_position = from_math(p);
         snap.support_grip_rotation = from_math(q);
+        snap.support_aim_rotation  = snap.support_grip_rotation;
+        if (get_pose(support_idx, &p, &q, /*use_aim=*/true)) snap.support_aim_rotation = from_math(q);
         snap.support_valid = true;
     }
 
     snap.valid = true;
+    return true;
+}
+
+void capture_tracking() {
+    TrackingSnapshot snap{};
+    if (!capture_tracking_into(snap)) {
+        s_tracking_ready.store(false, std::memory_order_release);
+        return;
+    }
     s_tracking = snap;
     s_tracking_ready.store(true, std::memory_order_release);
 }
@@ -1587,7 +2770,7 @@ void weapon_fix_tick() {
     // armdriver=2 with pawpn=0 is arms-here, gun-on-the-rig. Draining unconditionally there would
     // eat the latch belonging to the rig's own capture, and INSERT would silently stop working for
     // the exact configuration that still needs it. Same predicate WeaponCalib.cpp stands down on.
-    if (palettearm_weapon_owns()) (void)::halo::wpn_calib_take_pending();
+    if (palettearm_weapon_calib_owns()) (void)::halo::wpn_calib_take_pending();
 
     static bool     s_held = false;
     static bool     s_armed = false;
@@ -1605,7 +2788,7 @@ void weapon_fix_tick() {
     // down on, so exactly one of the two capture paths can ever claim a press. Two nearly-identical
     // conditions in two files is how a press ends up writing both destinations, or neither.
     const bool focused = ::halo::game_window_focused();
-    const bool held = palettearm_weapon_owns() && focused && ::halo::wpn_calib_held();
+    const bool held = palettearm_weapon_calib_owns() && focused && ::halo::wpn_calib_held();
     const bool was  = s_held;
     s_held = held;
 
@@ -1877,10 +3060,19 @@ void hand_fix_tick() {
     // to ~100 degrees; this one has none -- the support hand is already placed straight from the
     // controller, so the whole quantity being measured is a human hand's offset inside a human
     // grip. Anything past 45 degrees or 30 cm of that is a tracking dropout, not an alignment.
-    if (!std::isfinite(dm) || dm > 0.30f || !std::isfinite(ang) || ang > 45.0f) {
+    //
+    // CORRECTED 2026-09-17 FROM A HEADSET LOG: "this one has none" was wrong. The support wrist's
+    // convention is latched from its AUTHORED pose, which is a hand under a forestock, not a hand
+    // around a controller -- a fixed mismatch exactly like the weapon's. The player needed 90-165
+    // degrees of roll and this bound refused seventeen captures in a row ("it tends to snap back
+    // and not save the value"). So a FIRST capture (nothing stored yet) may be large, as the
+    // weapon's may; a refinement on top of a stored fix gets 90 -- still a gross-error guard, but a
+    // second attempt at a roll the first one got wrong must not be refused seventeen times over.
+    const float ang_limit = g_cfg.hand_fix_valid ? 90.0f : 175.0f;
+    if (!std::isfinite(dm) || dm > 0.30f || !std::isfinite(ang) || ang > ang_limit) {
         API::get()->log_info("[Halo-CampE-UEVR] HANDFIX: REJECTED (moved %.2f m, rotated %.0f deg; "
-                             "limits 0.30 m / 45 deg) -- tracking dropped, or your hand was not "
-                             "where the frozen one was. Nothing captured.", dm, ang);
+                             "limits 0.30 m / %.0f deg) -- tracking dropped, or your hand was not "
+                             "where the frozen one was. Nothing captured.", dm, ang, ang_limit);
         return;
     }
 
@@ -1929,19 +3121,100 @@ void hand_fix_tick() {
 
 } // namespace
 
+// The solved torso yaw, degrees, in the same frame the shoulders are hung from, plus a counter that
+// advances on every publish. Written from the palette detour every frame the basis validates; read
+// by the tick's torso A/B. Outside the anonymous namespace because the comparison deliberately
+// happens in Plugin.cpp -- see the note at the store site.
+std::atomic<float>    g_pa_torso_yaw{0.0f};
+std::atomic<uint32_t> g_pa_torso_seq{0};
+
+// THE CHEST NODE (2026-09-16) -- an experiment that turned out UNNECESSARY, kept for A/B only.
+// It was built on a reading that the rendered skeleton ignores palette node TRANSLATIONS (the
+// rendered Shoulder_R read S=0.95 in mode 4, same as the uncorrected control). A raw per-tick dump
+// the same day retracted that: the rendered joints track the palette's, translations included,
+// within ~1 cm every tick; the S came from a metric that scored only ticks where the aim moved,
+// while the palette's correction lands one tick after the camera turn. Rotating palette node N by
+// the torso frame and rotating each authored arm about it (pancreations' armRoot o unmod through
+// the hierarchy) does reach both rendered shoulders (node 4), but the translation anchor already
+// does the job. -1 = off.
 bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
+    else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
+    else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
+    else if (_stricmp(key, "paaimlead")       == 0) s_aim_lead                        = (v != 0.0);
+    else if (_stricmp(key, "paworldscale")    == 0) s_pa_world_scale                  = (float)v;
+    else if (_stricmp(key, "pafreshpose")     == 0) s_fresh_poses                     = (v != 0.0);
+    else if (_stricmp(key, "patgthead")       == 0) s_target_head                     = (v != 0.0);
+    else if (_stricmp(key, "pasupaim")        == 0) s_support_aim                     = (v != 0.0);
     else if (_stricmp(key, "pashoulderdown")  == 0) s_arm_tuning.shoulder_down_m      = (float)v;
     else if (_stricmp(key, "pashoulderlat")   == 0) s_arm_tuning.shoulder_lateral_m   = (float)v;
     else if (_stricmp(key, "paclavicle")      == 0) s_arm_tuning.clavicle_assist_m    = (float)v;
     else if (_stricmp(key, "pawristback")     == 0) s_arm_tuning.grip_to_wrist_back_m = (float)v;
     else if (_stricmp(key, "pawristdown")     == 0) s_arm_tuning.grip_to_wrist_down_m = (float)v;
+    else if (_stricmp(key, "papoleout")       == 0) s_arm_tuning.pole_out_down        = (v != 0.0);
+    else if (_stricmp(key, "papoledown")      == 0) s_arm_tuning.pole_down            = (float)v;
     else return false;
     return true;
 }
 
 const char* palettearm_status() { return s_status; }
 const char* palettearm_status_geom() { return s_status_geom; }
+bool palettearm_stock_marker_ue(float out_cm[3]) {
+    if (out_cm == nullptr) return false;
+    const long long t = s_stock_marker_ticks.load(std::memory_order_acquire);
+    if (t == 0) return false;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (std::chrono::duration<float>(std::chrono::steady_clock::duration(now - t)).count() > 0.25f) return false;
+    out_cm[0] = s_stock_marker_x.load(std::memory_order_relaxed);
+    out_cm[1] = s_stock_marker_y.load(std::memory_order_relaxed);
+    out_cm[2] = s_stock_marker_z.load(std::memory_order_relaxed);
+    return std::isfinite(out_cm[0]) && std::isfinite(out_cm[1]) && std::isfinite(out_cm[2]);
+}
+
+void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving,
+                         bool reload_down) {
+    if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving && !reload_down) return;
+    const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (melee_down)  s_pad_melee_ticks.store(now, std::memory_order_relaxed);
+    if (swap_down)   s_pad_swap_ticks.store(now, std::memory_order_relaxed);
+    if (throw_down)  s_pad_throw_ticks.store(now, std::memory_order_relaxed);
+    if (sprint_down) s_pad_sprint_ticks.store(now, std::memory_order_relaxed);
+    if (moving)      s_pad_move_ticks.store(now, std::memory_order_relaxed);
+    if (reload_down) s_pad_reload_ticks.store(now, std::memory_order_relaxed);
+}
+
+void palettearm_note_rig_weapon(bool valid, const float fwd[3], const float right[3],
+                                const float up[3], const float wpn_cm[3], bool frozen) {
+    s_rigw_frozen.store(frozen, std::memory_order_relaxed);
+    if (!valid || fwd == nullptr || right == nullptr || up == nullptr || wpn_cm == nullptr) {
+        s_rigw_valid.store(false, std::memory_order_release);
+        return;
+    }
+    // UE (+Y right) -> Blam (+Y left) is a mirror in Y, applied to every vector; a rotation's LEFT
+    // column is the image of UE's -Y axis, hence the extra sign on `right`. 304.8 cm per Blam unit.
+    RigWeaponTarget t{};
+    t.basis.forward = pa::Vec3{ fwd[0],   -fwd[1],    fwd[2]};
+    t.basis.left    = pa::Vec3{-right[0],  right[1], -right[2]};
+    t.basis.up      = pa::Vec3{ up[0],    -up[1],     up[2]};
+    const float k = 1.0f / (pa::kMetresPerBlamUnit * 100.0f);
+    t.position = pa::Vec3{wpn_cm[0] * k, -wpn_cm[1] * k, wpn_cm[2] * k};
+    s_rigw_seq.fetch_add(1, std::memory_order_release);
+    s_rigw = t;
+    s_rigw_seq.fetch_add(1, std::memory_order_release);
+    s_rigw_age.store(0, std::memory_order_relaxed);
+    s_rigw_valid.store(true, std::memory_order_release);
+}
+
+void palettearm_dbg_arm(float sh[3], float el[3], float wr[3]) {
+    sh[0] = s_dbg_sh_x.load(std::memory_order_relaxed);  sh[1] = s_dbg_sh_y.load(std::memory_order_relaxed);  sh[2] = s_dbg_sh_z.load(std::memory_order_relaxed);
+    el[0] = s_dbg_el_x.load(std::memory_order_relaxed);  el[1] = s_dbg_el_y.load(std::memory_order_relaxed);  el[2] = s_dbg_el_z.load(std::memory_order_relaxed);
+    wr[0] = s_dbg_got_x.load(std::memory_order_relaxed); wr[1] = s_dbg_got_y.load(std::memory_order_relaxed); wr[2] = s_dbg_got_z.load(std::memory_order_relaxed);
+}
+void palettearm_dbg_shoulder(float* x, float* y, float* z) {
+    if (x) *x = s_dbg_sh_x.load(std::memory_order_relaxed);
+    if (y) *y = s_dbg_sh_y.load(std::memory_order_relaxed);
+    if (z) *z = s_dbg_sh_z.load(std::memory_order_relaxed);
+}
 
 // Formats AND resets, so each emitted line is one clean window rather than a running total.
 const char* palettearm_status_jitter() {
@@ -1982,6 +3255,10 @@ const char* palettearm_status_jitter() {
 
 bool palettearm_weapon_owns() {
     return g_cfg.pa_weapon && g_cfg.arm_driver == 2 && !palettearm_unavailable();
+}
+
+bool palettearm_weapon_calib_owns() {
+    return palettearm_weapon_owns() && !g_cfg.pa_wpn_rig;
 }
 
 bool palettearm_unavailable() { return s_unavailable; }
@@ -2060,6 +3337,10 @@ void palettearm_update(float delta_seconds) {
     }
 
     capture_tracking();
+    {   // age the rig weapon target: a rig block that stopped running must not leave a stale gun
+        const int a = s_rigw_age.load(std::memory_order_relaxed);
+        if (a < 1000) s_rigw_age.store(a + 1, std::memory_order_relaxed);
+    }
 
     // Per-weapon rigid delta + its capture gesture. AFTER capture_tracking() and BEFORE the drive
     // runs, so a freeze latched this tick is in place for the very next build rather than a frame

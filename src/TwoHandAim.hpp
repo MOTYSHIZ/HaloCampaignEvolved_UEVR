@@ -220,6 +220,17 @@ bool two_hand_latched();
 // timing. Needed by the palette support hand, which has to travel onto the gun as the hold takes.
 float two_hand_blend_weight();
 
+// The same ramp WHETHER OR NOT a swing is being published. two_hand_blend_weight() reads 0 whenever
+// the swing is invalid -- a deny-listed weapon, or hands so well aligned there is nothing to bend --
+// which is right for a consumer of the BEND and wrong for one that only asks "is the off hand
+// holding the gun". The palette support hand is the second kind: it must not let go of the
+// forestock on the frames the barrel happens to need no correction.
+float two_hand_hold_weight();
+// The held weapon is on twohanddeny (a one-hander: the hold latches for zoom, the aim is not bent).
+bool  two_hand_hold_denied();
+// The support hand's grip button exactly as the hold reads it (OpenXR grip action or bindtwohand).
+bool  two_hand_support_grip_held();
+
 // Drop the latch, the blend and the remembered hand line. Level load, respawn, teardown.
 void two_hand_reset(const char* why);
 

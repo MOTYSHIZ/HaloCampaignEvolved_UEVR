@@ -1,4 +1,4 @@
-﻿// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
+// The VR gameplay plugin for Halo: Campaign Evolved (built on UEVR).
 //
 // Ships as halo_vr.dll, reading halo_vr.cfg from the profile root. Motion-controller aim is the
 // centrepiece, but the scope is the whole VR feel of the game, not just aim.
@@ -241,13 +241,36 @@ std::atomic<float> g_locked_view_yaw{0.0f};
 // can anchor the shoulders to the BODY rather than to the aim-driven camera. Defined here because
 // the two raw yaws have internal linkage; see MotionAimControl.hpp for why the delta is the right
 // thing to export rather than the pair.
+static float calib_frame_yaw_use();   // defined below; published here for Rig.cpp's shot-point aim
 void publish_view_lock_delta() {
+    ::halo::g_calib_frame_yaw.store(calib_frame_yaw_use());
     float d = g_dbg_view_out.load() - g_dbg_view_in.load();
     while (d > 180.0f)  d -= 360.0f;
     while (d < -180.0f) d += 360.0f;
     ::halo::g_view_lock_delta.store(d);
+    ::halo::g_view_out_yaw.store(g_dbg_view_out.load());
 }
 std::atomic<bool>  g_lock_primed{false};
+// PALETTE MESH STAND-DOWN -- published from the tick for the render path. True while the palette
+// route owns the arms and pa_mesh_standdown is set: the UeRig component placement (the tick writes
+// and the render re-apply) makes NO writes, so the mesh sits where the GAME puts it -- the frame
+// the palette records are authored in. See the rig block for the measurement behind this.
+std::atomic<bool>  g_mesh_standdown{false};
+// THE VIRTUAL RIG FRAME under the palette route (scope parity with rig mode, 2026-09-17). With the
+// mesh held in the body frame (pameshbody) the rig component is level and yaw-only, but the scope
+// places its pane relative to the rig and anchors its compositor quad in the rig's frame, both of
+// which assume the rig IS the gun -- as it is in rig mode. Rig mode's rig root sits at
+// weapon - R*socket_local, and socket_local is the stock weapon marker the palette holds, so the
+// same root exists here with nothing to read it from. The tick publishes its WORLD offset from the
+// rig parent (as g_rigw_off_* does for rig mode); the render path recomposes it against the live
+// parent and hands it to the layer, the same two-clocks shape as the rig-mode block.
+std::atomic<float> g_palrig_off_x{0.0f}, g_palrig_off_y{0.0f}, g_palrig_off_z{0.0f};
+std::atomic<bool>  g_palrig_off_valid{false};
+// The rig's relative transform as found at acquisition, BEFORE this plugin's first write -- what
+// stand-down restores. Zeros when the fields could not be read (zeros are also the expected value).
+static double g_rig_stock_loc[3] = {0.0, 0.0, 0.0};
+static double g_rig_stock_rot[3] = {0.0, 0.0, 0.0};
+static bool   g_rig_stock_valid  = false;
 // False until the very first prime. Distinguishes "adopt the camera as the base" (session start)
 // from a RE-prime after stick mode, which must fold the difference into the turn offset instead
 // -- see the prime site for why those are different operations.
@@ -8132,6 +8155,25 @@ void update() {
                                      g_rig_parent != nullptr
                                         ? narrow(class_name_of(g_rig_parent)).c_str()
                                         : "<none - falling back to ControlRotation yaw>");
+
+                // THE STOCK RELATIVE TRANSFORM, read before anything here writes the component.
+                // Standing the mesh placement down (palette route) restores exactly this, so the
+                // palette records render in the frame the game authored them for.
+                {
+                    const double* rl = found->get_property_data<double>(L"RelativeLocation");
+                    const double* rr = found->get_property_data<double>(L"RelativeRotation");
+                    g_rig_stock_valid = (rl != nullptr && rr != nullptr);
+                    for (int k = 0; k < 3; ++k) {
+                        g_rig_stock_loc[k] = (rl != nullptr) ? rl[k] : 0.0;
+                        g_rig_stock_rot[k] = (rr != nullptr) ? rr[k] : 0.0;
+                    }
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR]   stock relative transform: loc=(%.2f,%.2f,%.2f) "
+                        "rot=(p%.2f,y%.2f,r%.2f)%s",
+                        g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2],
+                        g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2],
+                        g_rig_stock_valid ? "" : " (UNREADABLE -- zeros assumed)");
+                }
             }
 
             // ---- THE GRIP PIVOT -- derived ONCE, then latched, and only ONCE THERE IS A WEAPON.
@@ -8504,6 +8546,75 @@ void update() {
         // stickforce=1 on foot, freezing the arms is the honest picture of the stack being down.
         // RESOLUTION (above) keeps running either way; the route reviving is how stick mode ends.
         if (rig != nullptr && !g_stick_mode.load()) {
+            // ---- PALETTE MESH STAND-DOWN. Two arm drivers must never fight over one component
+            // (ArmDriver.hpp), and this block IS the UeRig driver's component placement -- yet its
+            // writes were gated only on the weapon drives, so under armdriver=2 it kept pinning the
+            // mesh so its PrimaryWeapon socket sat on the controller. The palette records are
+            // camera-local and that route assumes the mesh sits where the game puts it; with this
+            // block still writing, the mesh ORIGIN swung about the controller by the socket lever,
+            // and every palette node swung with it, whatever torso frame the palette solved in.
+            // Measured 2026-09-16 (SimVR, head still, aim swept +/-40 deg, world-space socket
+            // reads): the shoulder-armour bone read S=1.2-1.7 in EVERY torso mode with these
+            // writes on, and 1.02 -- the mode-0 control's expected value -- with them off.
+            const bool mesh_standdown =
+                g_cfg.pa_mesh_standdown && halo::arm_driver_owns(halo::ArmDriverMode::Palette);
+            {
+                static bool s_standdown_prev = false;
+                if (mesh_standdown && !s_standdown_prev) {
+                    // ENTRY: put the component back where the game had it. The relative location
+                    // demonstrably takes; the relative rotation write is measured as ignored on
+                    // this mesh (Rig.cpp), so the WORLD rotation is also written as parent o stock
+                    // -- once, here; from then on the engine composes it with the parent itself
+                    // (the mode-0 control above rode the camera at 1.02 with no writes at all).
+                    for_each_rig([&](API::UObject* r) {
+                        rig_set_location(r, g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2]);
+                        rig_set_rotation(r, g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2]);
+                    });
+                    Vec3 prot{};
+                    if (g_rig_parent != nullptr &&
+                        call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot)) {
+                        const Quat q_par   = rotator_to_quat(prot.x, prot.y, prot.z);
+                        const Quat q_stock = rotator_to_quat((float)g_rig_stock_rot[0],
+                                                             (float)g_rig_stock_rot[1],
+                                                             (float)g_rig_stock_rot[2]);
+                        const Quat q_w = quat_mul(q_par, q_stock);
+                        float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+                        quat_to_rotator(q_w.x, q_w.y, q_w.z, q_w.w, &wp, &wy, &wr);
+                        for_each_rig([&](API::UObject* r) {
+                            rig_set_world_rotation(r, (double)wp, (double)wy, (double)wr);
+                        });
+                    }
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MESH STAND-DOWN: UeRig placement stopped; rig "
+                        "relative transform reset to stock loc=(%.2f,%.2f,%.2f) rot=(p%.2f,y%.2f,r%.2f)",
+                        g_rig_stock_loc[0], g_rig_stock_loc[1], g_rig_stock_loc[2],
+                        g_rig_stock_rot[0], g_rig_stock_rot[1], g_rig_stock_rot[2]);
+                } else if (!mesh_standdown && s_standdown_prev) {
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] PALETTE MESH STAND-DOWN released: UeRig placement resumes");
+                }
+                s_standdown_prev = mesh_standdown;
+                g_mesh_standdown.store(mesh_standdown, std::memory_order_relaxed);
+            }
+#if HALO_VR_DEV
+            // Does the mesh keep following its parent with no writes from us? Read, never assume.
+            if (mesh_standdown && (tick % 64u) == 0u && g_rig_parent != nullptr) {
+                Vec3 prot{}, rrot{}, ploc{}, rloc{};
+                if (call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot) &&
+                    call_ret_vec3(rig, L"K2_GetComponentRotation", &rrot) &&
+                    call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &ploc) &&
+                    call_ret_vec3(rig, L"K2_GetComponentLocation", &rloc)) {
+                    const double* rl = rig->get_property_data<double>(L"RelativeLocation");
+                    const float dx = rloc.x - ploc.x, dy = rloc.y - ploc.y, dz = rloc.z - ploc.z;
+                    API::get()->log_info(
+                        "[Halo-CampE-UEVR] MESHDOWN: rig-parent yaw=%.2f pitch=%.2f | rig-parent "
+                        "dist=%.1f cm | RelativeLocation=(%.2f,%.2f,%.2f)",
+                        wrap180(rrot.y - prot.y), rrot.x - prot.x,
+                        std::sqrt(dx * dx + dy * dy + dz * dz),
+                        rl ? rl[0] : 0.0, rl ? rl[1] : 0.0, rl ? rl[2] : 0.0);
+                }
+            }
+#endif
             // ROTATION -- must be RELATIVE TO THE PARENT, which is the aim.
             //
             // A scene component's relative transform COMPOSES on top of its parent, and the parent
@@ -8681,6 +8792,7 @@ void update() {
             // yaws about the same axis, which is the one case where adding the scalars is correct.
             const Quat q_turn = rotator_to_quat(
                 0.0f, g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use(), 0.0f);
+            ::halo::g_calib_frame_yaw.store(calib_frame_yaw_use());   // the shot-point aim's copy
 
             const Quat q_ctrl = quat_mul(q_turn, rotator_to_quat(g_pitch, g_yaw, g_roll));
             // USE SITE 2 of 2: the grip trim is a yaw calibration too, and carries the same frame.
@@ -8821,7 +8933,7 @@ void update() {
                 // q_gun below is still computed from the same inputs -- it is the INTENDED world
                 // rotation that the pivot arm and freeze snapshot consume, and it stays correct
                 // whether the mesh or the weapon root is the thing carrying it.
-                if (!halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
+                if (!mesh_standdown && !halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
                     for_each_rig([&](API::UObject* r) {
                         if (world_mode) rig_set_world_rotation(r, (double)wp, (double)wy, (double)wr);
                         else            rig_set_rotation(r, (double)rig_pitch, (double)rig_yaw, (double)c_roll);
@@ -9069,7 +9181,7 @@ void update() {
                     s_hold_prev = hold_rig_at_origin;
                 }
 
-                if (hold_rig_at_origin) {
+                if (hold_rig_at_origin && !mesh_standdown) {
                     xrlayer_note_publish_gate(5);
                     for_each_rig([&](API::UObject* r) { rig_set_location(r, 0.0, 0.0, 0.0); });
                 }
@@ -10583,6 +10695,90 @@ void update() {
                 g_rigw_off_valid = (g_cfg.rig_mode == 2 || g_cfg.rig_mode == 3)
                                 && (!hold_rig_at_origin || g_cfg.rigw_off_hold == 0);
 
+                // ---- THE SAME SOLUTION, FOR THE PALETTE ROUTE (pawpnrig; see Config.hpp).
+                //
+                // Under the stand-down nothing above is written to the mesh, but it is still where
+                // rig mode WOULD put the gun, calibrations and all. Published in the BODY frame --
+                // the frame the mesh is held in (pameshbody) -- so it never carries the aim.
+                //
+                // The WEAPON point, not the mesh offset: `off` subtracts the arm q_gun*sock_local,
+                // and sock_local is MEASURED off the rendered weapon -- which the palette route
+                // moves, so consuming it would feed the output back into the input. The identity
+                // above gives the weapon directly: parent + pose_off + mount. While calibrating the
+                // frozen mesh offset and the socket latched AT the freeze rebuild the frozen weapon
+                // point, which is what makes the End hold (and its solve, whose arm term cancels)
+                // work under this route too.
+                if (mesh_standdown) {
+                    const bool rw_ok = (g_cfg.rig_mode == 3) && !hold_rig_at_origin && !g_cfg.piv_viz;
+                    const Vec3 wpn_w = calibrating
+                        ? Vec3{calib_off_held.x, calib_off_held.y, calib_off_held.z}
+                        : Vec3{pose_off.x + mount.x, pose_off.y + mount.y, pose_off.z + mount.z};
+                    Vec3 wpn_t = wpn_w;
+                    if (calibrating) {
+                        const Vec3 arm_f = quat_rotate(q_gun, sep_live ? g_calib_sock_local : G);
+                        wpn_t = Vec3{wpn_w.x + arm_f.x, wpn_w.y + arm_f.y, wpn_w.z + arm_f.z};
+                    }
+                    const float body_yaw = g_locked_view_yaw.load() + g_turn_offset.load();
+                    const Quat  q_body_inv = quat_conj(rotator_to_quat(0.0f, body_yaw, 0.0f));
+                    const Quat  q_rel = quat_mul(q_body_inv, q_gun);
+                    const Vec3  f = quat_rotate(q_rel, Vec3{1.0f, 0.0f, 0.0f});
+                    const Vec3  r = quat_rotate(q_rel, Vec3{0.0f, 1.0f, 0.0f});
+                    const Vec3  u = quat_rotate(q_rel, Vec3{0.0f, 0.0f, 1.0f});
+                    const Vec3  w = quat_rotate(q_body_inv, wpn_t);
+                    const float fa[3] = {f.x, f.y, f.z}, ra[3] = {r.x, r.y, r.z};
+                    const float ua[3] = {u.x, u.y, u.z}, wa[3] = {w.x, w.y, w.z};
+                    const bool finite_ok = std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)
+                                        && std::isfinite(f.x) && std::isfinite(r.x) && std::isfinite(u.x);
+                    halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa, calibrating);
+                    // ---- THE VIRTUAL RIG FRAME, for the scope (see g_palrig_off_*). Rig mode's rig
+                    // root is weapon - R*socket_local; socket_local is the stock weapon marker the
+                    // palette holds. Published as a world offset from the rig parent (the render
+                    // side recomposes it) and handed to the scope with the parent read on THIS tick.
+                    {
+                        float S[3] = {0.0f, 0.0f, 0.0f};
+                        Vec3  pl{};
+                        const bool ok = rw_ok && finite_ok && halo::palettearm_stock_marker_ue(S) &&
+                                        g_rig_parent != nullptr &&
+                                        call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pl) &&
+                                        std::isfinite(pl.x) && std::isfinite(pl.y) && std::isfinite(pl.z);
+                        if (ok) {
+                            const Vec3 rs = quat_rotate(q_gun, Vec3{S[0], S[1], S[2]});
+                            const Vec3 root_off{wpn_t.x - rs.x, wpn_t.y - rs.y, wpn_t.z - rs.z};
+                            g_palrig_off_x.store(root_off.x, std::memory_order_relaxed);
+                            g_palrig_off_y.store(root_off.y, std::memory_order_relaxed);
+                            g_palrig_off_z.store(root_off.z, std::memory_order_relaxed);
+                            g_palrig_off_valid.store(true, std::memory_order_release);
+                            halo::scope_note_rig_frame(Vec3{pl.x + root_off.x, pl.y + root_off.y, pl.z + root_off.z},
+                                                       q_gun, tick);
+                        } else {
+                            g_palrig_off_valid.store(false, std::memory_order_relaxed);
+                        }
+                    }
+#if HALO_VR_DEV
+                    // GROUND TRUTH, read not predicted: how far the drawn weapon actually sits from
+                    // where rig mode would have put it. Independent of everything the palette did.
+                    if ((tick % 128u) == 0u && g_rig_parent != nullptr && rw_ok) {
+                        Vec3 pw{}, ww{};
+                        auto* wa2 = fp_weapon_actor();
+                        if (wa2 != nullptr
+                            && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pw)
+                            && call_ret_vec3(wa2,          L"K2_GetActorLocation",     &ww)) {
+                            const float ex = ww.x - (pw.x + wpn_t.x), ey = ww.y - (pw.y + wpn_t.y),
+                                        ez = ww.z - (pw.z + wpn_t.z);
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] PALETTE RIG CARRY check: drawn weapon is %.1f cm from the "
+                                "rig-mode target | target body-frame=(%.1f,%.1f,%.1f) cm mount=(%.1f,%.1f,%.1f) "
+                                "calibrating=%d | gun fwd=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) "
+                                "trim=(%.2f,%.2f,%.2f)",
+                                std::sqrt(ex * ex + ey * ey + ez * ez), w.x, w.y, w.z,
+                                mount_local.x, mount_local.y, mount_local.z, (int)calibrating,
+                                f.x, f.y, f.z, u.x, u.y, u.z,
+                                g_cfg.rig_dir_grip_deg, g_cfg.rig_dir_grip_yaw, g_cfg.rig_dir_grip_roll);
+                        }
+                    }
+#endif
+                }
+
                 // WHILE THE OUTAGE IS LIVE, SAY WHAT IS BEING WRITTEN. The player can feel that the
                 // arms moved; only this says HOW FAR and in which direction, which is the number
                 // that decides whether the guard is worth having. Rate-limited, and it only prints
@@ -10639,7 +10835,7 @@ void update() {
                 // `hand`, so with the controller position dead they are exactly the wrong offset the
                 // protective branch exists to avoid writing. Everything else in this block --
                 // the trace, the widget, the compositor publish -- is unaffected and has already run.
-                if (!hold_rig_at_origin
+                if (!hold_rig_at_origin && !mesh_standdown
                     && !halo::weapon_drive_owns() && !halo::palettearm_weapon_owns()) {
                     for_each_rig([&](API::UObject* r) {
                         rig_set_location(r, (double)ex, (double)ey, (double)ez);
@@ -11167,6 +11363,7 @@ public:
         sprintf_s(g_status_path, MAX_PATH, "%s\\halo_vr_status.txt", g_data_dir);
 
         ensure_user_cfg_template();   // all-comment template; never touches an existing file
+        ensure_weapons_cfg_template();// the per-weapon file's sections + weapon-name legend; same rule
         load_config();                // writes a commented default halo_vr.cfg if none exists
 
         // Every override layer now ships or is template-created, so file EXISTENCE says nothing --
@@ -11635,6 +11832,471 @@ public:
                 // latch. The palette itself is rewritten later, on the game's own thread, inside the
                 // detour -- which is exactly why this site must stay cheap.
                 { PerfScope _perf(PERF_PALARM); palettearm_update(delta); }
+
+                // ---- TORSO FRAME A/B. Answers patorsoframe with a number instead of a feeling.
+                //
+                // !!! PROVEN UNABLE TO ANSWER ITS QUESTION (2026-09-14, one in-headset session). This
+                // measures the torso yaw in the PALETTE's own space, where root never rotates: its
+                // control, mode 0, read exactly 0.000 twice while the tester SAW mode 0 swing with
+                // the gun, and modes 3 and 4 both read ~1 while both visibly swung. In that frame a
+                // magnitude cannot separate the two signs. Kept only as a palette-space torso probe;
+                // for a world-space answer use paworld, immediately below the arm-driver branches.
+                //
+                // The modes differ by a SIGN, and PaletteArm.cpp says plainly that handedness between
+                // the UE rotator and the Blam basis is a coin-flip that costs a headset round-trip to
+                // settle. It has already cost one, and that attempt failed on the READOUT: "which felt
+                // steadier" cannot separate nearly-right from exactly-right, and cannot be handed on.
+                //
+                // MAGNITUDES, NOT SIGNED DELTAS -- and this is the whole design. The torso yaw comes
+                // from Blam's basis; the aim and body yaws are UE rotators. Differencing them directly
+                // (the first version of this block) gave the instrument the SAME handedness ambiguity
+                // as the question it exists to answer, so it could confidently name the wrong mode. A
+                // yaw rotation's MAGNITUDE is identical in either handedness, so instead:
+                //
+                //     R = sum|d torso| / sum|d aim|, over ticks where the aim turned and the body did not
+                //
+                //     R ~ 0   torso locked to the BODY             <- the goal
+                //     R ~ 1   torso follows the AIM, uncorrected    (mode 0 is exactly this -- the control)
+                //     R ~ 2   correction applied with the WRONG SIGN: it double-counts the aim
+                //
+                // Modes 3 and 4 are one rotation and its negation, so one must read ~0, the other ~2,
+                // and they must sum to ~2. MODE 0 IS THE CONTROL: root IS the aim-driven camera, so it
+                // must read ~1. If it does not, the instrument is wrong and nothing it says about 3 or
+                // 4 means anything -- which is what a control arm is for.
+                //
+                // The body yaw is the locked BASE yaw: it moves with stick turning, never with the
+                // head. So "the body did not move" means "no stick turn" and the head is free -- except
+                // in modes 5 and 6, which fold head yaw into the torso on purpose.
+                //
+                // TWO WAYS THIS COULD REPORT A FALSE SUCCESS, both closed:
+                //   * A torso that stopped being published reads d=0, i.e. "perfectly body-locked".
+                //     g_pa_torso_seq must have advanced, or the tick is counted as STALE instead.
+                //   * Lag. The torso is written from the palette detour, later in the frame than the
+                //     view callback writes aim and body. A SUM OF MAGNITUDES over a back-and-forth sweep
+                //     is unchanged by a one-frame shift; an instantaneous difference grows with turn
+                //     speed. That is the two-clocks trap, and why this is a ratio of sums.
+                if (g_cfg.pa_torso_ab) {
+                    static float    ab_prev_torso = 0.0f, ab_prev_aim = 0.0f, ab_prev_body = 0.0f;
+                    static uint32_t ab_prev_seq = 0;
+                    static double   ab_sum_torso = 0.0, ab_sum_aim = 0.0;
+                    static uint32_t ab_n = 0, ab_stale = 0, ab_turning = 0, ab_said = 0;
+                    static int      ab_mode = -1;
+                    static bool     ab_have = false, ab_stale_said = false;
+
+                    const uint32_t seq   = ::halo::g_pa_torso_seq.load(std::memory_order_relaxed);
+                    const float    t_now = ::halo::g_pa_torso_yaw.load(std::memory_order_relaxed);
+                    const float    a_now = g_dbg_view_in.load();
+                    const float    b_now = g_dbg_view_out.load();
+
+                    // A mode change invalidates everything accumulated under the old one.
+                    if (ab_mode != g_cfg.pa_torso_frame) {
+                        ab_mode = g_cfg.pa_torso_frame;
+                        ab_sum_torso = ab_sum_aim = 0.0;
+                        ab_n = ab_stale = ab_turning = ab_said = 0;
+                        ab_have = false;
+                        ab_stale_said = false;
+                    }
+
+                    if (ab_have) {
+                        const float d_aim   = std::fabs(wrap180(a_now - ab_prev_aim));
+                        const float d_body  = std::fabs(wrap180(b_now - ab_prev_body));
+                        const float d_torso = std::fabs(wrap180(t_now - ab_prev_torso));
+                        if (d_aim > 0.3f) {                         // the controller actually turned
+                            if (seq == ab_prev_seq)  ++ab_stale;    // torso not republished
+                            else if (d_body > 0.15f) ++ab_turning;  // stick turn: the body moved
+                            else { ab_sum_torso += d_torso; ab_sum_aim += d_aim; ++ab_n; }
+                        }
+                    }
+                    ab_prev_torso = t_now;
+                    ab_prev_aim   = a_now;
+                    ab_prev_body  = b_now;
+                    ab_prev_seq   = seq;
+                    ab_have       = true;
+
+                    // Say WHY there is no verdict, instead of going quiet.
+                    if (!ab_stale_said && ab_stale >= 120 && ab_n == 0) {
+                        ab_stale_said = true;
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | NO DATA: the controller turned "
+                            "on %u ticks but the torso yaw was never republished. The palette is not being "
+                            "driven -- no weapon in hand, or the palette hook is installed but not called.",
+                            g_cfg.pa_torso_frame, ab_stale);
+                    }
+
+                    if (ab_n >= 60 && (ab_n % 64u) == 0u && ab_said < 40 && ab_sum_aim > 0.0) {
+                        ++ab_said;
+                        const double r = ab_sum_torso / ab_sum_aim;
+                        const char* verdict =
+                              (r < 0.35)             ? "LOCKED TO BODY"
+                            : (r > 0.65 && r < 1.35) ? "FOLLOWS THE AIM (uncorrected)"
+                            : (r > 1.65)             ? "DOUBLE-COUNTS THE AIM (wrong sign)"
+                            :                          "BETWEEN BANDS";
+                        const char* expect =
+                              (g_cfg.pa_torso_frame == 0) ? "CONTROL: must read ~1 or this instrument is wrong"
+                            : (g_cfg.pa_torso_frame == 3 || g_cfg.pa_torso_frame == 4)
+                                                          ? "one of 3/4 should read ~0 and the other ~2"
+                            : (g_cfg.pa_torso_frame == 5) ? "folds in head yaw: needs the head still"
+                            : (g_cfg.pa_torso_frame == 6) ? "blends hands+head: between 0 and 1 if the sign is right"
+                            :                               "no expectation for this mode";
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] PATORSO A/B patorsoframe=%d | R=%.3f (torso swept %.0f deg "
+                            "while aim swept %.0f) over %u ticks, rejected stale=%u stickturn=%u | %s | %s",
+                            g_cfg.pa_torso_frame, r, ab_sum_torso, ab_sum_aim, ab_n, ab_stale, ab_turning,
+                            verdict, expect);
+                    }
+                }
+            }
+
+            // ---- ARM WORLD PROBE (paworld=1): WHICH PART OF THE ARM SWINGS WITH THE AIM?
+            //
+            // WHY. The torso A/B measured in the palette's own space and failed its control; the
+            // tester then SAW every torso mode swing. This does not reason about frames: it measures
+            // in the one the player sees, per BONE, so the answer names the bones that ride the aim
+            // and the ones that do not -- which is also how the palette-node -> UE-bone mapping
+            // gets established instead of assumed (v1 sampled 'ShoulderArmor_R' as "the shoulder"
+            // and it read identically in every mode: 2026-09-16).
+            //
+            // THE FRAME: UE WORLD, from the RENDERED skeleton. GetSocketLocation on the rig mesh
+            // returns world positions -- the renderer's own numbers, no Blam conversion. Each point
+            // is taken RELATIVE TO THE CAMERA'S POSITION (translation only), so head bob and any
+            // camera orbit cancel while orientation stays world-fixed.
+            //
+            //     S = sum|d(P - cam)| / sum(|d aim| in rad * horizontal distance of P from cam)
+            //     S ~ 0  world-fixed (body-locked)            S ~ 1  rotates rigidly with the aim
+            //
+            // Two sweeps are scored separately: aim YAW ticks (yaw moves, pitch still) and aim PITCH
+            // ticks (pitch moves, yaw still); a tick where both move counts for neither.
+            //
+            // CONTROLS, each able to FAIL:
+            //   * METRIC -- two synthetic points from the same inputs: one locked to the aim (must
+            //     read 1.00), one fixed in the world (must read 0.00).
+            //   * IK-VISIBLE -- reads might be the game's own camera-glued animation, which also
+            //     rotates with the aim. On ticks where the aim does not move, only IK following the
+            //     controller can move the wrist: pushing the gun forward and back must move it well
+            //     over 20 cm on those ticks.
+            //   * BONES -- a name that does not exist makes GetSocketLocation return the COMPONENT's
+            //     own origin; a candidate within 0.05 cm of it is rejected.
+            //
+            // Beside the bones, each report carries the PALETTE shoulder (the aim arm's node 5 after
+            // anchoring, in palette units) and the mesh component's world transform, so the
+            // palette -> rendered-bone relation can be checked offline instead of assumed.
+            //
+            // The aim side follows aim_left_hand -- never assume the right controller aims.
+            if (g_cfg.pa_world_probe && !g_in_menu.load() && !g_stick_mode.load()) {
+                auto* rc = reinterpret_cast<API::UObject*>(g_rig_component.load(std::memory_order_relaxed));
+                if (rc != nullptr && g_rig_parent != nullptr) {
+                    constexpr int kMaxB = 16;             // tracked bones
+                    constexpr int kSyn  = 2;              // synthetic controls
+                    static API::UObject* wp_rc = nullptr;
+                    static int           wp_key = -1;
+                    static std::wstring  wp_name[kMaxB];
+                    static int           wp_n = 0;
+                    static int           wp_wrist = -1;
+                    static bool          wp_prev_ok = false;
+                    static Vec3          wp_prev_rel[kMaxB + kSyn]{};
+                    static float         wp_prev_aim = 0.0f, wp_prev_body = 0.0f, wp_prev_pitch = 0.0f;
+                    static double        wp_ypath[kMaxB + kSyn]{}, wp_yref[kMaxB + kSyn]{};
+                    static double        wp_ppath[kMaxB + kSyn]{}, wp_pref[kMaxB + kSyn]{};
+                    static double        wp_push = 0.0;          // max NET wrist displacement vs a slow reference
+                    static Vec3          wp_push_ref{};
+                    static uint32_t      wp_push_ref_age = 0;
+                    static uint32_t      wp_yaw_n = 0, wp_pitch_n = 0, wp_still_n = 0, wp_stickturn = 0;
+                    static uint32_t      wp_ynext = 128, wp_pnext = 128, wp_said = 0;
+                    static uint32_t      wp_raw_n = 0;                    // raw ticks logged so far
+                    static double        wp_hc_sum = 0.0, wp_hc_sum100 = 0.0;   // rendered wrist vs controller
+                    static uint32_t      wp_hc_n = 0;
+                    static Vec3          wp_win_rel[kMaxB + kSyn]{};       // 8-tick window start
+                    static float         wp_win_aim = 0.0f, wp_win_pitch = 0.0f;
+                    static uint32_t      wp_win_n = 0;
+                    static bool          wp_win_bad = false;
+                    static int           wp_isho = -1, wp_iel = -1;        // aim-side Shoulder / Elbow
+
+                    const bool left = g_cfg.aim_left_hand;
+                    const int  key  = g_cfg.pa_torso_frame * 2 + (left ? 1 : 0);
+
+                    // ---- (Re)resolve on a new rig, aim side or torso mode, and start the tallies over.
+                    if (rc != wp_rc || key != wp_key) {
+                        wp_rc = rc;
+                        wp_key = key;
+                        for (int i = 0; i < kMaxB + kSyn; ++i) { wp_ypath[i] = wp_yref[i] = wp_ppath[i] = wp_pref[i] = 0.0; }
+                        wp_push = 0.0;
+                        wp_yaw_n = wp_pitch_n = wp_still_n = wp_stickturn = wp_said = 0;
+                        wp_ynext = wp_pnext = 128;
+                        wp_prev_ok = false;
+                        wp_n = 0;
+                        wp_wrist = -1;
+                        wp_raw_n = 0;
+                        wp_isho = wp_iel = -1;
+                        wp_hc_sum = wp_hc_sum100 = 0.0; wp_hc_n = 0;
+                        wp_win_n = 0;
+
+                        Vec3 origin{};
+                        const bool have_origin = call_ret_vec3(rc, L"K2_GetComponentLocation", &origin);
+                        auto resolves = [&](const std::wstring& n) -> bool {
+                            Vec3 p{};
+                            if (!have_origin || !call_socket_location(rc, n.c_str(), &p)) return false;
+                            const float dx = p.x - origin.x, dy = p.y - origin.y, dz = p.z - origin.z;
+                            return (dx * dx + dy * dy + dz * dz) > (0.05f * 0.05f);
+                        };
+                        auto lower = [](std::wstring s) {
+                            for (auto& c : s) if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+                            return s;
+                        };
+
+                        // The real skeleton, once per rig.
+                        std::vector<std::wstring> bones;
+                        {
+                            alignas(16) uint8_t pn[RIG_PARAM_BUF] = {0};
+                            rc->call_function(L"GetNumBones", pn);
+                            const int32_t nb = *reinterpret_cast<int32_t*>(pn);
+                            if (nb > 0 && nb <= 512) {
+                                bones.reserve((size_t)nb);
+                                for (int32_t b = 0; b < nb; ++b) {
+                                    alignas(16) uint8_t pb[RIG_PARAM_BUF] = {0};
+                                    *reinterpret_cast<int32_t*>(pb) = b;          // GetBoneName(int32@0) -> FName@4
+                                    rc->call_function(L"GetBoneName", pb);
+                                    bones.push_back(reinterpret_cast<API::FName*>(pb + 4)->to_string());
+                                }
+                            }
+                        }
+                        // THE WHOLE UE HIERARCHY, once per rig: which bone hangs off which. The
+                        // palette's node parents are not the same fact, and whether a palette node
+                        // TRANSLATION reaches the rendered bone depends on exactly this.
+                        {
+                            std::wstring tree;
+                            for (const auto& b : bones) {
+                                alignas(16) uint8_t pp[RIG_PARAM_BUF] = {0};
+                                const API::FName bn = make_fname(b.c_str());
+                                std::memcpy(pp, &bn, sizeof(int32_t) * 2);       // GetParentBone(FName@0) -> FName@8
+                                rc->call_function(L"GetParentBone", pp);
+                                const std::wstring par = reinterpret_cast<API::FName*>(pp + 8)->to_string();
+                                tree += L" " + b + L"<" + par;
+                                if (tree.size() > 1800) {
+                                    API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD tree:%ls", tree.c_str());
+                                    tree.clear();
+                                }
+                            }
+                            if (!tree.empty()) API::get()->log_info("[Halo-CampE-UEVR] ARMWORLD tree:%ls", tree.c_str());
+                        }
+                        // Every arm-ish bone on the AIM side in skeleton order, plus the chest and
+                        // the OTHER side's three joints (the chest route must move both shoulders).
+                        const std::wstring sfx_lc = left ? L"_l" : L"_r";
+                        const std::wstring oth_lc = left ? L"_r" : L"_l";
+                        std::wstring listing;
+                        for (const auto& b : bones) {
+                            const std::wstring lb = lower(b);
+                            const bool chest = lb.find(L"chest") != std::wstring::npos;
+                            const bool aim_side = lb.size() >= 2 && lb.compare(lb.size() - 2, 2, sfx_lc) == 0;
+                            const bool oth_joint = lb == (L"shoulder" + oth_lc) || lb == (L"elbow" + oth_lc) ||
+                                                   lb == (L"wrist" + oth_lc);
+                            const bool armish = lb.find(L"shoulder") != std::wstring::npos ||
+                                                lb.find(L"clavicle") != std::wstring::npos ||
+                                                lb.find(L"arm")      != std::wstring::npos ||
+                                                lb.find(L"elbow")    != std::wstring::npos ||
+                                                lb.find(L"wrist")    != std::wstring::npos ||
+                                                lb.find(L"hand")     != std::wstring::npos;
+                            if (!(chest || (aim_side && armish) || oth_joint) || wp_n >= kMaxB) continue;
+                            if (!resolves(b)) { listing += L" [" + b + L":unresolved]"; continue; }
+                            if (wp_wrist < 0 && aim_side && lb.find(L"wrist") != std::wstring::npos) wp_wrist = wp_n;
+                            if (aim_side && lb == (L"shoulder" + sfx_lc)) wp_isho = wp_n;
+                            if (aim_side && lb == (L"elbow" + sfx_lc))    wp_iel  = wp_n;
+                            wp_name[wp_n++] = b;
+                            listing += L" " + b;
+                        }
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] ARMWORLD resolved (aim=%s, %u bones in skeleton, %d tracked, wrist=%d):%ls",
+                            left ? "L" : "R", (unsigned)bones.size(), wp_n, wp_wrist, listing.c_str());
+                    }
+
+                    // ---- Sample.
+                    Vec3 cam{};
+                    Vec3 pj[kMaxB]{};
+                    bool ok = wp_n > 0 && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &cam);
+                    for (int i = 0; i < wp_n && ok; ++i) ok = call_socket_location(rc, wp_name[i].c_str(), &pj[i]);
+                    const float aim   = g_dbg_view_in.load();
+                    const float body  = g_dbg_view_out.load();
+                    const float pitch = ::halo::g_view_pitch.load();
+                    if (ok) {
+                        const float ar = aim * 0.01745329252f;
+                        Vec3 rel[kMaxB + kSyn]{};
+                        for (int i = 0; i < wp_n; ++i) rel[i] = Vec3{pj[i].x - cam.x, pj[i].y - cam.y, pj[i].z - cam.z};
+                        // Synthetic aim-locked point: 50 cm along the FULL aim (yaw and pitch), so it
+                        // reads 1.00 on both the yaw and the pitch line.
+                        const float pr = pitch * 0.01745329252f;
+                        rel[wp_n]     = Vec3{50.0f * std::cos(pr) * std::cos(ar), 50.0f * std::cos(pr) * std::sin(ar),
+                                             50.0f * std::sin(pr)};
+                        rel[wp_n + 1] = Vec3{50.0f, 0.0f, 0.0f};                                  // synthetic: world-fixed
+                        const int total = wp_n + kSyn;
+                        if (wp_prev_ok) {
+                            const float d_aim   = std::fabs(wrap180(aim  - wp_prev_aim));
+                            const float d_body  = std::fabs(wrap180(body - wp_prev_body));
+                            const float d_pitch = std::fabs(pitch - wp_prev_pitch);
+                            if (d_body > 0.15f) {
+                                ++wp_stickturn;                                // the body moved: not this test
+                                wp_win_bad = true;
+                            } else if (d_aim < 0.1f && d_pitch < 0.1f && wp_wrist >= 0) {
+                                // NET displacement against a reference refreshed every 32 still
+                                // ticks (~1 s): a 30 cm push in under a second reads ~30 cm, while
+                                // per-tick jitter (0.2 cm/tick, random) barely accumulates. The
+                                // first version summed per-tick path and jitter alone cleared the
+                                // 20 cm bar in 100 ticks -- a control that could not fail.
+                                if (wp_still_n == 0 || wp_push_ref_age >= 32) {
+                                    wp_push_ref = rel[wp_wrist];
+                                    wp_push_ref_age = 0;
+                                }
+                                ++wp_push_ref_age;
+                                const float dx = rel[wp_wrist].x - wp_push_ref.x;
+                                const float dy = rel[wp_wrist].y - wp_push_ref.y;
+                                const float dz = rel[wp_wrist].z - wp_push_ref.z;
+                                const double net = std::sqrt(dx * dx + dy * dy + dz * dz);   // (std::max is shadowed by the Windows macro here)
+                                if (net > wp_push) wp_push = net;
+                                ++wp_still_n;
+                            }
+                        }
+                        // DOES THE RENDERED HAND SIT ON THE CONTROLLER? The controller's displacement
+                        // from the camera, in world cm, built exactly as the UeRig route builds it
+                        // (standing origin as the body anchor, recentre offset, VR->UE swizzle, the
+                        // turn/calibration yaw), at the rig scale the UeRig route was calibrated at and
+                        // at 100 cm/m -- against the rendered wrist. The palette places the wrist
+                        // 8 cm behind and 2 cm below the grip, so ~8 cm is "on the controller".
+                        if (wp_wrist >= 0) {
+                            const auto ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                                  : API::VR::get_right_controller_index();
+                            Vec3 gpos{}; Quat gq{};
+                            if (get_pose(ridx, &gpos, &gq, false)) {
+                                const auto so = API::VR::get_standing_origin();
+                                const Vec3 hand{gpos.x - so.x, gpos.y - so.y, gpos.z - so.z};
+                                Quat q_ro{0.0f, 0.0f, 0.0f, 1.0f};
+                                if (g_cfg.rig_view_yaw != 0.0f) {
+                                    const auto ro = API::VR::get_rotation_offset();
+                                    q_ro = Quat{ro.x, ro.y, ro.z, ro.w};
+                                    if (g_cfg.rig_view_yaw < 0.0f) q_ro = quat_conj(q_ro);
+                                }
+                                const Quat q_turn = rotator_to_quat(
+                                    0.0f, g_cfg.rig_turn * g_turn_offset.load() + calib_frame_yaw_use(), 0.0f);
+                                const Vec3 r = quat_rotate(q_ro, hand);
+                                const Vec3 c_rig = quat_rotate(q_turn, Vec3{-r.z * g_cfg.rig_scale, r.x * g_cfg.rig_scale, r.y * g_cfg.rig_scale});
+                                const Vec3 c_100 = quat_rotate(q_turn, Vec3{-r.z * 100.0f, r.x * 100.0f, r.y * 100.0f});
+                                const Vec3& w = rel[wp_wrist];
+                                wp_hc_sum    += std::sqrt((w.x - c_rig.x) * (w.x - c_rig.x) + (w.y - c_rig.y) * (w.y - c_rig.y) + (w.z - c_rig.z) * (w.z - c_rig.z));
+                                wp_hc_sum100 += std::sqrt((w.x - c_100.x) * (w.x - c_100.x) + (w.y - c_100.y) * (w.y - c_100.y) + (w.z - c_100.z) * (w.z - c_100.z));
+                                ++wp_hc_n;
+                            }
+                        }
+
+                        // RAW DUMP (paworldraw=N): the rendered joints and the palette's, tick by tick.
+                        if (g_cfg.pa_world_raw > 0 && wp_raw_n < (uint32_t)g_cfg.pa_world_raw &&
+                            wp_isho >= 0 && wp_iel >= 0 && wp_wrist >= 0) {
+                            ++wp_raw_n;
+                            float psh[3], pel[3], pwr[3];
+                            halo::palettearm_dbg_arm(psh, pel, pwr);
+                            const float k = 304.8f;                        // palette units -> cm
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] ARMWORLD raw #%u aim=%.2f p=%.2f | UE Sh=(%.1f,%.1f,%.1f) "
+                                "El=(%.1f,%.1f,%.1f) Wr=(%.1f,%.1f,%.1f) | PAL sh=(%.1f,%.1f,%.1f) el=(%.1f,%.1f,%.1f) "
+                                "wr=(%.1f,%.1f,%.1f) cm",
+                                wp_raw_n, aim, pitch,
+                                rel[wp_isho].x, rel[wp_isho].y, rel[wp_isho].z,
+                                rel[wp_iel].x,  rel[wp_iel].y,  rel[wp_iel].z,
+                                rel[wp_wrist].x, rel[wp_wrist].y, rel[wp_wrist].z,
+                                psh[0] * k, psh[1] * k, psh[2] * k, pel[0] * k, pel[1] * k, pel[2] * k,
+                                pwr[0] * k, pwr[1] * k, pwr[2] * k);
+                        }
+                        // ---- 8-TICK WINDOWS, not per-tick steps. The palette's correction lands one
+                        // tick AFTER the camera turn (two clocks), so scoring only the ticks where the
+                        // aim moved saw a body-locked joint step WITH the camera on the scored tick and
+                        // step back on the unscored one -- it read exactly like a camera-locked joint
+                        // (2026-09-16: the day 'translations do not render' was wrongly concluded from
+                        // it). Displacement across 8 ticks against the aim change across the same 8
+                        // ticks bounds the lag's share at 1/8; a window with a body move or with both
+                        // yaw and pitch moving is dropped.
+                        if (!wp_prev_ok || wp_win_n == 0) {
+                            for (int i = 0; i < total; ++i) wp_win_rel[i] = rel[i];
+                            wp_win_aim = aim; wp_win_pitch = pitch; wp_win_bad = false; wp_win_n = 0;
+                        }
+                        ++wp_win_n;
+                        if (wp_win_n >= 8) {
+                            const float D_aim   = std::fabs(wrap180(aim - wp_win_aim));
+                            const float D_pitch = std::fabs(pitch - wp_win_pitch);
+                            if (!wp_win_bad) {
+                                if (D_aim > 0.6f && D_pitch < 0.3f) {
+                                    const double da = (double)D_aim * 0.01745329252;
+                                    for (int i = 0; i < total; ++i) {
+                                        const float dx = rel[i].x - wp_win_rel[i].x;
+                                        const float dy = rel[i].y - wp_win_rel[i].y;
+                                        const float dz = rel[i].z - wp_win_rel[i].z;
+                                        wp_ypath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                        wp_yref[i]  += da * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y);
+                                    }
+                                    wp_yaw_n += 8;
+                                } else if (D_pitch > 0.6f && D_aim < 0.3f) {
+                                    const double dp = (double)D_pitch * 0.01745329252;
+                                    for (int i = 0; i < total; ++i) {
+                                        const float dx = rel[i].x - wp_win_rel[i].x;
+                                        const float dy = rel[i].y - wp_win_rel[i].y;
+                                        const float dz = rel[i].z - wp_win_rel[i].z;
+                                        wp_ppath[i] += std::sqrt(dx * dx + dy * dy + dz * dz);
+                                        // Pitch about the camera's LEFT axis: full radius from the
+                                        // camera. The synthetic aim-locked point follows the full aim
+                                        // (yaw and pitch), so it reads 1 here too.
+                                        wp_pref[i]  += dp * std::sqrt(rel[i].x * rel[i].x + rel[i].y * rel[i].y + rel[i].z * rel[i].z);
+                                    }
+                                    wp_pitch_n += 8;
+                                }
+                            }
+                            wp_win_n = 0;                                   // next tick opens a fresh window
+                        }
+                        for (int i = 0; i < total; ++i) wp_prev_rel[i] = rel[i];
+                        wp_prev_aim   = aim;
+                        wp_prev_body  = body;
+                        wp_prev_pitch = pitch;
+                        wp_prev_ok    = true;
+                    } else {
+                        wp_prev_ok = false;                                    // a failed read breaks the chain
+                    }
+
+                    // ---- Report on a COUNT, not a modulo (a stalled count must not repeat a line).
+                    const bool yaw_due   = (wp_yaw_n   >= wp_ynext);
+                    const bool pitch_due = (wp_pitch_n >= wp_pnext);
+                    if ((yaw_due || pitch_due) && wp_said < 60) {
+                        ++wp_said;
+                        if (yaw_due)   wp_ynext = wp_yaw_n   + 128;
+                        if (pitch_due) wp_pnext = wp_pitch_n + 128;
+                        const double* path = yaw_due ? wp_ypath : wp_ppath;
+                        const double* ref  = yaw_due ? wp_yref  : wp_pref;
+                        auto S = [&](int i) -> double { return (ref[i] > 1e-6) ? path[i] / ref[i] : -1.0; };
+                        const double s_lock = S(wp_n), s_fix = S(wp_n + 1);
+                        const bool metric_ok = std::fabs(s_lock - 1.0) < 0.05 && s_fix >= 0.0 && s_fix < 0.02;
+                        const bool ik_seen   = wp_push > 20.0;
+                        std::string bl;
+                        char tmp[96];
+                        for (int i = 0; i < wp_n; ++i) {
+                            std::snprintf(tmp, sizeof(tmp), " %ls=%.2f", wp_name[i].c_str(), S(i));
+                            bl += tmp;
+                        }
+                        float psx = 0.0f, psy = 0.0f, psz = 0.0f;
+                        halo::palettearm_dbg_shoulder(&psx, &psy, &psz);
+                        Vec3 mloc{}, mrot{};
+                        const bool have_m = call_ret_vec3(rc, L"K2_GetComponentLocation", &mloc) &&
+                                            call_ret_vec3(rc, L"K2_GetComponentRotation", &mrot);
+                        API::get()->log_info(
+                            "[Halo-CampE-UEVR] ARMWORLD %s patorsoframe=%d meshdown=%d | METRIC %s (aim-locked=%.2f "
+                            "want 1, world-fixed=%.2f want 0) | IK-VISIBLE %s (max net wrist push %.1f cm over %u still "
+                            "ticks, want >20) | S:%s | over %u ticks, stickturn=%u | PALSH=(%.4f,%.4f,%.4f) "
+                            "mesh-cam=(%.1f,%.1f,%.1f) meshrot=(p%.1f,y%.1f,r%.1f) aim=(y%.1f,p%.1f) body=%.1f "
+                            "| HAND-CTRL mean dist %.1f cm at rigscale, %.1f cm at 100/m (want ~8)",
+                            yaw_due ? "YAW" : "PITCH", g_cfg.pa_torso_frame,
+                            (int)g_mesh_standdown.load(std::memory_order_relaxed),
+                            metric_ok ? "ok" : "FAILED", s_lock, s_fix,
+                            ik_seen ? "ok" : "NOT YET -- push the gun forward and back", wp_push, wp_still_n,
+                            bl.c_str(), yaw_due ? wp_yaw_n : wp_pitch_n, wp_stickturn,
+                            psx, psy, psz,
+                            have_m ? mloc.x - cam.x : 0.0f, have_m ? mloc.y - cam.y : 0.0f, have_m ? mloc.z - cam.z : 0.0f,
+                            have_m ? mrot.x : 0.0f, have_m ? mrot.y : 0.0f, have_m ? mrot.z : 0.0f,
+                            aim, pitch, body,
+                            wp_hc_n ? wp_hc_sum / wp_hc_n : -1.0, wp_hc_n ? wp_hc_sum100 / wp_hc_n : -1.0);
+                    }
+                }
             }
         }
         perf_hitch_report();
@@ -11711,8 +12373,84 @@ public:
             if (!logged) { logged = true;
                 API::get()->log_info("[Halo-CampE-UEVR] stereo view index observed = %d", index); }
         }
+        // ---- PALETTE ROUTE: HOLD THE ARM MESH IN THE BODY FRAME (pameshbody; see Config.hpp).
+        // Render rate, same call the UeRig re-apply below makes. Rotation only: the relative
+        // location stays zero, so the mesh still rides the camera's POSITION. The body frame is
+        // exactly what the lock below hands the eyes: level, yaw = locked base + turn offset.
+        {
+            static bool s_body_prev = false;
+            const bool want = g_mesh_standdown.load(std::memory_order_relaxed) && g_cfg.pa_mesh_body
+                              && g_cfg.view_lock && rotation != nullptr
+                              && !g_in_menu.load() && !g_stick_mode.load() && g_lock_primed.load();
+            auto* brig = reinterpret_cast<API::UObject*>(g_rig_component.load());
+            if (want && brig != nullptr) {
+                const float body_yaw = g_locked_view_yaw.load() + g_turn_offset.load();
+                rig_set_world_rotation(brig, 0.0, (double)body_yaw, 0.0);
+                if (g_cfg.shell_drive) {
+                    if (auto* sh = reinterpret_cast<API::UObject*>(g_shell_component.load()))
+                        rig_set_world_rotation(sh, 0.0, (double)body_yaw, 0.0);
+                }
+                ::halo::g_mesh_body_active.store(true, std::memory_order_relaxed);
+                // ...AND THE RIG FRAME, AT RENDER RATE, for anything anchored to the rig. The scope's
+                // compositor pane decomposes its target against the rig component's transform as
+                // read on the tick (Scope.cpp), and rebuilds it here against a fresh one -- the
+                // two-clocks rule. The UeRig re-apply below is what publishes that fresh frame, and
+                // it stands down with the mesh, which left the pane with NO render-rate anchor under
+                // this route (it also switches head-relative off for rig-anchored slots), so it
+                // trailed every step and turn. The component IS where we just put it: the parent's
+                // location, level, at the body yaw. One reflected call, same as the path it replaces.
+                if (g_cfg.rig_render) {
+                    Vec3 rloc{};
+                    if (g_palrig_off_valid.load(std::memory_order_acquire) && g_rigw_valid.load() &&
+                        g_rig_parent != nullptr && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &rloc) &&
+                        std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
+                        // THE VIRTUAL RIG FRAME (see g_palrig_off_*): rig mode's root, recomposed
+                        // against the LIVE parent, with the gun's rotation -- the same frame the tick
+                        // handed the scope, so the quad's re-anchor cancels the GUN's motion between
+                        // tick and render as it does in rig mode. The body frame published below
+                        // cancels only the turn, and the pane trailed every pitch and roll.
+                        const Quat qr{g_rigw_x.load(), g_rigw_y.load(), g_rigw_z.load(), g_rigw_w.load()};
+                        const Vec3 root{rloc.x + g_palrig_off_x.load(std::memory_order_relaxed),
+                                        rloc.y + g_palrig_off_y.load(std::memory_order_relaxed),
+                                        rloc.z + g_palrig_off_z.load(std::memory_order_relaxed)};
+                        halo::xrlayer_note_rig(root,
+                                               quat_rotate(qr, Vec3{1.0f, 0.0f, 0.0f}),
+                                               quat_rotate(qr, Vec3{0.0f, 1.0f, 0.0f}),
+                                               quat_rotate(qr, Vec3{0.0f, 0.0f, 1.0f}));
+                    } else if (call_ret_vec3(brig, L"K2_GetComponentLocation", &rloc) &&
+                               std::isfinite(rloc.x) && std::isfinite(rloc.y) && std::isfinite(rloc.z)) {
+                        const float yr = body_yaw * DEG2RAD;
+                        const float cyw = std::cos(yr), syw = std::sin(yr);
+                        halo::xrlayer_note_rig(rloc, Vec3{cyw, syw, 0.0f}, Vec3{-syw, cyw, 0.0f},
+                                               Vec3{0.0f, 0.0f, 1.0f});
+                    }
+                }
+                if (!s_body_prev) {
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MESH BODY FRAME: mesh held at "
+                                         "(pitch 0, yaw %.2f, roll 0) at render rate; the palette "
+                                         "solves with no lock gap and no camera pitch", body_yaw);
+                }
+                s_body_prev = true;
+            } else {
+                ::halo::g_mesh_body_active.store(false, std::memory_order_relaxed);
+                if (s_body_prev && brig != nullptr && g_rig_parent != nullptr && !g_stick_mode.load()) {
+                    Vec3 prot{};                                   // hand the mesh back to its parent
+                    if (call_ret_vec3(g_rig_parent, L"K2_GetComponentRotation", &prot)) {
+                        rig_set_world_rotation(brig, (double)prot.x, (double)prot.y, (double)prot.z);
+                        if (g_cfg.shell_drive) {
+                            if (auto* sh = reinterpret_cast<API::UObject*>(g_shell_component.load()))
+                                rig_set_world_rotation(sh, (double)prot.x, (double)prot.y, (double)prot.z);
+                        }
+                    }
+                    API::get()->log_info("[Halo-CampE-UEVR] PALETTE MESH BODY FRAME released: the "
+                                         "mesh rides the camera again");
+                }
+                s_body_prev = false;
+            }
+        }
         if (g_cfg.rig_render && g_cfg.attach_mode == 0
-            && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()) {
+            && g_rigw_valid.load() && !g_in_menu.load() && !g_stick_mode.load()
+            && !g_mesh_standdown.load(std::memory_order_relaxed)) {   // palette route: the mesh is the game's
             auto* rig = reinterpret_cast<API::UObject*>(g_rig_component.load());
             auto* par = g_rig_parent;
             if (rig != nullptr && par != nullptr) {
@@ -12956,6 +13694,19 @@ public:
                 --s_pau_pulse;
                 state->dwPacketNumber++;
             }
+        }
+
+        // ---- ...and what the PALETTE ARMS need to know about it: melee, swap and throw as the game
+        // is about to see them, gesture-injected or thumbed. The animation preferences key off these
+        // because a butt stroke and a reload cannot be told apart from the pose.
+        {
+            const float mlx = (float)state->Gamepad.sThumbLX / 32767.0f, mly = (float)state->Gamepad.sThumbLY / 32767.0f;
+            halo::palettearm_note_pad(g_cfg.melee_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.melee_mask) != 0,
+                                      g_cfg.holster_swap_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.holster_swap_mask) != 0,
+                                      g_cfg.grenade_action != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.grenade_action) != 0,
+                                      g_cfg.pa_sprint_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.pa_sprint_mask) != 0,
+                                      mlx * mlx + mly * mly > 0.25f,
+                                      g_cfg.reload_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.reload_mask) != 0);
         }
 
         // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the

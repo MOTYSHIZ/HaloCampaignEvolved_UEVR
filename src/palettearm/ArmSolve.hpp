@@ -56,6 +56,28 @@ struct ArmTuning {
     // source instead of filtering the symptom. A filter here would add lag to the hand for a problem
     // that is not noise.
     float pole_body_fraction = 0.75f;
+
+    // WHICH WAY the body-anchored pole points. OFF: torso up (the port's original, which bends the
+    // elbow UPWARD -- a raised chicken-wing). ON: pancreations MCC VR's direction, OUT and DOWN in
+    // the torso frame -- left*outSign - pole_down*up, outSign +1 for the left arm and -1 for the
+    // right -- which is where a held-rifle elbow actually hangs (game.cpp:4618-4628).
+    // DEFAULT ON (2026-09-16): with the pole pointing up, the raw probe dump put the rendered elbow
+    // 18 cm ABOVE the shoulder-to-wrist midpoint on a pistol held at chest height -- the raised
+    // chicken-wing. Out-and-down is where a held-weapon elbow hangs, and it is what MCC VR ships.
+    bool  pole_out_down = true;
+    float pole_down     = 0.6f;
+
+    // OVER-REACH: stretch instead of clamping. 1.0 = off (clamp at the reach sphere, hand snapped
+    // the rest of the way so the forearm end stops short of the hand). pancreations use 1.8:
+    // both bone lengths scale by k = min(dist/reach, stretch_max) and the elbow subtree is moved
+    // onto the stretched elbow, so skinning stretches the mesh with the bones instead of the hand
+    // visibly detaching from the forearm. Applied AFTER the clavicle assist.
+    // BOTH bones really lengthen (2026-09-17): every helper node between two joints slides out by
+    // its station along the bone, and the hand is carried to the stretched forearm's end.
+    float stretch_max = 1.0f;
+    // How much of the extension the target asks for the BONES take; the rest still opens at the
+    // wrist when the hand is snapped onto the controller. 1 = all of it, up to stretch_max.
+    float stretch_share = 1.0f;
 };
 
 // ---- PRIMITIVES --------------------------------------------------------------------------------
@@ -162,5 +184,224 @@ struct HandCurl {
 // Derived rather than authored ON PURPOSE: it works for either hand and every shipped weapon with
 // no hard-coded Euler axes, which is what makes it survive a weapon we have never tested.
 bool apply_hand_openness(BlamMatrix4x3* palette, const ArmNodes& arm, const HandCurl& curl);
+
+// ---- HAND SHAPES FROM THE GAME'S OWN ANIMATIONS ------------------------------------------------
+//
+// Three key poses recorded off the stock first-person palette: the STRETCHED open hand at the
+// release of the grenade throw, the RELAXED hand of the weapon-draw animation, and the FIST of the
+// Magnum's off-hand punch. Stored as parent-relative joint
+// rotations (joint 0 relative to the wrist). This rig mirrors its hands by BEHAVIOUR -- every bone
+// offset of the left hand is the exact negative of the right's, measured -- so one set of local
+// rotations curls either hand, and the bone OFFSETS are read off the palette in hand rather than
+// stored, which keeps every finger bone its authored length.
+//
+//   curl      -1 = the stretched open hand .. 0 = the relaxed hand .. 1 = the fist
+//   authored  1 = leave the fingers exactly as the game posed them .. 0 = replace them entirely
+//
+// Rotations only: the knuckles stay where the palm puts them. Call AFTER the wrist is placed.
+bool apply_hand_shape(BlamMatrix4x3* palette, const ArmNodes& arm, float curl, float authored);
+
+// A rotation part of the way from `a` to `b`, along the SHORT ARC.
+//
+// blend_basis() is a normalised lerp, and says itself that it is only meaningful for nearby
+// orientations: with the two forwards opposed it has no forward left to normalise at the half-way
+// mark and returns something that is not a rotation. That was harmless while it only ever ramped a
+// hand onto a forestock it was already reaching for; a FREE hand handed to a reload animation can
+// start from any orientation at all. Never returns a non-rotation: degenerate inputs snap to the
+// nearer end.
+Mat3 slerp_basis(const Mat3& a, const Mat3& b, float weight);
+
+// ---- FOREARM TWIST --------------------------------------------------------------------------
+//
+// The solve turns the HAND to the controller and leaves the forearm exactly as the elbow carries
+// it, so every degree of controller roll is taken at the wrist joint: "the hand can twist
+// unnaturally in its socket". This rig has twist bones for exactly that -- two per forearm, on the
+// bone's axis a third and two thirds of the way down -- and the game's own animations drive them
+// at 0.31 and 0.72 of the hand's twist (see twist_share in the .cpp for the measurement). This
+// spreads the roll the SOLVE ADDED over them by the same rule.
+//
+// THE BASELINE IS THE AUTHORED POSE: capture_forearm_stock() before the arm is touched, and a hand
+// that ends up in its authored relation to the forearm adds nothing, whatever that relation is.
+// `gain` scales the game's own distribution: 0 = the forearm as the elbow carries it (the behaviour
+// to date), 1 = what the rig's animations would do for this much roll, 2 = the cap.
+// `plate_gain` is the ARMOUR's share: the off-axis nodes hanging off the elbow (gauntlet plates),
+// which the game never rolls. 1 = a plate turns with the forearm at its own station along the bone,
+// 0 = rigid with the elbow as the game has it.
+// `bone_gain` is the ELBOW NODE's own share -- whatever is skinned to the forearm bone proper. 1 = it
+// rolls as much as the near twist bone, 0 = not at all (the game's way, and ours until 2026-09-17).
+//
+// `thumb_up_hint` is any direction that reads as "up for a thumb" in the palette's frame (torso up,
+// leaning back); it only decides WHERE the roll's 180-degree seam sits, never how much is applied.
+struct ForearmStock {
+    Mat3 elbow_basis{};
+    Mat3 wrist_basis{};
+    Vec3 axis_local{};       // elbow -> wrist, unit, in the elbow's own frame
+    bool valid{false};
+};
+struct ForearmTwistResult {
+    float hand_deg{};        // the roll the solve added at the wrist, about the forearm
+    float neutral_deg{};     // the authored hand's roll short of thumb-up
+    float follow_deg{};      // what the forearm is asked to follow (before gain and per-bone share)
+    int   nodes{};           // twist bones turned
+    int   plates{};          // armour nodes carried round with them
+    float bone_deg{};        // how far the elbow node itself was rolled
+};
+ForearmStock capture_forearm_stock(const BlamMatrix4x3* palette, const ArmNodes& arm);
+bool distribute_forearm_twist(BlamMatrix4x3* palette, const ArmNodes& arm, const ForearmStock& stock,
+                              const Vec3& thumb_up_hint, float gain, float plate_gain, float bone_gain,
+                              ForearmTwistResult* result = nullptr);
+
+// ---- RECOIL PASS-THROUGH ----------------------------------------------------------------------
+//
+// A carry that lands the weapon's authored marker ON a target cancels every translation the game
+// animates into that marker -- including the straight-back kick that is ALL the recoil some weapons
+// have (the Assault Rifle: 2-4 cm back per shot, under a degree of rotation). This watches the
+// STOCK marker, learns where it rests, and hands back the part of its displacement that is a kick,
+// in the stock frame, for the carry to leave in.
+//
+//   gain   0 = cancel everything (the behaviour to date) .. 1 = the authored kick
+//   max_m  the most that is ever let through; displacement beyond it fades out by twice this
+//   learn  false on a frame that must not teach the rest pose (a mirror bank, a calibration hold)
+struct RecoilPass {
+    bool  have_ref{false};
+    Vec3  ref_pos{};
+    Mat3  ref_basis{};
+    bool  have_prev{false};
+    Vec3  prev_pos{};
+    Mat3  prev_basis{};
+    int   stable{0};
+    int   latches{0};            // times a rest pose was first learned (diagnostics)
+    bool  remembered{false};     // the rest pose was adopted, not learned: see adopt()
+    float last_back_m{0.0f};     // what the last update let through, metres (diagnostics)
+    float last_moved_m{0.0f};    // how far the marker is from its rest pose, metres...
+    float last_turned_deg{0.0f}; // ...and how far it has turned (both 0 until a rest pose is known)
+
+    void reset();
+    // Start from a rest pose this model taught EARLIER (the caller keeps one per weapon model):
+    // known at once, so everything measured from rest works from the first frame, but held loosely
+    // -- the first learn re-anchors it in a third of a second whatever the distance, since an
+    // idle sway can leave two learns of the same weapon a few centimetres apart.
+    void adopt(const Vec3& pos, const Mat3& basis);
+    Vec3 update(const Vec3& marker_pos, const Mat3& marker_basis, float gain, float max_m, bool learn);
+    // Known, holding still, and where it was learned: the only state rest RELATIONS are learned in.
+    bool at_rest() const;
+};
+
+// ---- REST RELATIONS, THE ACTION WATCH, THE MELEE GATE ----------------------------------------
+//
+// Where one stock node sits in the STOCK weapon marker's frame while the gun is at rest: learned
+// the same way RecoilPass learns the marker's own rest pose (still for a third of a second; a
+// relation far from the known one has to hold for 1.5 s), and only while RecoilPass::at_rest().
+// `dev_*` say how far the node is from that relation as of the last learn().
+struct RestRelation {
+    bool  have{false};
+    Vec3  pos{};
+    Mat3  basis{};
+    bool  have_prev{false};
+    Vec3  prev_pos{};
+    Mat3  prev_basis{};
+    int   stable{0};
+    bool  remembered{false};     // adopted from an earlier session with this model: see adopt()
+    float dev_m{0.0f};
+    float dev_deg{0.0f};
+
+    void reset();
+    // Start from a relation learned earlier for this model (as RecoilPass::adopt): known at once,
+    // re-anchored by the first learn in a third of a second whatever the distance.
+    void adopt(const Vec3& p, const Mat3& b);
+    void learn(bool gun_at_rest, const Vec3& p, const Mat3& b);
+};
+
+// While the support hand grips the gun it rides the rigid transform that carries the gun, so it
+// performs whatever the game animates -- the magazine swap, the pump. A FREE support hand follows
+// its controller, and then a reload swaps a magazine with nobody holding it. This says WHEN the
+// game is playing such an action, from the stock palette alone (there is no reload event to
+// subscribe to): the authored off hand moving RELATIVE TO THE GUN from its rest relation. The
+// result is an eased 0..1 weight for the caller to hand the wrist to the animation by, exactly as
+// it does for a two-hand hold. The gun leaving its own rest pose is NOT an action here -- that is
+// the EquipGate's business.
+//
+// `*_age_s` = seconds since that mask was last seen going to the game (negative = never): they say
+// which action a hand-over is, for the RETURN CUT (see the .cpp) -- a melee lets go on its first
+// sustained approach after the peak, a reload (and anything not asked for) only once the gun is
+// nearly home too, a throw `grenade_trim_s` before its authored end. The weight itself survives a
+// reset, so nothing pops.
+constexpr float kThrowSeconds = 1.35f;      // the authored throw (1.37 / 1.40 measured on Magnum / rifle)
+
+struct ActionWatch {
+    enum class Kind : std::uint8_t { Other, Melee, Reload, Grenade };
+    RestRelation hand;           // the support wrist in the marker's frame
+    float weight{0.0f};
+    float last_target{0.0f};     // diagnostics, as of the last update
+    bool  engaged{false};        // a hand-over is in progress (weight above zero)
+    Kind  kind{Kind::Other};     // ...and what asked for it
+    float since_onset_s{0.0f};
+    float peak_m{0.0f};          // the furthest the off hand has been from its hold this time
+    int   descending{0};         // consecutive frames it has been coming home
+    bool  home_cut{false};       // let go for the return; stays so until the authored hand is home
+
+    void  reset();
+    // `hand_*` = the STOCK support wrist expressed in the STOCK marker's frame. `gate` scales every
+    // threshold (1 = as measured). Live frames only.
+    float update(const RecoilPass& gun, const Vec3& hand_pos, const Mat3& hand_basis, float gate, float dt,
+                 float melee_age_s = -1.0f, float reload_age_s = -1.0f, float grenade_age_s = -1.0f,
+                 float grenade_trim_s = 0.0f);
+};
+
+// IS AN EQUIP ANIMATION PLAYING? The put-away (the gun leaving rest within a second of a swap being
+// asked for) and the draw (from the weapon model changing until the new weapon rests, 3 s at most).
+// `other_age_s` = seconds since ANY OTHER action was asked for (the reload, melee or throw mask;
+// negative = never): a press that arrives after the gate opened ends it, because the game does not
+// take one during a swap -- a reload straight off the draw is a reload, and the draw is over.
+struct EquipGate {
+    bool  active{false};
+    bool  draw{false};
+    float since_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float swap_age_s, bool weapon_changed, const RecoilPass& gun, float dt,
+                 float other_age_s = -1.0f);
+};
+
+// A HAND'S REST SHAPE: every wrist-subtree node's relation to the wrist. Captured off the stock
+// palette while the gun is at rest, and blended back in when an animation is being held off a
+// hand that is otherwise placed rigidly from the live pose -- otherwise "the fingers still animate".
+struct RestNode { Vec3 pos{}; Mat3 basis{}; };
+bool capture_hand_rest(const BlamMatrix4x3* palette, const ArmNodes& arm, RestNode* out, std::size_t out_count);
+bool blend_hand_to_rest(BlamMatrix4x3* palette, const ArmNodes& arm, const RestNode* rest, std::size_t rest_count,
+                        float weight);
+
+// IS A MELEE PLAYING? Which animation an action is cannot be read off the pose -- a butt stroke and
+// a reload overlap in every magnitude -- but a melee is always ASKED for: the swing gesture presses
+// the melee button, and so does a thumb. So this is keyed off the press (`press_age_s`: seconds
+// since the melee mask was last seen going to the game, negative = never), which also leads the
+// animation by a few frames, and stays up until the pose is back at rest (4 s at most) -- or until
+// another action is asked for (`other_age_s`: the reload or throw mask, negative = never), since a
+// reload pressed after the swing is a reload, and the melee's business is over.
+struct MeleeGate {
+    bool  active{false};
+    float since_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float press_age_s, const RecoilPass& gun, float hand_dev_m, float hand_dev_deg, float dt,
+                 float other_age_s = -1.0f);
+};
+
+// IS A SPRINT PLAYING? The sprint animation holds the gun well away from rest for the whole sprint,
+// which is also what a put-away or a melee looks like -- so it counts only with the stick pushed
+// (`move_age_s`: seconds since the movement stick was last past half travel) and a sprint asked for
+// within the last three seconds (`button_age_s`: the sprint mask, a hold or a toggle). Ends when the
+// stick or the pose lets go, or the rest pose is lost. The caller must stop teaching rest poses
+// while this is active, or the sprint pose becomes "rest" after a second and a half.
+struct SprintWatch {
+    bool  active{false};
+    float quiet_s{0.0f};
+    float weight{0.0f};          // eased 0..1
+
+    void  reset();
+    float update(float button_age_s, float move_age_s, const RecoilPass& gun, float dt);
+};
 
 } // namespace halo::palettearm
