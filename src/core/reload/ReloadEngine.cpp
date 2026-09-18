@@ -81,6 +81,9 @@ void wpn_mem_clear(const std::string& key) { if (auto* m = wpn_mem_find(key)) *m
 bool s_restoring_mag_out = false;   // set_state must not drop a second magazine on a restore
 static float            s_grab_y = 0.0f;         // left-hand height (VR y) at the belt grab
 bool s_reload_on = true;   // one release on the off edge (at a boot with reloadvr 0 there is nothing to release)
+// A reload tap made while a reset's window held the tick, dropped at the next press test. Declared
+// here because reload_release_windows (the reload state fragment) sets it and the press test below reads it.
+bool s_reset_drop_tap = false;
 
 // ================================================================ THE SNAPSHOT (zonesnapshot)
 //
@@ -312,9 +315,6 @@ bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head
     }
     return have_left;
 }
-
-// A reload tap made while a reset's window held the tick, dropped at the next press test.
-bool s_reset_drop_tap = false;
 
 bool reload_engine_press_ignored() {
     ++s_rt_taps;   // reloadshotgunlog: every tap the engine saw, ignored or not
@@ -704,19 +704,7 @@ void reload_engine_gesture_reset() {
     // reload press on its way to the game, the FirstPersonState hold, the animation rate clamp, the
     // Wwise mute window and the first-person pose hold. Dying mid-reload left all five running on
     // the respawned gun. reloadresetholds 0 restores the old behaviour.
-    if (g_cfg.reload_reset_holds) {
-        g_reload_hold_until.store(0, std::memory_order_relaxed);
-        s_sl_press_at = 0;
-        s_sh_until = 0; s_sh_inst = TrackedObject{};
-        if (s_anim_rate_until != 0) s_anim_rate_until = 1;   // the next tick hands rate and pause back
-        if (s_akm_until != 0) ak_id_mute_end();
-        reload_pose_hold(0);
-        // A tap made while the window held the tick belongs to the body that died: the first frame
-        // control comes back must not fire it.
-        s_reset_drop_tap = true;
-        if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
-            API::get()->log_info("[Halo-CampE-UEVR] RELOAD reset released the press, the state hold, the rate clamp, the sound mute and the pose hold");
-    }
+    reload_release_windows("gesture reset");
 }
 
 void reload_engine_ticks(bool poses_ok, const Vec3& hpos) {

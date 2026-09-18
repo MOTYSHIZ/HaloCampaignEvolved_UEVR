@@ -156,6 +156,26 @@ void rs_save(const char* why, bool quiet_if_same) {
     *r = now;
     if (!(same && quiet_if_same)) rs_log("save", why, now);
 }
+// ---- THE FIVE OPEN WINDOWS. A press on its way to the game, the FirstPersonState hold, the
+// animation rate clamp, the Wwise mute window and the first-person pose hold. None of them is a
+// record and none is cleared by forgetting one: each is a timer already running against a weapon
+// and a body, and both can go away underneath it. Extracted here so the two edges that end a
+// body -- the gesture reset (which a death reaches through stick mode) and the level load -- close
+// exactly the same five, rather than one of them depending on the other happening to fire.
+void reload_release_windows(const char* why) {
+    if (!g_cfg.reload_reset_holds) return;
+    g_reload_hold_until.store(0, std::memory_order_relaxed);
+    s_sl_press_at = 0;
+    s_sh_until = 0; s_sh_inst = TrackedObject{};
+    if (s_anim_rate_until != 0) s_anim_rate_until = 1;   // the next tick hands rate and pause back
+    if (s_akm_until != 0) ak_id_mute_end();
+    reload_pose_hold(0);
+    // A tap made while the window held the tick belongs to the body that is gone: the first frame
+    // control comes back must not fire it.
+    s_reset_drop_tap = true;
+    if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
+        API::get()->log_info("[Halo-CampE-UEVR] RELOAD released the press, the state hold, the rate clamp, the sound mute and the pose hold (%s)", why);
+}
 // The live state back to "nothing in progress" for the weapon now in hand.
 void rs_live_fresh(const char* why) {
     if (s_reload != ReloadState::Idle) set_state(ReloadState::Idle, why);
@@ -190,6 +210,23 @@ void reload_state_track() {
         if (pc != s_rs_pc) {
             if (s_rs_pc != nullptr) {
                 ++s_rs_epoch;
+                // THE LIVE STATE GOES WITH THE BODY, WHATEVER reloadstatelevel SAYS ABOUT THE
+                // RECORDS. Forgetting records is his key's business; the locks and the five open
+                // windows belong to a weapon on a PlayerController that no longer exists, and
+                // this edge used to leave every one of them running on the hope that stick mode
+                // would fire a gesture reset on the same load. The state is saved to its record
+                // first (so reloadstatelevel=1 still restores it), then the live side is cleared
+                // exactly as the reset edge clears it.
+                {
+                    const char* why = "level change: the body and its weapon are gone";
+                    if (!s_rs_live_id.empty() || !s_rs_live_type.empty()) {
+                        rs_save(why, false);
+                        s_rs_live_id.clear(); s_rs_live_type.clear(); s_rs_live_datum = -1;
+                        s_rs_after_reset = true;
+                    }
+                    rs_live_fresh(why);
+                    reload_release_windows(why);
+                }
                 if (g_cfg.reload_state_level == 0) rs_forget_all("level change, reloadstatelevel 0");
                 s_rs_carry[0] = s_rs_recent[0]; s_rs_carry[1] = s_rs_recent[1];
                 s_rs_carry_until = nowt + ms_to_ticks(120000);
