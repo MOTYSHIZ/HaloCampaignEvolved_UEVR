@@ -48,7 +48,6 @@ std::atomic<bool>  g_hand_blam_valid{false};
 std::atomic<float> g_throw_blam_x{0.0f}, g_throw_blam_y{1.0f}, g_throw_blam_z{0.0f};
 std::atomic<bool>  g_throw_blam_valid{false};
 
-uint32_t s_mk_fails = 0;   // empty surveys in a row: the sweep backs off (120 ticks -> 1200)
 
 }  // namespace
 
@@ -303,14 +302,6 @@ void holsterpollthrow_holster_reset() {
     // grenade the instant play resumes.
     g_pollthrow_mask.store(0, std::memory_order_relaxed);
     g_pollthrow_fired.store(false, std::memory_order_relaxed);
-}
-
-unsigned holsterpollthrow_mesh_sweep_period() {
-    return (s_mk_fails < 5 || !g_cfg.holster_poll_throw) ? 120u : 1200u;
-}
-
-void holsterpollthrow_mesh_swept(const void* mf) {
-        if (mf == nullptr) ++s_mk_fails; else s_mk_fails = 0;   // a level with no grenade mesh: one sweep per ~40 s, not per 4 s
 }
 
 void holsterpollthrow_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
@@ -664,8 +655,6 @@ constinit const FeatureHooks kHolsterPollThrowHooks{
     .xinput_note_buttons        = &holster_note_buttons,
     .game_tick_after_blam_aim   = &holsterpollthrow_game_tick_after_blam_aim,
     .holster_reset              = &holsterpollthrow_holster_reset,
-    .holster_mesh_sweep_period  = &holsterpollthrow_mesh_sweep_period,
-    .holster_mesh_swept         = &holsterpollthrow_mesh_swept,
     .holster_before_release     = &holsterpollthrow_before_release,
     .sim_unit_state_grenades    = &holsterpollthrow_unit_state_grenades,
     .sim_unit_state_after_radar = &holsterpollthrow_unit_state_after_radar,

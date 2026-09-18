@@ -43,6 +43,20 @@ void markers_render_place();                          // the render pass (stereo
 // every room->world placed against the frame (SVC_MARKER_ANCHOR).
 void marker_camera_publish();
 
+// ---- THE MARKER MESH SWEEP'S BACKOFF, a CORE guard because it guards the AUTHOR'S sweep and
+// serves whichever consumer asked for a marker. His spawn gate re-runs resolve_grenade_meshes()
+// every 120 ticks until every wanted marker exists, and that walk is the whole ~290k object array
+// (65-100 ms, measured by the sweep itself). In a level with no grenade mesh at all, and with
+// holstermarkers=2 asking for the pouches unconditionally, nothing ever satisfies the gate, so the
+// walk repeats for the whole level with no ceiling. Five empty sweeps in a row and the period goes
+// to 1200 ticks; one that finds a mesh resets it.
+//
+// It lived inside holsterpollthrow, whose own master key switched the ceiling off, which meant the
+// only configuration that needs the ceiling -- his markers on, our throw feature off -- was the one
+// configuration that did not get it.
+unsigned marker_sweep_period();              // ticks between the author's mesh sweeps
+void     marker_sweep_result(const void* mf);   // null = the sweep found no mesh
+
 // The richer faces the vehicle wheel uses: name-list spawn with per-axis scale (a squashed
 // sphere reads as a disc), placement with orientation, and the hull-frame transforms that make
 // a point bolted to the vehicle mean the same thing to the ring and to the grab zone.

@@ -340,12 +340,19 @@ void features_holster_reset() {
 }
 
 unsigned features_holster_mesh_sweep_period() {
+    // A feature may lengthen the period, never shorten it below the core backoff: the backoff
+    // guards the author's ~290k walk and must hold whatever is switched on (core/MarkerFaces).
+    unsigned period = marker_sweep_period();
     for (const FeatureHooks* f : kFeatureList)
-        if (f->holster_mesh_sweep_period != nullptr) return f->holster_mesh_sweep_period();
-    return 120u;
+        if (f->holster_mesh_sweep_period != nullptr) {
+            const unsigned p = f->holster_mesh_sweep_period();
+            if (p > period) period = p;
+        }
+    return period;
 }
 
 void features_holster_mesh_swept(const void* mf) {
+    marker_sweep_result(mf);
     for (const FeatureHooks* f : kFeatureList)
         if (f->holster_mesh_swept != nullptr) f->holster_mesh_swept(mf);
 }

@@ -74,6 +74,11 @@ void marker_tint(API::UObject* comp, const char* rgb) {
     }
 }
 Vec3 holster_room_to_world_at(const Vec3& room, const Vec3& hmd_room, const Vec3& cam) { return room_to_world_at(room, hmd_room, cam); }
+
+// The mesh sweep's backoff (see the header). No feature gate: it guards the author's own walk.
+namespace { uint32_t s_mk_fails = 0; }   // empty surveys in a row
+unsigned marker_sweep_period() { return (s_mk_fails < 5) ? 120u : 1200u; }
+void marker_sweep_result(const void* mf) { if (mf == nullptr) ++s_mk_fails; else s_mk_fails = 0; }
 // The inverse: UE world cm -> room metres, same yaw and swizzle undone.
 Vec3 holster_world_to_room_at(const Vec3& world, const Vec3& hmd_room, const Vec3& cam) {
     Vec3 anchor = hmd_room;
