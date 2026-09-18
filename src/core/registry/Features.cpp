@@ -433,6 +433,16 @@ void features_apply() {
     //   Off-hand melee is a setting of melee by swinging.
     if (!g_cfg.melee_swing) g_cfg.melee_left = false;
 
+    // THE FORK'S RELOAD EVIDENCE ANSWERS TO EITHER LOG SWITCH. About forty fork lines moved from
+    // the author's reloadlog onto the fork's own reloadvrlog when the manual reload became a
+    // feature. reloadlog is HIS key, parsed by HIS parser, so it cannot go in the alias table --
+    // that table holds fork names only, and claiming one of his would be the very thing the rule
+    // forbids. The translation goes the other way instead: his switch also raises OURS, which is a
+    // write to a fork key and never to his. So reloadlog still lights the fork's reload evidence,
+    // which is what the settings menu writes and what a player who has been told "turn the reload
+    // log on" will set, and reloadvrlog keeps working on its own for anyone who set that.
+    if (g_cfg.reload_log) g_cfg.reload_vr_log = true;
+
     // SHARED INFRASTRUCTURE, turned on for the features that need it unless a file sets it.
     //   The weapon placement (palettewpn = armdriver mode 3) moves the drawn weapon through the
     //   first-person pose hook and composes against the pose latch's stamped intent. Both act only
