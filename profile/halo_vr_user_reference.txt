@@ -462,6 +462,18 @@
 # for meleespeed and meleefwd. Set it, swing a dozen times, read the log, turn
 # it off.
 
+# ---------------------------------------------------------------- ARMS: PLAYER IK
+# Which system poses your first-person arms.
+#   2 = PLAYER IK (default). The game's own arm skeleton is solved to your
+#       controllers: elbows, forearm twist, recoil, the off hand on the
+#       weapon's grip when you hold it two-handed, reload/melee/throw hand-over,
+#       and hand gestures on a free hand.
+#   1 = the older rig route from earlier releases.
+# If Player IK cannot start on your copy of the game, the log says so and it
+# falls back to 1 by itself. Switching is live. A per-weapon fit captured
+# before v0.5 was made on route 1 -- see the capture key below.
+#armdriver=2
+
 # ---------------------------------------------------------------- TWO-ARM RECON
 # Dumps the first-person skeleton -- every bone with its parent -- and reports
 # which bone functions this build actually exposes. Read-only: nothing is
@@ -726,13 +738,15 @@
 # rewrites in full. It is YOURS: updates never overwrite it, and DELETING IT
 # puts every weapon back on the shipped calibration.
 #
-# WHAT THE KEY WRITES DEPENDS ON WHICH WEAPON DRIVER IS RUNNING, so there is
+# WHAT THE KEY WRITES DEPENDS ON WHICH ARM ROUTE IS RUNNING, so there is
 # only ever one key to remember:
-#   * the default (rig) route  -> a wpnoff delta on the grip/mount fit
-#   * the palette route (armdriver=2 with pawpn=1) -> a wpnfix rigid delta,
+#   * Player IK (armdriver=2, the default since v0.5) -> a wpnfix rigid delta,
 #     which OVERRIDES the shipped per-weapon calibration in halo_vr.cfg for
 #     that weapon alone. Repeat captures refine rather than reset, and they
 #     start from whichever value is currently in effect.
+#   * the older rig route (armdriver=1) -> a wpnoff delta on the grip/mount fit.
+# Fits captured before v0.5 were made on the older route. If a weapon sits
+# wrong under Player IK, capture it again, or set armdriver=1.
 #
 # A capture needs about a fifth of a second of hold to count, so it cannot be
 # triggered by brushing the key. If it refuses one, log.txt says why.
