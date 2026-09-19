@@ -1754,6 +1754,7 @@ void parse_config_key_2(const char* key, const char* val, double v) {
         else if (_stricmp(key, "brakemode")     == 0) g_cfg.brake_mode      = (int)v;
         else if (_stricmp(key, "brakemask")     == 0) g_cfg.brake_mask      = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "brakekey")      == 0) g_cfg.brake_key       = (int)strtol(val, nullptr, 0);
+        else if (_stricmp(key, "vehamask")      == 0) g_cfg.veh_a_mask       = (int)strtol(val, nullptr, 0);
         else if (_stricmp(key, "cutscene2d")    == 0) g_cfg.cutscene_2d     = (int)v;
         else if (_stricmp(key, "cuthint")       == 0) g_cfg.cut_hint        = (v != 0.0);
         else if (_stricmp(key, "cuthintdist")   == 0) g_cfg.cut_hint_dist   = cm_to_m(v, 50.0f,  50.0f,  500.0f, "cuthintdist");

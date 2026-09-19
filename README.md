@@ -238,7 +238,7 @@ on foot.
 | Right stick | Aim and swing the camera (the game's own vehicle look) |
 | Left stick | Drive — throttle and steering |
 | **Either grip** | Hard brake |
-| Right A | Hard brake (the game's own binding — grip does the same thing) |
+| Right A | Banshee trick — flip/roll (still the hard brake in ground vehicles; either grip also brakes) |
 | Left trigger (hold) | Handbrake — the sharp, quick turn |
 | Right trigger | Fire |
 | Head | Free look, as always |

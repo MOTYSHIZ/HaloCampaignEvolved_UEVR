@@ -13602,6 +13602,26 @@ public:
             }
         }
 
+        // ---- VEHICLE A -> TRICK. Sibling of the on-foot binds above, but for stick mode -- so it
+        // sits OUTSIDE that !g_stick_mode block on purpose, as its own vehicle-only lane.
+        //
+        // In a vehicle the on-foot remaps stand down and the pad is native, so A reaches the game
+        // as its own vehicle action (hard brake). The Banshee's aerial trick is on LB, and no VR
+        // input reaches LB while seated: the left grip's native LB was swallowed upstream, and the
+        // on-foot LB remaps are gated off here. So OR LB in whenever A is physically held in a
+        // vehicle -- A performs the trick, and because this is ADDITIVE, A's native hard brake and
+        // the grip brake are both untouched. vehamask=0 restores the plain passthrough.
+        //
+        // Gated on raw_btn (the physical snapshot), NOT live state: the grip brake injects
+        // brake_mask=A on its own further down, so reading live state would make every grip-brake
+        // also fire the trick. Same raw_btn discipline as the grenade remap. !g_in_menu is belt-
+        // and-braces -- pausing drops stick mode -- and costs nothing.
+        if (g_cfg.veh_a_mask != 0 && g_stick_mode.load() && !g_in_menu.load()
+            && (raw_btn & XINPUT_GAMEPAD_A) != 0) {
+            state->Gamepad.wButtons |= (WORD)g_cfg.veh_a_mask;
+            state->dwPacketNumber++;
+        }
+
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
         // keeps Blam's native zoom (viewmodel hide, zoomed look speed) from ever engaging under
         // the VR presentation. Menus and vehicle seats are excluded inside, so LT still means

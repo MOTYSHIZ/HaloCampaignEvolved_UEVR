@@ -539,6 +539,20 @@ struct Config {
     // Windows virtual-key held while gripping in mode 1. 0xA2 = Left Ctrl.
     int   brake_key     = 0xA2;
 
+    // ---- VEHICLE A -> TRICK. The mask the physical A button ADDS while seated in a vehicle
+    // (stick mode). DEFAULT 0x0100 = LB, which is this game's Banshee aerial trick (flip/roll).
+    //
+    // WHY IT NEEDS ITS OWN LANE. In a vehicle the on-foot VR remaps stand down and the pad is
+    // native, so A reaches the game as its own vehicle action (hard brake) -- but the trick is on
+    // LB, and no VR input reaches LB while seated: the left grip's native LB is swallowed upstream
+    // and the on-foot LB remaps are gated off here. So there is no button to perform the trick.
+    // Pressing A ORs LB in (ADDITIVE, so A's native hard brake and the grip brake are untouched).
+    //
+    // Scoped to stick mode, so on-foot A stays the game's jump -- the whole reason this is not a
+    // global remap. Injected off the raw physical-A snapshot, never live state, so the grip brake
+    // (which injects brake_mask=A on its own) cannot also fire the trick. 0 = A passes through.
+    int   veh_a_mask    = 0x0100;   // XInput LB -- this game's Banshee trick
+
     // ---- CUTSCENE FLAT VIEW. This game's cutscene cameras render a stereo pair that does not
     // fuse (each eye gets a mismatched image), so while a cutscene plays the mod flattens the
     // view and restores it when gameplay returns.
