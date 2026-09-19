@@ -2889,8 +2889,13 @@ void sample_hand_inputs() {
     static UEVR_ActionHandle s_trig_touch[2] = {nullptr, nullptr};   // [left, right]
     static const char* const kTrigTouch[2] = {"/actions/default/in/TriggerTouchLeft",
                                               "/actions/default/in/TriggerTouchRight"};
+    // A handle that is still null is RETRIED only every 64 calls (~2 s): on stock UEVR four of these
+    // names never exist, and each lookup builds a string and hashes it -- ~128 allocations a second on
+    // the game thread for nothing, forever (pre-release audit, 2026-09-18). The first call looks up.
+    static uint32_t s_lookup_n = 0;
+    const bool lookup = (s_lookup_n++ % 64u) == 0u;
     for (int side = 0; side < 2; ++side)
-        if (s_trig_touch[side] == nullptr) s_trig_touch[side] = API::VR::get_action_handle(kTrigTouch[side]);
+        if (lookup && s_trig_touch[side] == nullptr) s_trig_touch[side] = API::VR::get_action_handle(kTrigTouch[side]);
     static UEVR_ActionHandle s_grip = nullptr, s_trig = nullptr;
     // The thumb sensor: A/X and B/Y touch, the thumbrest -- and a THUMBSTICK touch, which stock UEVR
     // does not bind (its OpenXR table has thumbstick and thumbstick/click only); the fourth name is
@@ -2901,11 +2906,11 @@ void sample_hand_inputs() {
     static const char* const kTouch[2][4] = {
         {"/actions/default/in/AButtonTouchLeft",  "/actions/default/in/BButtonTouchLeft",  "/actions/default/in/ThumbrestTouchLeft",  "/actions/default/in/ThumbstickTouchLeft"},
         {"/actions/default/in/AButtonTouchRight", "/actions/default/in/BButtonTouchRight", "/actions/default/in/ThumbrestTouchRight", "/actions/default/in/ThumbstickTouchRight"}};
-    if (s_grip == nullptr) s_grip = API::VR::get_action_handle("/actions/default/in/Grip");
-    if (s_trig == nullptr) s_trig = API::VR::get_action_handle("/actions/default/in/Trigger");
+    if (lookup && s_grip == nullptr) s_grip = API::VR::get_action_handle("/actions/default/in/Grip");
+    if (lookup && s_trig == nullptr) s_trig = API::VR::get_action_handle("/actions/default/in/Trigger");
     for (int side = 0; side < 2; ++side)
         for (int k = 0; k < 4; ++k)
-            if (s_touch[side][k] == nullptr) s_touch[side][k] = API::VR::get_action_handle(kTouch[side][k]);
+            if (lookup && s_touch[side][k] == nullptr) s_touch[side][k] = API::VR::get_action_handle(kTouch[side][k]);
     // hand 0 = aim, 1 = support; side 0 = left, 1 = right
     for (int hand = 0; hand < 2; ++hand) {
         const bool is_left = (hand == 0) == (g_cfg.aim_left_hand != 0);
@@ -2915,9 +2920,11 @@ void sample_hand_inputs() {
         for (int k = 0; k < 4; ++k)
             thumb = thumb || (s_touch[side][k] != nullptr && API::VR::is_action_active(s_touch[side][k], src));
         s_in_grip[hand].store(s_grip != nullptr && API::VR::is_action_active(s_grip, src), std::memory_order_relaxed);
-        const bool trig = (s_trig_touch[side] != nullptr)
-                              ? API::VR::is_action_active(s_trig_touch[side], src)
-                              : (s_trig != nullptr && API::VR::is_action_active(s_trig, src));
+        // Touch OR pull. A backend that HAS the touch action does not mean a controller that has the
+        // sensor (WMR, Vive wands): with touch alone the index would never curl on those. A pull is
+        // always also a touch where the sensor exists, so the OR costs nothing on Quest/Index.
+        const bool trig = (s_trig_touch[side] != nullptr && API::VR::is_action_active(s_trig_touch[side], src))
+                       || (s_trig != nullptr && API::VR::is_action_active(s_trig, src));
         s_in_trig[hand].store(trig, std::memory_order_relaxed);
         s_in_thumb[hand].store(thumb, std::memory_order_relaxed);
     }
@@ -3442,7 +3449,7 @@ void palettearm_hand_poses_poll() {
     }
     char buf[4096];
     size_t n = 0;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < (1u << 20)) text.append(buf, n);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < (64u << 10)) text.append(buf, n);
     fclose(f);
     const pa::HandPoseJsonResult r = pa::hand_poses_from_json(text.c_str(), text.size(), t);
     if (!r.ok) {

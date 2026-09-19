@@ -1768,6 +1768,15 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
                 s_last_wpn = wpn;
                 s_pane_anchored = false;   // re-place in the rig frame, then re-convert
             }
+            // ...and on the PLAYER IK route, a new weapon MODEL (the palette's serial) is a new rest
+            // pose for the closed-form placement. The class name above can stay the same across a
+            // model change, and the socket gate is spent once attached, so without this the pane kept
+            // the previous model's rest until the next swap (pre-release audit, 2026-09-18).
+            if (g_cfg.arm_driver == 2) {
+                static int s_last_serial = -1;
+                const int ser = ::halo::palettearm_model_serial();
+                if (ser != s_last_serial) { s_last_serial = ser; s_pane_anchored = false; }
+            }
         }
 
         const bool placing = !s_pane_anchored || pane_placement_changed() || s_calib_held;
@@ -4065,7 +4074,17 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                 have_v = std::isfinite(v_dist) && std::isfinite(v_right) && std::isfinite(v_up) &&
                          std::isfinite(v_p) && std::isfinite(v_y) && std::isfinite(v_r);
             }
-            if (have_v || (rel_loc != nullptr && rel_rot != nullptr)) {
+            // On the PLAYER IK route the pane's RelativeLocation is measured against a level, body-
+            // frame mesh, NOT the rig frame these numbers are stored in -- a capture taken from it
+            // would mix two frames and be written to the calibration file. Refuse it and say so; the
+            // player can simply calibrate again (pre-release audit, 2026-09-18).
+            const bool frame_mixed = !have_v && g_cfg.arm_driver == 2;
+            if (frame_mixed) {
+                API::get()->log_info("[Halo-CampE-UEVR] scope: calibration NOT saved -- the weapon's rig frame "
+                                     "was not fresh at release (Player IK route). Hold the gun steady and "
+                                     "calibrate again.");
+            }
+            if (!frame_mixed && (have_v || (rel_loc != nullptr && rel_rot != nullptr))) {
                 g_cfg.scope_dist  = have_v ? v_dist  : (float)rel_loc[0];
                 g_cfg.scope_right = have_v ? v_right : (float)rel_loc[1];
                 g_cfg.scope_up    = have_v ? v_up    : (float)rel_loc[2];

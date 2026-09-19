@@ -8418,15 +8418,40 @@ void update() {
             {
                 static void*         s_fp_for = nullptr;
                 static API::UObject* s_fp_cam = nullptr;
-                static float*        s_fp_scale_p = nullptr;  static bool* s_fp_scale_en = nullptr;
-                static float*        s_fp_fov_p = nullptr;    static bool* s_fp_fov_en = nullptr;
+                // THE ENABLE FLAGS ARE PACKED BITFIELD BOOLS (uint8 :1 in CameraComponent, sharing a byte
+                // with bLockToHmd / bUsePawnControlRotation / bUseAdditiveOffset). A whole-byte bool write
+                // cleared every neighbour on every tick -- pre-release audit, 2026-09-18, BLOCKER. So each
+                // flag is its BYTE plus its FBoolProperty field MASK, resolved once per camera, and every
+                // read/write is masked.
+                struct FpBit {
+                    uint8_t* byte = nullptr; uint8_t mask = 0;
+                    bool ok() const { return byte != nullptr && mask != 0; }
+                    bool get() const { return (*byte & mask) != 0; }
+                    void set(bool on) const { *byte = on ? (uint8_t)(*byte | mask) : (uint8_t)(*byte & ~mask); }
+                };
+                auto find_bit = [](API::UObject* obj, const wchar_t* name) -> FpBit {
+                    FpBit b{};
+                    auto* cls = (obj != nullptr) ? obj->get_class() : nullptr;
+                    auto* prop = (cls != nullptr) ? cls->find_property(name) : nullptr;
+                    if (prop == nullptr) return b;
+                    auto* bp = static_cast<API::FBoolProperty*>(prop);
+                    b.byte = reinterpret_cast<uint8_t*>(obj) + bp->get_offset();
+                    b.mask = bp->get_field_mask() ? bp->get_field_mask() : 0xFFu;
+                    return b;
+                };
+                static float*        s_fp_scale_p = nullptr;  static FpBit s_fp_scale_en{};
+                static float*        s_fp_fov_p = nullptr;    static FpBit s_fp_fov_en{};
                 static float         s_fp_orig_scale = -1.0f, s_fp_orig_fov = -1.0f;
                 static int           s_fp_orig_scale_en = -1, s_fp_orig_fov_en = -1;
                 static float         s_fp_last_scale_cfg = -99.0f, s_fp_last_fov_cfg = -99.0f;
                 static uint32_t      s_fp_fixes = 0, s_fp_sum_tick = 0;
+                // LIVENESS: the cache is keyed on the rig component, but a respawn can reuse the same
+                // address or re-parent the mesh. A camera whose object-array slot no longer holds it is
+                // dropped (constant time, no array walk) and re-found on the next tick.
+                if (s_fp_cam != nullptr && !uobject_slot_valid(s_fp_cam)) s_fp_for = nullptr;
                 if (rig_v != s_fp_for) {
                     s_fp_for = rig_v; s_fp_cam = nullptr;
-                    s_fp_scale_p = nullptr; s_fp_scale_en = nullptr; s_fp_fov_p = nullptr; s_fp_fov_en = nullptr;
+                    s_fp_scale_p = nullptr; s_fp_scale_en = FpBit{}; s_fp_fov_p = nullptr; s_fp_fov_en = FpBit{};
                     s_fp_last_scale_cfg = -99.0f; s_fp_last_fov_cfg = -99.0f;   // log the state on the new camera
                     auto* o = reinterpret_cast<API::UObject*>(rig_v);
                     for (int depth = 0; o != nullptr && depth < 8; ++depth) {
@@ -8436,28 +8461,29 @@ void update() {
                     }
                     if (s_fp_cam != nullptr) {
                         s_fp_scale_p  = s_fp_cam->get_property_data<float>(L"FirstPersonScale");
-                        s_fp_scale_en = s_fp_cam->get_property_data<bool>(L"bEnableFirstPersonScale");
+                        s_fp_scale_en = find_bit(s_fp_cam, L"bEnableFirstPersonScale");
                         s_fp_fov_p    = s_fp_cam->get_property_data<float>(L"FirstPersonFieldOfView");
-                        s_fp_fov_en   = s_fp_cam->get_property_data<bool>(L"bEnableFirstPersonFieldOfView");
+                        s_fp_fov_en   = find_bit(s_fp_cam, L"bEnableFirstPersonFieldOfView");
                     }
-                    API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s above the arm mesh (scale %s/flag %s, fov %s/flag %s)",
+                    API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s above the arm mesh (scale %s/flag mask 0x%02X, "
+                                         "fov %s/flag mask 0x%02X)",
                                          s_fp_cam != nullptr ? "found a CameraComponent" : "NO CameraComponent found",
-                                         s_fp_scale_p ? "ok" : "MISSING", s_fp_scale_en ? "ok" : "MISSING",
-                                         s_fp_fov_p ? "ok" : "MISSING", s_fp_fov_en ? "ok" : "MISSING");
+                                         s_fp_scale_p ? "ok" : "MISSING", (unsigned)s_fp_scale_en.mask,
+                                         s_fp_fov_p ? "ok" : "MISSING", (unsigned)s_fp_fov_en.mask);
                 }
                 if (s_fp_cam != nullptr && g_cfg.enabled) {
                     // One value + its flag. cfg: 0 (or less) = the game's own; 1 on the SCALE = the
                     // engine's first-person scale switched off entirely; anything else = flag on,
                     // with that value. The FOV has no "off" number: fpfov=0 turns the override off
                     // (the arms drawn at the world FOV, like the reference), fpfov<0 = the game's own.
-                    auto enforce = [&](float* val, bool* en, float cfg, bool is_scale, float& orig, int& orig_en,
+                    auto enforce = [&](float* val, const FpBit& en, float cfg, bool is_scale, float& orig, int& orig_en,
                                        float& last_cfg, const char* name) {
-                        if (val == nullptr || en == nullptr) {
+                        if (val == nullptr || !en.ok()) {
                             if (last_cfg != cfg) API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s (or its enable flag) "
                                                                       "is not a property on this build", name);
                             last_cfg = cfg; return;
                         }
-                        if (orig < 0.0f && std::isfinite(*val)) { orig = *val; orig_en = *en ? 1 : 0; }
+                        if (orig < 0.0f && std::isfinite(*val)) { orig = *val; orig_en = en.get() ? 1 : 0; }
                         bool  want_en;  float want_val;
                         if (is_scale) {
                             if (!(cfg > 0.0f))                  { want_en = orig_en != 0; want_val = orig; }
@@ -8471,19 +8497,19 @@ void update() {
                         // The scale VALUE is held even with its flag off (1 for anything that reads it
                         // regardless); an unused FOV value is left alone.
                         const bool val_off = (want_en || is_scale) && std::fabs(*val - want_val) >= 1e-4f;
-                        const bool en_off  = (*en != want_en);
+                        const bool en_off  = (en.get() != want_en);
                         if (val_off || en_off) {
-                            const float was = *val; const bool was_en = *en;
+                            const float was = *val; const bool was_en = en.get();
                             if (want_en) *val = want_val; else if (is_scale) *val = want_val;
-                            *en = want_en;
+                            if (en_off) en.set(want_en);
                             if (last_cfg == cfg) ++s_fp_fixes;           // the GAME moved it, not a key change
                             else API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s %.3f/%s -> %.3f/%s "
                                                       "(game's own %.3f/%s; key %.3f)",
-                                                      name, was, was_en ? "on" : "off", *val, *en ? "on" : "off",
+                                                      name, was, was_en ? "on" : "off", *val, en.get() ? "on" : "off",
                                                       orig, orig_en == 1 ? "on" : "off", cfg);
                         } else if (last_cfg != cfg) {
                             API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s already %.3f/%s (key %.3f)",
-                                                 name, *val, *en ? "on" : "off", cfg);
+                                                 name, *val, en.get() ? "on" : "off", cfg);
                         }
                         last_cfg = cfg;
                     };
@@ -12042,7 +12068,8 @@ public:
                 //     view callback writes aim and body. A SUM OF MAGNITUDES over a back-and-forth sweep
                 //     is unchanged by a one-frame shift; an instantaneous difference grows with turn
                 //     speed. That is the two-clocks trap, and why this is a ratio of sums.
-                if (g_cfg.pa_torso_ab) {
+                // HALO_VR_DEV &&: compile-time dead in a player build (pre-release audit, 2026-09-18).
+                if (HALO_VR_DEV && g_cfg.pa_torso_ab) {
                     static float    ab_prev_torso = 0.0f, ab_prev_aim = 0.0f, ab_prev_body = 0.0f;
                     static uint32_t ab_prev_seq = 0;
                     static double   ab_sum_torso = 0.0, ab_sum_aim = 0.0;
@@ -12149,7 +12176,8 @@ public:
             // palette -> rendered-bone relation can be checked offline instead of assumed.
             //
             // The aim side follows aim_left_hand -- never assume the right controller aims.
-            if (g_cfg.pa_world_probe && !g_in_menu.load() && !g_stick_mode.load()) {
+            // HALO_VR_DEV &&: compile-time dead in a player build (pre-release audit, 2026-09-18).
+            if (HALO_VR_DEV && g_cfg.pa_world_probe && !g_in_menu.load() && !g_stick_mode.load()) {
                 auto* rc = reinterpret_cast<API::UObject*>(g_rig_component.load(std::memory_order_relaxed));
                 if (rc != nullptr && g_rig_parent != nullptr) {
                     constexpr int kMaxB = 16;             // tracked bones
