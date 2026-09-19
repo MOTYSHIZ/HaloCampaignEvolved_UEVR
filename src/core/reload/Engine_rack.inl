@@ -481,7 +481,11 @@ void slide_update(const Vec3& head) {
     const float dist_m = std::sqrt(dx * dx + dy * dy + dz * dz);
     // The rack is LIVE when the weapon has a part and, for a @reloadonly weapon, only in the
     // reload state (a shell in, the mag out, or the lock waiting for the rack).
-    const bool rack_live = (g_slide_rack_found || g_sl_part_valid.load(std::memory_order_relaxed))
+    // ONE SOURCE FOR "HAS A PART", part_ok above. This read used to go to g_sl_part_valid live
+    // while the zone it gates was built from the snapshot, so on the frame a weapon gained or lost
+    // its part the two disagreed: a hot zone drawn from a part the placement no longer had, or a
+    // part-shaped zone with the rack judged dead over it.
+    const bool rack_live = (g_slide_rack_found || part_ok)
                         && (!g_sl_zone_reload_only.load(std::memory_order_relaxed) || s_sl_lock_pending || s_reload != ReloadState::Idle || s_true_empty || s_sl_locked_back);
     g_slide_zone_hot.store(rack_live && dist_m <= g_cfg.slide_radius + reload_gate_pad_m(), std::memory_order_relaxed);
     if (g_cfg.slide_log) {
