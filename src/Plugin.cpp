@@ -13854,7 +13854,8 @@ public:
                                       g_cfg.grenade_action != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.grenade_action) != 0,
                                       g_cfg.pa_sprint_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.pa_sprint_mask) != 0,
                                       mlx * mlx + mly * mly > 0.25f,
-                                      g_cfg.reload_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.reload_mask) != 0);
+                                      g_cfg.reload_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.reload_mask) != 0,
+                                      halo::melee_press_active());   // a swing's melee, not a button's
         }
 
         // ---- WHAT THE GAME ACTUALLY RECEIVES. The companion to the raw logger far above, and the
