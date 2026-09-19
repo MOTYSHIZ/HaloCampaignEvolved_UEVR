@@ -96,18 +96,21 @@ bool s_mesh_logged = false;
 // walk LOGS every magazine-ish name it meets -- that log is the asset survey, and the frag mesh
 // stands in until it says otherwise.
 TrackedObject s_mag_marker, s_mesh_mag;
-int  s_mag_pick = 0;                 // 0 none, 3 "magazine", 2 "clip", 1 "ammo" -- higher wins
+int  s_mag_pick = 0;                 // 0 none, 3 "magazine"; 2 "clip" / 1 "ammo" only at reloadmagpick=0
 bool s_mag_search_done = false;      // the survey ran to completion once; do not rewalk forever
 bool s_mag_zone_prev = false;        // fetch hand inside the mag zone (haptic edge)
 std::atomic<bool> s_mag_hand_in{false};   // ...published for Gesture's grab test (prior tick)
 
 // ---- PER-WEAPON MAGS. The 2026-08-27 survey settled the old blocking unknown: this game SHIPS a
 // standalone magazine StaticMesh per weapon (SM_Magnum_Magazine_Default, SM_BattleRifle_Magazine_
-// M_Default, ...) plus SM_ammo_pickup_* for the ones that load shells instead. So the survey now
-// KEEPS every hit, and the marker's mesh is re-picked whenever the held weapon changes: weapon_key
-// ("FP_Magnum") minus its FP_ prefix, lowercased, matched into the candidate names -- the same
-// substring convention the wpnoff table uses. "magazine" hits outrank "ammo pickup" hits so the
-// magnum gets its mag, not its pickup box; no match falls back to the global pick, then the frag.
+// M_Default, ...) plus SM_ammo_pickup_* for the ones that load shells instead. So the survey keeps
+// every QUALIFYING hit, and the marker's mesh is re-picked whenever the held weapon changes:
+// weapon_key ("FP_Magnum") minus its FP_ prefix, lowercased, matched into the candidate names --
+// the same substring convention the wpnoff table uses. No match falls back to the global pick,
+// then the frag.
+// A pickup box is not a magazine and no longer enters the list at all: at reloadmagpick >= 1 the
+// walk ranks "magazine" (and the classic AR's "megazine") and nothing else, so the magnum gets its
+// mag because its pickup box was never a candidate, not because it was outranked by one.
 struct MagCand { std::wstring lname; TrackedObject obj; int rank = 0; };
 std::vector<MagCand> s_mag_cands;
 std::string s_mag_mesh_key = "\x01";   // weapon key the marker's mesh matches; sentinel = never set
@@ -161,17 +164,37 @@ void resolve_grenade_meshes() {
                 s_mesh_frag.set_at(o, i);
             }
         }
-        // The magazine hunt. "magazine" outranks "clip" outranks "ammo" -- the broader the term,
-        // the likelier it names a crate or a pickup rather than the mag itself. Every hit is
-        // LOGGED (capped): this survey is the ground truth the per-weapon-mag step was blocked on,
-        // and it must print whether or not the pick is any good.
+        // The magazine hunt. ONLY "magazine" qualifies (reloadmagpick >= 1), and the refusal is
+        // HERE, at collection, not later at draw time. Blocking a crate only when it is about to
+        // be drawn still lets it into the candidate list, still prints it in the survey log as
+        // though it were a magazine, and still lets it take the global pick from a real one.
+        //
+        // "ammo" is GONE, and it is the whole reason a crate was once reloaded: that walk ran
+        // during marker spawn, before a single weapon mesh had loaded, and every one of its 8 hits
+        // was an "ammo" name -- SM_ammo_crate, SM_AmmoPickup_*, SM_ammo_pickup_*. A crate and a
+        // pickup box are world props, never something a hand carries to a mag well, so no ranking
+        // of them can be right.
+        // "clip" is gone with it, which is what this feature's own key doc already says. The
+        // shipped parts spell it "Magazine" in every case the part surveys have printed
+        // (SM_AssaultRifle_Magazine_M_Default, SM_Magnum_Magazine_Default,
+        // SM_SMG_Magazine1Jnt_L_Default, SM_BattleRifle_Magazine_M_Default), so "clip" has never
+        // matched a real magazine here -- while it IS a substring of ordinary level and engine art
+        // (clip volumes, clipping planes, clipboards). It could only ever contribute false
+        // positives, so it earns no rank.
+        // Every hit that does qualify is still LOGGED (capped): this survey is the asset ground
+        // truth, and it must print whether or not the pick is any good.
         if (want_mag) {
             std::wstring low; low.reserve(full.size());
             for (wchar_t ch : full) low.push_back((wchar_t)towlower(ch));
             int rank = 0;
-            if      (low.find(L"magazine") != std::wstring::npos) rank = 3;
-            else if (low.find(L"clip")     != std::wstring::npos) rank = 2;
-            else if (low.find(L"ammo")     != std::wstring::npos) rank = 1;
+            if (g_cfg.reload_mag_pick == 0) {
+                if      (low.find(L"magazine") != std::wstring::npos) rank = 3;
+                else if (low.find(L"clip")     != std::wstring::npos) rank = 2;
+                else if (low.find(L"ammo")     != std::wstring::npos) rank = 1;
+            } else if (low.find(L"magazine") != std::wstring::npos
+                       || low.find(L"megazine") != std::wstring::npos) {
+                rank = 3;   // "megazine": the misspelling the native component walk already allows for
+            }
             if (rank > 0) {
                 if (mag_lines < 40) {
                     ++mag_lines;
