@@ -956,13 +956,13 @@ static void seed_builtin_weapon_anims() {
     strcpy_s(m.match, sizeof(m.match), "FP_Magnum");
     m.sprint = 3.0f; m.set = 1u;
     m.from_weapons_file = false;
+    m.builtin = true;
     g_cfg.wpn_anim[0] = m;
     g_cfg.wpn_anim_count = 1;
 }
 
 static bool parse_weapon_anim(const char* val) {
     if (val == nullptr || val[0] == 0) return false;
-    if (g_cfg.wpn_anim_count >= kMaxWeaponAnim) return true;   // full: ignore rather than overflow
 
     char buf[256] = {0};
     strncpy_s(buf, sizeof(buf), val, _TRUNCATE);
@@ -990,8 +990,20 @@ static bool parse_weapon_anim(const char* val) {
     w.from_weapons_file = s_wpnfix_from_capture;
 
     for (int i = 0; i < g_cfg.wpn_anim_count; ++i) {
-        if (_stricmp(g_cfg.wpn_anim[i].match, w.match) == 0) { g_cfg.wpn_anim[i] = w; return true; }
+        if (_stricmp(g_cfg.wpn_anim[i].match, w.match) != 0) continue;
+        // A player line over a BUILT-IN one keeps the built-in's fields it leaves blank, so
+        // "wpnanim=FP_Magnum,,2" changes the melee and keeps the shipped sprint -- what "blank keeps"
+        // promises. Over another player line it replaces, as before.
+        const WeaponAnim& old = g_cfg.wpn_anim[i];
+        if (old.builtin) {
+            const float oldv[5] = { old.sprint, old.melee, old.equip, old.grenade_trim, old.sup_anim };
+            for (int k = 0; k < 5; ++k)
+                if (!(w.set & (1u << k)) && (old.set & (1u << k))) { *fields[k] = oldv[k]; w.set |= (1u << k); }
+        }
+        g_cfg.wpn_anim[i] = w;
+        return true;
     }
+    if (g_cfg.wpn_anim_count >= kMaxWeaponAnim) return true;   // full: ignore rather than overflow
     g_cfg.wpn_anim[g_cfg.wpn_anim_count++] = w;
     return true;
 }

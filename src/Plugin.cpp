@@ -8385,7 +8385,13 @@ void update() {
                 // LIVENESS: the cache is keyed on the rig component, but a respawn can reuse the same
                 // address or re-parent the mesh. A camera whose object-array slot no longer holds it is
                 // dropped (constant time, no array walk) and re-found on the next tick.
-                if (s_fp_cam != nullptr && !uobject_slot_valid(s_fp_cam)) s_fp_for = nullptr;
+                if (s_fp_cam != nullptr && !uobject_slot_valid(s_fp_cam)) {
+                    // Clear EVERYTHING, not just the key: with the rig also gone (a level load) the
+                    // re-find below does not run, and the cached pointers would keep being written
+                    // into a freed object until a new rig appeared (code review, 2026-09-18).
+                    s_fp_for = nullptr; s_fp_cam = nullptr;
+                    s_fp_scale_p = nullptr; s_fp_scale_en = FpBit{}; s_fp_fov_p = nullptr; s_fp_fov_en = FpBit{};
+                }
                 if (rig_v != s_fp_for) {
                     s_fp_for = rig_v; s_fp_cam = nullptr;
                     s_fp_scale_p = nullptr; s_fp_scale_en = FpBit{}; s_fp_fov_p = nullptr; s_fp_fov_en = FpBit{};
@@ -8408,7 +8414,7 @@ void update() {
                                          s_fp_scale_p ? "ok" : "MISSING", (unsigned)s_fp_scale_en.mask,
                                          s_fp_fov_p ? "ok" : "MISSING", (unsigned)s_fp_fov_en.mask);
                 }
-                if (s_fp_cam != nullptr && g_cfg.enabled) {
+                if (s_fp_cam != nullptr) {
                     // One value + its flag. cfg: 0 (or less) = the game's own; 1 on the SCALE = the
                     // engine's first-person scale switched off entirely; anything else = flag on,
                     // with that value. The FOV has no "off" number: fpfov=0 turns the override off
@@ -8422,6 +8428,8 @@ void update() {
                         }
                         if (orig < 0.0f && std::isfinite(*val)) { orig = *val; orig_en = en.get() ? 1 : 0; }
                         bool  want_en;  float want_val;
+                        const bool games_own = is_scale ? !(cfg > 0.0f) : (cfg < 0.0f);
+                        if (games_own && (orig < 0.0f || orig_en < 0)) { last_cfg = cfg; return; }   // never captured: leave it
                         if (is_scale) {
                             if (!(cfg > 0.0f))                  { want_en = orig_en != 0; want_val = orig; }
                             else if (std::fabs(cfg - 1.0f) < 1e-4f) { want_en = false; want_val = 1.0f; }
@@ -8450,9 +8458,13 @@ void update() {
                         }
                         last_cfg = cfg;
                     };
-                    enforce(s_fp_scale_p, s_fp_scale_en, g_cfg.fp_scale, true,  s_fp_orig_scale, s_fp_orig_scale_en,
+                    // The kill switch hands the GAME'S OWN values back (scale 0 / fov -1 mean exactly
+                    // that), like the arm hide does -- rather than leaving our flags in place.
+                    const float scale_cfg = g_cfg.enabled ? g_cfg.fp_scale : 0.0f;
+                    const float fov_cfg   = g_cfg.enabled ? g_cfg.fp_fov : -1.0f;
+                    enforce(s_fp_scale_p, s_fp_scale_en, scale_cfg, true,  s_fp_orig_scale, s_fp_orig_scale_en,
                             s_fp_last_scale_cfg, "FirstPersonScale");
-                    enforce(s_fp_fov_p,   s_fp_fov_en,   g_cfg.fp_fov,   false, s_fp_orig_fov,   s_fp_orig_fov_en,
+                    enforce(s_fp_fov_p,   s_fp_fov_en,   fov_cfg,   false, s_fp_orig_fov,   s_fp_orig_fov_en,
                             s_fp_last_fov_cfg,   "FirstPersonFieldOfView");
                     if (tick - s_fp_sum_tick >= 320u) {
                         s_fp_sum_tick = tick;
@@ -10841,7 +10853,13 @@ void update() {
                     {
                         float S[3] = {0.0f, 0.0f, 0.0f};
                         Vec3  pl{};
-                        const bool ok = rw_ok && finite_ok && halo::palettearm_stock_marker_ue(S) &&
+                        // The REST marker when the palette knows it: the closed-form socket placement
+                        // (Scope.cpp socket_relative_from_rest) is written about S_rest, so a root built
+                        // on the LIVE marker was off by the animation's kick -- a calibration taken then
+                        // stored it, and the pane jumped by twice it at the attach (code review,
+                        // 2026-09-18). The live marker stays the fallback for a never-rested model.
+                        const bool have_S = halo::palettearm_stock_marker_rest_ue(S) || halo::palettearm_stock_marker_ue(S);
+                        const bool ok = rw_ok && finite_ok && have_S &&
                                         g_rig_parent != nullptr &&
                                         call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &pl) &&
                                         std::isfinite(pl.x) && std::isfinite(pl.y) && std::isfinite(pl.z);

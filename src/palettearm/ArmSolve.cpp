@@ -1054,7 +1054,14 @@ float ActionWatch::update(const RecoilPass& gun, const Vec3& hand_pos, const Mat
         float youngest = -1.0f;
         const auto take = [&](float a) { if (a >= 0.0f && (youngest < 0.0f || a < youngest)) youngest = a; };
         take(melee_age_s); take(reload_age_s); take(grenade_age_s);
-        if (youngest >= 0.0f && youngest < 0.05f && (home_cut || (engaged && since_onset_s > 0.3f))) {
+        // A PRESS EDGE, not "a button is down": the ages are time since the mask was last SEEN
+        // down, so a HELD button reads ~0 every frame and re-counted as a new press every 0.3 s --
+        // clearing the return cut and walking the free hand back onto the gun mid-action (code
+        // review, 2026-09-18). A new press = fresh now, after at least 0.15 s released.
+        const bool fresh = youngest >= 0.0f && youngest < 0.05f;
+        const bool edge  = fresh && (prev_youngest_s < 0.0f || prev_youngest_s > 0.15f);
+        prev_youngest_s = youngest;
+        if (edge && (home_cut || (engaged && since_onset_s > 0.3f))) {
             home_cut = false; engaged = false;
         }
     }

@@ -7,6 +7,7 @@
 #include "Config.hpp"
 #include "DevTools.hpp"
 #include "Rig.hpp"   // call_ret_vec3, for the placement readback
+#include "ArmDriver.hpp"            // arm_driver_owns(): is the palette route actually driving
 #include "palettearm/PaletteArm.hpp"   // palettearm_stock_marker_ue: the bone's motion relative to the gun under the palette route
 #include "Reticule.hpp"   // make_color_rt, for the dev probe's texture
 #include "ScopeBlit.hpp"  // digital zoom: registers its own render callback
@@ -113,6 +114,7 @@ const wchar_t* s_attached_socket = nullptr;
 // a 2x lens magnifies -- the reported "I can drift its relative location, and it moves much more
 // jittery than my controller". So a write happens only when something actually changed.
 bool  s_pane_anchored = false;
+bool  s_closed_form_applied = false;   // the last socket attach used socket_relative_from_rest
 // Defined further down with the calibration gesture. Forward-declared because the ATTACH decision
 // (well above it) must know when a capture is in progress: a capture reads RelativeLocation, so it
 // has to happen in the canonical rig frame or it records numbers in the socket's frame instead.
@@ -1776,6 +1778,16 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
                 static int s_last_serial = -1;
                 const int ser = ::halo::palettearm_model_serial();
                 if (ser != s_last_serial) { s_last_serial = ser; s_pane_anchored = false; }
+                // ...and ONCE per model, if the socket attach happened before the palette knew this
+                // model's rest: the engine's KeepWorld conversion was kept, and nothing else would
+                // ever redo it (code review, 2026-09-18).
+                static int s_rest_retry_serial = -2;
+                float rr[3];
+                if (s_attached_socket != nullptr && !s_closed_form_applied && s_rest_retry_serial != ser &&
+                    ::halo::palettearm_stock_marker_rest_ue(rr)) {
+                    s_rest_retry_serial = ser;
+                    s_pane_anchored = false;
+                }
             }
         }
 
@@ -1989,11 +2001,13 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
             // socket_relative_from_rest), so they are written over it here, before the readback
             // below prints them. Whatever the body, the gun or the draw were doing at the attach
             // no longer matters.
+            if (ok && want_socket != nullptr) s_closed_form_applied = false;
             if (ok && want_socket != nullptr && vrig_fresh(tick)) {
                 Vec3 rl_c{}, rr_c{};
                 if (socket_relative_from_rest(&rl_c, &rr_c)) {
                     set_relative_location(s_pane.ptr, (double)rl_c.x, (double)rl_c.y, (double)rl_c.z);
                     set_relative_rotation(s_pane.ptr, (double)rr_c.x, (double)rr_c.y, (double)rr_c.z);
+                    s_closed_form_applied = true;
                 }
             }
 
@@ -4070,11 +4084,16 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
             // frame mesh, NOT the rig frame these numbers are stored in -- a capture taken from it
             // would mix two frames and be written to the calibration file. Refuse it and say so; the
             // player can simply calibrate again (pre-release audit, 2026-09-18).
-            const bool frame_mixed = !have_v && g_cfg.arm_driver == 2;
+            // The virtual frame exists only while the palette ACTUALLY owns the arms -- not merely
+            // while armdriver says 2: a session where Player IK fell back to the rig route has a real
+            // gun frame and a valid RelativeLocation (code review, 2026-09-18).
+            const bool frame_mixed = !have_v && g_cfg.pa_mesh_standdown &&
+                                     ::halo::arm_driver_owns(::halo::ArmDriverMode::Palette);   // = Plugin.cpp's mesh_standdown
             if (frame_mixed) {
                 API::get()->log_info("[Halo-CampE-UEVR] scope: calibration NOT saved -- the weapon's rig frame "
                                      "was not fresh at release (Player IK route). Hold the gun steady and "
                                      "calibrate again.");
+                s_pane_anchored = false;   // snap the pane back to the saved numbers, not the dragged ones
             }
             if (!frame_mixed && (have_v || (rel_loc != nullptr && rel_rot != nullptr))) {
                 g_cfg.scope_dist  = have_v ? v_dist  : (float)rel_loc[0];
