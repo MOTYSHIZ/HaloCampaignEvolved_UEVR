@@ -1295,6 +1295,7 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayersrcxcheck") == 0) { g_cfg.xr_layer_src_xcheck = (v != 0.0); return true; }
     // Perf fix, ships ON. 0 forces per-tick get_native_resource()+GetDesc (pre-fix) for A/B measuring.
     if (_stricmp(key, "xrlayersrccache") == 0) { g_cfg.xr_layer_src_cache  = (v != 0.0); return true; }
+    if (_stricmp(key, "xrlayersrcscan")  == 0) { g_cfg.xr_layer_src_scan   = (v != 0.0); return true; }
     if (_stricmp(key, "xrlayersrc")      == 0) { g_cfg.xr_layer_src       = (v != 0.0); return true; }
     // 0 is a real setting -- "revert to the ring the instant a capture is missed", i.e. the old
     // hardcoded behaviour with the window shut. The upper bound is a minute, well past any level

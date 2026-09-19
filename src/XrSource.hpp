@@ -107,9 +107,15 @@
 //
 // THE FIX is a two-speed acceptance, with NO hardcoded WinGDK offsets -- the layout is DISCOVERED
 // per build:
-//   * validate_native() -- get_native_resource() + a real ID3D12Resource::GetDesc() + want x want +
-//     UEVR's own device -- is already BUILD-AGNOSTIC. It never reads a guessed byte; it asks the
-//     runtime, so it is the authority on any binary.
+//   * validate_native() is BUILD-AGNOSTIC: it asks the runtime, never a guessed byte. First it tries
+//     UEVR's get_native_resource() + a real ID3D12Resource::GetDesc() (want x want + UEVR's device).
+//     But get_native_resource ITSELF is measured against ONE build and returns null/garbage on WinGDK
+//     (verified 2026-09-19), so a lax chain falls back to resolve_native_by_scan(): it finds the
+//     ID3D12Resource inside the FD3D12Texture by scanning (2 levels, bounded) for a heap object whose
+//     vtable is in UEVR's own D3D12 module -- the SAFETY gate, so GetDesc only ever runs on a proven
+//     D3D12 object -- and whose GetDesc agrees with aimwidgetdraw -- the CORRECTNESS gate. Still no
+//     hardcoded offset, still fail-closed. On Steam the strict chain resolves on the first
+//     get_native_resource try, so the scan is dead there.
 //   * probe() prefers a PLAUSIBLE candidate (Steam: latches a STRICT chain, byte-for-byte unchanged).
 //     Only if nothing plausible validates does it validate the IMPLAUSIBLE extent-matches through
 //     validate_native and latch a LAX chain (Chain::lax). The desc pre-filter is then disabled for

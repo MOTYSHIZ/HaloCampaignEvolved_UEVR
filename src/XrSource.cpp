@@ -412,24 +412,68 @@ bool desc_plausible(const uint8_t* q) {
     return true;
 }
 
-// Turn a candidate FRHITexture into a validated ID3D12Resource, or nullptr with a reason logged.
+// ============================================================================================
+// Finding the ID3D12Resource WITHOUT get_native_resource -- the WinGDK / Microsoft Store path
+// ============================================================================================
 //
-// THIS is the ValueAgreement rung. The dimensions are known independently (they are what we asked
-// UE for with SetDrawSize), so a resource that reports them is agreeing with a number we did not
-// read out of the same place we read the pointer.
-void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
-    void* native;
-    {
-#if HALO_VR_DEV
-        SplitTimer _t(&g_split.native_ms, &g_split.native_n);   // the virtual call, timed on its own
-#endif
-        native = call_native_guarded(rhi);
-    }
-    if (native == nullptr) {
-        if (loud) logf("  rhi %p -> get_native_resource returned null", rhi);
-        return nullptr;
-    }
+// get_native_resource() is UEVR's SDK reading the ID3D12Resource out of the FD3D12Texture at an
+// offset MEASURED ON ITS REFERENCE BUILD. On the Steam Win64 binary that works; on the Microsoft
+// Store / Game Pass (WinGDK) binary it reads the wrong slot and returns null or a garbage interior
+// pointer that faults on GetDesc (measured 2026-09-19 on the actual GP build). So on a lax chain we
+// resolve the resource OURSELVES, build-agnostically and with no hardcoded offset:
+//
+//   * SAFETY filter -- an ID3D12Resource created by UEVR's ID3D12Device has its VTABLE IN THE SAME
+//     MODULE as that device's vtable (device and resources are the same D3D12 implementation DLL).
+//     We only ever call GetDesc on a heap object proven to live in that module, never on a random
+//     pointer. That is what makes probing memory for the resource safe.
+//   * CORRECTNESS filter -- the resource's GetDesc must report TEXTURE2D at exactly
+//     aim_widget_draw x aim_widget_draw on the SAME device UEVR reports. That is a ValueAgreement
+//     with a number we chose ourselves, not "does it look like a pointer".
+//
+// It fails CLOSED: anything unproven leaves the resource null and the generated ring drawing. It is
+// NOT dev-gated (it is the actual feature), but it is reached ONLY through the lax path, so on Steam
+// -- which always latches a strict chain and resolves through get_native_resource on the first try --
+// none of this ever runs.
 
+// AllocationBase of the module that implements UEVR's ID3D12Device (its vtable's module).
+void* device_impl_module_base() {
+    auto* p = API::get()->param();
+    void* dev = (p != nullptr && p->renderer != nullptr) ? p->renderer->device : nullptr;
+    if (dev == nullptr || !mem_is_private(dev, sizeof(void*))) return nullptr;
+    const void* vt = *reinterpret_cast<void* const*>(dev);
+    if (!mem_is_image(vt)) return nullptr;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(vt, &mbi, sizeof(mbi)) == 0) return nullptr;
+    return mbi.AllocationBase;
+}
+
+// Is `obj` a COM object (heap object whose first qword is a mapped-image vtable of >=16 code slots)
+// whose vtable lives in `mod_base`'s module -- i.e. an object implemented by the SAME DLL as UEVR's
+// D3D12 device? That is the pre-filter that makes calling GetDesc on it safe.
+bool com_in_module(const void* obj, const void* mod_base) {
+    if (obj == nullptr || (reinterpret_cast<uintptr_t>(obj) & 7u) != 0u) return false;
+    if (!mem_is_private(obj, sizeof(void*))) return false;
+    const void* vt = *reinterpret_cast<void* const*>(obj);
+    if (vt == nullptr || (reinterpret_cast<uintptr_t>(vt) & 7u) != 0u) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(vt, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE) return false;
+    if (mbi.AllocationBase != mod_base) return false;
+    constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if ((mbi.Protect & READABLE) == 0 || (mbi.Protect & PAGE_GUARD) != 0) return false;
+    if (addrcascade::readable_bytes(vt, sizeof(void*) * 16) < sizeof(void*) * 16) return false;
+    for (int i = 0; i < 16; ++i) {
+        const void* fn = reinterpret_cast<void* const*>(vt)[i];
+        if (fn == nullptr) break;
+        if (!mem_is_image(fn)) return false;
+    }
+    return true;
+}
+
+// GetDesc-validate one ID3D12Resource candidate against `want`. Extracted so the get_native_resource
+// path AND the scan share the exact same correctness gate.
+void* validate_resource(void* native, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
     D3D12_RESOURCE_DESC d{};
     void* dev = nullptr;
     bool desc_ok;
@@ -440,35 +484,130 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
         desc_ok = desc_guarded(native, &d, &dev);
     }
     if (!desc_ok) {
-        if (loud) logf("  rhi %p -> native %p but GetDesc faulted -- REJECTED", rhi, native);
+        if (loud) logf("  native %p GetDesc faulted -- REJECTED", native);
         return nullptr;
     }
-
     auto* p = API::get()->param();
     void* uevr_dev = (p != nullptr && p->renderer != nullptr) ? p->renderer->device : nullptr;
-
-    const bool dim_ok = (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D);
+    const bool dim_ok  = (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D);
     const bool size_ok = ((int)d.Width == want && (int)d.Height == want);
-    const bool dev_ok = (uevr_dev == nullptr || dev == nullptr || dev == uevr_dev);
-
+    const bool dev_ok  = (uevr_dev == nullptr || dev == nullptr || dev == uevr_dev);
     if (loud) {
-        logf("  rhi %p -> native %p desc dim=%d %llux%u fmt=%u mips=%u samples=%u dev=%p (UEVR %p)",
-             rhi, native, (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height,
-             (unsigned)d.Format, (unsigned)d.MipLevels, (unsigned)d.SampleDesc.Count, dev, uevr_dev);
+        logf("  native %p desc dim=%d %llux%u fmt=%u mips=%u samples=%u dev=%p (UEVR %p)%s",
+             native, (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height,
+             (unsigned)d.Format, (unsigned)d.MipLevels, (unsigned)d.SampleDesc.Count, dev, uevr_dev,
+             (dim_ok && size_ok && dev_ok) ? "" : " -- REJECTED");
     }
-
-    if (!dim_ok || !size_ok || !dev_ok) {
-        if (loud) {
-            logf("  REJECTED: %s%s%s", dim_ok ? "" : "not a 2D texture; ",
-                 size_ok ? "" : "dimensions disagree with aimwidgetdraw; ",
-                 dev_ok ? "" : "different ID3D12Device than UEVR reports; ");
-        }
-        return nullptr;
-    }
-
+    if (!dim_ok || !size_ok || !dev_ok) return nullptr;
     if (out_dim != nullptr) *out_dim = want;
     if (out_fmt != nullptr) *out_fmt = (uint32_t)d.Format;
     return native;
+}
+
+// Bounds for the scan. Structural limits, not addresses -- one-time cost on a lax latch / re-host.
+constexpr size_t kScanWindow    = 0x200;   // bytes of each object swept for pointers
+constexpr int    kScanMaxGets   = 24;      // hard cap on GetDesc attempts across the whole scan
+constexpr int    kScanMaxRecurse = 16;     // level-0 heap objects we descend into (FD3D12Resource, ...)
+constexpr int    kScanMaxChecks  = 512;    // hard cap on com_in_module probes (bounds the walk cost)
+
+// Resolve the ID3D12Resource for a candidate FRHITexture WITHOUT get_native_resource. The resource is
+// either cached directly in the FD3D12Texture (level 0) or one hop away through an intermediate UE
+// object such as FD3D12Resource (level 1); both are covered. Lax path only; fails closed.
+void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
+    const void* mod = device_impl_module_base();
+    if (mod == nullptr) {
+        if (loud) logf("  SCAN: could not establish UEVR's D3D12 module -- refusing to scan (fail closed)");
+        return nullptr;
+    }
+    void* seen[kScanMaxGets] = {};
+    int   seen_n   = 0;
+    int   gets     = 0;
+    int   checks   = 0;
+    int   recursed = 0;
+
+    auto try_resource = [&](void* cand, unsigned o0, int o1) -> void* {
+        for (int i = 0; i < seen_n; ++i) if (seen[i] == cand) return nullptr;
+        if (gets >= kScanMaxGets) return nullptr;
+        if (seen_n < kScanMaxGets) seen[seen_n++] = cand;
+        ++gets;
+        int dim_out = 0;
+        uint32_t fmt_out = 0;
+        void* found = validate_resource(cand, want, loud, &dim_out, &fmt_out);
+        if (found == nullptr) return nullptr;
+        if (loud) {
+            if (o1 < 0) logf("  SCAN: FRHITexture+0x%X holds ID3D12Resource %p (%dx%d, DXGI %u) -- "
+                             "resolved WITHOUT get_native_resource.", o0, found, dim_out, dim_out, fmt_out);
+            else        logf("  SCAN: FRHITexture+0x%X -> obj+0x%X holds ID3D12Resource %p (%dx%d, "
+                             "DXGI %u) -- resolved WITHOUT get_native_resource.",
+                             o0, (unsigned)o1, found, dim_out, dim_out, fmt_out);
+        }
+        if (out_dim != nullptr) *out_dim = dim_out;
+        if (out_fmt != nullptr) *out_fmt = fmt_out;
+        return found;
+    };
+
+    const size_t lim0 = scan_limit(rhi, kScanWindow);
+    for (size_t o0 = 8; o0 + sizeof(void*) <= lim0 && gets < kScanMaxGets && checks < kScanMaxChecks;
+         o0 += sizeof(void*)) {
+        void* p0 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(rhi) + o0);
+        if (p0 == nullptr || p0 == rhi) continue;
+        ++checks;
+        // (a) the resource may be cached directly in the FD3D12Texture
+        if (com_in_module(p0, mod)) {
+            if (void* r = try_resource(p0, (unsigned)o0, -1)) return r;
+            continue;   // a same-module COM object is the resource or nothing -- do not recurse into it
+        }
+        // (b) otherwise follow p0 as an intermediate UE heap object and look one level deeper. Reading
+        //     p0's bytes is safe (readable_bytes-bounded); GetDesc still only fires on a com_in_module
+        //     pointer found inside it.
+        if (recursed >= kScanMaxRecurse) continue;
+        if (!mem_is_private(p0, sizeof(void*))) continue;
+        ++recursed;
+        const size_t lim1 = scan_limit(p0, kScanWindow);
+        for (size_t o1 = 8; o1 + sizeof(void*) <= lim1 && gets < kScanMaxGets && checks < kScanMaxChecks;
+             o1 += sizeof(void*)) {
+            void* p1 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(p0) + o1);
+            if (p1 == nullptr || p1 == p0 || p1 == rhi) continue;
+            ++checks;
+            if (!com_in_module(p1, mod)) continue;
+            if (void* r = try_resource(p1, (unsigned)o0, (int)o1)) return r;
+        }
+    }
+    if (loud) logf("  SCAN: no ID3D12Resource in the FRHITexture validated %dx%d on UEVR's device "
+                   "(%d GetDesc, %d probes, %d objs) -- generated ring.", want, want, gets, checks, recursed);
+    return nullptr;
+}
+
+// Turn a candidate FRHITexture into a validated ID3D12Resource, or nullptr with a reason logged.
+//
+// THIS is the ValueAgreement rung. The dimensions are known independently (they are what we asked
+// UE for with SetDrawSize), so a resource that reports them is agreeing with a number we did not
+// read out of the same place we read the pointer.
+//
+// `allow_scan` (LAX PATH ONLY): when UEVR's get_native_resource does not yield a valid resource --
+// the WinGDK case, where it is measured against the wrong build -- fall back to
+// resolve_native_by_scan, which finds the ID3D12Resource in the FD3D12Texture build-agnostically.
+// A strict (Steam) chain never sets this, so the scan is dead code on Steam.
+void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt,
+                      bool allow_scan) {
+    void* native;
+    {
+#if HALO_VR_DEV
+        SplitTimer _t(&g_split.native_ms, &g_split.native_n);   // the virtual call, timed on its own
+#endif
+        native = call_native_guarded(rhi);
+    }
+    if (native != nullptr) {
+        if (void* ok = validate_resource(native, want, loud, out_dim, out_fmt)) return ok;
+    } else if (loud) {
+        logf("  rhi %p -> get_native_resource returned null", rhi);
+    }
+    if (allow_scan) {
+        if (loud) logf("  rhi %p -> get_native_resource did not resolve; scanning the FD3D12Texture "
+                       "for the ID3D12Resource (WinGDK/Store path).", rhi);
+        return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
+    }
+    return nullptr;
 }
 
 // Walk the latched chain and re-validate it end to end. No searching, no assumptions: every hop is
@@ -598,11 +737,13 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
         return cached_native;
     }
 
-    // CACHE MISS -- derive and validate the native fresh (get_native_resource + GetDesc).
+    // CACHE MISS -- derive and validate the native fresh (get_native_resource + GetDesc, and on a
+    // lax chain the FD3D12Texture scan if get_native_resource cannot decode this build).
 #if HALO_VR_DEV
     ++g_split.cache_miss;
 #endif
-    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt);
+    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt,
+                           /*allow_scan=*/(g_chain.lax && g_cfg.xr_layer_src_scan));
 }
 
 // ============================================================================================
@@ -746,7 +887,8 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
                 int dim_out = 0;
                 uint32_t fmt_out = 0;
-                void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out);
+                void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
+                                               /*allow_scan=*/false);
                 if (native == nullptr) continue;
 
                 ++accepted;
@@ -803,15 +945,16 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
             int dim_out = 0;
             uint32_t fmt_out = 0;
-            void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out);
+            void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
+                                           /*allow_scan=*/g_cfg.xr_layer_src_scan);
             if (native == nullptr) continue;
 
             ++accepted;
             logf("ACCEPTED (LAX): chain rt+0x%X res+0x%X rhi+0x%X -> ID3D12Resource %p, %dx%d, DXGI "
-                 "format %u. The descriptor bytes are not at the Steam sub-offsets, but "
-                 "get_native_resource + GetDesc AGREE with aimwidgetdraw on UEVR's own device -- "
-                 "latching a LAX chain (desc pre-filter off for it; every resolve still re-validates "
-                 "size + identity).",
+                 "format %u. The descriptor bytes are not at the Steam sub-offsets, but the resource "
+                 "VALIDATED at aimwidgetdraw on UEVR's own device (via get_native_resource or, on this "
+                 "build, the FD3D12Texture scan above) -- latching a LAX chain (desc pre-filter off for "
+                 "it; every resolve still re-validates size + identity).",
                  (unsigned)lax_cand[i].o1, (unsigned)lax_cand[i].o2, (unsigned)lax_cand[i].oe,
                  native, dim_out, dim_out, fmt_out);
 
