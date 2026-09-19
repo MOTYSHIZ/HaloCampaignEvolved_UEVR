@@ -301,6 +301,9 @@ bool s_switch_on[kTierCount];
 // Shared infrastructure the resolver turns on for its consumers, unless a file sets it.
 int  s_palette_hook_layer = -1;
 int  s_pose_latch_layer   = -1;
+// The fork's reload log, so a player who switched it OFF explicitly keeps it off even with the
+// author's reloadlog on. Without this the raise below is one-way.
+int  s_reload_vr_log_layer = -1;
 // The author's rig, arm hide mode and bone list, left alone by the arm hide and rig derivation when a
 // file sets them.
 int  s_arm_hide_mode_layer = -1;
@@ -384,6 +387,7 @@ void features_begin_load() {
     for (int t = 0; t < kTierCount; ++t) { s_switch_layer[t] = -1; s_switch_on[t] = false; }
     s_palette_hook_layer = -1;
     s_pose_latch_layer = -1;
+    s_reload_vr_log_layer = -1;
     s_arm_hide_mode_layer = -1;
     s_arm_hide_bone_layer = -1;
     s_rig_layer = -1;
@@ -413,6 +417,7 @@ void features_note_key(const char* key, const char* val) {
     }
     if (_stricmp(key, "palettehook") == 0) { s_palette_hook_layer = s_layer; return; }
     if (_stricmp(key, "paletteposelatch") == 0)   { s_pose_latch_layer = s_layer; return; }
+    if (_stricmp(key, "reloadvrlog") == 0)        { s_reload_vr_log_layer = s_layer; return; }
     if (_stricmp(key, "armhidemode") == 0) { s_arm_hide_mode_layer = s_layer; return; }
     if (_stricmp(key, "armhidebone") == 0) { s_arm_hide_bone_layer = s_layer; return; }
     if (_stricmp(key, "rig") == 0)         { s_rig_layer = s_layer; return; }
@@ -440,10 +445,19 @@ void features_apply() {
     // feature. reloadlog is HIS key, parsed by HIS parser, so it cannot go in the alias table --
     // that table holds fork names only, and claiming one of his would be the very thing the rule
     // forbids. The translation goes the other way instead: his switch also raises OURS, which is a
-    // write to a fork key and never to his. So reloadlog still lights the fork's reload evidence,
-    // which is what the settings menu writes and what a player who has been told "turn the reload
-    // log on" will set, and reloadvrlog keeps working on its own for anyone who set that.
-    if (g_cfg.reload_log) g_cfg.reload_vr_log = true;
+    // write to a fork key and never to his, so a player told "turn the reload log on" gets the
+    // fork's evidence whichever of the two switches they reach for.
+    //
+    // CORRECTION to the reasoning this shipped with, which claimed reloadlog is "what the settings
+    // menu writes": it is not. The menu's Record the reload gesture writes reloadvrlog
+    // (profile/scripts/halo_vr_settings.lua), so the everyday switch is OURS and his is the one a
+    // troubleshooting instruction names. That leaves the direction of the raise right and the old
+    // one-way form wrong: with reloadlog on in a cfg file, turning the menu switch off wrote
+    // reloadvrlog=0 and nothing happened, because the raise ran afterwards and overrode it.
+    //
+    // EITHER OR, with the explicit value winning: if any cfg file set reloadvrlog, that is the
+    // player's answer and it stands, on or off. Only when nobody set it does his switch raise it.
+    if (s_reload_vr_log_layer < 0 && g_cfg.reload_log) g_cfg.reload_vr_log = true;
 
     // SHARED INFRASTRUCTURE, turned on for the features that need it unless a file sets it.
     //   The weapon placement (palettewpn = armdriver mode 3) moves the drawn weapon through the
