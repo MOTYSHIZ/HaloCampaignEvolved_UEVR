@@ -305,6 +305,20 @@ void gesture_reset() {
 // hand does all day -- fetch magazines, pull grenades, brace the weapon -- each a fast, extending
 // reach, so each gets an explicit stand-down rather than a threshold tweak. The strike is aimed
 // along the punch (meleeaimmode 1), which is what makes a left hook land left.
+// meleegrip: the swing strikes only while the grip of the hand throwing it is held. Logged at most
+// every 300 ms per hand, so a swing that stays over threshold for several ticks is one line.
+static bool melee_grip_ok(bool right_hand, const char* which, float speed, float ext, float reach) {
+    if (!g_cfg.melee_grip || holster_grip_held(right_hand)) return true;
+    static long long s_said[2] = {0, 0};
+    const long long t = now_ticks();
+    if (g_cfg.melee_log && t - s_said[right_hand ? 1 : 0] > ms_to_ticks(300)) {
+        s_said[right_hand ? 1 : 0] = t;
+        API::get()->log_info("[Halo-CampE-UEVR] MELEE (%s) stood down: grip not held (meleegrip=1) "
+                             "speed=%.2f ext=%.2f reach=%.2f", which, speed, ext, reach);
+    }
+    return false;
+}
+
 void offhand_melee_update(float dt) {
     static Vec3      s2_prev_rel{};
     static float     s2_prev_reach = 0.0f;
@@ -421,6 +435,7 @@ void offhand_melee_update(float dt) {
         if (holster_offhand_melee_veto()) s_cooldown_until = nowt + ms_to_ticks(150);
         return;
     }
+    if (!melee_grip_ok(/*right_hand=*/g_cfg.aim_left_hand, "OFF HAND", speed, s2_ext, reach)) return;
 
     g_melee_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);
     s_cooldown_until = nowt + ms_to_ticks(g_cfg.melee_cooldown_ms);
@@ -608,6 +623,7 @@ void gesture_update(float dt) {
     if (s_ext < g_cfg.melee_ext)   return;
     if (reach < g_cfg.melee_reach) return;
     if (along < g_cfg.melee_fwd)   return;
+    if (!melee_grip_ok(/*right_hand=*/!g_cfg.aim_left_hand, "AIM HAND", speed, s_ext, reach)) return;
 
     g_melee_hold_until.store(now + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);
 
