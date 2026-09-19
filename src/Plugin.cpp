@@ -8337,54 +8337,105 @@ void update() {
 
             // ---- FIRST-PERSON SCALE / FOV ON THE PAWN CAMERA (fpscale / fpfov; see Config.hpp). The
             // camera is found by walking UP the arm mesh's attach chain -- no object-array sweep --
-            // once per rig component. Each value is READ every 64 ticks (a property read, no call)
-            // and written only when it differs: through the setter, then directly if the setter is
-            // absent or did not land. The game's own values are remembered at first sight so a key
-            // set back to 0 hands them back.
+            // once per rig component, and its four property addresses are cached with it.
+            //
+            // EACH VALUE HAS AN ENABLE FLAG, AND THE FLAG IS WHAT MATTERS (2026-09-18). The first
+            // version wrote only the VALUE, every 64 ticks, and left bEnableFirstPersonScale on: the
+            // game rewrites these properties itself (measured: fpfov=1 read back as the game's 78
+            // within 13 s, with nothing of ours writing it), so between our writes the engine drew
+            // the arms at the game's 0.15 -- "behaving like it's still scaled down". The reference
+            // 0.5 mod's projection-fix script, and blindcowboy24's port of it, turn the FLAG off:
+            // with it off the engine applies no first-person scale at all, whatever the value says.
+            // So: scale 1 = flag OFF (plus value 1 for anything that reads it anyway); another
+            // scale = flag ON with that value; FOV likewise. Checked EVERY tick -- two cached bool
+            // reads and two float compares, no engine call -- and written only on a difference, so
+            // a game write is undone before the next frame is drawn. The game's own values are
+            // remembered at first sight so a key set back hands them back. Game rewrites are
+            // COUNTED and summarised every ~10 s, so whether the game fights this is on record.
             {
                 static void*         s_fp_for = nullptr;
                 static API::UObject* s_fp_cam = nullptr;
-                static uint32_t      s_fp_last = 0;
+                static float*        s_fp_scale_p = nullptr;  static bool* s_fp_scale_en = nullptr;
+                static float*        s_fp_fov_p = nullptr;    static bool* s_fp_fov_en = nullptr;
                 static float         s_fp_orig_scale = -1.0f, s_fp_orig_fov = -1.0f;
-                static float         s_fp_last_scale_cfg = -2.0f, s_fp_last_fov_cfg = -2.0f;
-                bool due = false;
+                static int           s_fp_orig_scale_en = -1, s_fp_orig_fov_en = -1;
+                static float         s_fp_last_scale_cfg = -99.0f, s_fp_last_fov_cfg = -99.0f;
+                static uint32_t      s_fp_fixes = 0, s_fp_sum_tick = 0;
                 if (rig_v != s_fp_for) {
-                    s_fp_for = rig_v; s_fp_cam = nullptr; due = true;
+                    s_fp_for = rig_v; s_fp_cam = nullptr;
+                    s_fp_scale_p = nullptr; s_fp_scale_en = nullptr; s_fp_fov_p = nullptr; s_fp_fov_en = nullptr;
+                    s_fp_last_scale_cfg = -99.0f; s_fp_last_fov_cfg = -99.0f;   // log the state on the new camera
                     auto* o = reinterpret_cast<API::UObject*>(rig_v);
                     for (int depth = 0; o != nullptr && depth < 8; ++depth) {
                         if (class_name_of(o).find(L"CameraComponent") != std::wstring::npos) { s_fp_cam = o; break; }
                         auto* ap = o->get_property_data<API::UObject*>(L"AttachParent");
                         o = (ap != nullptr) ? *ap : nullptr;
                     }
-                    API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s above the arm mesh",
-                                         s_fp_cam != nullptr ? "found a CameraComponent" : "NO CameraComponent found");
+                    if (s_fp_cam != nullptr) {
+                        s_fp_scale_p  = s_fp_cam->get_property_data<float>(L"FirstPersonScale");
+                        s_fp_scale_en = s_fp_cam->get_property_data<bool>(L"bEnableFirstPersonScale");
+                        s_fp_fov_p    = s_fp_cam->get_property_data<float>(L"FirstPersonFieldOfView");
+                        s_fp_fov_en   = s_fp_cam->get_property_data<bool>(L"bEnableFirstPersonFieldOfView");
+                    }
+                    API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s above the arm mesh (scale %s/flag %s, fov %s/flag %s)",
+                                         s_fp_cam != nullptr ? "found a CameraComponent" : "NO CameraComponent found",
+                                         s_fp_scale_p ? "ok" : "MISSING", s_fp_scale_en ? "ok" : "MISSING",
+                                         s_fp_fov_p ? "ok" : "MISSING", s_fp_fov_en ? "ok" : "MISSING");
                 }
-                if (g_cfg.fp_scale != s_fp_last_scale_cfg || g_cfg.fp_fov != s_fp_last_fov_cfg) due = true;
-                if (s_fp_cam != nullptr && g_cfg.enabled && (due || (tick - s_fp_last) >= 64u)) {
-                    s_fp_last = tick;
-                    auto apply = [&](const wchar_t* prop, const wchar_t* setter, float cfg, float& orig,
-                                     float& last_cfg, const char* name) {
-                        auto* p = s_fp_cam->get_property_data<float>(prop);
-                        if (p == nullptr) {
-                            if (last_cfg != cfg) API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s is not a property on this build", name);
+                if (s_fp_cam != nullptr && g_cfg.enabled) {
+                    // One value + its flag. cfg: 0 (or less) = the game's own; 1 on the SCALE = the
+                    // engine's first-person scale switched off entirely; anything else = flag on,
+                    // with that value. The FOV has no "off" number: fpfov=0 turns the override off
+                    // (the arms drawn at the world FOV, like the reference), fpfov<0 = the game's own.
+                    auto enforce = [&](float* val, bool* en, float cfg, bool is_scale, float& orig, int& orig_en,
+                                       float& last_cfg, const char* name) {
+                        if (val == nullptr || en == nullptr) {
+                            if (last_cfg != cfg) API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s (or its enable flag) "
+                                                                      "is not a property on this build", name);
                             last_cfg = cfg; return;
                         }
-                        if (orig < 0.0f && std::isfinite(*p)) orig = *p;              // the game's own, at first sight
-                        const float want = (cfg > 0.0f) ? cfg : orig;
-                        if (!(want > 0.0f) || std::fabs(*p - want) < 1.0e-4f) { last_cfg = cfg; return; }
-                        const float was = *p;
-                        alignas(16) uint8_t q[RIG_PARAM_BUF] = {0};
-                        *reinterpret_cast<float*>(q) = want;
-                        s_fp_cam->call_function(setter, q);
-                        const bool via_setter = std::fabs(*p - want) < 1.0e-4f;
-                        if (!via_setter) *p = want;
-                        if (last_cfg != cfg)
-                            API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s %.3f -> %.3f (%s; game's own %.3f; key %.3f)",
-                                                 name, was, *p, via_setter ? "setter" : "direct write", orig, cfg);
+                        if (orig < 0.0f && std::isfinite(*val)) { orig = *val; orig_en = *en ? 1 : 0; }
+                        bool  want_en;  float want_val;
+                        if (is_scale) {
+                            if (!(cfg > 0.0f))                  { want_en = orig_en != 0; want_val = orig; }
+                            else if (std::fabs(cfg - 1.0f) < 1e-4f) { want_en = false; want_val = 1.0f; }
+                            else                                { want_en = true;  want_val = cfg; }
+                        } else {
+                            if (cfg < 0.0f)                     { want_en = orig_en != 0; want_val = orig; }
+                            else if (cfg == 0.0f)               { want_en = false; want_val = *val; }
+                            else                                { want_en = true;  want_val = cfg; }
+                        }
+                        // The scale VALUE is held even with its flag off (1 for anything that reads it
+                        // regardless); an unused FOV value is left alone.
+                        const bool val_off = (want_en || is_scale) && std::fabs(*val - want_val) >= 1e-4f;
+                        const bool en_off  = (*en != want_en);
+                        if (val_off || en_off) {
+                            const float was = *val; const bool was_en = *en;
+                            if (want_en) *val = want_val; else if (is_scale) *val = want_val;
+                            *en = want_en;
+                            if (last_cfg == cfg) ++s_fp_fixes;           // the GAME moved it, not a key change
+                            else API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s %.3f/%s -> %.3f/%s "
+                                                      "(game's own %.3f/%s; key %.3f)",
+                                                      name, was, was_en ? "on" : "off", *val, *en ? "on" : "off",
+                                                      orig, orig_en == 1 ? "on" : "off", cfg);
+                        } else if (last_cfg != cfg) {
+                            API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: %s already %.3f/%s (key %.3f)",
+                                                 name, *val, *en ? "on" : "off", cfg);
+                        }
                         last_cfg = cfg;
                     };
-                    apply(L"FirstPersonScale",       L"SetFirstPersonScale",       g_cfg.fp_scale, s_fp_orig_scale, s_fp_last_scale_cfg, "FirstPersonScale");
-                    apply(L"FirstPersonFieldOfView", L"SetFirstPersonFieldOfView", g_cfg.fp_fov,   s_fp_orig_fov,   s_fp_last_fov_cfg,   "FirstPersonFieldOfView");
+                    enforce(s_fp_scale_p, s_fp_scale_en, g_cfg.fp_scale, true,  s_fp_orig_scale, s_fp_orig_scale_en,
+                            s_fp_last_scale_cfg, "FirstPersonScale");
+                    enforce(s_fp_fov_p,   s_fp_fov_en,   g_cfg.fp_fov,   false, s_fp_orig_fov,   s_fp_orig_fov_en,
+                            s_fp_last_fov_cfg,   "FirstPersonFieldOfView");
+                    if (tick - s_fp_sum_tick >= 320u) {
+                        s_fp_sum_tick = tick;
+                        if (s_fp_fixes > 0) {
+                            API::get()->log_info("[Halo-CampE-UEVR] FP CAMERA: the game rewrote the first-person "
+                                                 "scale/FOV %u time(s) in the last ~10 s -- put back each time", s_fp_fixes);
+                            s_fp_fixes = 0;
+                        }
+                    }
                 }
             }
 
@@ -11844,7 +11895,10 @@ public:
                 const bool two_hand_ok = !halo::g_menu_active.load(std::memory_order_relaxed)
                                       && !halo::g_stick_mode_active.load(std::memory_order_relaxed)
                                       && !halo::g_aim_calibrating.load(std::memory_order_relaxed)
-                                      && !g_calib_held.load(std::memory_order_relaxed);
+                                      && !g_calib_held.load(std::memory_order_relaxed)
+                                      // emote mode (weapon put away over the left shoulder): there
+                                      // is no visible gun to brace, and the left grip is a gesture
+                                      && !halo::holster_emote_active();
                 PerfScope _perf(PERF_2HAND);
                 halo::two_hand_update(delta, two_hand_ok, g_ticks.load(std::memory_order_relaxed));
             }

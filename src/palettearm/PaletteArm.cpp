@@ -11,6 +11,7 @@
 #include "../addrcascade/AddressCascade.hpp"
 #include "../ArmDriver.hpp"
 #include "../Config.hpp"
+#include "../Holster.hpp"         // holster_emote_active(): the weapon put away, the aim hand free
 #include "../DevTools.hpp"        // HALO_VR_DEV_ONLY: the dump must not exist in a player build
 #include "../MotionAimControl.hpp"   // get_pose()
 #include "../WeaponCalib.hpp"        // wpnfix: the per-weapon rigid delta and its capture latch
@@ -2651,7 +2652,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // EMPTY-HAND GESTURES (pagesture; see Config.hpp): the controller's grip, trigger and thumb
     // sensor pick a tuned pose from the table (halo_vr_handposes.json), eased between. The support hand whenever it is free -- on the
     // gun the grab weight hands the fingers back to the authored grip, as before -- and the AIM
-    // hand only while unarmed, eased in and out so picking a weapon up does not snap the fingers.
+    // hand only while unarmed or in emote mode, eased in and out so the weapon coming back does not
+    // snap the fingers.
     if (g_cfg.pa_hand_pose) {
         const float rest = g_cfg.pa_hand_rest < -1.0f ? -1.0f : (g_cfg.pa_hand_rest > 1.0f ? 1.0f : g_cfg.pa_hand_rest);
         if (!access.is_capture_bank) {
@@ -2674,7 +2676,14 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                         dt, 0.045f);
                 }
             }
-            const float aw = (g_cfg.pa_gesture != 0 && s_unarmed.load(std::memory_order_relaxed)) ? 1.0f : 0.0f;
+            // The aim hand gestures while unarmed, and in EMOTE MODE (weapon put away over the left
+            // shoulder). The pose table serves both hands as-is: the rig is a behaviour mirror (every
+            // right-hand finger offset is the left's negated), so the same parent-relative rotations
+            // -- recorded poses and trims alike -- give the mirror image. Checked on the recording:
+            // every joint of every pose within 0.2 cm of the exact mirror (the pinky knuckle's own
+            // offset is asymmetric in the skeleton, up to 2.7 cm; the pose does not touch offsets).
+            const bool aim_free = s_unarmed.load(std::memory_order_relaxed) || ::halo::holster_emote_active();
+            const float aw = (g_cfg.pa_gesture != 0 && aim_free) ? 1.0f : 0.0f;
             s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));
             if (s_aim_gesture_w < 0.001f && aw <= 0.0f) s_aim_gesture_w = 0.0f;
         }

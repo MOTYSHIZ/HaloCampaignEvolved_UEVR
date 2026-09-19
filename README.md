@@ -184,7 +184,7 @@ first time the layer loads into the game.
 | Right trigger | Fire |
 | Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
 | Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
-| Right grip | Reach over your shoulder and squeeze to switch weapons |
+| Right grip | Reach over your right shoulder and squeeze to switch weapons; over your left shoulder to put the weapon away and free your hand (squeeze there again to bring it back) |
 | Right A | Jump |
 | Right Y | Switch weapon |
 | Left X | Equipment / overshield |

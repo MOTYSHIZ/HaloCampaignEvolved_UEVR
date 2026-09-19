@@ -736,8 +736,11 @@
 #wpncalibkey=0x2D
 
 # ------------------------------------------------- HOLSTERS: REACH FOR YOUR GEAR
-# Weapons live over your shoulders and grenades on your chest. Reach to a spot and squeeze the
-# grip: over a shoulder stows, draws or exchanges a weapon; at a chest pouch takes a grenade.
+# Reach to a spot and squeeze the grip:
+#   over your RIGHT shoulder   switch weapons (and bring the weapon back if it was put away)
+#   over your LEFT shoulder    put the weapon away, leaving your hand free; squeeze there again to
+#     (or at your right hip)   bring it back. While it is away the trigger does not fire.
+#   at a chest pouch           take a grenade.
 # Y still switches weapons the ordinary way -- the reach is an addition, not a replacement.
 #
 # The zones hang on your TORSO, not your head, so glancing around does not drag your gear with
@@ -756,11 +759,11 @@
 # near misses that landed a little behind the pouch, because the hand settles back against your
 # chest before you squeeze. Raise this before you move the pouches.
 #holstergradius=0.13
-# Right shoulder -- behind you. Weapon slot.
+# Right shoulder -- behind you. Switches weapons.
 #holsterrs=0.20,-0.10,0.22
-# Left shoulder -- behind you. Weapon slot.
+# Left shoulder -- behind you. Puts the weapon away / brings it back.
 #holsterls=-0.20,-0.10,0.22
-# Right hip. Weapon slot.
+# Right hip. Same as the left shoulder.
 #holsterrh=0.22,-0.65,0.05
 # Left chest, in front: FRAG grenades.
 #holsterlc=-0.12,-0.30,-0.12
@@ -790,7 +793,7 @@
 # drag the pouches forward off your chest. Both 0 restores the old head-anchored behaviour.
 #holsterneckdown=0.15
 #holsterneckback=0.08
-# Buzz the controller on a successful grab or stow.
+# Buzz the controller on a successful grab, swap or put-away.
 #holsterhaptic=1
 # The pad buttons these gestures press for you. Change them only if your controller reports
 # different masks -- measure with mapbtnlog=1 rather than guessing.
