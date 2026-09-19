@@ -402,6 +402,11 @@
 # two-handed, or working a grenade pouch. 0 = only the aim hand melees.
 #meleeleft=1
 
+# Only strike while the GRIP of the swinging hand is held -- make a fist to punch.
+# Stops fast reaches and aim turns from ever counting as a hit. Applies to both
+# hands, each needing its own grip. 0 = any fast enough swing strikes.
+#meleegrip=1
+
 # Off-hand chops: how far (metres) the hand must travel during the swing to
 # count as a strike even when it barely reaches away from you -- a downward chop
 # arcs around the shoulder rather than extending. 0 = extension only.

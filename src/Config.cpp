@@ -1341,6 +1341,7 @@ static bool parse_holster_key(const char* key, const char* val, double v) {
 static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "meleeswing")     == 0) { g_cfg.melee_swing    = (v != 0.0); return true; }
     if (_stricmp(key, "meleeleft")      == 0) { g_cfg.melee_left     = (v != 0.0); return true; }
+    if (_stricmp(key, "meleegrip")      == 0) { g_cfg.melee_grip     = (v != 0.0); return true; }
     if (_stricmp(key, "meleedisp")      == 0) { g_cfg.melee_disp     = std::isfinite(v) ? (float)std::fmin(std::fmax(v, 0.0), 2.0) : 0.4f; return true; }
     if (_stricmp(key, "meleespeed")     == 0) { g_cfg.melee_speed    = clampf((float)v, 0.0f, 20.0f); return true; }
     if (_stricmp(key, "meleeext")       == 0) { g_cfg.melee_ext      = clampf((float)v, 0.0f, 20.0f); return true; }

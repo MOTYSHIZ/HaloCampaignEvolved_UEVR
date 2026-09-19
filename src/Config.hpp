@@ -3601,6 +3601,12 @@ struct Config {
     // its actual jobs: a VR reload in progress, a two-hand brace, a grenade in the pouch or hand, and
     // the off hand's own holster window. Their ForceTube shot window is not ported (no ForceTube here).
     bool  melee_left      = true;
+    // GRIP-GATED MELEE (2026-09-18, by request). A swing only strikes while the GRIP of the hand
+    // throwing it is held -- a closed fist, not a flick of the wrist or a fast reach. Applies to both
+    // detectors, each reading its own hand's grip (UEVR's per-hand Grip action, as the holsters do).
+    // Checked last, after the swing has passed every other test, so a stood-down swing is logged
+    // with its numbers. 0 = any fast swing strikes, as before.
+    bool  melee_grip      = true;
     // Off-hand CHOP rescue: extension OR this much travel (m) since the swing began. A vertical chop
     // arcs around the shoulder -- big speed and over a metre of travel while the extension gate never
     // passes (their measurement: ext 1.43 / 1.80 against the gate, travel 1.13 / 0.77 m). Jitter stays
