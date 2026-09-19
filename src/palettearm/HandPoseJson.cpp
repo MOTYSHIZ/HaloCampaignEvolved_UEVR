@@ -12,7 +12,7 @@ void default_hand_poses(HandPose out[kHandPoseCount]) {
     // pointing index (curl 0, segments 0/-0.85/-3, -6 deg on the knuckle) in point and pointdown;
     // the thumb-down set (20/0/20 deg on the thumb's base) in fist, pointdown and ok; the thumb-up
     // set (-20/0/-20 deg, ext -2) in thumbsup and point; thumb over 0.35 on the clenched fist,
-    // thumb out 0.3 everywhere. OK is new: the fist's index and thumb, the other three relaxed.
+    // thumb out 0.3 everywhere. OK: see below.
     for (int p = 0; p < kHandPoseCount; ++p) { out[p] = HandPose{}; out[p].thumb_out = 0.3f; }
     const auto fingers = [](HandPose& h, float i, float m, float r, float k, float t) {
         h.finger[0].curl = i; h.finger[1].curl = m; h.finger[2].curl = r; h.finger[3].curl = k; h.finger[4].curl = t;
@@ -32,7 +32,18 @@ void default_hand_poses(HandPose out[kHandPoseCount]) {
     fingers(up,   1, 1, 1, 1, -1); thumb_up(up);
     fingers(pt,   0, 1, 1, 1, -1); point_index(pt);  thumb_up(pt);
     fingers(ptd,  0, 1, 1, 1, 1);  point_index(ptd); thumb_down(ptd);
-    fingers(ok,   1, 0, 0, 0, 1);  thumb_down(ok);   ok.thumb_over = 0.35f;
+    // OK, CANONIZED 2026-09-18 from the user's own tuning in halo_vr_handposes.json: the index
+    // curled with its joints eased back open (a ring with the thumb, not a fist), the other three
+    // fanned -- each segment turned a little further out about its own z, the pinky most.
+    fingers(ok,   1, 0, 0, 0, 1);  ok.thumb_over = 0.35f;
+    const auto segs = [](FingerPose& f, float a, float b, float c) { f.seg[0] = a; f.seg[1] = b; f.seg[2] = c; };
+    segs(ok.finger[0], -0.45f, -0.5f, -0.8f);
+    segs(ok.finger[1],  0.25f, -0.5f, -0.9f);  ok.finger[1].rot[2][2] = -20.0f;
+    segs(ok.finger[2], -0.25f,  0.0f,  0.0f);  ok.finger[2].rot[1][2] = -20.0f; ok.finger[2].rot[2][2] = -20.0f;
+    segs(ok.finger[3], -0.7f,   0.0f,  0.0f);  ok.finger[3].rot[0][2] = -45.0f; ok.finger[3].rot[1][2] = -20.0f;
+                                                ok.finger[3].rot[2][2] = -30.0f;
+    segs(ok.finger[4],  0.5f,   0.0f,  0.0f);  ok.finger[4].rot[0][0] = 20.0f;  ok.finger[4].rot[0][2] = 5.0f;
+                                                ok.finger[4].rot[2][2] = -30.0f;
 }
 
 namespace {

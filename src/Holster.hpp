@@ -1,16 +1,16 @@
 // ============================================================================================
 // HOLSTERS -- body-anchored slots the RIGHT hand reaches into.
 //
-// Three WEAPON slots (right shoulder, left shoulder, right hip) and one GRENADE slot (left
-// chest). Halo carries two weapons, A (the game's current) and B (its backup); each is either in
-// a slot or in the hand, and the hand can be EMPTY:
-//   armed,   grip at an empty slot      -> STOW: the held weapon goes there; you are unarmed
-//                                          (FP weapon hidden, trigger swallowed).
-//   unarmed, grip at a slot with a gun  -> DRAW it. If it is the game's backup, one swap press
-//                                          first; either way it is unhidden.
-//   armed,   grip at the other gun's slot -> direct exchange (swap press; held gun takes the slot).
-// At spawn A is in hand and B is at the right shoulder. Halo has no native unarmed pose, so it is
-// made here: the FP weapon actor is hidden and the fire input swallowed while the hand is empty.
+// Three WEAPON zones (right shoulder, left shoulder, right hip) and the GRENADE pouches (chest).
+// Halo carries two weapons; the zones no longer book-keep which one "lives" where (2026-09-18, by
+// request -- the old stow/draw slots let an empty-hand state travel between weapons):
+//   right shoulder            -> SWAP weapons, always (the game's swap press). Also ends emote
+//                                mode, so the weapon you swap to never comes out hidden.
+//   left shoulder / right hip -> EMOTE MODE toggle: the weapon is put away (FP weapon hidden, fire
+//                                swallowed, the two-handed hold stood down) and the RIGHT hand
+//                                gestures from the pose table like the left one. The same grip
+//                                there again brings the weapon back.
+// Halo has no native unarmed pose while it still holds a weapon, so emote mode is made here.
 //
 // The grenade slot arms a grenade on grip; releasing the grip with a forward swing throws it
 // (the game's throw press), releasing still puts it back. Grenade-type switching is not here yet.
@@ -39,8 +39,9 @@ extern std::atomic<long long> g_holster_throw_until;
 bool holster_swap_press_active();
 bool holster_throw_press_active();
 
-// Which weapon slot currently holds the stowed weapon (for the hands/HUD later).
-HolsterSlot holster_stowed_slot();
+// EMOTE MODE: the weapon is put away (left shoulder / right hip grip) and the aim hand is free to
+// gesture. Ends at the right shoulder (swap), the same grip again, or any holster_reset().
+bool holster_emote_active();
 // True while a grenade is "in hand" (grip held after arming at the chest).
 bool holster_grenade_armed();
 

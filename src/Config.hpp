@@ -4028,7 +4028,8 @@ struct Config {
     // "Trigger" = the trigger TOUCH where our UEVR backend binds it, else the pull. "Thumb" = any
     // capacitive thumb sensor: A/B touch, the thumbrest, or the thumbstick touch (backend-bound).
     // The SUPPORT hand gestures whenever it is free (on the gun it keeps the authored grip); the AIM
-    // hand only while unarmed, since its trigger is the weapon's. 0 = the old behaviour (grip closes
+    // hand only while unarmed or in EMOTE MODE (weapon put away over the left shoulder -- Holster.hpp),
+    // since otherwise its trigger is the weapon's. 0 = the old behaviour (grip closes
     // the whole support hand, nothing else).
     int   pa_gesture       = 1;       // DEV KEY pagesture
     // The POSES themselves are not in any cfg: they live in halo_vr_handposes.json (user-owned,
@@ -4046,11 +4047,17 @@ struct Config {
     // FirstPersonScale 0.15, the enable flags toggled by the game at runtime). FirstPersonScale
     // squashes first-person primitives TOWARD THE EYE so they never clip walls on a flat screen; in
     // stereo that is a real depth change, so the arms and gun sit at 15% of their true distance
-    // ("having one other than that for VR doesn't make sense" -- the user, 2026-09-18). fpscale is
-    // written as the value (not the enable flag, which the game flips); 0 = leave the game's.
-    // fpfov is the first-person FOV the arms are drawn through (0 = leave the game's 78) -- exposed
-    // live to find out what it does to the arms in a headset. Both on change + a cheap readback
-    // every 64 ticks (the game may rewrite them), never an engine call per tick.
+    // ("having one other than that for VR doesn't make sense" -- the user, 2026-09-18).
+    //   fpscale  1 = the engine's first-person scale switched OFF (bEnableFirstPersonScale=false,
+    //              value 1) -- what the reference 0.5 mod's projection-fix script does; another
+    //              value = flag on with that value; 0 = the game's own (0.15, flag as found).
+    //   fpfov    0 = the first-person FOV override switched OFF (the arms drawn at the world FOV,
+    //              as the reference does); a value = flag on with that FOV; -1 = the game's own.
+    // CORRECTED 2026-09-18: the first version wrote only the VALUE, every 64 ticks, and left the
+    // flag on. The game rewrites these (fpfov=1 was back at the game's 78 within 13 s), so the arms
+    // were drawn at 0.15 between our writes. Now the FLAG is the switch and both are checked every
+    // tick through cached property addresses (reads + compares, no engine call), written only on a
+    // difference; game rewrites are counted in the log ('FP CAMERA: the game rewrote ...').
     float fp_scale         = 1.0f;    // DEV KEY fpscale
     float fp_fov           = 0.0f;    // DEV KEY fpfov
     // UNARMED ARMS. hidearms exists because an unarmed viewmodel was a T-pose swinging with the rig.
