@@ -94,6 +94,30 @@
 // get_native_resource + GetDesc, exactly as before. Set xrlayersrccache=0 to force that full walk
 // EVERY tick (the pre-fix behaviour): the safe fallback and the A/B control for the measurement.
 
+// ============================================================================================
+// BUILD PORTABILITY: STRICT vs LAX CHAINS (2026-09-19) -- Steam Win64 vs WinGDK / Microsoft Store
+// ============================================================================================
+// desc_plausible() reads mips/samples/dimension/format at FIXED sub-offsets of the FRHITexture
+// descriptor, MEASURED ON THE STEAM Win64 BINARY. The Microsoft Store / Game Pass (WinGDK) binary
+// lays that descriptor out differently, so those bytes are garbage there -- and using desc_plausible
+// as a GATE meant the probe rejected every real extent-match on WinGDK, never latched, re-walked
+// forever (the "every other second" stutter a Game Pass player reported) and fell back to the
+// generated ring. That is a per-platform time bomb of exactly the kind the repo's address rule and
+// the PRE-RELEASE PLATFORM AUDIT exist to catch: a byte-offset measured on ONE store's binary.
+//
+// THE FIX is a two-speed acceptance, with NO hardcoded WinGDK offsets -- the layout is DISCOVERED
+// per build:
+//   * validate_native() -- get_native_resource() + a real ID3D12Resource::GetDesc() + want x want +
+//     UEVR's own device -- is already BUILD-AGNOSTIC. It never reads a guessed byte; it asks the
+//     runtime, so it is the authority on any binary.
+//   * probe() prefers a PLAUSIBLE candidate (Steam: latches a STRICT chain, byte-for-byte unchanged).
+//     Only if nothing plausible validates does it validate the IMPLAUSIBLE extent-matches through
+//     validate_native and latch a LAX chain (Chain::lax). The desc pre-filter is then disabled for
+//     that chain on BOTH the per-tick hit path (rhi-identity + extent is the invariant) and the miss
+//     path (validate_native is the gate). A lax latch is still a real, validated resource.
+// So Steam is unchanged and WinGDK gets the same crisp game art. A distinctive aimwidgetdraw still
+// helps on a lax build (fewer coincidental extent-matches to validate); the probe log says so.
+
 #pragma once
 
 #include <cstdint>

@@ -203,11 +203,24 @@ bool desc_guarded(void* native, D3D12_RESOURCE_DESC* out, void** out_device) {
 // them makes the validation fail, which drops the source and leaves the generated ring drawing --
 // it cannot make us write through a stale address. There is deliberately no compiled-in fallback
 // value: on a shipping build with no measurement, this feature is simply unavailable, which is the
-// fail-closed answer.
+// fail-closed answer. (On a LAX chain the desc BYTE pre-filter is dropped -- those bytes are not at
+// the Steam sub-offsets on that build -- but the two ValueAgreements that actually guard the write
+// remain: the FRHITexture still has to read back want x want, and the real GetDesc still has to
+// agree on size + UEVR's device. So the guard is unchanged in substance; see Chain::lax.)
 struct Chain {
     int32_t off_res = -1;   // UTextureRenderTarget2D -> FTextureResource*
     int32_t off_rhi = -1;   // FTextureResource       -> FRHITexture*
     int32_t off_ext = -1;   // FRHITexture            -> int32 SizeX (SizeY at +4)
+    // LAX (2026-09-19, WinGDK/Store parity): true when this build's FRHITexture descriptor bytes are
+    // NOT at the Steam-measured sub-offsets desc_plausible() reads. The Microsoft Store / Game Pass
+    // (WinGDK) binary lays them out differently, so the desc pre-filter reads garbage and would
+    // reject the real texture forever (never latching -> the generated ring + a re-walk stutter).
+    // A lax chain disables that pre-filter and leans on the build-AGNOSTIC validate_native()
+    // (get_native_resource + a real ID3D12Resource::GetDesc + want x want + UEVR's device) as the
+    // sole gate. A lax latch is still a REAL latch -- validate_native confirmed a want x want 2D
+    // resource on UEVR's own device -- and every per-tick resolve still re-validates size+identity.
+    // Steam always latches a STRICT (lax=false) chain first, so nothing here changes Steam.
+    bool    lax     = false;
     bool valid() const { return off_res >= 0 && off_rhi >= 0 && off_ext >= 0; }
 };
 Chain g_chain;
@@ -537,7 +550,11 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
                     auto* rb = reinterpret_cast<const uint8_t*>(rhi2);
                     const int32_t x = *reinterpret_cast<const int32_t*>(rb + g_chain.off_ext);
                     const int32_t y = *reinterpret_cast<const int32_t*>(rb + g_chain.off_ext + 4);
-                    if (x == want && y == want && desc_plausible(rb + g_chain.off_ext)) {
+                    // A LAX chain skips the desc pre-filter (its bytes are garbage on this build):
+                    // rhi-identity (rhi2 == cached_rhi, checked above) + extent agreement is the
+                    // invariant, and the cached native was validated via real GetDesc at miss time.
+                    // A strict chain is unchanged.
+                    if (x == want && y == want && (g_chain.lax || desc_plausible(rb + g_chain.off_ext))) {
                         rhi = rhi2;
                         fast_hit = true;
                     }
@@ -561,7 +578,10 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
             const int32_t x = *reinterpret_cast<const int32_t*>(rhi_b + g_chain.off_ext);
             const int32_t y = *reinterpret_cast<const int32_t*>(rhi_b + g_chain.off_ext + 4);
             if (x != want || y != want) return nullptr;
-            if (!desc_plausible(rhi_b + g_chain.off_ext)) return nullptr;
+            // A LAX chain relies on the authoritative validate_native() below (get_native_resource +
+            // real GetDesc + want x want + device) instead of the Steam-measured desc pre-filter,
+            // which reads garbage on this build. A strict chain keeps the cheap pre-filter, unchanged.
+            if (!g_chain.lax && !desc_plausible(rhi_b + g_chain.off_ext)) return nullptr;
         }
     }
 
@@ -654,6 +674,15 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
     void* first_native = nullptr;
 
+    // Extent matches whose desc bytes are NOT plausible at the Steam sub-offsets, deferred for the
+    // lax pass after the loop. Stays EMPTY on the Steam build (the plausible pass latches first, so
+    // it is never consumed); on the WinGDK / Microsoft Store binary every real match lands here and
+    // the lax pass validates them through the build-agnostic path. Bounded and de-duplicated by
+    // FRHITexture pointer, exactly like `tried`. See Chain::lax.
+    struct LaxCand { void* rhi; int32_t o1, o2, oe; };
+    LaxCand lax_cand[MAX_ATTEMPTS] = {};
+    int     lax_n = 0;
+
     // 0x28 skips the UObject header (vtable, flags, index, outer, name, class), none of which can
     // be an FTextureResource pointer.
     for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim; o1 += 8) {
@@ -690,10 +719,19 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
                 if (mode < 2) continue;   // mode 1 LOGS AND STOPS. No virtual call.
 
-                // EVERY extent match is LOGGED; only a plausible one is CALLED. Filtering the log
-                // as well would hide the evidence that says what the layout actually is -- which is
-                // the only thing that made this gate writable in the first place.
-                if (!plausible) continue;
+                // EVERY extent match is LOGGED; a plausible one is CALLED here. An IMPLAUSIBLE one is
+                // DEFERRED to the lax pass after the loop: on the Steam build the real chain is
+                // plausible and latches below, so the deferred list is never consumed; on a build
+                // that lays the descriptor out differently (WinGDK / Microsoft Store) EVERY real match
+                // is "implausible" here, and the lax pass validates those via get_native_resource once
+                // the plausible pass has latched nothing. Filtering the log stays off -- the evidence
+                // of the actual layout is exactly what made this writable in the first place.
+                if (!plausible) {
+                    bool have = false;
+                    for (int i = 0; i < lax_n; ++i) if (lax_cand[i].rhi == rhi) { have = true; break; }
+                    if (!have && lax_n < MAX_ATTEMPTS) lax_cand[lax_n++] = { rhi, o1, o2, oe };
+                    continue;
+                }
 
                 bool seen = false;
                 for (int i = 0; i < tried_n; ++i) if (tried[i] == rhi) { seen = true; break; }
@@ -737,6 +775,60 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                     *out = Chain{};
                     return;
                 }
+            }
+        }
+    }
+
+    // ---- LAX PASS: nothing PLAUSIBLE latched, but this build may carry the descriptor at
+    //      sub-offsets we do not recognise (WinGDK / Microsoft Store). Validate the deferred
+    //      extent-matches through the build-AGNOSTIC path (get_native_resource + real GetDesc) and
+    //      latch a LAX chain if one is real. Never runs on Steam, where a plausible chain latches
+    //      above (first_native != nullptr). Reached only by falling off the loop, not by `goto done`
+    //      (the attempt-cap path is a Steam-shaped "many plausible candidates" case).
+    if (first_native == nullptr && lax_n > 0) {
+        logf("no plausible-desc candidate latched, but %d extent-match(es) had an unrecognised "
+             "descriptor layout -- validating them via get_native_resource (this may be the "
+             "Microsoft Store / WinGDK binary; see the LAX note in XrSource).", lax_n);
+        for (int i = 0; i < lax_n; ++i) {
+            void* rhi = lax_cand[i].rhi;
+            bool seen = false;
+            for (int k = 0; k < tried_n; ++k) if (tried[k] == rhi) { seen = true; break; }
+            if (seen) continue;   // already validated (and failed) as a plausible candidate above
+            if (attempts >= MAX_ATTEMPTS) {
+                logf("  attempt cap (%d) reached in the lax pass -- stopping.", MAX_ATTEMPTS);
+                break;
+            }
+            tried[tried_n++] = rhi;
+            ++attempts;
+
+            int dim_out = 0;
+            uint32_t fmt_out = 0;
+            void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out);
+            if (native == nullptr) continue;
+
+            ++accepted;
+            logf("ACCEPTED (LAX): chain rt+0x%X res+0x%X rhi+0x%X -> ID3D12Resource %p, %dx%d, DXGI "
+                 "format %u. The descriptor bytes are not at the Steam sub-offsets, but "
+                 "get_native_resource + GetDesc AGREE with aimwidgetdraw on UEVR's own device -- "
+                 "latching a LAX chain (desc pre-filter off for it; every resolve still re-validates "
+                 "size + identity).",
+                 (unsigned)lax_cand[i].o1, (unsigned)lax_cand[i].o2, (unsigned)lax_cand[i].oe,
+                 native, dim_out, dim_out, fmt_out);
+
+            if (first_native == nullptr) {
+                first_native = native;
+                out->off_res = lax_cand[i].o1;
+                out->off_rhi = lax_cand[i].o2;
+                out->off_ext = lax_cand[i].oe;
+                out->lax     = true;
+            } else if (native == first_native) {
+                logf("  (same resource reached by a second lax path -- corroboration, chain kept)");
+            } else {
+                logf("AMBIGUOUS (LAX): a second lax chain validated a DIFFERENT resource (%p vs %p). "
+                     "Refusing to latch either -- re-probe with a more distinctive aimwidgetdraw.",
+                     native, first_native);
+                *out = Chain{};
+                return;
             }
         }
     }
@@ -1152,7 +1244,9 @@ void xrsource_tick(uint32_t tick) {
             probe(subject, want, probe_mode, &g_chain);
             if (g_chain.valid()) {
                 for (auto& t : g_t) t.next_resolve = tick;   // resolve through it next tick
-                logf("LATCHED chain rt+0x%X / res+0x%X / rhi+0x%X. Re-validated on every resolve.",
+                logf("LATCHED %s chain rt+0x%X / res+0x%X / rhi+0x%X. Re-validated on every resolve.",
+                     g_chain.lax ? "LAX (Store/WinGDK: desc pre-filter off, validate_native is the gate)"
+                                 : "strict",
                      (unsigned)g_chain.off_res, (unsigned)g_chain.off_rhi, (unsigned)g_chain.off_ext);
             }
         }
@@ -1229,12 +1323,17 @@ void xrsource_tick(uint32_t tick) {
         }
     }
 #else
-    if (probe_mode > 0) {
+    // The SOURCE WALK itself (probe -> latch -> resolve) SHIPS and runs in a release build -- it is
+    // the whole "game art through the XR layer" feature, un-gated 2026-09-07. Only the CROSS-CHECK
+    // above (a research proof that the offsets are class-level) is dev-only, so say only that, and
+    // only when its key is on -- not the old, now-false "the discovery walk is not in a ship build".
+    if (g_cfg.xr_layer_src_xcheck) {
         static bool said = false;
         if (!said) {
             said = true;
-            logf("xrlayersrcprobe is a DEV-BUILD key: the discovery walk is not compiled into a "
-                 "shipping build. Without measured offsets there is nothing to resolve.");
+            logf("xrlayersrcxcheck is a DEV-BUILD diagnostic (it re-walks a second target to prove "
+                 "the offsets are class-level); it is not compiled into a shipping build. The source "
+                 "walk itself DOES run here -- this only skips the proof.");
         }
     }
 #endif
