@@ -1,7 +1,7 @@
 #pragma once
 
-// THE PLAYER'S OWN FIRE INPUT, shared by the ForceTube per-shot filter, the off-hand melee's
-// gunstock gate, the rack and the rounds-loaded probe.
+// THE PLAYER'S OWN FIRE INPUT, shared by the ForceTube per-shot filter, the rack and the
+// rounds-loaded probe.
 
 #include <atomic>
 
@@ -16,10 +16,6 @@ namespace halo {
 // finger can.
 extern std::atomic<long long> g_ft_fire_at;
 void fire_input_note(bool firing);
-
-// True while a feature makes the gunstock kick on each shot (a haptic stock). Written on the game
-// tick by that feature; false when none is on. The off-hand melee stands down in the kick window.
-extern std::atomic<bool> g_fire_kick_live;
 
 // XInput hook thread, once per poll, on the raw pad: right trigger past 64 or the right shoulder.
 void fire_input_note_pad(_XINPUT_STATE* state);

@@ -95,10 +95,17 @@ struct Swing {
     float blend = 0.0f;
 };
 
+// For the palette support hand -- see two_hand_hold_weight(). Plain atomics: one float and two
+// flags, each meaningful on its own, written on the tick and read in the palette detour.
+std::atomic<float> s_hold_weight{0.0f};
+std::atomic<bool>  s_hold_denied{false};
+std::atomic<bool>  s_support_grip{false};
 std::atomic<uint32_t> s_seq{0};
 Swing                 s_swing{};
 
 void publish(const Swing& s) {
+    s_hold_weight.store(s.blend < 0.0f ? 0.0f : (s.blend > 1.0f ? 1.0f : s.blend),
+                        std::memory_order_relaxed);
     s_seq.fetch_add(1, std::memory_order_release);       // odd: write in progress
     s_swing = s;
     s_seq.fetch_add(1, std::memory_order_release);       // even again: readable
@@ -304,6 +311,10 @@ bool two_hand_latched() {
     Swing s{};
     return read_swing(&s) && s.latched;
 }
+
+float two_hand_hold_weight()       { return s_hold_weight.load(std::memory_order_relaxed); }
+bool  two_hand_hold_denied()       { return s_hold_denied.load(std::memory_order_relaxed); }
+bool  two_hand_support_grip_held() { return s_support_grip.load(std::memory_order_relaxed); }
 
 const TwoHandReach& two_hand_reach() { return s_reach; }
 
@@ -565,6 +576,8 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
         in.support_grip_held = s_grip != nullptr && API::VR::is_action_active(s_grip, grip_src);
     }
     if (in.support_grip_held) s_grip_ever = true;
+    s_support_grip.store(in.support_grip_held, std::memory_order_relaxed);
+    s_hold_denied.store(deny_aim, std::memory_order_relaxed);
 
     // THE ZONE IS MEASURED IN THE GUN'S FRAME, by the rig block earlier in this same tick. Along =
     // down the barrel, lateral = off it. Handing the hold these two scalars is what moves the grab

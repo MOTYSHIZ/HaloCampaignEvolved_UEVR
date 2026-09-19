@@ -149,7 +149,6 @@ void install_hook() {
 } // namespace
 
 void forcetube_tick() {
-    g_fire_kick_live.store(g_cfg.force_tube, std::memory_order_relaxed);
     if (!g_cfg.force_tube) {
         // Switched off live: take the spawn hook back out, so off leaves no detour on the
         // projectile path. Turning it on again re-installs through install_hook().

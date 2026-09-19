@@ -123,10 +123,6 @@ struct FeatureHooks {
     // the aim convergence note.
     void (*stereo_post_eye_rendered)(int index, float ex, float ey, float ez);
 
-    // features_gesture_melee_offhand: the melee half of the gesture tick, before the aim hand's
-    // detector, with the tick's dt.
-    void (*gesture_melee_offhand)(float dt);
-
     // features_xinput_note_buttons: the raw pad buttons in the XInput hook, before remapping.
     void (*xinput_note_buttons)(unsigned short buttons);
 
@@ -160,12 +156,6 @@ struct FeatureHooks {
     // features_blam_create_after: the dev create_projectile hook, after the original call, with its
     // return value.
     void (*blam_create_after)(uintptr_t params, uintptr_t cret);
-
-    // features_holster_pouch_offhand: the holster tick's pouch loop, the off hand against one pouch.
-    void (*holster_pouch_offhand)(bool ghand_ok, const Vec3& ghand, const Vec3& pouch);
-
-    // features_holster_pouches_measured: the holster tick, right after the pouch loop.
-    void (*holster_pouches_measured)();
 
     // features_gesture_reset: gesture_reset, after the reload engine's reset and before the melee reset.
     void (*gesture_reset)();

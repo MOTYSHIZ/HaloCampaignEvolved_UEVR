@@ -7,6 +7,8 @@
 #include "Config.hpp"
 #include "DevTools.hpp"
 #include "Rig.hpp"   // call_ret_vec3, for the placement readback
+#include "ArmDriver.hpp"            // arm_driver_owns(): is the palette route actually driving
+#include "palettearm/PaletteArm.hpp"   // palettearm_stock_marker_ue: the bone's motion relative to the gun under the palette route
 #include "Reticule.hpp"   // make_color_rt, for the dev probe's texture
 #include "ScopeBlit.hpp"  // digital zoom: registers its own render callback
 // The gun-mounted compositor quad. Driven from HERE and nowhere else -- same reason ScopeBlit
@@ -113,6 +115,7 @@ const wchar_t* s_attached_socket = nullptr;
 // a 2x lens magnifies -- the reported "I can drift its relative location, and it moves much more
 // jittery than my controller". So a write happens only when something actually changed.
 bool  s_pane_anchored = false;
+bool  s_closed_form_applied = false;   // the last socket attach used socket_relative_from_rest
 // Defined further down with the calibration gesture. Forward-declared because the ATTACH decision
 // (well above it) must know when a capture is in progress: a capture reads RelativeLocation, so it
 // has to happen in the canonical rig frame or it records numbers in the socket's frame instead.
@@ -127,6 +130,16 @@ int   s_anchored_mount = -1;
 // Set once if the relative mount is measured to have put the pane somewhere unintended -- see
 // the readback in scope_apply. Session-scoped; a config edit to scopemount clears it.
 bool  s_relative_rejected = false;
+// THE VIRTUAL RIG FRAME (scope_note_rig_frame; see Scope.hpp). Fresh for two ticks after it was
+// noted; stale or never noted means "read the rig component", which is rig mode's behaviour.
+Vec3     s_vrig_off{};               // the root's world offset from the arm mesh, as noted
+Vec3     s_vrig_pos{};               // the root THIS tick: the mesh's position now + that offset
+Quat     s_vrig_rot{0.0f, 0.0f, 0.0f, 1.0f};
+uint32_t s_vrig_tick = 0;
+bool     s_vrig_have = false;
+bool     s_vrig_pos_valid = false;   // s_vrig_pos was composed on this tick (scope_apply's top)
+bool vrig_fresh(uint32_t tick) { return s_vrig_have && s_vrig_pos_valid && (tick - s_vrig_tick) <= 2u; }
+Vec3 vrig_axis(const Vec3& local) { return quat_rotate(s_vrig_rot, local); }
 // Last good roll-lock angle. The lock is ABSOLUTE now (the image is locked to the lens itself,
 // not to a remembered pose), so no reference pose is needed -- this only carries the previous
 // value across the one degenerate case, where the lens's up axis lies along the aim ray.
@@ -287,6 +300,86 @@ void set_world_scale3(API::UObject* comp, double x, double y, double z) {
 }
 
 void set_world_scale(API::UObject* comp, double s) { set_world_scale3(comp, s, s, s); }
+
+// THE PANE'S PLACE ON THE GUN, from the VIRTUAL rig frame (palette route): the same
+// scope_dist/right/up and rot trims rig mode composes against its rig component, composed against
+// the frame the tick handed us and written in WORLD space, because the component the pane is
+// parented to is level in the body frame under this route. Used for the phase-1 mount, and again
+// every tick the pane spends waiting on the rig origin for the socket handshake -- left where the
+// first write put it, the pane sat still on a camera-mounted mesh while the gun moved on, and the
+// KeepWorld conversion then baked that drift into the socket offset ("tracking with whatever
+// offset it had when it engaged").
+void place_pane_from_vrig(API::UObject* pane) {
+    const Vec3 f = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
+    const Vec3 r = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
+    const Vec3 u = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
+    const Vec3 pos{
+        s_vrig_pos.x + f.x * g_cfg.scope_dist + r.x * g_cfg.scope_right + u.x * g_cfg.scope_up,
+        s_vrig_pos.y + f.y * g_cfg.scope_dist + r.y * g_cfg.scope_right + u.y * g_cfg.scope_up,
+        s_vrig_pos.z + f.z * g_cfg.scope_dist + r.z * g_cfg.scope_right + u.z * g_cfg.scope_up};
+    const Quat qw = quat_mul(s_vrig_rot, rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r));
+    float wp = 0.0f, wy = 0.0f, wr = 0.0f;
+    quat_to_rotator(qw.x, qw.y, qw.z, qw.w, &wp, &wy, &wr);
+    set_world_location(pane, pos);
+    set_world_rotation(pane, (double)wp, (double)wy, (double)wr);
+}
+
+// A rotation from its three column axes -- the exact inverse of quat_to_mat3() (Math.cpp), whose
+// m[i][0..2] rows carry X/Y/Z columns as the images of the axes. Shepperd's branches, so a basis
+// near any of the four singular cases stays exact.
+Quat quat_from_axes(const Vec3& X, const Vec3& Y, const Vec3& Z) {
+    const float m00 = X.x, m10 = X.y, m20 = X.z;
+    const float m01 = Y.x, m11 = Y.y, m21 = Y.z;
+    const float m02 = Z.x, m12 = Z.y, m22 = Z.z;
+    const float tr = m00 + m11 + m22;
+    Quat q{0.0f, 0.0f, 0.0f, 1.0f};
+    if (tr > 0.0f) {
+        const float s = std::sqrt(tr + 1.0f) * 2.0f;
+        q.w = 0.25f * s; q.x = (m21 - m12) / s; q.y = (m02 - m20) / s; q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s; q.x = 0.25f * s; q.y = (m01 + m10) / s; q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s; q.x = (m01 + m10) / s; q.y = 0.25f * s; q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s; q.x = (m02 + m20) / s; q.y = (m12 + m21) / s; q.z = 0.25f * s;
+    }
+    return q;
+}
+
+// THE SOCKET-FRAME PLACEMENT, IN CLOSED FORM (palette route). The pane's calibrated place is
+// root + R*t in the rig frame (t = scopedist/right/up, the rot trims as a rotation Qt). The
+// PrimaryWeapon socket is the weapon marker node, whose rest pose in the model frame is (S, M) --
+// the palette knows it (learned, remembered or baked). Under this route the root is w - R*S and
+// the carried socket sits at w with basis R*M, so relative to the socket the pane is
+//     M^-1 (t - S)   and   M^-1 Qt
+// -- per weapon constants, no world transform read on any clock. Checked against rig mode's own
+// KeepWorld conversions: the Battle Rifle's settled SPACE SWITCH numbers (-0.3, -8, 30) are
+// exactly what this gives from its bake line. Every other route (a KeepWorld attach of a pane
+// written on one tick against a socket read on another) put one tick of whatever was moving --
+// the body, the gun, the draw -- into the offset, and the pane rode the weapon wrong until the
+// next swap. False until the palette knows this weapon's rest.
+bool socket_relative_from_rest(Vec3* rel_loc, Vec3* rel_rot_deg) {
+    float S[3] = {0, 0, 0}, X[3] = {0, 0, 0}, Y[3] = {0, 0, 0}, Z[3] = {0, 0, 0};
+    if (rel_loc == nullptr || rel_rot_deg == nullptr) return false;
+    if (!::halo::palettearm_stock_marker_rest_ue(S, X, Y, Z)) return false;
+    const Vec3 xa{X[0], X[1], X[2]}, ya{Y[0], Y[1], Y[2]}, za{Z[0], Z[1], Z[2]};
+    const Vec3 d{g_cfg.scope_dist - S[0], g_cfg.scope_right - S[1], g_cfg.scope_up - S[2]};
+    // M^-1 = M^T: the columns become the rows.
+    *rel_loc = Vec3{xa.x * d.x + xa.y * d.y + xa.z * d.z,
+                    ya.x * d.x + ya.y * d.y + ya.z * d.z,
+                    za.x * d.x + za.y * d.y + za.z * d.z};
+    const Quat qM   = quat_from_axes(xa, ya, za);
+    const Quat qt   = rotator_to_quat(g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+    const Quat qrel = quat_mul(quat_conj(qM), qt);
+    float p = 0.0f, y = 0.0f, r = 0.0f;
+    quat_to_rotator(qrel.x, qrel.y, qrel.z, qrel.w, &p, &y, &r);
+    *rel_rot_deg = Vec3{p, y, r};
+    return std::isfinite(rel_loc->x) && std::isfinite(rel_loc->y) && std::isfinite(rel_loc->z) &&
+           std::isfinite(p) && std::isfinite(y) && std::isfinite(r);
+}
 
 // PIN THE CAPTURE'S EXPOSURE.
 //
@@ -1482,10 +1575,63 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     static uint32_t s_moved_tick  = 0;   // last tick the bone moved more than the threshold
     static uint32_t s_first_wait  = 0;   // when this wait began, for the deadline
     static bool     s_waiting     = false;
+    static Vec3     s_rest{};            // the learned rest pose (see below)
+    static bool     s_rest_valid  = false;
+    static bool     s_src_palette = false;
     *out_timed_out = false;
 
-    Vec3 sp{};
-    if (rig == nullptr || !call_socket_location(rig, socket, &sp)) {
+    // WHAT "THE BONE" IS MEASURED AGAINST. In rig mode the whole mesh rides the rig, so the
+    // socket's world position moves only with the animation (and the player, who is standing
+    // still to scope). Under the PALETTE ROUTE the controller carries that bone every frame, so
+    // its world position never rests while the hand moves at all -- the log read "has not reached
+    // its rest pose in 48 ticks ... HELD" for the whole session and the pane never left the
+    // camera-mounted mesh: it rode the head, not the gun, and a weapon switch re-placed it into
+    // the same wait. The quantity the gate MEANS -- the bone's motion relative to the gun, i.e.
+    // the game's own animation -- is the stock weapon marker the palette publishes, in the same
+    // centimetres, so under that route it is measured instead. The two sources are not
+    // interchangeable mid-stream: switching resets the velocity and rest state.
+    Vec3  sp{};
+    bool  have = false;
+    bool  rest_authoritative = false;
+    float S[3] = {0.0f, 0.0f, 0.0f};
+    static int s_serial = -1;
+    if (vrig_fresh(tick) && ::halo::palettearm_stock_marker_ue(S)) {
+        sp = Vec3{S[0], S[1], S[2]};
+        have = true;
+        // ...and the bone must actually be CARRIED to the controller, or the socket the conversion
+        // reads is at the stock animation's place -- 40 cm from where it will be once the carry
+        // runs (measured at the first scope-in after a spawn: converted there, pane off to the
+        // right until the next swap). Not carried = not still, whatever the marker says.
+        if (!::halo::palettearm_carry_active()) s_moved_tick = tick;
+        // A weapon MODEL change (the palette says so) is a new bone with a new rest: the velocity
+        // and rest state from the previous weapon must not carry over. Left in place, the 2%/tick
+        // rest average needed seconds to walk over from the old marker to the new one, and the
+        // conversion waited for it -- "tracking of the scope pane doesn't work until after a few
+        // seconds" after every swap.
+        const int serial = ::halo::palettearm_model_serial();
+        if (!s_src_palette || serial != s_serial) {
+            s_src_palette = true; s_serial = serial;
+            s_prev_valid = false; s_rest_valid = false; s_waiting = false;
+        }
+        // The rest the palette already knows (learned, remembered or baked) is the authority; the
+        // slow average below is only the fallback for a model that has never rested yet.
+        float R[3] = {0.0f, 0.0f, 0.0f};
+        if (::halo::palettearm_stock_marker_rest_ue(R)) {
+            s_rest = Vec3{R[0], R[1], R[2]}; s_rest_valid = true; rest_authoritative = true;
+            // AND THERE IS NOTHING TO WAIT FOR. With the rest known the socket-frame placement is
+            // written in closed form at the attach (socket_relative_from_rest), so the bone's
+            // motion, the carry and the animation no longer enter into it: convert now. (The
+            // velocity state below is left untouched; a fallback to it starts from the reset a
+            // model change already forces.)
+            g_socket_rest_est = s_rest;
+            s_waiting = false;
+            return !placing;
+        }
+    } else {
+        if (s_src_palette) { s_src_palette = false; s_prev_valid = false; s_rest_valid = false; }
+        have = (rig != nullptr) && call_socket_location(rig, socket, &sp);
+    }
+    if (!have) {
         // Cannot measure -> do not withhold. An unmeasurable socket must degrade to the old
         // behaviour, not to a pane that never follows the weapon.
         s_prev_valid = false;
@@ -1502,10 +1648,8 @@ bool socket_ready_to_convert(API::UObject* rig, const wchar_t* socket, uint32_t 
     if (moved > kSocketStillCm) s_moved_tick = tick;
 
     // The learned rest pose. Seeded on the first sample so it is never far off at startup.
-    static Vec3 s_rest{};
-    static bool s_rest_valid = false;
     if (!s_rest_valid) { s_rest = sp; s_rest_valid = true; }
-    else {
+    else if (!rest_authoritative) {
         s_rest.x += (sp.x - s_rest.x) * kSocketRestEma;
         s_rest.y += (sp.y - s_rest.y) * kSocketRestEma;
         s_rest.z += (sp.z - s_rest.z) * kSocketRestEma;
@@ -1626,6 +1770,25 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
             if (wpn != s_last_wpn) {
                 s_last_wpn = wpn;
                 s_pane_anchored = false;   // re-place in the rig frame, then re-convert
+            }
+            // ...and on the PLAYER IK route, a new weapon MODEL (the palette's serial) is a new rest
+            // pose for the closed-form placement. The class name above can stay the same across a
+            // model change, and the socket gate is spent once attached, so without this the pane kept
+            // the previous model's rest until the next swap (pre-release audit, 2026-09-18).
+            if (g_cfg.arm_driver == 2) {
+                static int s_last_serial = -1;
+                const int ser = ::halo::palettearm_model_serial();
+                if (ser != s_last_serial) { s_last_serial = ser; s_pane_anchored = false; }
+                // ...and ONCE per model, if the socket attach happened before the palette knew this
+                // model's rest: the engine's KeepWorld conversion was kept, and nothing else would
+                // ever redo it (code review, 2026-09-18).
+                static int s_rest_retry_serial = -2;
+                float rr[3];
+                if (s_attached_socket != nullptr && !s_closed_form_applied && s_rest_retry_serial != ser &&
+                    ::halo::palettearm_stock_marker_rest_ue(rr)) {
+                    s_rest_retry_serial = ser;
+                    s_pane_anchored = false;
+                }
             }
         }
 
@@ -1831,6 +1994,23 @@ void update_pane_attachment(API::UObject* rig, bool ready, uint32_t tick) {
             // which re-attaches... a permanent oscillation between the two frames, at tick rate, on a
             // pane the player is looking through.
             if (parent_changed) s_pane_anchored = false;
+
+            // PALETTE ROUTE: OVERWRITE THE ENGINE'S CONVERSION WITH THE CLOSED FORM. The KeepWorld
+            // attach above computed a socket-relative transform from a pane written on one clock
+            // against a socket read on another; while the palette knows this weapon's rest, the
+            // exact numbers rig mode would settle on are known without reading anything (see
+            // socket_relative_from_rest), so they are written over it here, before the readback
+            // below prints them. Whatever the body, the gun or the draw were doing at the attach
+            // no longer matters.
+            if (ok && want_socket != nullptr) s_closed_form_applied = false;
+            if (ok && want_socket != nullptr && vrig_fresh(tick)) {
+                Vec3 rl_c{}, rr_c{};
+                if (socket_relative_from_rest(&rl_c, &rr_c)) {
+                    set_relative_location(s_pane.ptr, (double)rl_c.x, (double)rl_c.y, (double)rl_c.z);
+                    set_relative_rotation(s_pane.ptr, (double)rr_c.x, (double)rr_c.y, (double)rr_c.z);
+                    s_closed_form_applied = true;
+                }
+            }
 
             // ---- THE CONVERTED NUMBERS, PRINTED IN A FORM THAT CAN BE CANONIZED ------------------
             //
@@ -2834,6 +3014,16 @@ void scope_notice_focus(const Vec3& world_hit, bool valid, uint32_t tick) {
     s_focus_tick  = tick;
 }
 
+void scope_note_rig_frame(const Vec3& off_from_mesh, const Quat& rot, uint32_t tick) {
+    if (!std::isfinite(off_from_mesh.x) || !std::isfinite(off_from_mesh.y) || !std::isfinite(off_from_mesh.z) ||
+        !std::isfinite(rot.x) || !std::isfinite(rot.y) || !std::isfinite(rot.z) || !std::isfinite(rot.w))
+        return;
+    // The first frame ever noted re-opens the relative mount: a rejection latched before the
+    // palette route was up was a rejection of the BODY frame, not of this one.
+    if (!s_vrig_have) { s_relative_rejected = false; s_pane_anchored = false; }
+    s_vrig_off = off_from_mesh; s_vrig_rot = rot; s_vrig_tick = tick; s_vrig_have = true;
+}
+
 void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig, uint32_t tick) {
     s_ray_origin = origin;
     s_ray_target = target;
@@ -3163,6 +3353,19 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (len < 1e-3f) return;
     dir.x /= len; dir.y /= len; dir.z /= len;
+
+    // THE VIRTUAL RIG FRAME'S ORIGIN, THIS TICK (see scope_note_rig_frame): the arm mesh's position
+    // as it is now plus the body-relative offset the tick noted -- the same composition the render
+    // side makes against the mesh, so both clocks describe one frame and neither is a tick behind.
+    s_vrig_pos_valid = false;
+    if (s_vrig_have && (tick - s_vrig_tick) <= 2u && rig != nullptr) {
+        Vec3 ml{};
+        if (call_ret_vec3(rig, L"K2_GetComponentLocation", &ml) &&
+            std::isfinite(ml.x) && std::isfinite(ml.y) && std::isfinite(ml.z)) {
+            s_vrig_pos = Vec3{ml.x + s_vrig_off.x, ml.y + s_vrig_off.y, ml.z + s_vrig_off.z};
+            s_vrig_pos_valid = true;
+        }
+    }
 
     // CAPTURE: on the shot line, looking along it -- so what the reticule promises is what the
     // pane shows. It sits scope_cam_dist out rather than at the origin, which puts it BEYOND the
@@ -3661,7 +3864,17 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                 // The rig's rotation on THIS tick, measured alongside the pane axes so the two
                 // describe one instant. The submit thread differences it against the render-rate
                 // rig to cancel the interval the pane has already moved through.
-                if (rig != nullptr) {
+                if (vrig_fresh(tick)) {
+                    // THE VIRTUAL RIG FRAME (palette route): the frame rig mode's rig would have,
+                    // from the same quaternion the render side re-anchors against -- so the two
+                    // clocks describe one frame, and the gun's motion between them cancels, as it
+                    // does in rig mode. The component itself is level under this route.
+                    feed.rig_pos       = s_vrig_pos;
+                    feed.rig_fwd       = vrig_axis(Vec3{1.0f, 0.0f, 0.0f});
+                    feed.rig_right     = vrig_axis(Vec3{0.0f, 1.0f, 0.0f});
+                    feed.rig_up        = vrig_axis(Vec3{0.0f, 0.0f, 1.0f});
+                    feed.rig_rot_valid = true;
+                } else if (rig != nullptr) {
                     // AXES, not a rotator. K2_GetComponentRotation would hand back Euler angles and
                     // put a decomposition on this path -- the exact thing that made the pane jitter
                     // on roll. Three vectors carry the same information with no ordering and no
@@ -3823,6 +4036,21 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // Ordering rule worth keeping: this call must precede every early return in scope_apply that can
     // happen while the pane is alive. It is the only thing that keeps the attachment frame and the
     // calibration frame in agreement.
+    // PALETTE ROUTE, WHILE THE PANE WAITS ON THE RIG ORIGIN FOR THE SOCKET: keep it on the gun --
+    // and do it HERE, before the attachment update, which is where the KeepWorld conversion is
+    // taken. The rig origin is a camera-mounted, body-frame mesh under this route, so a pane left
+    // there stands still while the gun moves; re-writing it from the virtual frame each tick keeps
+    // the world transform the conversion reads correct at the moment it is taken -- but only if
+    // the write precedes the read. This used to sit after the placement block below, so the
+    // conversion read the pane as written at the END OF THE PREVIOUS TICK against a socket at this
+    // tick's position, and a conversion taken while walking baked one tick of the body's motion
+    // into the socket offset ("offset slightly in the direction I was locomoting" on the first
+    // scope-in after a swap). Two reflected calls per tick, only while unsocketed, never during a
+    // calibration hold (which owns the pane) and never on the aim-ray path.
+    if (vrig_fresh(tick) && s_pane_anchored && s_attached_socket == nullptr && !s_calib_held &&
+        g_cfg.scope_mount == 1 && !s_relative_rejected) {
+        place_pane_from_vrig(pane);
+    }
     update_pane_attachment(rig, true, tick);
 
     // ---- CALIBRATION GESTURE, before the ordinary placement so it owns the pane while held.
@@ -3845,13 +4073,45 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
             // rig on every frozen write, so the answer is simply there to be read.
             auto* rel_loc = pane->get_property_data<double>(L"RelativeLocation");
             auto* rel_rot = pane->get_property_data<double>(L"RelativeRotation");
-            if (rel_loc != nullptr && rel_rot != nullptr) {
-                g_cfg.scope_dist  = (float)rel_loc[0];
-                g_cfg.scope_right = (float)rel_loc[1];
-                g_cfg.scope_up    = (float)rel_loc[2];
-                g_cfg.scope_rot_p = (float)rel_rot[0];
-                g_cfg.scope_rot_y = (float)rel_rot[1];
-                g_cfg.scope_rot_r = (float)rel_rot[2];
+            // PALETTE ROUTE: the numbers must be in the VIRTUAL rig frame, not the level body-frame
+            // component the pane is parented to, or a capture made here would not describe the
+            // same place on the gun as one made in rig mode (and would be re-applied through the
+            // virtual frame above, in the wrong frame). Differenced from the pane's WORLD transform.
+            Vec3  vw_loc{}, vw_rotv{};
+            bool  have_v = false;
+            float v_dist = 0.0f, v_right = 0.0f, v_up = 0.0f, v_p = 0.0f, v_y = 0.0f, v_r = 0.0f;
+            if (vrig_fresh(tick) && call_ret_vec3(pane, L"K2_GetComponentLocation", &vw_loc) &&
+                read_component_rotation(pane, &vw_rotv)) {
+                const Vec3 d{vw_loc.x - s_vrig_pos.x, vw_loc.y - s_vrig_pos.y, vw_loc.z - s_vrig_pos.z};
+                const Vec3 l = quat_rotate(quat_conj(s_vrig_rot), d);
+                const Quat qrel = quat_mul(quat_conj(s_vrig_rot), rotator_to_quat(vw_rotv.x, vw_rotv.y, vw_rotv.z));
+                quat_to_rotator(qrel.x, qrel.y, qrel.z, qrel.w, &v_p, &v_y, &v_r);
+                v_dist = l.x; v_right = l.y; v_up = l.z;
+                have_v = std::isfinite(v_dist) && std::isfinite(v_right) && std::isfinite(v_up) &&
+                         std::isfinite(v_p) && std::isfinite(v_y) && std::isfinite(v_r);
+            }
+            // On the PLAYER IK route the pane's RelativeLocation is measured against a level, body-
+            // frame mesh, NOT the rig frame these numbers are stored in -- a capture taken from it
+            // would mix two frames and be written to the calibration file. Refuse it and say so; the
+            // player can simply calibrate again (pre-release audit, 2026-09-18).
+            // The virtual frame exists only while the palette ACTUALLY owns the arms -- not merely
+            // while armdriver says 2: a session where Player IK fell back to the rig route has a real
+            // gun frame and a valid RelativeLocation (code review, 2026-09-18).
+            const bool frame_mixed = !have_v && g_cfg.pa_mesh_standdown &&
+                                     ::halo::arm_driver_owns(::halo::ArmDriverMode::Palette);   // = Plugin.cpp's mesh_standdown
+            if (frame_mixed) {
+                API::get()->log_info("[Halo-CampE-UEVR] scope: calibration NOT saved -- the weapon's rig frame "
+                                     "was not fresh at release (Player IK route). Hold the gun steady and "
+                                     "calibrate again.");
+                s_pane_anchored = false;   // snap the pane back to the saved numbers, not the dragged ones
+            }
+            if (!frame_mixed && (have_v || (rel_loc != nullptr && rel_rot != nullptr))) {
+                g_cfg.scope_dist  = have_v ? v_dist  : (float)rel_loc[0];
+                g_cfg.scope_right = have_v ? v_right : (float)rel_loc[1];
+                g_cfg.scope_up    = have_v ? v_up    : (float)rel_loc[2];
+                g_cfg.scope_rot_p = have_v ? v_p     : (float)rel_rot[0];
+                g_cfg.scope_rot_y = have_v ? v_y     : (float)rel_rot[1];
+                g_cfg.scope_rot_r = have_v ? v_r     : (float)rel_rot[2];
                 // ---- PER-WEAPON TRIM CLAIMS THE CAPTURE, IF ARMED.
                 //
                 // The gesture above is identical either way -- freeze the pane, move it, release.
@@ -3915,8 +4175,18 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         // Z up in rig space, with the facing trims as a plain relative rotation. Nothing here
         // consults the aim ray, so rotation and translation cannot interact -- the reported
         // "applying a rotation changes how the translation variables are evaluated".
-        set_relative_location(pane, g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up);
-        set_relative_rotation(pane, g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+        if (vrig_fresh(tick)) {
+            // PALETTE ROUTE: the same numbers, composed against the VIRTUAL rig frame and written in
+            // world space -- the component the pane is parented to is level in the body frame under
+            // this route, so a relative write would land the pane 64 cm along the body's forward
+            // instead of the gun's (the "NOT WHERE IT WAS ASKED FOR" readback below, every time).
+            // The socket handshake that follows is KeepWorld, so from here on nothing differs from
+            // rig mode, and the same calibration numbers describe the same place on the gun.
+            place_pane_from_vrig(pane);
+        } else {
+            set_relative_location(pane, g_cfg.scope_dist, g_cfg.scope_right, g_cfg.scope_up);
+            set_relative_rotation(pane, g_cfg.scope_rot_p, g_cfg.scope_rot_y, g_cfg.scope_rot_r);
+        }
         const double s = g_cfg.scope_size / 100.0;   // Engine Plane is 100 cm across
         // The round lens is a Cylinder squashed on its own axis; the flat Plane keeps uniform
         // scale. Both end up scope_size across.
@@ -4040,6 +4310,9 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                              g_cfg.scope_size, g_cfg.scope_rot_p, g_cfg.scope_rot_y,
                              g_cfg.scope_rot_r);
     }
+
+    // (The per-tick re-place of a pane waiting for the socket lives ABOVE the attachment update,
+    // where the conversion reads it -- see the note there.)
 
     // Live-tunable brightness, same as the reticule tint path.
     if (auto* mid = s_pane_mid.get_checked(L"MaterialInstanceDynamic")) {

@@ -513,46 +513,6 @@
     // run on one weapon.
     bool  scope_lens = false;
 
-    // ---- (after the author's Config.hpp line 3558)
-    // The OFF hand punches too. Same three tests and thresholds, own detector state, shared
-    // cooldown; stands down while the off hand is doing its actual jobs (mag out, grenade in
-    // pouch or hand, two-hand brace, holster veto window).
-    bool  melee_left      = false;
-
-    // ---- (after the author's Config.hpp line 3634)
-    // OFF-HAND shot window, ForceTube only: while the trigger is down (+ this tail) the gunstock's
-    // recoil kick jolts the off hand riding it into a barely-over-threshold "swing" (measured
-    // 2.31 and 2.46 against the 2.20 gate, versus 6.7-9.7 for deliberate punches). For that
-    // window the swing must also have TRAVELLED melee_shot_dist metres from where it began --
-    // a jolt clears the velocity gate without going anywhere, a punch goes somewhere. The main
-    // hand never false-fired and is not gated. ms=0 disables.
-    int   melee_shot_ms    = 250;
-    float melee_shot_dist  = 0.25f;
-
-    // ---- THE OFF HAND'S OWN SWING THRESHOLDS. The author's meleespeed / meleeext / meleereach /
-    // meleemaxspeed / meleemaxreach / meleetau / meleecooldown / meleehold stay HIS: his defaults,
-    // read by his Gesture.cpp for the AIM hand's swing, and by nothing of ours. These are the same
-    // quantities with the same parse, the same units and the same clamps, for the OFF hand only,
-    // shipped at the values this gesture is tuned for. Nothing reads them with meleeleft off.
-    //
-    // The two that differ from his: an off hand that is also holding a magazine, steadying a barrel
-    // and reaching for a pouch throws far more false positives than the weapon hand, so the speed
-    // and the extension both sit well above his.
-    float melee_left_speed     = 5.00f;   // m/s at the peak of the swing (his: 1.50)
-    float melee_left_ext       = 2.20f;   // m/s of extension away from the head (his: 1.50)
-    float melee_left_reach     = 0.30f;   // m the hand must be from the head
-    float melee_left_max_speed = 12.0f;   // m/s above which the sample is tracking noise
-    float melee_left_max_reach = 1.20f;   // m beyond which the sample is tracking noise
-    float melee_left_tau_ms    = 20.0f;   // smoothing of the measured speed
-    int   melee_left_cooldown_ms = 500;   // after a punch lands
-    int   melee_left_hold_ms   = 80;      // how long the melee button is held down
-
-    // OFF-HAND chop rescue: extension OR this much travel since the swing began. A vertical chop
-    // arcs around the shoulder -- huge speed and over a metre of travel with the extension gate
-    // never passing (measured: ext 1.43/1.80 vs the 2.20 gate, disp 1.13/0.77). Noise and the
-    // gunstock kick stay under 0.1 m of travel. 0 disables, restoring extension-only.
-    float melee_disp       = 0.40f;
-
     // ---- (after the author's Config.hpp line 3642)
     // Turning why-not instrument: one line per deadzone crossing that no gate lets through
     // (naming the gate), one line per snap that lands. For "sometimes turning works".
@@ -1639,7 +1599,6 @@
     // genuinely defenceless until you finish. Off means the reload is cosmetic.
     bool  reload_hold_fire = true;
     bool  reload_vr_log = false;          // the manual reload's own evidence lines
-    bool  melee_left_log = false;         // the off hand's own swing evidence lines
     bool  holster_throw_log = false;      // the poll-rate throw's own evidence lines
     bool  grenade_swallow_log = false;    // the grenade strip's one-shot evidence line
     // THE PALETTE'S TWO-HANDED HOLD. His twohand* keys tune HIS two-handed aim (TwoHandAim.cpp,

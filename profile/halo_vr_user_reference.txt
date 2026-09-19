@@ -454,27 +454,6 @@
 # normal speed before your hand takes it over, in seconds.
 #slidefireentry=0
 
-# ---------------------------------------------------------- PUNCH WITH YOUR OTHER HAND (meleeleft)
-# ---- Punching with your other hand. Its own thresholds: an off hand that is also holding a
-# magazine, steadying a barrel and reaching for a pouch triggers far more false punches than the
-# weapon hand, so these sit above the ones the weapon hand uses.
-# Swing speed needed, metres per second.
-#meleeleftspeed=5.00
-# Extension speed needed away from your head, metres per second.
-#meleeleftext=2.20
-# How far from your head the hand must be, metres.
-#meleeleftreach=0.30
-# Above this speed the sample is tracking noise and is thrown away, metres per second.
-#meleeleftmaxspeed=12.0
-# Above this reach the sample is tracking noise and is thrown away, metres.
-#meleeleftmaxreach=1.20
-# Smoothing of the measured speed, milliseconds.
-#meleelefttau=20.0
-# Rest after a punch lands, milliseconds.
-#meleeleftcooldown=500
-# How long the punch is held down, milliseconds.
-#meleelefthold=80
-
 # ---------------------------------------------------------------------------- WRIST HUD (wristhud)
 # Wrist HUD: moving contacts drawn as dots on the wrist motion tracker.
 #wristradar=1
@@ -692,6 +671,22 @@
 # Never fires in stick mode (vehicles, cutscenes, death) or during calibration.
 #meleeswing=1
 
+# Punch with the OFF hand too (the hand without the gun). Same speed, extension
+# and reach tests as the aim hand, and the strike goes the way the punch went.
+# It stays out of the way while that hand is busy: reloading, holding the gun
+# two-handed, or working a grenade pouch. 0 = only the aim hand melees.
+#meleeleft=1
+
+# Only strike while the GRIP of the swinging hand is held -- make a fist to punch.
+# Stops fast reaches and aim turns from ever counting as a hit. Applies to both
+# hands, each needing its own grip. 0 = any fast enough swing strikes.
+#meleegrip=1
+
+# Off-hand chops: how far (metres) the hand must travel during the swing to
+# count as a strike even when it barely reaches away from you -- a downward chop
+# arcs around the shoulder rather than extending. 0 = extension only.
+#meleedisp=0.40
+
 # Controller speed that counts as a strike, m/s. Conservative on purpose: a
 # missed melee costs one swing, a spurious one shoves at the wrong moment.
 #meleespeed=1.50
@@ -741,6 +736,18 @@
 # Prints every swing's peak speed and whether it fired -- the tuning instrument
 # for meleespeed and meleefwd. Set it, swing a dozen times, read the log, turn
 # it off.
+
+# ---------------------------------------------------------------- ARMS: PLAYER IK
+# Which system poses your first-person arms.
+#   2 = PLAYER IK (default). The game's own arm skeleton is solved to your
+#       controllers: elbows, forearm twist, recoil, the off hand on the
+#       weapon's grip when you hold it two-handed, reload/melee/throw hand-over,
+#       and hand gestures on a free hand.
+#   1 = the older rig route from earlier releases.
+# If Player IK cannot start on your copy of the game, the log says so and it
+# falls back to 1 by itself. Switching is live. A per-weapon fit captured
+# before v0.5 was made on route 1 -- see the capture key below.
+#armdriver=2
 
 # ---------------------------------------------------------------- TWO-ARM RECON
 # Dumps the first-person skeleton -- every bone with its parent -- and reports
@@ -1006,13 +1013,15 @@
 # rewrites in full. It is YOURS: updates never overwrite it, and DELETING IT
 # puts every weapon back on the shipped calibration.
 #
-# WHAT THE KEY WRITES DEPENDS ON WHICH WEAPON DRIVER IS RUNNING, so there is
+# WHAT THE KEY WRITES DEPENDS ON WHICH ARM ROUTE IS RUNNING, so there is
 # only ever one key to remember:
-#   * the default (rig) route  -> a wpnoff delta on the grip/mount fit
-#   * the palette route (armdriver=2 with pawpn=1) -> a wpnfix rigid delta,
+#   * Player IK (armdriver=2, the default since v0.5) -> a wpnfix rigid delta,
 #     which OVERRIDES the shipped per-weapon calibration in halo_vr.cfg for
 #     that weapon alone. Repeat captures refine rather than reset, and they
 #     start from whichever value is currently in effect.
+#   * the older rig route (armdriver=1) -> a wpnoff delta on the grip/mount fit.
+# Fits captured before v0.5 were made on the older route. If a weapon sits
+# wrong under Player IK, capture it again, or set armdriver=1.
 #
 # A capture needs about a fifth of a second of hold to count, so it cannot be
 # triggered by brushing the key. If it refuses one, log.txt says why.
@@ -1021,8 +1030,11 @@
 #wpncalibkey=0x2D
 
 # ------------------------------------------------- HOLSTERS: REACH FOR YOUR GEAR
-# Weapons live over your shoulders and grenades on your chest. Reach to a spot and squeeze the
-# grip: over a shoulder stows, draws or exchanges a weapon; at a chest pouch takes a grenade.
+# Reach to a spot and squeeze the grip:
+#   over your RIGHT shoulder   switch weapons (and bring the weapon back if it was put away)
+#   over your LEFT shoulder    put the weapon away, leaving your hand free; squeeze there again to
+#     (or at your right hip)   bring it back. While it is away the trigger does not fire.
+#   at a chest pouch           take a grenade.
 # Y still switches weapons the ordinary way -- the reach is an addition, not a replacement.
 #
 # The zones hang on your TORSO, not your head, so glancing around does not drag your gear with
@@ -1041,11 +1053,11 @@
 # near misses that landed a little behind the pouch, because the hand settles back against your
 # chest before you squeeze. Raise this before you move the pouches.
 #holstergradius=0.13
-# Right shoulder -- behind you. Weapon slot.
+# Right shoulder -- behind you. Switches weapons.
 #holsterrs=0.20,-0.10,0.22
-# Left shoulder -- behind you. Weapon slot.
+# Left shoulder -- behind you. Puts the weapon away / brings it back.
 #holsterls=-0.20,-0.10,0.22
-# Right hip. Weapon slot.
+# Right hip. Same as the left shoulder.
 #holsterrh=0.22,-0.65,0.05
 # Left chest, in front: FRAG grenades.
 #holsterlc=-0.12,-0.30,-0.12
@@ -1075,7 +1087,7 @@
 # drag the pouches forward off your chest. Both 0 restores the old head-anchored behaviour.
 #holsterneckdown=0.15
 #holsterneckback=0.08
-# Buzz the controller on a successful grab or stow.
+# Buzz the controller on a successful grab, swap or put-away.
 #holsterhaptic=1
 # The pad buttons these gestures press for you. Change them only if your controller reports
 # different masks -- measure with mapbtnlog=1 rather than guessing.

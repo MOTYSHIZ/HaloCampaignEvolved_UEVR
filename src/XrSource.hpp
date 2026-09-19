@@ -167,9 +167,12 @@ int xrsource_dim();
 // One-line state for the diagnostics block in Plugin.cpp.
 const char* xrsource_status();
 
-// Drop everything and forget the latched offsets. Called when the widget component is rebuilt (a
-// mission transition re-hosts the crosshair and allocates a NEW render target, so the old
-// ID3D12Resource is a dangling pointer we must never hand to the compositor).
+// Drop every slot's captured source + reset the probe backoff. NOTE (2026-09-18): this does NOT
+// clear the latched offset chain (g_chain) -- those offsets are class-level and build-constant, so
+// forgetting them would only re-pay discovery -- and it currently has NO CALLERS. Re-hosts are
+// handled per tick inside service_slot/xrsource_tick (a changed render target or component drops the
+// slot on identity change), not by this function. If you wire it into a teardown, re-check that
+// keeping g_chain is what you want.
 void xrsource_reset();
 
 }   // namespace halo

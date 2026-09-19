@@ -37,6 +37,7 @@
 #include "ScopeMask.hpp"
 
 #include "Config.hpp"
+#include "ViewMode.hpp"   // which eyes UEVR renders per frame -- decides what `head` is below
 #include "Scope.hpp"   // g_scope_active -- the one-reticule-at-a-time gate
 #include "DevTools.hpp"
 #include "addrcascade/AddressCascade.hpp"
@@ -372,6 +373,9 @@ std::atomic<bool>     g_mono_view_have{false};
 // The RENDER-RATE half: each eye's last rendered position, so their midpoint gives the head.
 std::atomic<float>    g_eye_x[2]{}, g_eye_y[2]{}, g_eye_z[2]{};
 std::atomic<bool>     g_eye_have[2]{};
+// True while quads are being flattened to infinity for the Mono rendering method (see the
+// xrlayermonoflat note in Config.hpp). Written by xrlayer_note_eye, read for the state line.
+std::atomic<bool>     g_mono_flat_active{false};
 
 void publish(const Frame& f) {
     const uint32_t seq = g_seq.load(std::memory_order_relaxed);
@@ -1879,9 +1883,11 @@ XrVector3f xr_rotate(const XrQuaternionf& q, const XrVector3f& v) {
 // so that this function stays what it has always been -- pure geometry that knows nothing about slot
 // indices -- and so the atomic loads all happen together at the one call site, under the same
 // snapshot as the target position.
+// `flat_m` > 0 slides the quad out along its own ray to that many metres with its angular size
+// held -- the Mono rendering method's zero-disparity placement (see the call site). 0 = real depth.
 bool compute_pose(const Vec3& world_pos, const Vec3& cam_pos,
                   float cam_yaw, float cam_pitch, float cam_roll,
-                  float world_cm, float hold_cm,
+                  float world_cm, float hold_cm, float flat_m,
                   XrPosef* out_pose, float* out_size_m, float* out_ang,
                   const XrQuaternionf* orient = nullptr) {
     const Mirror m = mirror_load();
@@ -1912,7 +1918,7 @@ bool compute_pose(const Vec3& world_pos, const Vec3& cam_pos,
         }
     }
 
-    const XrVector3f d_view = ue_offset_to_xr(d_world, cam_yaw, cam_pitch, cam_roll, cm_per_m);
+    XrVector3f d_view = ue_offset_to_xr(d_world, cam_yaw, cam_pitch, cam_roll, cm_per_m);
 
     // SIZE IS DERIVED FROM THE IN-SCENE WIDGET, not tuned against it.
     //
@@ -1939,10 +1945,28 @@ bool compute_pose(const Vec3& world_pos, const Vec3& cam_pos,
     const float dist_m = std::sqrt(d_view.x * d_view.x + d_view.y * d_view.y + d_view.z * d_view.z);
     if (out_ang != nullptr) *out_ang = (dist_m > 0.01f) ? (*out_size_m / dist_m) : 1.0e3f;
 
+    // ZERO-DISPARITY PLACEMENT for the Mono rendering method. The scene is one image rendered from
+    // between the eyes and shown to both, so nothing in it has binocular disparity and it all fuses
+    // at infinity. A quad left at its true depth is then the only thing in view WITH disparity --
+    // IPD / distance, ~1.2 deg at 3 m, several times the reticule's own width -- and with the eyes
+    // converged on the scene it doubles. Sliding it out along the SAME ray keeps its direction and
+    // apparent size (the drop key above is computed first, and is invariant under this scaling)
+    // while its disparity falls to IPD / flat_m: 0.04 deg at 100 m, under a pixel. Direction is
+    // what matters, and direction is exactly what the mono image shares with a centre-eye head.
+    const bool flattened = flat_m > 0.0f && dist_m > 0.01f;
+    if (flattened) {
+        const float k = flat_m / dist_m;
+        d_view.x *= k; d_view.y *= k; d_view.z *= k;
+        *out_size_m *= k;
+    }
+
     if (m.space == 2) {
-        // Head-locked diagnostic: park it straight ahead at the measured distance.
+        // Head-locked diagnostic: park it straight ahead at the measured distance -- or at the
+        // flattened one, because *out_size_m was just scaled for THAT distance and the two must
+        // agree or the bring-up ring fills the view under mono and reads as a broken pipeline.
+        const float place_m = flattened ? flat_m : dist_m;
         out_pose->orientation = XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f};
-        out_pose->position    = XrVector3f{0.0f, 0.0f, -(dist_m > 0.05f ? dist_m : 0.05f)};
+        out_pose->position    = XrVector3f{0.0f, 0.0f, -(place_m > 0.05f ? place_m : 0.05f)};
         return true;
     }
 
@@ -3455,20 +3479,36 @@ int xrlayer_cell_dim(int slot) {
     return (int)g_cell[slot].dim;
 }
 
+bool xrlayer_mono_flat_active() {
+    return g_mono_flat_active.load(std::memory_order_relaxed);
+}
+
 void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_pos,
                       float view_yaw, float view_pitch, float view_roll) {
-    if (!g_cfg.xr_layer) return;
-    if (g_state.load(std::memory_order_relaxed) != State::Armed) return;
+    if (!g_cfg.xr_layer || g_state.load(std::memory_order_relaxed) != State::Armed) {
+        // Nothing is being published, so nothing is being flattened: keep the state line honest.
+        g_mono_flat_active.store(false, std::memory_order_relaxed);
+        return;
+    }
     if (eye_index < 0 || eye_index > 1) return;
 
-    // Remember this eye and use the MIDPOINT of the two as the head position.
+    // Remember this eye. What `head` is made of depends on WHICH EYES UEVR IS RENDERING -- see
+    // ViewMode.hpp for the per-method table and the reason the index alone cannot tell.
     //
-    // Not one eye's position: the callback fires once per eye, so computing from whichever eye ran
-    // would alternate the quad between two points half an IPD apart every frame -- a shimmer, and a
-    // far more obvious artefact than the constant offset it would be replacing. The midpoint IS the
-    // head, which is what get_pose() reports, so the correspondence becomes exact rather than
-    // merely close. Publishing on both callbacks is then harmless: the answer is identical either
-    // time.
+    //   Stereo (two views per frame):  the MIDPOINT of the two slots. Not one eye's position: the
+    //     callback fires once per eye, so computing from whichever eye ran would alternate the quad
+    //     between two points half an IPD apart every frame -- a shimmer, and a far more obvious
+    //     artefact than the constant offset it would be replacing. The midpoint IS the head, which
+    //     is what get_pose() reports, so the correspondence is exact.
+    //   Alternating (AFR: one view per frame, eyes by turns, always index 0): the midpoint of THIS
+    //     sample and the PREVIOUS one, which was the other eye. Half a frame of head motion stale,
+    //     which is millimetres; the per-index slot would have hopped half an IPD at 45 Hz.
+    //   Mono (one view per frame, the centre eye): this sample IS the head, with no IPD residual at
+    //     all -- UEVR hands us the midpoint of the two eye offsets. The slot for the other index is
+    //     IGNORED here even if it once reported: after a live method flip it holds the last eye seen
+    //     under the old method, wherever the player stood at the time, and averaging that in put
+    //     every quad off by half the distance walked since. That was the 2026-09-15 report.
+    //   Unknown (first frames): this sample, as for Mono.
     g_eye_x[eye_index].store(eye_pos.x, std::memory_order_relaxed);
     g_eye_y[eye_index].store(eye_pos.y, std::memory_order_relaxed);
     g_eye_z[eye_index].store(eye_pos.z, std::memory_order_relaxed);
@@ -3486,17 +3526,51 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     g_view_roll.store(view_roll, std::memory_order_relaxed);
     g_view_have.store(true, std::memory_order_release);
 
+    // The previous sample, for the Alternating and Unknown cases. Render thread only, like
+    // everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
+    // the previous sample was taken HERE: the early returns above skip this function while the
+    // layer is off or not yet armed, and the first sample after it comes back must not be
+    // averaged with one from before that (review finding, 2026-09-15).
+    static Vec3     s_prev_eye{};
+    static unsigned s_prev_seq  = 0;
+    static bool     s_prev_have = false;
+    const unsigned  seq = viewmode_samples();
+    const bool      prev_consecutive = s_prev_have && (seq == s_prev_seq + 1u);
+
     Vec3 head{};
-    if (g_eye_have[0].load(std::memory_order_acquire) && g_eye_have[1].load(std::memory_order_acquire)) {
+    const ViewMode vm = viewmode_current();
+    if (vm == ViewMode::Stereo &&
+        g_eye_have[0].load(std::memory_order_acquire) && g_eye_have[1].load(std::memory_order_acquire)) {
         head.x = 0.5f * (g_eye_x[0].load(std::memory_order_relaxed) + g_eye_x[1].load(std::memory_order_relaxed));
         head.y = 0.5f * (g_eye_y[0].load(std::memory_order_relaxed) + g_eye_y[1].load(std::memory_order_relaxed));
         head.z = 0.5f * (g_eye_z[0].load(std::memory_order_relaxed) + g_eye_z[1].load(std::memory_order_relaxed));
+    } else if ((vm == ViewMode::Alternating || vm == ViewMode::Unknown) && prev_consecutive) {
+        // AFR: the previous callback was the other eye. UNKNOWN (one view per frame, verdict
+        // still pending): the same average is a half-frame lag if it turns out to be Mono and
+        // exactly right if it turns out to be AFR -- never ONE eye alone, which under AFR is the
+        // half-IPD hop this exists to remove.
+        head.x = 0.5f * (eye_pos.x + s_prev_eye.x);
+        head.y = 0.5f * (eye_pos.y + s_prev_eye.y);
+        head.z = 0.5f * (eye_pos.z + s_prev_eye.z);
     } else {
-        // Only one eye has ever reported (2D-screen mode, or the very first frame). Use it rather
-        // than drawing nothing: the error is half an IPD and CONSTANT, which is not the drift this
-        // function exists to remove.
+        // Mono (exact: the view IS the centre eye), or no usable previous sample. On the very
+        // first frame of a stereo session the error is half an IPD and CONSTANT, which is not
+        // the drift this function exists to remove.
         head = eye_pos;
     }
+    s_prev_eye  = eye_pos;
+    s_prev_seq  = seq;
+    s_prev_have = true;
+
+    // FLATTEN TO INFINITY under the Mono rendering method (compute_pose explains why). Gated on
+    // THREE things agreeing (viewmode_is_mono): the observed topology, UEVR's declared method, and
+    // both eyes reporting one projection matrix -- an older backend ignores VR_RenderingMethod=3
+    // and keeps rendering stereo, PureDark's reads 3 as AFW, and flattening a stereo scene's quads
+    // would destroy the parallax the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
+    const int   flat_mode = g_cfg.xr_layer_mono_flat;
+    const float flat_m    = (flat_mode == 2 || (flat_mode == 1 && viewmode_is_mono()))
+                              ? g_cfg.xr_layer_mono_far_m : 0.0f;
+    g_mono_flat_active.store(flat_m > 0.0f, std::memory_order_relaxed);
 
     // EVERY LIVE SLOT, from THIS eye. The reticule's reason for being here applies to the markers
     // with more force, not less: the navpoint lane already re-places its in-scene markers in this
@@ -3642,6 +3716,7 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
                                 head, view_yaw, view_pitch, view_roll,
                                 g_tgt_cm[s].load(std::memory_order_relaxed),
                                 g_tgt_hold[s].load(std::memory_order_relaxed),
+                                flat_m,
                                 &sn.pose, &sn.size_m, &sn.ang, orient_p);
         // Second extent, through the SAME cm_per_m compute_pose used for the first -- read back off
         // size_m rather than re-deriving, so the two axes cannot end up on different scales if the
@@ -4436,6 +4511,7 @@ void xrlayer_shutdown() {
     g_source_override.store(nullptr, std::memory_order_release);
     g_live.store(false, std::memory_order_relaxed);
     g_state.store(State::Off, std::memory_order_relaxed);
+    g_mono_flat_active.store(false, std::memory_order_relaxed);   // no quads, nothing flattened
 
     // The atlas layout goes with the swapchain it sized. Leaving stale cells behind would let a
     // slot accept a source against a rectangle of an image that no longer exists.

@@ -9,7 +9,6 @@
 namespace halo {
 
 std::atomic<long long> g_ft_fire_at{0};
-std::atomic<bool>      g_fire_kick_live{false};
 
 void fire_input_note(bool firing) {
     if (firing) g_ft_fire_at.store(std::chrono::steady_clock::now().time_since_epoch().count(),

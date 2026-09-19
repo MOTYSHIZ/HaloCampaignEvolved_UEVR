@@ -50,7 +50,6 @@ extern const FeatureHooks kRoomscaleHooks;
 extern const FeatureHooks kHeightCalHooks;
 extern const FeatureHooks kWristHudHooks;
 extern const FeatureHooks kVehCamHooks;
-extern const FeatureHooks kMeleeLeftHooks;
 extern const FeatureHooks kHolsterPollThrowHooks;
 extern const FeatureHooks kReloadVrHooks;
 extern const FeatureHooks kSlideVrHooks;
@@ -74,7 +73,6 @@ const FeatureHooks* const kFeatureListStorage[] = {
     &kHeightCalHooks,
     &kWristHudHooks,
     &kVehCamHooks,
-    &kMeleeLeftHooks,
     &kHolsterPollThrowHooks,
     &kReloadVrHooks,
     &kSlideVrHooks,
@@ -303,11 +301,6 @@ void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez) 
         if (f->stereo_post_eye_rendered != nullptr) f->stereo_post_eye_rendered(index, ex, ey, ez);
 }
 
-void features_gesture_melee_offhand(float dt) {
-    for (const FeatureHooks* f : kFeatureList)
-        if (f->gesture_melee_offhand != nullptr) f->gesture_melee_offhand(dt);
-}
-
 void features_melee_hold_check() {
     if (service_active(SVC_MELEE_INSTRUMENTS)) melee_hold_check();
 }
@@ -414,16 +407,6 @@ void features_teardown_early() {
     stability_teardown_early();
 }
 void features_teardown_restore() { stability_teardown_restore(); }
-
-void features_holster_pouch_offhand(bool ghand_ok, const Vec3& ghand, const Vec3& pouch) {
-    for (const FeatureHooks* f : kFeatureList)
-        if (f->holster_pouch_offhand != nullptr) f->holster_pouch_offhand(ghand_ok, ghand, pouch);
-}
-
-void features_holster_pouches_measured() {
-    for (const FeatureHooks* f : kFeatureList)
-        if (f->holster_pouches_measured != nullptr) f->holster_pouches_measured();
-}
 
 // ---- THE RELOAD ENGINE (core/reload). The state machine's hooks run only inside the author's enabled
 // reload (reloadvr on), so they read the manual availability; the rest read either availability.

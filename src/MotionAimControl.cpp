@@ -94,7 +94,10 @@ std::atomic<void*>   g_aim_law_pc{nullptr};
 // Turning state rather than aim state, but derive_ctrl_angles folds it into the setpoint, and a
 // definition in Plugin.cpp could not be linked against: that file's body is an anonymous namespace.
 std::atomic<float> g_turn_offset{0.0f};
+std::atomic<float> g_calib_frame_yaw{0.0f};
 std::atomic<float> g_view_lock_delta{0.0f};
+std::atomic<float> g_view_out_yaw{0.0f};
+std::atomic<bool>  g_mesh_body_active{false};
 std::atomic<float> g_view_pitch{0.0f};
 std::atomic<float> g_desired_yaw{0.0f}, g_desired_pitch{0.0f};
 std::atomic<bool>  g_aim_calibrating{false};

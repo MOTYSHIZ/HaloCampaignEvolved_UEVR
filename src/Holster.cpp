@@ -35,10 +35,8 @@ inline long long ms_to_ticks(int ms) {
     return std::chrono::duration_cast<clock_t_::duration>(std::chrono::milliseconds(ms)).count();
 }
 
-// Where A (the game's CURRENT weapon) and B (its backup) live; None = in the hand.
-HolsterSlot s_slot_a = HolsterSlot::None;
-HolsterSlot s_slot_b = HolsterSlot::RightShoulder;
-bool  s_unarmed = false;                              // hand empty: hide + swallow fire
+// EMOTE MODE (see Holster.hpp): the weapon put away, the hand free. Hide + swallow fire.
+bool  s_unarmed = false;
 int   s_unhide_ticks = 0;                             // re-assert SetActorHiddenInGame(false) briefly after a draw
 HolsterSlot s_in_zone = HolsterSlot::None;           // hand's current zone (for haptics / log)
 bool  s_grip_prev = false;
@@ -348,7 +346,7 @@ HALO_HOLSTER_STATE_BRIDGE
 
 bool holster_swap_press_active()  { const auto u = g_holster_swap_until.load(std::memory_order_relaxed);  return u != 0 && now_ticks() < u; }
 bool holster_throw_press_active() { const auto u = g_holster_throw_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
-HolsterSlot holster_stowed_slot() { return (s_slot_a != HolsterSlot::None) ? s_slot_a : s_slot_b; }
+bool holster_emote_active() { return s_unarmed; }
 bool holster_grenade_armed() { return s_grenade_armed; }
 float holster_nearest_dist() { return s_nearest_dist; }
 bool  holster_veto_by_proximity() { return s_near_zone; }
@@ -372,6 +370,16 @@ bool holster_mag_hand_in() {
     return s_mag_hand_in.load(std::memory_order_relaxed);
 }
 bool holster_gswitch_press_active() { const auto u = g_holster_gswitch_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
+// The OFF hand's own veto (ported from blindcowboy24's play build, 2026-09-10). holster_melee_veto()
+// below tests the AIM hand's zone -- right for the aim-hand detector, wrong for a left punch: the
+// right hand holding a rifle at chest height sits in pouch space and stood every left punch down in
+// their measurement. This tests the OFF hand's pouch (s_gin_zone; theirs used a wider "near" band we
+// do not track) plus the same recent-action window. A carried grenade is holster_offhand_busy().
+bool holster_offhand_melee_veto() {
+    if (!g_cfg.holster_enabled) return false;
+    if (s_gin_zone != HolsterSlot::None) return true;
+    return (now_ticks() - s_last_action) < ms_to_ticks(g_cfg.holster_melee_veto_ms);
+}
 bool holster_melee_veto() {
     if (!g_cfg.holster_enabled) return false;
     // A grenade CARRIED in the aim hand vetoes melee (the throw swing IS a fast aim-hand
@@ -392,7 +400,6 @@ void holster_reset() {
         if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER re-armed (reset)");
     }
     s_unarmed = false; s_unhide_ticks = 0;
-    s_slot_a = HolsterSlot::None; s_slot_b = HolsterSlot::RightShoulder;
     if (s_grenade_armed && g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER grenade dropped (reset)");
     s_grenade_armed = false;
     s_grip_prev = false;
@@ -585,11 +592,9 @@ void holster_update(float dt) {
             const float d = std::sqrt((ghand.x - o.x) * (ghand.x - o.x) + (ghand.y - o.y) * (ghand.y - o.y) + (ghand.z - o.z) * (ghand.z - o.z));
             if (d < g_cfg.holster_gradius && d < gbest) { gbest = d; zone_g = sl; }
         }
-        features_holster_pouch_offhand(ghand_ok, ghand, o);
     }
     s_nearest_dist = nearest;
     s_near_zone = (nearest < g_cfg.holster_radius + g_cfg.holster_melee_margin);
-    features_holster_pouches_measured();
 
     // ---- GRENADE VISUALS. Spawned lazily (paced), placed every tick, scale re-applied every
     // tick -- the wheel-disc lesson: anything a live cfg value controls must be re-applied on the
@@ -800,9 +805,10 @@ void holster_update(float dt) {
     if (zone != s_in_zone) {
         // Entering a zone gets a tick of haptics -- the slot you can act on; leaving gets nothing.
         if (zone != HolsterSlot::None) {
-            const bool full = (zone == s_slot_a) || (zone == s_slot_b);
-            haptic(full ? 0.08f : 0.04f, full ? 0.5f : 0.25f);
-            if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER enter %s (%s) hand=(%.2f %.2f %.2f)", slot_name(zone), full ? "full" : "empty", hand.x, hand.y, hand.z);
+            // The swap shoulder buzzes harder than the emote zones, so the two read apart by feel.
+            const bool swap = (zone == HolsterSlot::RightShoulder);
+            haptic(swap ? 0.08f : 0.05f, swap ? 0.5f : 0.3f);
+            if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER enter %s (%s) hand=(%.2f %.2f %.2f)", slot_name(zone), swap ? "swap" : "emote toggle", hand.x, hand.y, hand.z);
         }
         s_in_zone = zone;
     }
@@ -905,37 +911,26 @@ void holster_update(float dt) {
             const long long now = now_ticks();
             if (now - s_last_swap > ms_to_ticks(400)) {
                 s_last_swap = now;
-                const bool a_here = (zone == s_slot_a), b_here = (zone == s_slot_b);
-                const bool armed = !s_unarmed;
-                if (armed && !a_here && !b_here) {
-                    // STOW the held weapon (whichever is in hand) into this empty slot.
-                    if (s_slot_a == HolsterSlot::None) s_slot_a = zone; else s_slot_b = zone;
-                    s_unarmed = true;
-                    set_weapon_hidden(true);
-                    haptic(0.12f, 0.9f);
-                    if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER STOW at %s -> unarmed (A@%s B@%s)", slot_name(zone), slot_name(s_slot_a), slot_name(s_slot_b));
-                } else if (!armed && (a_here || b_here)) {
-                    // DRAW. The game's backup needs a swap press first; afterwards it IS the
-                    // current weapon, so relabel (A is always the game's current).
-                    if (b_here) {
-                        g_holster_swap_until.store(now + ms_to_ticks(g_cfg.holster_press_ms), std::memory_order_relaxed);
-                        const HolsterSlot t = s_slot_a; s_slot_a = s_slot_b; s_slot_b = t;   // relabel
-                    }
-                    s_slot_a = HolsterSlot::None;
-                    s_unarmed = false; s_unhide_ticks = 30;
+                if (zone == HolsterSlot::RightShoulder) {
+                    // SWAP, always -- and out of emote mode, so the weapon swapped to comes out
+                    // visible (the old slots let a hidden state follow a weapon around).
+                    g_holster_swap_until.store(now + ms_to_ticks(g_cfg.holster_press_ms), std::memory_order_relaxed);
+                    const bool was_emote = s_unarmed;
+                    s_unarmed = false;
+                    s_unhide_ticks = 30;          // the swapped-in actor arrives on its own schedule
                     set_weapon_hidden(false);
                     haptic(0.12f, 0.9f);
-                    if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER DRAW from %s%s -> armed (A@hand B@%s)", slot_name(zone), b_here ? " (swap)" : "", slot_name(s_slot_b));
-                } else if (armed && b_here) {
-                    // EXCHANGE at the other gun's slot: held gun takes the slot, the other comes out.
-                    g_holster_swap_until.store(now + ms_to_ticks(g_cfg.holster_press_ms), std::memory_order_relaxed);
-                    s_slot_b = HolsterSlot::None; s_slot_a = zone;
-                    { const HolsterSlot t = s_slot_a; s_slot_a = s_slot_b; s_slot_b = t; }     // relabel
-                    s_unhide_ticks = 30;
-                    haptic(0.12f, 0.9f);
-                    if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER EXCHANGE at %s -> swap (A@hand B@%s)", slot_name(zone), slot_name(s_slot_b));
-                } else if (g_cfg.holster_log) {
-                    API::get()->log_info("[Halo-CampE-UEVR] HOLSTER grip at %s: nothing to do (%s, A@%s B@%s)", slot_name(zone), armed ? "armed" : "unarmed", slot_name(s_slot_a), slot_name(s_slot_b));
+                    if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER SWAP at right shoulder%s",
+                                                                was_emote ? " (emote mode ended)" : "");
+                } else {
+                    // EMOTE MODE toggle (left shoulder / right hip).
+                    s_unarmed = !s_unarmed;
+                    if (s_unarmed) { set_weapon_hidden(true); s_unhide_ticks = 0; }
+                    else           { set_weapon_hidden(false); s_unhide_ticks = 30; }
+                    haptic(0.12f, s_unarmed ? 0.9f : 0.6f);
+                    if (g_cfg.holster_log) API::get()->log_info("[Halo-CampE-UEVR] HOLSTER EMOTE %s at %s",
+                                                                s_unarmed ? "ON (weapon put away, right hand free)"
+                                                                          : "OFF (weapon back)", slot_name(zone));
                 }
             }
         }

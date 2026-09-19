@@ -194,12 +194,6 @@ const FeatureRow kFeatures[] = {
       "slidepartsign,slideparttest,slidepartui,slidephantom,slideseq,slideseqback,slideseqfwd,slideseqsweep,"
       "slidesign,slideslot,slideundoreload,slideweapons,slidezone",
       "", FEATURE_BOOL(slide_vr) },
-    { "meleeleft",    1, Tier::Experimental, "Melee and grenades", "Punch with your other hand",
-      "Your other hand can melee too, on its own swing thresholds.",
-      "meleeleftcooldown,meleeleftext,meleelefthold,meleeleftmaxreach,meleeleftmaxspeed,meleeleftreach,"
-      "meleeleftspeed,meleelefttau",
-      "meleeleftdisp,meleeleftlog,meleeleftshotdist,meleeleftshotms",
-      "meleeswing", FEATURE_BOOL(melee_left) },
     { "grenadeswallow", 1, Tier::Experimental, "Melee and grenades", "Grenades from the pouches only",
       "The left face button stops throwing grenades; grenades come from your chest pouches.",
       "",
@@ -437,8 +431,6 @@ void features_apply() {
     //   The hidden reload (co-op, and solo) keeps the gun dead until the manual reload gesture gives
     //   it back; with manual reload off nothing ever would.
     if (!g_cfg.reload_vr) { g_cfg.coop_hide = false; g_cfg.hide_solo = false; }
-    //   Off-hand melee is a setting of melee by swinging.
-    if (!g_cfg.melee_swing) g_cfg.melee_left = false;
 
     // THE FORK'S RELOAD EVIDENCE ANSWERS TO EITHER LOG SWITCH. About forty fork lines moved from
     // the author's reloadlog onto the fork's own reloadvrlog when the manual reload became a

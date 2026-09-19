@@ -58,10 +58,6 @@ const KeyAliasRow kAliases[] = {
     { "blipdump",             "wristblipdump" },
     { "trackerdump",          "wristtrackerdump" },
     { "trackermid",           "wristtrackermid" },
-    // meleeleft -- stem "meleeleft". melee* alone is the author's melee-by-swing family.
-    { "meleedisp",            "meleeleftdisp" },
-    { "meleeshotdist",        "meleeleftshotdist" },
-    { "meleeshotms",          "meleeleftshotms" },
     // stabilityfixes -- stem "stability".
     { "turnlog",              "stabilityturnlog" },
     { "widgetlog",            "stabilitywidgetlog" },

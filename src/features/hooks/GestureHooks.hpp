@@ -6,10 +6,6 @@
 
 namespace halo {
 
-// gesture_update (game thread), in the melee half: after the melee_swing gate and the dt sanity
-// check, before the aim hand's pose check. The off-hand melee detector.
-void features_gesture_melee_offhand(float dt);
-
 // gesture_update (game thread), near its top, after the reload family's ticks and before the global
 // stand-down: the deferred melee hold check (core/fixes/MeleeInstruments).
 void features_melee_hold_check();

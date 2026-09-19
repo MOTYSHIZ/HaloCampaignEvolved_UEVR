@@ -26,11 +26,6 @@ void features_holster_mesh_swept(const void* mf);
 void features_holster_before_release(HolsterSlot zone_g, HolsterSlot zone_p,
                                      const Vec3& pos, const Vec3& gpos, const Vec3& hpos);
 
-// holster_update (game thread), in the pouch loop, after the off hand's grab test: the off hand's
-// distance to this pouch, whether or not it may grab.
-void features_holster_pouch_offhand(bool ghand_ok, const Vec3& ghand, const Vec3& pouch);
-// holster_update (game thread), right after the aim hand's proximity is published.
-void features_holster_pouches_measured();
 // holster_update (game thread), a pouch or hand marker just spawned, before it is kept.
 void features_holster_marker_spawned(uevr::API::UObject* marker);
 // holster_update (game thread), the tick's release edge: true = the release is too slow to throw.
