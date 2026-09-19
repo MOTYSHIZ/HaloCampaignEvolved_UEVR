@@ -80,6 +80,9 @@ bool palette_wpn_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettewpnoffy") == 0) { g_cfg.palette_weapon_off_y = clampf((float)v,-200.0f,200.0f); return true; }
     if (_stricmp(key, "palettewpnoffz") == 0) { g_cfg.palette_weapon_off_z = clampf((float)v,-200.0f,200.0f); return true; }
     if (_stricmp(key, "palettewpnscale")== 0) { g_cfg.palette_weapon_scale = clampf((float)v, 0.05f, 20.0f); return true; }
+    if (_stricmp(key, "palettesocketfix")        == 0) { g_cfg.palette_socket_fix = (int)clampf((float)v, 0.0f, 3.0f); return true; }
+    if (_stricmp(key, "palettesocketfixsamples") == 0) { g_cfg.palette_socket_fix_samples = (int)clampf((float)v, 1.0f, 60.0f); return true; }
+    if (_stricmp(key, "palettesocketfixtol")     == 0) { g_cfg.palette_socket_fix_tol = clampf((float)v, 0.001f, 1.0f); return true; }
     if (_stricmp(key, "palettecalibkey")== 0) { g_cfg.palette_calib_key = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "judderlog")      == 0) { g_cfg.judder_log           = (int)clampf((float)v, 0.0f, 20000.0f); return true; }
     if (_stricmp(key, "palettelerp")    == 0) { g_cfg.palette_lerp         = (v != 0.0); return true; }

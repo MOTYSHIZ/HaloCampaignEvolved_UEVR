@@ -978,6 +978,40 @@
     float palette_weapon_off_x = 0.0f;
     float palette_weapon_off_y = 0.0f;
     float palette_weapon_off_z = 0.0f;
+    // PALETTESOCKETFIX. Cancel the authored separation between palette node 8, which this
+    // placement writes, and the PrimaryWeapon socket, which the weapon is actually drawn on.
+    //
+    // MEASURED, not assumed (log.txt 2026-09-18, 411 TRACE-NODE8 samples in one session): the
+    // socket tracks node 8 one for one, at a CONSTANT offset of (-0.092 +0.039 -0.102) palette
+    // units = (-28 +12 -31) cm, |43.5| cm. 396 of the 411 samples print that value to three
+    // decimals; the rest are within 0.003 u of it, across every camera angle, every reach from
+    // 11 to 76 cm, and both weapons held. Place node 8 on the hand and the weapon therefore
+    // renders 43.5 cm away from it -- position, not rotation, which is the report.
+    //
+    // The comment on the placement itself asserts this diff is zero on every weapon. It was, when
+    // it was measured; it is not now. The separation is also known to FLIP between two fixed
+    // values across a respawn (~38.9 cm the last time it was characterised), which is why nothing
+    // here is a pinned constant: every mode below cancels a value the game thread MEASURED this
+    // session, and mode 0 leaves the old behaviour intact for comparison.
+    //
+    // Three distinct mechanisms, one key -- they differ in WHAT they trust, not in a threshold:
+    //   0 = off. Node 8 goes on the hand and the socket lands wherever the authored offset puts it.
+    //   1 = LIVE (default). Every placement subtracts the newest measurement, smoothed by an EMA
+    //       over the samples the trace block already takes. Follows a flip within a second or two
+    //       and needs no notion of when a weapon or a life began.
+    //   2 = PER-WEAPON LATCH. The first run of agreeing samples after a weapon change is latched
+    //       and used unchanged until the weapon changes again. Immune to a noisy sample mid-fight,
+    //       at the cost of carrying a stale value across a respawn that does not swap weapons.
+    //   3 = FLIP TRACK. Keeps the two values the separation is known to alternate between and
+    //       snaps to whichever the newest sample is nearer, never averaging across the flip --
+    //       the mode to use if 1 is seen to smear during the frame or two after a respawn.
+    // Cancellation only ever applies while a measurement exists; with none, every mode is 0.
+    int   palette_socket_fix = 1;
+    // How many agreeing samples mode 2 wants before it latches, and how far apart two samples may
+    // sit (palette units) and still be called agreeing. Also the radius mode 3 calls "the same
+    // value" when it decides whether a sample belongs to a bucket it already holds.
+    int   palette_socket_fix_samples = 3;
+    float palette_socket_fix_tol = 0.02f;
     // UEVR WORLD SCALE, as the palette path applies it: metres of real hand movement -> game cm
     // is 100 x this. It is the SAME physical quantity as rigscale/100 and as UEVR's own
     // VR_WorldScale, and it must agree with whatever UEVR is actually applying -- a mismatch

@@ -136,14 +136,15 @@ const FeatureRow kFeatures[] = {
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
       "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
-      "palettepubframe,paletterolltrim,palettetwohandagreefull,palettetwohandagreemin,palettetwohandmarker,"
+      "palettepubframe,paletterolltrim,palettesocketfix,palettetwohandagreefull,palettetwohandagreemin,palettetwohandmarker,"
       "palettetwohandmax,palettetwohandmin,palettewpncalibkey",
       "aimboreaxis,camleadall,compgain,complatch,complatchms,fpanimkill,fpmeshlog,fppin,fpscalefix,"
       "judderlog,liftyaw,palaimcalibver,palaimfix,palaimoffpitch,palaimoffyaw,paletteaimdirectwrite,"
       "paletteaimreticulefresh,palettebank,palettebarrellock,palettecam,palettecamsmooth,palettefinal,"
       "palettehook,palettehooktest,palettelatch,palettelatchms,palettelerp,palettelocal,"
       "palettemeshconstgate,palettepoke,palettepokeamt,palettepokecount,palettepokenode,paletteposelatch,"
-      "palettescan,paletteslidewatch,paletteslidezonepriority,palettesync,palettetwohandblendms,"
+      "palettescan,paletteslidewatch,paletteslidezonepriority,palettesocketfixsamples,palettesocketfixtol,"
+      "palettesync,palettetwohandblendms,"
       "palettetwohandhaptic,palettetwohandlog,palettetwohandmarkercolor,palettetwohandmarkerscale,"
       "palettetwohandrad,palettewatch,palettewpnoffx,palettewpnoffy,palettewpnoffz,palettewpnscale,"
       "palgripfix,palrender,palsniff,palstep,palstepctx,palstepsrc,palwpnfix,pinuevrframe,posefilter,"

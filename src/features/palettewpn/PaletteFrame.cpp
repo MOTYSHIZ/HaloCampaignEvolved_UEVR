@@ -444,6 +444,12 @@ void palette_wpn_game_tick_after_vehicle(uint32_t tick) {
             sock_local = Vec3{sl.x / 304.8f, -sl.y / 304.8f, sl.z / 304.8f};
             w8x = halo::g_dbg_node8_x.load(); w8y = halo::g_dbg_node8_y.load(); w8z = halo::g_dbg_node8_z.load();
         }
+        // PALETTESOCKETFIX: hand this measurement to the placement. It must NOT be gated on the
+        // log flag -- the cancellation is a feature, the printing is evidence -- and it is only
+        // meaningful when both terms came from a real socket read under a live mesh.
+        if (have_gun && have_par)
+            halo::palette_socket_fix_note(sock_local.x - w8x, sock_local.y - w8y, sock_local.z - w8z);
+
         if (pwl) API::get()->log_info(
             "[Halo-CampE-UEVR] TRACE-NODE8 written=(%.3f %.3f %.3f)u  socket_in_mesh=(%.3f %.3f %.3f)u  "
             "diff=(%.3f %.3f %.3f)u = (%.0f %.0f %.0f)cm  [constant diff = authored socket offset]",

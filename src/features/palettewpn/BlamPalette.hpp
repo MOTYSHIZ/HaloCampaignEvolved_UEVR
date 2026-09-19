@@ -194,4 +194,16 @@ void blam_palette_instruments_release();
 bool blam_palette_unavailable();
 void blam_palette_retry();
 
+// ---- PALETTESOCKETFIX (doctrine at Config palette_socket_fix). The separation between palette
+// node 8, which the placement writes, and the PrimaryWeapon socket the weapon is DRAWN on.
+//
+// note(): the game thread hands in one measurement, socket_in_mesh minus the node 8 value that
+// produced it, in palette units. It reads the held weapon's generation itself, so the caller
+// needs no notion of weapon identity. The measurement is invariant to the correction (both terms
+// move by it together), so measuring while cancelling is not a feedback loop.
+// value(): the separation the placement should subtract right now, by the configured mode.
+// False when no measurement has arrived yet, and every mode then cancels nothing.
+void palette_socket_fix_note(float sx, float sy, float sz);
+bool palette_socket_fix_value(float* out_xyz);
+
 } // namespace halo

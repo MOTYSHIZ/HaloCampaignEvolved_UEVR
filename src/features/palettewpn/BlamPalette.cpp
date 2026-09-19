@@ -1502,6 +1502,29 @@ struct HandLatch {
     std::atomic<float> gx{0.0f}, gy{0.0f}, gz{0.0f};
 };
 HandLatch g_hl;
+
+// ---- PALETTESOCKETFIX (doctrine at Config palette_socket_fix). The state behind the three
+// modes, written by the game thread's trace block and read by whichever thread is placing.
+// Plain atomics rather than a seqlock: a torn read here costs one frame of a slightly wrong
+// cancellation, which is invisible next to the 43.5 cm the cancellation removes, and the
+// separation is authored and changes only at a flip.
+struct SocketFix {
+    std::atomic<uint32_t> samples{0};            // total measurements ever handed in
+    std::atomic<float> live_x{0.0f}, live_y{0.0f}, live_z{0.0f};   // mode 1: the EMA
+    std::atomic<bool>  live_ok{false};
+    // Mode 2: the per-weapon latch, plus the run of agreeing samples that arms it.
+    std::atomic<float> latch_x{0.0f}, latch_y{0.0f}, latch_z{0.0f};
+    std::atomic<bool>  latch_ok{false};
+    std::atomic<uint32_t> latch_gen{0xFFFFFFFFu};
+    // Mode 3: the two values the separation is known to alternate between, and which one the
+    // newest sample chose. A third distinct value evicts whichever bucket is older.
+    std::atomic<float> bkt_x[2]{}, bkt_y[2]{}, bkt_z[2]{};
+    std::atomic<bool>  bkt_ok[2]{};
+    std::atomic<int>   bkt_cur{-1};
+    std::atomic<uint32_t> bkt_age[2]{};
+};
+SocketFix g_sfx;
+
 // ---- THE DIVISOR LATCH (Config.hpp comp_latch). Shared across threads deliberately: the whole
 // point is that the sim-thread build writer and the render-thread refresh use the SAME sample.
 // Seqlocked, odd while writing, same doctrine as g_p_seq.
@@ -1917,6 +1940,28 @@ bool apply_weapon_branch(PaletteNode* palette, Mat3* out_delta_basis = nullptr, 
             const Mat3 weapon_frame = mat_mul(root_basis, visual);
             desired_pos = add(desired_pos,
                               xform(weapon_frame, mul(off_cm, 1.0f / kCmPerBlamUnit)));
+        }
+    }
+
+    // ---- THE NODE-8-TO-SOCKET SEPARATION, CANCELLED (palettesocketfix; doctrine and the fit at
+    // the Config key).
+    //
+    // Everything above places NODE 8. The weapon is not drawn on node 8: it is drawn on the mesh's
+    // PrimaryWeapon socket, which sits a fixed distance from it in the same frame. The comment
+    // above still says that distance is zero on every weapon -- it was when it was measured, and
+    // it is not now: 396 of 411 TRACE-NODE8 rows in the 2026-09-18 session print a separation of
+    // (-0.092 +0.039 -0.102) u = 43.5 cm, unchanged while the written value moves 43 cm and the
+    // camera sweeps 112 degrees. Put node 8 on the hand and the weapon renders 43.5 cm off it.
+    //
+    // Subtracting the separation here puts the SOCKET on the hand instead, which is what the
+    // player is aiming at. The measurement is taken from the same two numbers after the
+    // subtraction (socket minus what we wrote), so it does not chase itself.
+    {
+        float sep[3] = {0.0f, 0.0f, 0.0f};
+        if (palette_socket_fix_value(sep)) {
+            desired_pos.x -= sep[0];
+            desired_pos.y -= sep[1];
+            desired_pos.z -= sep[2];
         }
     }
 
@@ -4209,6 +4254,152 @@ void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_
 
 std::atomic<uint32_t>  g_game_tid{0};
 std::atomic<int>       g_engine_phase{0};
+
+// ---- PALETTESOCKETFIX. THE MEASUREMENT IN, AND THE CANCELLATION OUT.
+//
+// FITTED BEFORE WRITTEN, from log.txt 2026-09-18 (411 TRACE-NODE8 rows, one session, weapon
+// placement on, shipped defaults): socket_in_mesh tracks the node 8 value we wrote one for one,
+// at a separation of (-0.092 +0.039 -0.102) palette units = (-28 +12 -31) cm, |43.5| cm. 396 rows
+// print that to three decimals and the remaining 15 sit within 0.003 u of it, while the written
+// value itself ranges over 0.14 u (43 cm) and the camera sweeps 112 degrees of yaw. A separation
+// that holds across all of that is authored geometry, not a frame error -- and it is exactly the
+// distance the owner reports the weapon sitting from his hand.
+//
+// WHAT WAS NOT THE CAUSE, since both were checked against the same log and both are refuted:
+//   * A conversion or a doubled term. The PALETTEWPN ratio does read 2.000-2.005, but `ours` is
+//     byte identical on the 145 consecutive samples that carry it (21:26:41 to 21:28:17) and on
+//     61 more later -- one parked controller, sampled 206 times, not 206 measurements. Over the
+//     session `ours` spans 0.026 to 0.248 u and the ratio spans 0.209 to 2.116. There is no
+//     factor of two to find.
+//   * The scale. The pullback's own 50 cm self test lands at |0.164| u = 50.0 cm in every sample
+//     of the same log, so cm-per-unit and the axis map are exact.
+void palette_socket_fix_note(float sx, float sy, float sz) {
+    if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(sz)) return;
+    // A separation further than a body is a bad socket read, not geometry; 1 palette unit is
+    // 3.05 m. Refuse it rather than let one row poison a latch or a bucket.
+    if (std::fabs(sx) > 1.0f || std::fabs(sy) > 1.0f || std::fabs(sz) > 1.0f) return;
+    const uint32_t n = g_sfx.samples.fetch_add(1, std::memory_order_relaxed) + 1u;
+
+    // MODE 1, LIVE. An EMA over the samples the trace block already takes (~0.7 Hz on foot, and
+    // every tick while a calibration key is held). First sample seeds it outright so the very
+    // first placement after a weapon appears is already corrected.
+    if (!g_sfx.live_ok.load(std::memory_order_relaxed)) {
+        g_sfx.live_x.store(sx, std::memory_order_relaxed);
+        g_sfx.live_y.store(sy, std::memory_order_relaxed);
+        g_sfx.live_z.store(sz, std::memory_order_relaxed);
+        g_sfx.live_ok.store(true, std::memory_order_release);
+    } else {
+        const float a = 0.35f;
+        g_sfx.live_x.store(g_sfx.live_x.load(std::memory_order_relaxed) + a * (sx - g_sfx.live_x.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+        g_sfx.live_y.store(g_sfx.live_y.load(std::memory_order_relaxed) + a * (sy - g_sfx.live_y.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+        g_sfx.live_z.store(g_sfx.live_z.load(std::memory_order_relaxed) + a * (sz - g_sfx.live_z.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+    }
+
+    const float tol = g_cfg.palette_socket_fix_tol;
+    const uint32_t gen = g_p_wpn_gen.load(std::memory_order_relaxed);
+
+    // MODE 2, PER-WEAPON LATCH. A run of agreeing samples arms it; the weapon generation
+    // disarming it is the only thing that lets it move again.
+    {
+        static uint32_t s_run_gen = 0xFFFFFFFFu;
+        static int   s_run = 0;
+        static float s_rx = 0.0f, s_ry = 0.0f, s_rz = 0.0f;
+        if (g_sfx.latch_gen.load(std::memory_order_relaxed) != gen) {
+            g_sfx.latch_ok.store(false, std::memory_order_relaxed);
+            if (s_run_gen != gen) { s_run_gen = gen; s_run = 0; }
+        }
+        if (!g_sfx.latch_ok.load(std::memory_order_relaxed)) {
+            const bool agrees = s_run > 0 && std::fabs(sx - s_rx) <= tol
+                                          && std::fabs(sy - s_ry) <= tol
+                                          && std::fabs(sz - s_rz) <= tol;
+            if (agrees) ++s_run; else s_run = 1;
+            s_rx = sx; s_ry = sy; s_rz = sz;
+            if (s_run >= g_cfg.palette_socket_fix_samples) {
+                g_sfx.latch_x.store(sx, std::memory_order_relaxed);
+                g_sfx.latch_y.store(sy, std::memory_order_relaxed);
+                g_sfx.latch_z.store(sz, std::memory_order_relaxed);
+                g_sfx.latch_gen.store(gen, std::memory_order_relaxed);
+                g_sfx.latch_ok.store(true, std::memory_order_release);
+            }
+        }
+    }
+
+    // MODE 3, FLIP TRACK. The separation is known to alternate between two fixed values across a
+    // respawn, so keep both and snap to whichever the newest sample belongs to. Nothing is ever
+    // averaged across the two, which is the failure mode 1 would have in the frames after a flip.
+    {
+        int hit = -1;
+        for (int i = 0; i < 2; ++i) {
+            if (!g_sfx.bkt_ok[i].load(std::memory_order_relaxed)) continue;
+            if (std::fabs(sx - g_sfx.bkt_x[i].load(std::memory_order_relaxed)) <= tol &&
+                std::fabs(sy - g_sfx.bkt_y[i].load(std::memory_order_relaxed)) <= tol &&
+                std::fabs(sz - g_sfx.bkt_z[i].load(std::memory_order_relaxed)) <= tol) { hit = i; break; }
+        }
+        if (hit < 0) {
+            // A value neither bucket holds: take a free bucket, else evict the one not updated
+            // for longest, so a genuine third value cannot be locked out by two stale ones.
+            hit = 0;
+            if (!g_sfx.bkt_ok[0].load(std::memory_order_relaxed)) hit = 0;
+            else if (!g_sfx.bkt_ok[1].load(std::memory_order_relaxed)) hit = 1;
+            else hit = (g_sfx.bkt_age[0].load(std::memory_order_relaxed) <=
+                        g_sfx.bkt_age[1].load(std::memory_order_relaxed)) ? 0 : 1;
+            g_sfx.bkt_ok[hit].store(true, std::memory_order_relaxed);
+        }
+        g_sfx.bkt_x[hit].store(sx, std::memory_order_relaxed);
+        g_sfx.bkt_y[hit].store(sy, std::memory_order_relaxed);
+        g_sfx.bkt_z[hit].store(sz, std::memory_order_relaxed);
+        g_sfx.bkt_age[hit].store(n, std::memory_order_relaxed);
+        g_sfx.bkt_cur.store(hit, std::memory_order_release);
+    }
+
+    // ONE LINE A SECOND while the placement log is on: what was measured, what each mode would
+    // cancel, and how many samples are behind it. The value to read in the headset is the one
+    // TRACE-NODE8 prints next, which goes to ~0 once a mode is cancelling.
+    if (g_cfg.palette_weapon_log) {
+        static uint32_t s_n = 0;
+        if ((s_n++ % 2u) == 0u) {
+            float applied[3] = {0.0f, 0.0f, 0.0f};
+            const bool on = palette_socket_fix_value(applied);
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] PALETTESOCK mode=%d measured=(%.3f %.3f %.3f)u = (%.0f %.0f %.0f)cm |%.0f|cm  "
+                "applied=(%.3f %.3f %.3f)u on=%d  samples=%u latched=%d bucket=%d",
+                g_cfg.palette_socket_fix, sx, sy, sz, sx * 304.8f, sy * 304.8f, sz * 304.8f,
+                std::sqrt(sx*sx + sy*sy + sz*sz) * 304.8f,
+                applied[0], applied[1], applied[2], (int)on, n,
+                (int)g_sfx.latch_ok.load(std::memory_order_relaxed),
+                g_sfx.bkt_cur.load(std::memory_order_relaxed));
+        }
+    }
+}
+
+bool palette_socket_fix_value(float* out_xyz) {
+    if (out_xyz == nullptr) return false;
+    out_xyz[0] = out_xyz[1] = out_xyz[2] = 0.0f;
+    switch (g_cfg.palette_socket_fix) {
+    case 1:
+        if (!g_sfx.live_ok.load(std::memory_order_acquire)) return false;
+        out_xyz[0] = g_sfx.live_x.load(std::memory_order_relaxed);
+        out_xyz[1] = g_sfx.live_y.load(std::memory_order_relaxed);
+        out_xyz[2] = g_sfx.live_z.load(std::memory_order_relaxed);
+        return true;
+    case 2:
+        if (!g_sfx.latch_ok.load(std::memory_order_acquire)) return false;
+        out_xyz[0] = g_sfx.latch_x.load(std::memory_order_relaxed);
+        out_xyz[1] = g_sfx.latch_y.load(std::memory_order_relaxed);
+        out_xyz[2] = g_sfx.latch_z.load(std::memory_order_relaxed);
+        return true;
+    case 3: {
+        const int i = g_sfx.bkt_cur.load(std::memory_order_acquire);
+        if (i < 0 || i > 1 || !g_sfx.bkt_ok[i].load(std::memory_order_relaxed)) return false;
+        out_xyz[0] = g_sfx.bkt_x[i].load(std::memory_order_relaxed);
+        out_xyz[1] = g_sfx.bkt_y[i].load(std::memory_order_relaxed);
+        out_xyz[2] = g_sfx.bkt_z[i].load(std::memory_order_relaxed);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
 
 bool blam_palette_fp_live() {
     const int64_t last = g_fp_built_ms.load(std::memory_order_relaxed);
