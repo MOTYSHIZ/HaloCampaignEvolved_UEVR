@@ -45,7 +45,7 @@ void features_reload_buttons_read();
 // reload_update, the grip: true = the fetch hand's grip action is held (the XInput mask still counts).
 bool features_reload_grip_held();
 // reload_update, the fetch hand: the author's get_pose result in, whether the hand counts as present.
-bool features_reload_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head);
+bool features_reload_fetch_pose(bool pose_ok, Vec3* hand_l, const Vec3* head);
 // reload_update, Idle: true = this weapon's press is ignored; accepted = right before MAG_OUT.
 bool features_reload_press_ignored();
 void features_reload_press_accepted();

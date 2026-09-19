@@ -227,7 +227,7 @@ static void reload_update(const Vec3* hand_r, const Vec3* head) {
     const auto lidx = g_cfg.aim_left_hand ? API::VR::get_right_controller_index()
                                           : API::VR::get_left_controller_index();
     Vec3 hand_l{}; Quat lrot{};
-    const bool have_left = features_reload_fetch_pose(get_pose(lidx, &hand_l, &lrot, /*use_aim=*/false), hand_l, head);
+    const bool have_left = features_reload_fetch_pose(get_pose(lidx, &hand_l, &lrot, /*use_aim=*/false), &hand_l, head);
 
     switch (s_reload) {
     case ReloadState::Idle:

@@ -1753,11 +1753,22 @@
     //   1  SAME SNAPSHOT COMPARE. One instant per tick, carrying a sequence number: the head, the
     //      aim hand's aim pose, the other hand's grip pose, the game camera, the rack part's world
     //      centre and the magazine component's world transform are all sampled together, and the
-    //      zone, the seat, the grab test and both markers are built from that alone. No newest
-    //      value read anywhere in the path. Only the HAND-FRAME offset crosses a tick boundary,
-    //      and that quantity is frame-invariant. zonehandrel's low pass is kept as it was, 0.2 per
-    //      tick: with the bias gone by construction its only remaining job is killing the weapon
-    //      animation's bob, which is what it was always good at  [default]
+    //      zone, the seat, the grab test and both markers are built from that alone. Only the
+    //      HAND-FRAME offset crosses a tick boundary, and that quantity is frame-invariant.
+    //      zonehandrel's low pass is kept as it was, 0.2 per tick: with the bias gone by
+    //      construction its only remaining job is killing the weapon animation's bob, which is
+    //      what it was always good at  [default]
+    //      THE ONE READ THAT REMAINS, named rather than claimed away. This used to say "no newest
+    //      value read anywhere in the path", and two were. The fetch hand was one: the gesture
+    //      caller's own live read of the tracker the snapshot had already sampled as `off`, so it
+    //      is now REPLACED by the snapshot's and the RELOAD held line prints, as snapdiff fetch,
+    //      how far apart the two reads were. The other is the AIM hand, and it stays: the caller
+    //      hands in that tracker's GRIP pose (use_aim=false) because the melee detector it shares
+    //      the read with cannot use the aim pose (which reads teleport-scale travel and would fire
+    //      strikes), while the snapshot holds the same tracker's AIM pose. They are two different
+    //      quantities from ONE moment, not two moments -- so the snapshot rule is not broken by
+    //      it, and the same log line prints their separation as snapdiff aim so the headset can
+    //      settle whether it matters instead of anyone arguing about it.
     //   2  ZONE FROM THE DRAWN GUN. The placement owns the rendered pose, so the zone is built in
     //      the DRAWN weapon's own rotation frame, composed the way aimbore composes the drawn
     //      barrel, and the game component leaves the path entirely -- neither a camera nor the

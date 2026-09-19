@@ -435,7 +435,7 @@ void features_reload_update_begin() { if (reload_engine_active()) reload_engine_
 void features_reload_timed_out() { if (reload_engine_active()) reload_engine_timed_out(); }
 void features_reload_buttons_read() { if (reload_engine_active()) reload_engine_swap_cancel(); }
 bool features_reload_grip_held() { return reload_manual_available() && reload_engine_grip_held(); }
-bool features_reload_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head) {
+bool features_reload_fetch_pose(bool pose_ok, Vec3* hand_l, const Vec3* head) {
     return reload_manual_available() ? reload_engine_fetch_pose(pose_ok, hand_l, head) : pose_ok;
 }
 bool features_reload_press_ignored() { return reload_manual_available() && reload_engine_press_ignored(); }

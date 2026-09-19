@@ -51,7 +51,11 @@ void reload_engine_update_begin();
 void reload_engine_timed_out();
 void reload_engine_swap_cancel();
 bool reload_engine_grip_held();
-bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head_p);
+// The fetch hand, and the ONE SNAPSHOT rule applied to it (zonesnap). `hand_l` is IN/OUT: the
+// caller passes its own live read and, with the snapshot on, gets the snapshot's fetch hand back,
+// so the seat test and the belt grab measure the same instant the zones were built from. The
+// difference between the two reads is kept and printed on the RELOAD held line.
+bool reload_engine_fetch_pose(bool pose_ok, Vec3* hand_l, const Vec3* head_p);
 bool reload_engine_press_ignored();
 void reload_engine_press_accepted();
 bool reload_engine_belt_grab_ok(bool belt);

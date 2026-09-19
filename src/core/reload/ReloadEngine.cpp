@@ -292,7 +292,33 @@ bool reload_engine_grip_held() {
     return holster_grip_held(fetch_right);
 }
 
-bool reload_engine_fetch_pose(bool pose_ok, const Vec3& hand_l, const Vec3* head_p) {
+// ---- THE TWO READS THE SEAT AND GRAB PATH STILL MAKES, MEASURED (zonesnap).
+//   fetch: the caller's own live read of the fetch tracker, against s_snap.off, which is the SAME
+//          tracker sampled at the top of this tick. With the snapshot on this one is REPLACED and
+//          the difference below is what the replacement removed.
+//   aim:   the caller's hand_r, which is the aim tracker's GRIP pose (use_aim=false), against
+//          s_snap.aim, which is the same tracker's AIM pose (use_aim=true). These are two
+//          different quantities, not two moments -- the grip pose is what the melee detector needs
+//          (the aim pose reads teleport-scale travel and would fire strikes), so this read stays
+//          and the doctrine says so rather than pretending it is gone.
+float s_snapdiff_fetch_cm = 0.0f;
+float s_snapdiff_aim_cm   = 0.0f;
+
+bool reload_engine_fetch_pose(bool pose_ok, Vec3* hand_l_p, const Vec3* head_p) {
+    if (hand_l_p == nullptr) return false;
+    // ONE SNAPSHOT for the fetch hand. This used to be the caller's live read while the belt zone,
+    // the well and the rack it is tested against all came from s_snap -- the newest value of the
+    // one tracker the snapshot had already sampled, compared against zones built a few
+    // milliseconds earlier. Serve it from the snapshot and the whole gate is one instant.
+    if (zone_snapshot_on() && s_snap.poses_ok && pose_ok) {
+        const float dx = hand_l_p->x - s_snap.off.x, dy = hand_l_p->y - s_snap.off.y,
+                    dz = hand_l_p->z - s_snap.off.z;
+        s_snapdiff_fetch_cm = std::sqrt(dx*dx + dy*dy + dz*dz) * 100.0f;
+        *hand_l_p = s_snap.off;
+    } else {
+        s_snapdiff_fetch_cm = 0.0f;
+    }
+    const Vec3& hand_l = *hand_l_p;
     // No head pose, no belt or well to measure against: the fetch hand counts as absent.
     bool have_left = (head_p != nullptr) && pose_ok;
     // DEAD-POSE GATE. get_pose passes a sleeping/glitched controller as (0,0,0) -- the room origin,
@@ -372,6 +398,15 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     // snapshot, beside the poses it is compared against, and the head is the snapshot's too.
     const bool use_snap = zone_snapshot_on();
     const Vec3 head_s = use_snap && s_snap.poses_ok ? s_snap.head : head;
+    // The aim hand arrives as the aim tracker's GRIP pose and the snapshot holds its AIM pose.
+    // Measure the gap rather than assume it: if it is small the two are interchangeable here and
+    // the remaining read costs nothing; if it is not, the log says so before anyone theorises.
+    if (use_snap && s_snap.poses_ok) {
+        const float ax = hand_r.x - s_snap.aim.x, ay = hand_r.y - s_snap.aim.y, az = hand_r.z - s_snap.aim.z;
+        s_snapdiff_aim_cm = std::sqrt(ax*ax + ay*ay + az*az) * 100.0f;
+    } else {
+        s_snapdiff_aim_cm = 0.0f;
+    }
     float join = 1e9f;
     Vec3  well_world{}; bool have_well_world = false;
     if (auto* mc = s_mag_hidden.get()) {
@@ -414,11 +449,13 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
     if (g_cfg.reload_vr_log) {
         static uint32_t s_rl = 0;
         if ((s_rl++ % 15u) == 0u)
-            API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f) | snap=%u mode=%d well=%s",
+            API::get()->log_info("[Halo-CampE-UEVR] RELOAD held: mag-to-well=%.0fcm lifted=%.0fcm (need <=%.0f, >=%.0f) | snap=%u mode=%d well=%s"
+                                 " | snapdiff fetch=%.1fcm (removed) aim=%.1fcm (grip vs aim pose, kept)",
                                  join * 100.0f, (hand_l.y - s_grab_y) * 100.0f,
                                  g_cfg.reload_seat_dist * 100.0f, g_cfg.reload_lift * 100.0f,
                                  use_snap ? s_snap.seq : 0u, g_cfg.zone_snap,
-                                 have_well_world ? "component" : "reloadwellfwd fallback");
+                                 have_well_world ? "component" : "reloadwellfwd fallback",
+                                 s_snapdiff_fetch_cm, s_snapdiff_aim_cm);
     }
     // THE SLIDE, in place of the old four-tick debounce. Inside the capture radius (and
     // lifted) the magazine leaves the hand and travels into the well over reload_slide_ms;
