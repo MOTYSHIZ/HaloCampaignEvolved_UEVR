@@ -352,22 +352,28 @@ wrong, hold that weapon and store an adjustment for it alone with the per-weapon
 
 ### Where your calibration is stored
 
-Calibrations write to two files next to the config:
+Calibrations write to three files next to the config:
 
 ```
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg      (the global fit, captured barrel lines)
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg    (per-weapon adjustments, front handles)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg          (the global fit, captured barrel lines)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg        (per-weapon adjustments, front handles)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_palette_calib.cfg  ("weapon follows your hand": grip, aim and per-weapon)
 ```
+
+The third one only appears if you use *Weapon follows your hand* and calibrate it — its grip (Page
+Up), weapon (Home) and aim (Page Down) captures are kept apart from the standard calibration so
+neither can overwrite the other, and either can be reset without touching the other.
 
 They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: updates
 refresh the shipped calibration freely while your measured fit is never touched.
 
 **To go back to the shipped calibration, delete `halo_vr_calib.cfg` — and `halo_vr_weapons.cfg` to
-clear every per-weapon adjustment.** Neither is part of the download — each only exists once you've
-calibrated — so there's no original copy to restore, and deleting one simply lets the shipped
-defaults apply again. The mod recreates them next time you calibrate.
+clear every per-weapon adjustment, or `halo_vr_palette_calib.cfg` to clear the weapon-follows-your-hand
+fit.** None is part of the download — each only exists once you've calibrated — so there's no original
+copy to restore, and deleting one simply lets the shipped defaults apply again. The mod recreates them
+next time you calibrate.
 
-Once you have a calibration you like, it's worth copying both files somewhere safe, along with
+Once you have a calibration you like, it's worth copying those files somewhere safe, along with
 `halo_vr_user.cfg` if you've changed settings. They're small, plain text, and they're the only things
 in the profile that are specific to *you* — everything else can be re-downloaded.
 

@@ -119,10 +119,13 @@ void apply_capture_pp() {
     // measured 2026-08-19 renders no bounce light, so force it to Lumen (1) here.
     // EDynamicGlobalIlluminationMethod: 0 None, 1 Lumen, 2 ScreenSpace, 3 RayTraced, 4 Plugin.
     // EReflectionMethod:                0 None, 1 Lumen, 2 ScreenSpace, 3 RayTraced.
-    // The method comes from the key now, so the A/B against ScreenSpace costs no rebuild. The
-    // reflection enum has no Plugin entry, so 3 (GI only) leaves reflections on Lumen.
+    // The method comes from the key now, so the A/B against ScreenSpace costs no rebuild.
+    // THE TWO ENUMS AGREE UP TO 3 AND PART AT 4: only the GI enum has Plugin, so 4 is the one
+    // value that cannot be written to reflections and falls back to Lumen there. The remap used to
+    // sit on 3 instead, from reading the author's key doc ("3 = Plugin") rather than the enums
+    // printed two lines up -- which quietly sent RayTraced GI out with Lumen reflections.
     const uint8_t lum_gi = (uint8_t)g_cfg.scope_lens_lumen;
-    const uint8_t lum_rf = (uint8_t)(g_cfg.scope_lens_lumen == 3 ? 1 : g_cfg.scope_lens_lumen);
+    const uint8_t lum_rf = (uint8_t)(g_cfg.scope_lens_lumen == 4 ? 1 : g_cfg.scope_lens_lumen);
     set_bit(write_lum, L"bOverride_DynamicGlobalIlluminationMethod", true); set_u8(write_lum, L"DynamicGlobalIlluminationMethod", lum_gi);
     set_bit(write_lum, L"bOverride_ReflectionMethod", true);                set_u8(write_lum, L"ReflectionMethod", lum_rf);
     // ---- tone curve (scopetonecurve, live; <0 = leave alone). The decisive knob for the lens:
@@ -691,7 +694,7 @@ bool parse_physscope_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "scopertfmt")     == 0) { g_cfg.scope_rt_format = (int)v; return true; }
     if (_stricmp(key, "scopeev")        == 0) { g_cfg.scope_ev = clampf((float)v, -10.0f, 10.0f); return true; }
     if (_stricmp(key, "scopepp")        == 0) { g_cfg.scope_pp_override = (int)v; return true; }
-    if (_stricmp(key, "scopelenslumen") == 0) { g_cfg.scope_lens_lumen = (int)clampf((float)v, -1.0f, 3.0f); return true; }
+    if (_stricmp(key, "scopelenslumen") == 0) { g_cfg.scope_lens_lumen = (int)clampf((float)v, -1.0f, 4.0f); return true; }
     if (_stricmp(key, "scopecvardump")  == 0) { g_cfg.scope_cvar_dump = (v != 0.0); return true; }
     if (_stricmp(key, "scoperound")     == 0) { g_cfg.scope_round = (int)v; return true; }
     if (_stricmp(key, "scopeshowflags") == 0) { g_cfg.scope_showflags = (int)v; return true; }

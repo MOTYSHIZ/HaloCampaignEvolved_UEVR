@@ -429,8 +429,16 @@
     //
     // The lens used to read the author's scopelumen for this. That key is HIS, it feeds HIS pane,
     // and its default is -1 (leave alone), so nothing shipped ever turned the lens's bounce light
-    // on; per the no-shared-keys rule the lens gets its own. Same values as his, so a number means
-    // the same thing in either: -1 leave alone, 0 None, 1 Lumen, 2 ScreenSpace, 3 Plugin.
+    // on; per the no-shared-keys rule the lens gets its own.
+    //
+    // THE VALUES ARE THE ENGINE'S, not a numbering of our own, so that a number read out of a log
+    // means what UE means by it (EDynamicGlobalIlluminationMethod, and the code beside the write
+    // in ScopeLens.cpp prints both enums):
+    //   -1 leave alone   0 None   1 Lumen   2 ScreenSpace   3 RayTraced   4 Plugin
+    // The author's own key documents 3 as Plugin; that is his file and his pane, and this key is
+    // separate precisely so it can be right here. 3 needs hardware ray tracing and 4 needs a GI
+    // plugin the title does not ship, so the settings menu offers -1 to 2 and the other two are
+    // reachable only by hand-editing a cfg file.
     // Shipped at 1, the value the owner plays with and the one that matches the main view on this
     // title. It costs real GPU time (the capture runs a second Lumen scene), which is why his own
     // key stayed opt-in; the lens is a fork feature and this is the value it is tuned for.
