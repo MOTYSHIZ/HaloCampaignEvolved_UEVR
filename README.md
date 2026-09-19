@@ -15,7 +15,8 @@ on Blam. So a number of workarounds were required to get aim and movement workin
 appropriately.
 
 > **Status: early access.** Built and tested against the Steam release of Halo: Campaign Evolved,
-> on [UEVR nightly-01138 or newer](#uevr-version). Works in multiplayer!
+> on [UEVR nightly-01138 or newer](#uevr-version) — best on [our UEVR build](#uevr-version), attached
+> to each release. Works in multiplayer!
 
 ## Features
 
@@ -41,9 +42,18 @@ appropriately.
   magnified lens on the gun, aimed down the ray your shots actually follow. Without the grip, the
   same trigger throws a grenade. Halo's flat zoom (which hides the weapon and masks your view) stays
   suppressed.
-- **Physical melee and weapon switching** — swing your gun hand to melee, and the strike follows the
-  swing rather than wherever the gun ended up pointing. Reach over your shoulder and squeeze the grip
-  to switch weapons.
+- **Player IK** — your first-person arms follow your real hands: the game's own arm skeleton is
+  solved to your controllers, with elbows, forearm twist, weapon recoil, the off hand on the
+  weapon's grip when you hold it two-handed, and the off hand joining reloads, melees and grenade
+  throws.
+- **Hand gestures** — a free hand shapes its fingers from your controller: fist, point, thumbs up and
+  OK, from the grip, the trigger and the thumb sensors. With [our UEVR build](#uevr-version) a finger
+  resting on the trigger or a thumb resting on the stick counts too. The poses are yours to tune in
+  `halo_vr_handposes.json`.
+- **Physical melee and weapon switching** — squeeze the grip and swing either hand to melee, and the
+  strike follows the swing rather than wherever the gun ended up pointing. Reach over your right
+  shoulder and squeeze the grip to switch weapons; over your left shoulder to put the weapon away and
+  free your gun hand for gestures (squeeze there again to bring it back).
 - **Head-relative movement** — push the stick where you look, walk where you look, independent of
   where the gun points. Snap turn supported.
 - **VR control layout** — crouch on right-stick-down, equipment on left-X, and the d-pad on the
@@ -63,7 +73,8 @@ appropriately.
 ## Requirements
 
 - **Halo: Campaign Evolved** (Steam).
-- **UEVR** — [nightly-01138 or newer](#uevr-version). Older builds render this game black.
+- **UEVR** — [our UEVR build](#uevr-version) (recommended, attached to each release), or stock
+  [nightly-01138 or newer](#uevr-version). Older builds render this game black.
 - A VR headset set to the **OpenXR** runtime — the shipped config selects this for you. OpenVR
   mis-assigns controller bindings; see [Runtime](#runtime-use-openxr) if yours ends up on it.
 - A VR controller pair. Developed against Quest touch controllers over Steam Link, and used on
@@ -75,6 +86,22 @@ appropriately.
 > else on this page.
 
 ## UEVR version
+
+**Recommended: our UEVR build, `UEVR-HaloVR-01139.zip`, attached to each release.** It is stock UEVR
+nightly-01139 plus a handful of changes made for this mod (all source diffs ship inside the zip):
+
+- **Capacitive touch on the trigger and the thumbstick.** Stock UEVR does not expose them, so a finger
+  resting on the trigger or a thumb resting on the stick is invisible to a mod. With them, your
+  in-game index finger follows your real one without pulling the trigger, and your thumb goes down
+  when it rests on the stick. Quest-style controllers; others simply use the trigger pull.
+- **Mono rendering** (optional) — one view shown to both eyes, for roughly one eye's cost.
+- **Fixes** for injection reliability on this game, a plugin deadlock during hitches, and the crash
+  at game exit.
+
+Unzip it into its own folder (not inside your normal UEVR) and inject with its `UEVRInjector.exe`.
+It is an unofficial build — please do not report problems with it to the UEVR project.
+
+**Stock UEVR also works.** The minimum is below.
 
 **Minimum: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138). Newer is
 fine.**
@@ -94,9 +121,10 @@ already in your `log.txt` — but please do not assume it is the cause and reins
 
 ## Install
 
-1. Install [UEVR nightly-01138 or newer](#uevr-version) and run `UEVRInjector.exe` once so it
-   creates its folders.
-2. Download `HaloCampaignEvolved.zip` from this repo's **Releases** page.
+1. From this repo's **Releases** page download both `HaloCampaignEvolved.zip` (the mod) and
+   `UEVR-HaloVR-01139.zip` (our [UEVR build](#uevr-version), recommended).
+2. Extract `UEVR-HaloVR-01139.zip` into a folder of its own and run its `UEVRInjector.exe` once so
+   it creates its folders. (Stock [UEVR nightly-01138 or newer](#uevr-version) works too.)
 3. In the UEVR frontend, click **Import Config** and select the downloaded zip.
    - **Manual install (no Import Config):** instead of clicking Import Config, extract the zip into
      `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` so that `config.txt` sits directly in that folder.
@@ -184,7 +212,7 @@ first time the layer loads into the game.
 | Hand **near your head** | Right stick becomes the d-pad (turning and crouch pause until you lower the hand):<br>**D-pad up** — Flashlight<br>**D-pad right** — Switch grenade<br>**D-pad left** — Equipment<br>**D-pad down (hold)** — Drop weapon |
 | Right stick **up (hold)** | The same d-pad, on the left stick instead |
 | Right stick **down** | Crouch |
-| Right stick **click** | Melee — or just swing your gun hand |
+| Right stick **click** | Melee — or squeeze a grip and swing that hand (either hand; `meleegrip=0` to swing without the grip) |
 | Right trigger | Fire |
 | Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
 | Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
@@ -435,6 +463,10 @@ his work, not ours — and this mod's first cutscene handling (the flattened cut
 `cutscene2d`) followed the approach his plugin pioneered. Since v0.4.2 the mod presents cutscenes
 itself, so the plugin is no longer bundled.
 
+He also started this mod's **Player IK**: the arms are posed through Halo's own first-person arm
+skeleton by a route ported from his project, and everything the arms do here was built on top of
+that start.
+
 He is also the reason this mod's crosshair has colour at all. The world-space crosshair rendered
 near-black for a long time, and the diagnosis that fixed it is his: an unlit widget's output is
 still multiplied by the scene's **pre-exposure** before tonemapping, so an authored colour lands
@@ -449,7 +481,7 @@ limitation on our side, not a defect in his approach.
 of these projects stands on, for the nonstandard 5.5.4 fix that had this game rendering in VR within
 days of its release, and for the plugin SDK this mod is written against. Hail to the king.
 
-**Special thanks to [blindcowboy24](https://github.com/blindcowboy24)** — My main direct contributor to the project! He's responsible for many neat feature additions and fixes (per-weapon calibration, directional melee, over the shoulder holster, and more on the way). 
+**Special thanks to [blindcowboy24](https://github.com/blindcowboy24)** — My main direct contributor to the project! He's responsible for many neat feature additions and fixes (per-weapon calibration, directional melee including the left-hand directional melee, over the shoulder holster, and more on the way). 
 Unparalleled patience and politeness in his manner of contribution, with great communication and flexibility in direction. Honestly wasn't expecting this kind of big help. Can't thank you enough, bro! 
 
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
