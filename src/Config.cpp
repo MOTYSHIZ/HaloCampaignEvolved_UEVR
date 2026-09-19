@@ -946,6 +946,20 @@ static bool parse_weapon_offset(const char* val) {
 // wpnoff an EMPTY field (or '-') means "leave that one on its global", so "wpnanim=FP_Shotgun,3"
 // sets only the sprint mode and "wpnanim=FP_Magnum,,2" only the melee mode. strtok would swallow
 // the empty field, so this splits by hand. Replace by match, like the other per-weapon tables.
+// THE BUILT-IN per-weapon animation lines -- the wpnanim counterpart of the compiled Config.hpp
+// defaults, seeded on every reload right after the struct reset, so a player's own line for the same
+// weapon REPLACES it (same match, same rule as a second line in a file). Not written back into
+// halo_vr_weapons.cfg (from_weapons_file = false). Canonized v0.5 from the user's tuning:
+//   FP_Magnum sprint 3 -- the pistol held at rest through a sprint (mode 2 turned the arms backwards).
+static void seed_builtin_weapon_anims() {
+    WeaponAnim m{};
+    strcpy_s(m.match, sizeof(m.match), "FP_Magnum");
+    m.sprint = 3.0f; m.set = 1u;
+    m.from_weapons_file = false;
+    g_cfg.wpn_anim[0] = m;
+    g_cfg.wpn_anim_count = 1;
+}
+
 static bool parse_weapon_anim(const char* val) {
     if (val == nullptr || val[0] == 0) return false;
     if (g_cfg.wpn_anim_count >= kMaxWeaponAnim) return true;   // full: ignore rather than overflow
@@ -2041,6 +2055,7 @@ void load_config() {
     const int keep_blam_aim = g_cfg.blam_aim;
 
     g_cfg = Config{};
+    seed_builtin_weapon_anims();
     g_cfg.blam_aim = keep_blam_aim;
     // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset
     // here -- without it a deleted twohand* key kept its last value until the game restarted.

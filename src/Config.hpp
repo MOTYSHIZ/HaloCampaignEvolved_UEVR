@@ -3712,12 +3712,12 @@ struct Config {
     //   1 = UeRig    Rig.cpp + Arms.cpp + Hands.cpp -- UE reflection, the route this project built
     //   2 = Palette  src\palettearm\ -- the Blam node palette, ported from elliotttate's project
     //
-    // DEFAULT 1: the shipped behaviour is exactly what it was before the palette route existed.
-    // Mode 2 has NEVER been verified against a running game -- its offset chain was measured on
-    // someone else's copy of the simulation DLL -- so it is opt-in, and it exists to be A/B'd in a
-    // headset against mode 1. Switching is live: the arbiter tears the outgoing driver down before
-    // the incoming one gets a frame, so it is safe to flip mid-session while wearing the headset.
-    int   arm_driver      = 1;
+    // DEFAULT 2 SINCE v0.5 (2026-09-18, the user's call: "we want players to have the Player IK").
+    // The palette route is what the user has played and tuned in a headset over many sessions --
+    // recoil, forearm twist, reload/melee hand-over, gestures, emote mode -- and these defaults are
+    // their canonized dev settings. 1 (UeRig) stays selectable. Switching is live: the arbiter tears
+    // the outgoing driver down before the incoming one gets a frame.
+    int   arm_driver      = 2;
 
     // ---- TWO-HANDED AIMING (src\TwoHandAim.hpp) --------------------------------------------
     //
@@ -3870,9 +3870,10 @@ struct Config {
     // how six coupled wrongs impersonate one right"), and he bounds every written node to arm's
     // reach after a crash where a sleeping controller read (0,0,0) and produced a 2.4 m hand.
     //
-    // DEFAULT OFF. Requires armdriver=2. Suppresses the legacy mesh drive while it owns the weapon,
-    // because two writers on one gun is the fight that has cost this project several sessions.
-    bool  pa_weapon       = false;
+    // DEFAULT ON SINCE v0.5 (canonized with armdriver=2). Requires armdriver=2. Suppresses the legacy
+    // mesh drive while it owns the weapon, because two writers on one gun is the fight that has cost
+    // this project several sessions.
+    bool  pa_weapon       = true;
 
     // WEAPON GRIP TRIM for the palette path, DEGREES, applied in the CONTROLLER's frame.
     //
@@ -4081,9 +4082,9 @@ struct Config {
     // the roll THE SOLVE ADDED is spread over them by that same rule, times this gain. The authored
     // hand-to-forearm relation is the zero: a hand in its authored pose adds nothing, so the support
     // pose on the gun looks exactly as it did. Both arms. Live.
-    //   0 = off (the behaviour to date) .. 1 = the game's own distribution (DEFAULT) .. 2 = cap
-    //       (raised from 1.5 on request after the first headset run)
-    float pa_forearm_roll  = 1.0f;    // DEV KEY paforearmroll
+    //   0 = off .. 1 = the game's own distribution .. 2 = cap (raised from 1.5 on request after the
+    //       first headset run). DEFAULT 2 since v0.5: the user's canonized setting.
+    float pa_forearm_roll  = 2.0f;    // DEV KEY paforearmroll
     // ...AND THE FOREARM ARMOUR GOES ROUND WITH IT (headset, same run: "make it so that the forearm
     // armor piece follows the rotation of the forearm"). The gauntlet nodes hang 10-13 cm off the
     // bone and the game carries them rigidly with the elbow -- fine for its own animations, wrong
@@ -4152,10 +4153,11 @@ struct Config {
     //       onto the eased rest marker before the carry, the aim wrist and its FINGERS to their rest
     //       relation, the kick faded), the support hand stays on its controller. Needs a rest pose,
     //       so the DRAW of a new weapon plays as 1 until the weapon has rested once.
-    // Defaults: melee 1 (a physical swing is the melee), equip 1 (the swap is the player's reach
-    // over the shoulder), sprint 0. All live. Per weapon: a wpnanim line in halo_vr_weapons.cfg
-    // (see WeaponAnim) -- one line covers these three, pagrenadetrim and pasupanim.
-    int   pa_melee_anim    = 1;       // DEV KEY pameleeanim
+    // Defaults: melee 3 (canonized v0.5 -- the gun holds still and your own swing is the melee),
+    // equip 1 (the swap is the player's reach over the shoulder), sprint 0. All live. Per weapon: a
+    // wpnanim line in halo_vr_weapons.cfg (see WeaponAnim) -- one line covers these three,
+    // pagrenadetrim and pasupanim. BUILT-IN per-weapon lines: see seed_builtin_weapon_anims().
+    int   pa_melee_anim    = 3;       // DEV KEY pameleeanim
     int   pa_equip_anim    = 1;       // DEV KEY paequipanim
     int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
     int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
