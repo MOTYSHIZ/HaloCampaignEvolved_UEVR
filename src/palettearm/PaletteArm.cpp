@@ -2680,8 +2680,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // shoulder). The pose table serves both hands as-is: the rig is a behaviour mirror (every
             // right-hand finger offset is the left's negated), so the same parent-relative rotations
             // -- recorded poses and trims alike -- give the mirror image. Checked on the recording:
-            // every joint of every pose within 0.2 cm of the exact mirror (the pinky knuckle's own
-            // offset is asymmetric in the skeleton, up to 2.7 cm; the pose does not touch offsets).
+            // every joint of every pose on the exact mirror, pinky included: a posed hand takes the
+            // skeleton's own offsets (kHandBoneOffsetL, the left hand's; the right negated), not the
+            // live ones the weapon's hold animation moves.
             const bool aim_free = s_unarmed.load(std::memory_order_relaxed) || ::halo::holster_emote_active();
             const float aw = (g_cfg.pa_gesture != 0 && aim_free) ? 1.0f : 0.0f;
             s_aim_gesture_w += (aw - s_aim_gesture_w) * (1.0f - std::exp(-dt / 0.12f));

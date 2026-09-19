@@ -330,6 +330,7 @@ void offhand_melee_update(float dt) {
     static float     s2_pk_spd = 0.0f, s2_pk_ext = 0.0f, s2_pk_reach = 0.0f;
     static Vec3      s2_rel0{};          // hand-rel-head where this swing began
     static float     s2_pk_disp = 0.0f;  // furthest it has travelled from there
+    static long long s2_quiet_until = 0;  // the OFF hand's own short hold after a holster veto
 
     if (!g_cfg.melee_left) { s2_have = false; return; }
 
@@ -415,6 +416,7 @@ void offhand_melee_update(float dt) {
     }
 
     if (nowt < s_cooldown_until)   return;
+    if (nowt < s2_quiet_until)     return;
     if (speed < g_cfg.melee_speed) return;
     // Extension OR travel: a vertical chop barely extends but travels far (see meleedisp).
     const bool travelled = g_cfg.melee_disp > 0.0f && disp >= g_cfg.melee_disp;
@@ -432,7 +434,9 @@ void offhand_melee_update(float dt) {
             API::get()->log_info("[Halo-CampE-UEVR] MELEE (OFF HAND) stood down by %s: "
                                  "speed=%.2f ext=%.2f reach=%.2f", job, speed, s2_ext, reach);
         }
-        if (holster_offhand_melee_veto()) s_cooldown_until = nowt + ms_to_ticks(150);
+        // Its OWN hold, not the shared cooldown: re-armed every tick while the off hand swings in
+        // the veto window, the shared one swallowed the AIM hand's punch too (code review).
+        if (holster_offhand_melee_veto()) s2_quiet_until = nowt + ms_to_ticks(150);
         return;
     }
     if (!melee_grip_ok(/*right_hand=*/g_cfg.aim_left_hand, "OFF HAND", speed, s2_ext, reach)) return;
@@ -623,6 +627,10 @@ void gesture_update(float dt) {
     if (s_ext < g_cfg.melee_ext)   return;
     if (reach < g_cfg.melee_reach) return;
     if (along < g_cfg.melee_fwd)   return;
+    // The holster veto was written for exactly this detector and never called (code review,
+    // 2026-09-18). With meleegrip it matters: the reach back from a right-shoulder swap is a fast
+    // forward swing with the grip still closed, as is a throw with a grenade in the aim hand.
+    if (holster_melee_veto()) return;
     if (!melee_grip_ok(/*right_hand=*/!g_cfg.aim_left_hand, "AIM HAND", speed, s_ext, reach)) return;
 
     g_melee_hold_until.store(now + ms_to_ticks(g_cfg.melee_hold_ms), std::memory_order_relaxed);

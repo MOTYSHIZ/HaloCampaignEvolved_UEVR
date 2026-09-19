@@ -58,6 +58,7 @@ struct WeaponAnim {
     float    sprint = 0.0f, melee = 0.0f, equip = 0.0f, grenade_trim = 0.0f, sup_anim = 0.0f;
     unsigned set = 0;                  // bit 0 sprint, 1 melee, 2 equip, 3 grenade_trim, 4 sup_anim
     bool     from_weapons_file = false;
+    bool     builtin = false;       // seed_builtin_weapon_anims(): a player line MERGES over it
 };
 constexpr int kMaxWeaponAnim = 32;
 

@@ -391,6 +391,7 @@ struct ActionWatch {
     float peak_m{0.0f};          // the furthest the off hand has been from its hold this time
     int   descending{0};         // consecutive frames it has been coming home
     bool  home_cut{false};       // let go for the return; stays so until the authored hand is home
+    float prev_youngest_s{-1.0f}; // last update's youngest press age: the new-press EDGE test
 
     void  reset();
     // `hand_*` = the STOCK support wrist expressed in the STOCK marker's frame. `gate` scales every
