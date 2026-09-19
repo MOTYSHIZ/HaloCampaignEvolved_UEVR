@@ -140,6 +140,22 @@ constexpr float kHandPoseRest[5][4][4] = {   // index, middle, ring, pinky, thum
     {{0.413511f, -0.588510f, -0.112556f, 0.685563f}, {-0.020540f, -0.034212f, 0.134255f, 0.990143f}, {0.008271f, 0.037203f, 0.004822f, 0.999262f}, {0.000000f, 0.000000f, 0.000000f, 1.000000f}},
 };
 
+// THE SKELETON'S OWN FINGER OFFSETS, LEFT hand, parent-relative, palette units (1 = 304.8 cm):
+// each joint's position in its parent's frame -- joint 0 in the WRIST's. Measured over the 5,149
+// recorded frames (handrec-01). Almost every offset is rigid (range 0.000 cm), but the animation
+// MOVES the first joint of the pinky (range 1.2 cm left, 4.8 cm right) and of the thumb (0.6 cm),
+// so a posed hand that kept the LIVE offsets carried whatever the current weapon's hold animation
+// had done to them -- field report: "depending on what weapon I had selected ... additional finger
+// bone offsets for the right hand". The right hand is the mirror: every offset negated (the rig is
+// a behaviour mirror; the measured right means agree to 1e-5 u everywhere the offset is rigid).
+constexpr float kHandBoneOffsetL[5][4][3] = {   // index, middle, ring, pinky, thumb
+    {{+0.001621f, -0.036762f, -0.012123f}, {0.0f, -0.017050f, 0.0f}, {0.0f, -0.008720f, 0.0f}, {0.0f, -0.011943f, 0.0f}},
+    {{ 0.0f,      -0.039302f,  0.0f},      {0.0f, -0.020040f, 0.0f}, {0.0f, -0.010009f, 0.0f}, {0.0f, -0.012779f, 0.0f}},
+    {{+0.000787f, -0.036501f, +0.010083f}, {0.0f, -0.019920f, 0.0f}, {0.0f, -0.009550f, 0.0f}, {0.0f, -0.012814f, 0.0f}},
+    {{+0.002581f, -0.031209f, +0.018307f}, {0.0f, -0.016060f, 0.0f}, {0.0f, -0.007143f, 0.0f}, {0.0f, -0.009298f, 0.0f}},
+    {{+0.009224f, -0.009624f, -0.013726f}, {0.0f, -0.013365f, 0.0f}, {+0.000007f, -0.010812f, -0.000249f}, {-0.000275f, -0.013973f, -0.000112f}},
+};
+
 Quat slerp_short(const Quat& a, const Quat& b_in, float t) {
     Quat b = b_in;
     float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
@@ -255,6 +271,15 @@ bool apply_hand_pose(BlamMatrix4x3* palette, const ArmNodes& arm, const HandPose
     const Mat3 wrist_basis = orthonormal_basis(palette[arm.wrist]);
     if (!valid_basis(wrist_basis)) return false;
     const Vec3 wrist_pos = palette[arm.wrist].position;
+    // WHICH HAND, for the skeleton offsets: the middle finger's knuckle sits at -y in a LEFT wrist's
+    // frame and +y in a right one (0.039 u either way, rigid in every recorded frame). Anything else
+    // means this is not the skeleton those offsets describe, and the live offsets are kept.
+    float side = 0.0f;
+    {
+        const Vec3 m0 = transform_vector(transpose(wrist_basis), palette[arm.middle[0]].position - wrist_pos);
+        if (m0.y < -0.03f && m0.y > -0.05f) side = 1.0f;          // left: the table as recorded
+        else if (m0.y > 0.03f && m0.y < 0.05f) side = -1.0f;      // right: the mirror, negated
+    }
 
     const FingerChain* chains[5] = {&arm.index, &arm.middle, &arm.ring, &arm.pinky, &arm.thumb};
     for (std::size_t f = 0; f < 5; ++f) {
@@ -311,7 +336,15 @@ bool apply_hand_pose(BlamMatrix4x3* palette, const ArmNodes& arm, const HandPose
             const Mat3 rel = rotation_basis(q);
             if (!valid_basis(rel)) return false;
             const Mat3 nb = multiply(pb, rel);
-            const Vec3 np = pp + transform_vector(pb, stock_off[j]);
+            // The skeleton's own offset while the POSE owns the joint, the animation's as far as the
+            // game's fingers are blended back in (authored) -- see kHandBoneOffsetL.
+            Vec3 off = stock_off[j];
+            if (side != 0.0f && j < 4u) {
+                const Vec3 bone{side * kHandBoneOffsetL[f][j][0], side * kHandBoneOffsetL[f][j][1],
+                                side * kHandBoneOffsetL[f][j][2]};
+                off = bone + (stock_off[j] - bone) * authored;
+            }
+            const Vec3 np = pp + transform_vector(pb, off);
             BlamMatrix4x3& m = palette[ch[j]];
             m.forward = nb.forward; m.left = nb.left; m.up = nb.up;
             m.position = np;
