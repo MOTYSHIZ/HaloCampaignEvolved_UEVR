@@ -939,7 +939,7 @@ static bool parse_weapon_offset(const char* val) {
     return true;
 }
 
-// wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- the palette arms' animation
+// wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>,<meleebtn> -- the palette arms' animation
 // preferences for one weapon (pasprintanim / pameleeanim / paequipanim / pagrenadetrim / pasupanim).
 //
 // One line per weapon, repeatable, positional, everything after the match optional -- and unlike
@@ -969,7 +969,7 @@ static bool parse_weapon_anim(const char* val) {
     for (int i = (int)strlen(buf) - 1; i >= 0 && (unsigned char)buf[i] <= ' '; --i) buf[i] = 0;
 
     WeaponAnim w{};
-    float* fields[] = { &w.sprint, &w.melee, &w.equip, &w.grenade_trim, &w.sup_anim };
+    float* fields[] = { &w.sprint, &w.melee, &w.equip, &w.grenade_trim, &w.sup_anim, &w.melee_btn };
     int field = -1;                        // -1 = the match, 0.. = the settings
     const char* p = buf;
     while (true) {
@@ -978,7 +978,7 @@ static bool parse_weapon_anim(const char* val) {
         if (field < 0) {
             if (len == 0) return true;      // no match, no entry
             strncpy_s(w.match, sizeof(w.match), p, len < sizeof(w.match) - 1 ? len : sizeof(w.match) - 1);
-        } else if (field < 5) {
+        } else if (field < 6) {
             size_t k = 0;
             while (k < len && (unsigned char)p[k] <= ' ') ++k;
             if (k < len && p[k] != '-') { *fields[field] = (float)atof(p + k); w.set |= (1u << field); }
@@ -996,8 +996,8 @@ static bool parse_weapon_anim(const char* val) {
         // promises. Over another player line it replaces, as before.
         const WeaponAnim& old = g_cfg.wpn_anim[i];
         if (old.builtin) {
-            const float oldv[5] = { old.sprint, old.melee, old.equip, old.grenade_trim, old.sup_anim };
-            for (int k = 0; k < 5; ++k)
+            const float oldv[6] = { old.sprint, old.melee, old.equip, old.grenade_trim, old.sup_anim, old.melee_btn };
+            for (int k = 0; k < 6; ++k)
                 if (!(w.set & (1u << k)) && (old.set & (1u << k))) { *fields[k] = oldv[k]; w.set |= (1u << k); }
         }
         g_cfg.wpn_anim[i] = w;
@@ -1429,6 +1429,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "paequipanim")   == 0) { g_cfg.pa_equip_anim     = (int)v;   return true; }
     if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
     if (_stricmp(key, "pameleeanim")   == 0) { g_cfg.pa_melee_anim     = (int)v;   return true; }
+    if (_stricmp(key, "pameleebtnanim") == 0) { g_cfg.pa_melee_btn_anim = (int)v;  return true; }
     if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }
     if (_stricmp(key, "pasprintmask")  == 0) { g_cfg.pa_sprint_mask    = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }

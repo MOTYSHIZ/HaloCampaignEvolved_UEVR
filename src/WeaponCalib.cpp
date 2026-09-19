@@ -341,11 +341,12 @@ void wpn_calib_write_file() {
         // the rewrite has to carry them through. Only lines parsed FROM this file are written back
         // -- one in halo_vr_user.cfg or the dev catalog stays where it was written, rather than
         // being copied here to outlive it.
-        fprintf(f, "\r\n# wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>  -- the palette\r\n"
-                   "# arms' animation preferences for ONE weapon, over the globals pasprintanim /\r\n"
-                   "# pameleeanim / paequipanim / pagrenadetrim / pasupanim (see halo_vr_dev.cfg).\r\n"
-                   "# <sprint>, <melee> and <equip> each take the same four values -- what the arms do\r\n"
-                   "# while that animation plays:\r\n"
+        fprintf(f, "\r\n# wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>,<meleebtn>  -- the\r\n"
+                   "# palette arms' animation preferences for ONE weapon, over the globals pasprintanim /\r\n"
+                   "# pameleeanim / paequipanim / pagrenadetrim / pasupanim / pameleebtnanim (see\r\n"
+                   "# halo_vr_dev.cfg). <melee> is a melee from your SWING, <meleebtn> one from a BUTTON.\r\n"
+                   "# <sprint>, <melee>, <equip> and <meleebtn> each take the same four values -- what the\r\n"
+                   "# arms do while that animation plays:\r\n"
                    "#   0 = the whole animation with the IK on top: the free left hand JOINS it\r\n"
                    "#   1 = the gun hand only: the left hand stays on its controller (a gripping one\r\n"
                    "#       holds its rest grip on the gun)\r\n"
@@ -364,9 +365,9 @@ void wpn_calib_write_file() {
             const auto& a = g_cfg.wpn_anim[i];
             if (a.match[0] == 0 || !a.from_weapons_file || a.set == 0) continue;
             char line[192]; int n = sprintf_s(line, sizeof(line), "wpnanim=%s", a.match);
-            const float vals[5] = { a.sprint, a.melee, a.equip, a.grenade_trim, a.sup_anim };
+            const float vals[6] = { a.sprint, a.melee, a.equip, a.grenade_trim, a.sup_anim, a.melee_btn };
             int last = -1;
-            for (int k = 0; k < 5; ++k) if (a.set & (1u << k)) last = k;
+            for (int k = 0; k < 6; ++k) if (a.set & (1u << k)) last = k;
             for (int k = 0; k <= last && n > 0 && n < (int)sizeof(line) - 16; ++k) {
                 if (a.set & (1u << k)) n += (k == 3) ? sprintf_s(line + n, sizeof(line) - n, ",%.2f", vals[k])
                                                      : sprintf_s(line + n, sizeof(line) - n, ",%d", (int)vals[k]);

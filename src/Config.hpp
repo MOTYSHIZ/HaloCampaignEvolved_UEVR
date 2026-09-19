@@ -55,8 +55,8 @@ constexpr int kMaxWeaponAdjust = 24;
 // survives the captures that rewrite the file.
 struct WeaponAnim {
     char     match[64] = "";
-    float    sprint = 0.0f, melee = 0.0f, equip = 0.0f, grenade_trim = 0.0f, sup_anim = 0.0f;
-    unsigned set = 0;                  // bit 0 sprint, 1 melee, 2 equip, 3 grenade_trim, 4 sup_anim
+    float    sprint = 0.0f, melee = 0.0f, equip = 0.0f, grenade_trim = 0.0f, sup_anim = 0.0f, melee_btn = 0.0f;
+    unsigned set = 0;                  // bit 0 sprint, 1 melee, 2 equip, 3 grenade_trim, 4 sup_anim, 5 melee_btn
     bool     from_weapons_file = false;
     bool     builtin = false;       // seed_builtin_weapon_anims(): a player line MERGES over it
 };
@@ -4177,6 +4177,13 @@ struct Config {
     // wpnanim line in halo_vr_weapons.cfg (see WeaponAnim) -- one line covers these three,
     // pagrenadetrim and pasupanim. BUILT-IN per-weapon lines: see seed_builtin_weapon_anims().
     int   pa_melee_anim    = 3;       // DEV KEY pameleeanim
+    // ...and a melee from a BUTTON (the stick click, or whatever melee is bound to) takes its OWN
+    // mode (2026-09-19, by request): the swing gesture's melee is your own motion, so holding the gun
+    // still (3) reads right; a thumbed melee has no motion of yours behind it, so the game's own
+    // animation should play (0, the default). Which one a melee was is latched at its press edge in
+    // palettearm_note_pad(): the gesture's melee is the injected press (melee_press_active()), anything
+    // else is a button. Same four values. Per weapon: the 7th wpnanim field.
+    int   pa_melee_btn_anim = 0;      // DEV KEY pameleebtnanim
     int   pa_equip_anim    = 1;       // DEV KEY paequipanim
     int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
     int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
@@ -4485,7 +4492,7 @@ struct Config {
     bool  wpn_log         = false;
     WeaponAdjust wpn[kMaxWeaponAdjust];
     int   wpn_count       = 0;
-    // wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim> -- see WeaponAnim.
+    // wpnanim=<match>,<sprint>,<melee>,<equip>,<grenadetrim>,<supanim>,<meleebtn> -- see WeaponAnim.
     WeaponAnim wpn_anim[kMaxWeaponAnim];
     int   wpn_anim_count  = 0;
 

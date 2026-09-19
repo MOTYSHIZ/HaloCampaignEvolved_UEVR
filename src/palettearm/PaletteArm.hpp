@@ -136,7 +136,8 @@ bool palettearm_weapon_calib_owns();
 // The palette arms key the melee-animation preference, the equip hand-over and the grenade tail
 // off these, because none of those actions can be told apart from the pose alone.
 void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down,
-                         bool moving, bool reload_down);
+                         bool moving, bool reload_down,
+                         bool melee_from_gesture);   // the swing gesture's injected press is live
 
 
 
