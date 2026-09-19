@@ -134,7 +134,7 @@ const FeatureRow kFeatures[] = {
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
     { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
-      "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on.",
+      "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on. After turning it on or off, exit to the main menu and load back in for the change to take effect.",
       "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
       "palettepubframe,paletterolltrim,palettesocketfix,palettetwohandagreefull,palettetwohandagreemin,palettetwohandmarker,"
       "palettetwohandmax,palettetwohandmin,palettewpncalibkey",
