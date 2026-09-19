@@ -4524,10 +4524,14 @@ struct Config {
     // precedence note before touching either half.
     //
     // Captured by the same INSERT gesture as wpnoff above; which of the two a press writes is
-    // decided by WHICH DRIVER OWNS THE WEAPON, not by a second hotkey. Under the palette driver
-    // (armdriver=2 + pawpn=1) the rig's grip/mount fit is not in the chain at all, so a wpnoff delta
-    // would adjust nothing a player can see; under the rig driver the reverse. One key, one meaning:
-    // "fix the weapon in my hand".
+    // decided by WHICH SOLUTION PLACES THE WEAPON, not by a second hotkey: palettearm_weapon_calib_owns()
+    // = armdriver=2 + pawpn=1 + pawpnrig=0. Only there -- the palette's OWN controller carry -- is the
+    // rig's grip/mount fit out of the chain, so a capture writes wpnfix. Under the shipped defaults
+    // (pawpnrig=1, since 2026-09-16) the palette carries the RIG's solution: the capture writes wpnoff
+    // exactly as in rig mode, and wpnfix (shipped baseline included) is BYPASSED. Corrected
+    // 2026-09-19: this comment said the fit was "not in the chain at all" under the palette driver,
+    // which stopped being true when pawpnrig landed, and the v0.5.0 notes briefly repeated it.
+    // One key, one meaning: "fix the weapon in my hand".
     //
     // NO STRUCT DEFAULTS, AND THAT IS THE RULE WORKING RATHER THAN AN EXCEPTION TO IT. These are
     // CALIBRATION DATA, not settings: their home is halo_vr.cfg, the one shipped file that still
