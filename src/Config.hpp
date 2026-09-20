@@ -1921,6 +1921,18 @@ struct Config {
     // Canonical: present the game's OWN reticle render target rather than our generated ring. This
     // is what gives the layer real per-weapon art and live firing/reload animation.
     bool  xr_layer_src = true;
+    // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
+    // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)
+    // FD3D12Texture, so the source never resolves there and the layer draws the generated ring. With
+    // this ON, a LAX chain resolves the resource by scanning the FD3D12Texture for an object that
+    // carries THE SAME VTABLE as an ID3D12Resource we created ourselves on UEVR's device, then
+    // GetDesc-validates it against aimwidgetdraw. Nothing is called on a candidate before that
+    // identity check, and a lax chain never calls get_native_resource at all.
+    // WHY OFF: the first version gated on "vtable is in the D3D12 module" and FROZE the Game Pass
+    // build at every mission entry (it called GetDesc on non-resources; SEH catches faults, not
+    // hangs). This version is unproven in a headset -- turn it on only to test on Game Pass.
+    // Never reached on Steam (strict chain). Live-reloadable.
+    bool  xr_layer_src_scan = false;
     // ms. HOW LONG THE LAYER KEEPS SHOWING THE LAST CAPTURED CROSSHAIR once the game thread stops
     // capturing, before it gives up and draws the generated ring instead.
     //
