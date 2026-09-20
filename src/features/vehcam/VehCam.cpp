@@ -725,6 +725,143 @@ void resolve_hog_body() {
 
 } // namespace
 
+// ================================================================================================
+// VEHPROBE (dev only) -- does a vehicle expose a WEAPON/TURRET aim distinct from the Blam control
+// record (the one value that also drives the chase camera)? This is the Route A/B decision probe
+// for the aim/camera-decouple lane; doctrine + how to read the output live in
+// docs\VEHICLE_AIM_DECOUPLE_PROBE.md. Read-only. Game thread, seated only, self-contained: it reads
+// the rider position straight off the seat object so it does not depend on veh_cam/veh_seat_direct
+// publishing anything. `vehprobe_tick()` is an empty stub in a release build (DevTools pattern), so
+// the call site in vehcam_game_tick_vehicle needs no #if.
+#if HALO_VR_DEV
+namespace {
+
+std::atomic<uintptr_t> g_vehprobe_turret{0};   // nearest non-hull VehicleActor mesh (the gun)
+bool                   g_vehprobe_scanned = false;
+
+// Rider Blam position off the seat object (+0x20), guarded, converted Blam->UE cm. Mirrors
+// seat_direct_refresh's read so the probe stands alone.
+bool vehprobe_rider_pos(double* bx, double* by, double* bz) {
+    const uintptr_t obj = g_seat_obj.load(std::memory_order_relaxed);
+    if (obj == 0 || IsBadReadPtr((const void*)obj, 0x2C)) return false;
+    const float* q = (const float*)(obj + 0x20);
+    if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2])) return false;
+    const double S = 304.8;
+    *bx =  (double)q[0] * S; *by = -(double)q[1] * S; *bz = (double)q[2] * S;
+    return true;
+}
+
+// The Blam control-record aim, radians -> degrees. This is the SHARED value: in a vehicle it drives
+// both the weapon and the chase camera. rec points AT the yaw field (rec+0x94), pitch at rec+0x98.
+bool vehprobe_record_deg(float* yaw_deg, float* pitch_deg) {
+    const uintptr_t rec = blam_control_record();
+    if (rec == 0 || IsBadReadPtr((const void*)rec, 8)) return false;
+    const float* fp = (const float*)rec;
+    if (!std::isfinite(fp[0]) || !std::isfinite(fp[1])) return false;
+    const float R2D = 180.0f / 3.14159265358979f;
+    *yaw_deg = fp[0] * R2D; *pitch_deg = fp[1] * R2D;
+    return true;
+}
+
+// One-shot: log the name + offset of every UPROPERTY on obj's leaf class. A turret-rotation field
+// (RelativeRotation, or a bespoke aim field) that we could write for Route B shows itself by name.
+void vehprobe_dump_props(API::UObject* obj, const char* label) {
+    if (obj == nullptr) return;
+    auto* cls = obj->get_class();
+    if (cls == nullptr) return;
+    API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE %s = %ls; UPROPERTIES:",
+                         label, obj->get_full_name().c_str());
+    for (auto* f = cls->get_child_properties(); f != nullptr; f = f->get_next()) {
+        auto* nm = f->get_fname();
+        const int32_t off = reinterpret_cast<API::FProperty*>(f)->get_offset();
+        API::get()->log_info("[Halo-CampE-UEVR]     %ls  @ +0x%X",
+                             nm ? nm->to_string().c_str() : L"?", (unsigned)off);
+    }
+}
+
+// One walk of the UObject array: log every VehicleActor SkeletalMeshComponent within 6 m of the
+// seat with its WORLD rotation, and latch the nearest one NOT named .hull/.body as the turret
+// candidate. The rotations tell whether the gun points independently of the hull; the record aim
+// (logged each throttled tick) tells whether that independent aim is just the shared value.
+void vehprobe_scan(double bx, double by, double bz) {
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return;
+    auto ends_with_ci = [](const std::wstring& s, const wchar_t* suf) {
+        const size_t m = wcslen(suf);
+        if (s.size() < m) return false;
+        for (size_t k = 0; k < m; ++k)
+            if (towlower(s[s.size() - m + k]) != towlower(suf[k])) return false;
+        return true;
+    };
+    const int32_t n = arr->get_object_count();
+    API::UObject* nearest_gun = nullptr; double ngd = 1e18;
+    API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE scan: VehicleActor skeletal meshes within 6 m of the seat --");
+    for (int32_t i = 0; i < n; ++i) {
+        auto* o = static_cast<API::UObject*>(arr->get_object(i));
+        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
+        if (class_name_of(o) != L"SkeletalMeshComponent") continue;
+        const std::wstring full = o->get_full_name();
+        if (full.find(L"PersistentLevel") == std::wstring::npos) continue;
+        if (full.find(L"VehicleActor")   == std::wstring::npos) continue;
+        Vec3 w{}; if (!call_ret_vec3(o, L"K2_GetComponentLocation", &w)) continue;
+        const double d = std::sqrt((w.x - bx) * (w.x - bx) + (w.y - by) * (w.y - by)
+                                 + (w.z - bz) * (w.z - bz));
+        if (d > 600.0) continue;
+        Vec3 r{}; const bool haveR = call_ret_vec3(o, L"K2_GetComponentRotation", &r);
+        const bool is_hull = ends_with_ci(full, L".hull") || ends_with_ci(full, L".body");
+        API::get()->log_info("[Halo-CampE-UEVR]     %.0fcm rot(x=%.1f y=%.1f z=%.1f ok%d) %s %ls",
+                             d, r.x, r.y, r.z, (int)haveR, is_hull ? "[HULL]" : "", full.c_str());
+        if (!is_hull && d < ngd) { ngd = d; nearest_gun = o; }
+    }
+    if (nearest_gun != nullptr) {
+        g_vehprobe_turret.store((uintptr_t)nearest_gun, std::memory_order_relaxed);
+        vehprobe_dump_props(nearest_gun, "turret-candidate");
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE: no non-hull VehicleActor mesh within 6 m -- "
+                             "this seat may have no independent turret (whole-vehicle aim).");
+    }
+}
+
+void vehprobe_tick() {
+    if (!g_cfg.veh_probe) return;
+    static bool was_mounted = false;
+    const bool m = g_unit_mounted.load(std::memory_order_relaxed);
+    if (!m) {   // reset on dismount so the next vehicle re-scans
+        if (was_mounted) { g_vehprobe_scanned = false; g_vehprobe_turret.store(0, std::memory_order_relaxed); }
+        was_mounted = false;
+        return;
+    }
+    was_mounted = true;
+
+    double bx = 0, by = 0, bz = 0;
+    if (!vehprobe_rider_pos(&bx, &by, &bz)) return;   // wait until the seat object is readable
+
+    if (!g_vehprobe_scanned) { vehprobe_scan(bx, by, bz); g_vehprobe_scanned = true; }
+
+    // Throttled comparison line, ~every 60 ticks (~2 s at 32 Hz): aim around and watch whether the
+    // turret's world rotation tracks the record aim (coupled) or can diverge from it.
+    static uint32_t c = 0;
+    if ((c++ % 60u) != 0u) return;
+    float ry = 0, rp = 0; const bool haveRec = vehprobe_record_deg(&ry, &rp);
+    float dy = 0, dp = 0; const bool haveDes = desired_aim_now(&dy, &dp);
+    Vec3 tr{}; bool haveTur = false;
+    const uintptr_t tur = g_vehprobe_turret.load(std::memory_order_relaxed);
+    if (tur != 0 && !IsBadReadPtr((const void*)tur, sizeof(void*)))
+        haveTur = call_ret_vec3((API::UObject*)tur, L"K2_GetComponentRotation", &tr);
+    const float fx = g_veh_fx.load(std::memory_order_relaxed);
+    const float fy = g_veh_fy.load(std::memory_order_relaxed);
+    const float faceDeg = std::atan2(fy, fx) * (180.0f / 3.14159265f);
+    API::get()->log_info(
+        "[Halo-CampE-UEVR] VEHPROBE rec(y=%.1f p=%.1f ok%d) des(y=%.1f p=%.1f ok%d) "
+        "turretWorld(x=%.1f y=%.1f z=%.1f ok%d) blamFace=%.1f",
+        ry, rp, (int)haveRec, dy, dp, (int)haveDes, tr.x, tr.y, tr.z, (int)haveTur, faceDeg);
+}
+
+} // namespace
+#else
+namespace { inline void vehprobe_tick() {} }
+#endif // HALO_VR_DEV
+
 // Game-thread tick for the vehicle body work: the driver hide reconciles every tick, and the
 // hog hull resolves at the mount edge and KEEPS RETRYING while it fails. The one-shot version
 // cost a whole session of false verdicts: it fired at the exact instant the mounted flag flips
@@ -809,6 +946,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamscale")    == 0) { g_cfg.veh_cam_scale = (float)v; return true; }
     if (_stricmp(key, "vehcamsrc")      == 0) { g_cfg.veh_cam_src = (int)v; return true; }
     if (_stricmp(key, "vehanchor")      == 0) { g_cfg.veh_anchor = (int)v; return true; }
+    if (_stricmp(key, "vehprobe")       == 0) { g_cfg.veh_probe = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -864,6 +1002,7 @@ void vehcam_game_tick_vehicle() {
     g_tick_stage = "vehicle_body";
     vehicle_body_update();
     if (g_in_menu.load()) vehicle_reset(); else vehicle_update(g_last_dt.load());
+    vehprobe_tick();   // dev-only; empty stub in a release build
 }
 
 void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
