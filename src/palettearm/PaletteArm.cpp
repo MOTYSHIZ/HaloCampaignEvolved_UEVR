@@ -520,6 +520,9 @@ bool               s_aim_fingers_have = false, s_sup_fingers_have = false;
 // poll each mask was seen down, 0 = never. Written by the XInput hook, read by the live drive.
 std::atomic<long long> s_pad_melee_ticks{0}, s_pad_swap_ticks{0}, s_pad_throw_ticks{0},
                        s_pad_sprint_ticks{0}, s_pad_move_ticks{0}, s_pad_reload_ticks{0};
+// Where the LATEST melee press came from, latched at its press edge (palettearm_note_pad): true = a
+// button, false = the swing gesture's injected press. Picks pameleebtnanim over pameleeanim.
+std::atomic<bool> s_melee_from_button{false};
 // ---- THE SPRINT (pasprintanim; see Config.hpp and pa::SprintWatch), and what it asks of this
 // frame's drive, resolved at the top of drive_palette() from the per-weapon overrides.
 pa::SprintWatch    s_sprint;
@@ -650,10 +653,11 @@ int  s_bake_stable   = 0;
 // The preferences in force for the weapon in hand -- the globals, with whatever a wpnanim line for
 // its class sets (halo_vr_weapons.cfg; substring of the class name, case-insensitive, FIRST match,
 // the way wpnoff is matched). A few strstr calls a frame.
-struct EffectivePrefs { int melee_anim; int equip_anim; int sup_anim; float grenade_trim_s; int sprint_anim; };
+struct EffectivePrefs { int melee_anim; int equip_anim; int sup_anim; float grenade_trim_s; int sprint_anim;
+                        int melee_btn_anim; };
 EffectivePrefs resolve_prefs(const char* cls) {
     EffectivePrefs e{g_cfg.pa_melee_anim, g_cfg.pa_equip_anim, g_cfg.pa_sup_anim, g_cfg.pa_grenade_trim_s,
-                     g_cfg.pa_sprint_anim};
+                     g_cfg.pa_sprint_anim, g_cfg.pa_melee_btn_anim};
     if (cls == nullptr || cls[0] == 0 || g_cfg.wpn_anim_count == 0) return e;
     char low[96]; std::size_t n = 0;
     for (; cls[n] != 0 && n + 1 < sizeof(low); ++n) low[n] = (char)std::tolower((unsigned char)cls[n]);
@@ -670,6 +674,7 @@ EffectivePrefs resolve_prefs(const char* cls) {
         if (a.set & 4u)  e.equip_anim     = (int)a.equip;
         if (a.set & 8u)  e.grenade_trim_s = a.grenade_trim;
         if (a.set & 16u) e.sup_anim       = (int)a.sup_anim;
+        if (a.set & 32u) e.melee_btn_anim = (int)a.melee_btn;
         break;
     }
     return e;
@@ -1379,10 +1384,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // Folded into four weights: join / off / stock / hold. `gun_eff_*` is the marker the hands are
     // placed against -- the live marker, or the live marker eased toward its rest pose by `hold`.
     const EffectivePrefs prefs = resolve_prefs(::halo::weapon_offset_current_class());
+    // The melee in progress takes the mode of WHERE ITS PRESS CAME FROM (pameleebtnanim for a button).
+    const int melee_mode = s_melee_from_button.load(std::memory_order_relaxed) ? prefs.melee_btn_anim
+                                                                                : prefs.melee_anim;
     float join_w = 0.0f, off_w = 0.0f, stock_w_all = 0.0f, hold_w = 0.0f;
     {
         const struct { int mode; float w; } gates[3] = {
-            { prefs.melee_anim,  s_melee.weight },
+            { melee_mode,        s_melee.weight },
             { prefs.equip_anim,  s_equip.weight },
             { prefs.sprint_anim, s_sprint.weight },
         };
@@ -1636,7 +1644,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                                  s_melee.weight, s_equip.weight,
                                                  !s_equip.active ? "" : (s_equip.draw ? " (draw)" : " (put-away)"),
                                                  s_sprint.active ? 1 : 0, off_w, hold_w, join_w,
-                                                 prefs.sup_anim, prefs.melee_anim, prefs.equip_anim, prefs.sprint_anim,
+                                                 prefs.sup_anim, melee_mode, prefs.equip_anim, prefs.sprint_anim,
                                                  (int)access.model_tag);
                         }
                         s_reload_age_was = reload_age;
@@ -1668,7 +1676,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                                              std::chrono::duration<float>(tnow - s_act_since).count(),
                                              s_act_peak_m * 100.0f, s_act_peak_deg, s_act_peak_hm * 100.0f,
                                              s_act_peak_hd, g_cfg.pa_sup_anim_gate, prefs.equip_anim,
-                                             prefs.melee_anim, s_melee.weight);
+                                             melee_mode, s_melee.weight);
                         s_act_peak_m = s_act_peak_deg = s_act_peak_hm = s_act_peak_hd = 0.0f;
                     }
 #endif
@@ -3522,7 +3530,12 @@ bool palettearm_stock_marker_ue(float out_cm[3]) {
 }
 
 void palettearm_note_pad(bool melee_down, bool swap_down, bool throw_down, bool sprint_down, bool moving,
-                         bool reload_down) {
+                         bool reload_down, bool melee_from_gesture) {
+    // The melee press EDGE says where this melee came from; held, it keeps what the edge said. Only
+    // the XInput hook calls this, so the previous-state static has one writer.
+    static bool s_melee_prev = false;
+    if (melee_down && !s_melee_prev) s_melee_from_button.store(!melee_from_gesture, std::memory_order_relaxed);
+    s_melee_prev = melee_down;
     if (!melee_down && !swap_down && !throw_down && !sprint_down && !moving && !reload_down) return;
     const long long now = std::chrono::steady_clock::now().time_since_epoch().count();
     if (melee_down)  s_pad_melee_ticks.store(now, std::memory_order_relaxed);

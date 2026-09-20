@@ -94,6 +94,36 @@
 // get_native_resource + GetDesc, exactly as before. Set xrlayersrccache=0 to force that full walk
 // EVERY tick (the pre-fix behaviour): the safe fallback and the A/B control for the measurement.
 
+// ============================================================================================
+// BUILD PORTABILITY: STRICT vs LAX CHAINS (2026-09-19) -- Steam Win64 vs WinGDK / Microsoft Store
+// ============================================================================================
+// desc_plausible() reads mips/samples/dimension/format at FIXED sub-offsets of the FRHITexture
+// descriptor, MEASURED ON THE STEAM Win64 BINARY. The Microsoft Store / Game Pass (WinGDK) binary
+// lays that descriptor out differently, so those bytes are garbage there -- and using desc_plausible
+// as a GATE meant the probe rejected every real extent-match on WinGDK, never latched, re-walked
+// forever (the "every other second" stutter a Game Pass player reported) and fell back to the
+// generated ring. That is a per-platform time bomb of exactly the kind the repo's address rule and
+// the PRE-RELEASE PLATFORM AUDIT exist to catch: a byte-offset measured on ONE store's binary.
+//
+// THE FIX is a two-speed acceptance, with NO hardcoded WinGDK offsets -- the layout is DISCOVERED
+// per build:
+//   * validate_native() is BUILD-AGNOSTIC: it asks the runtime, never a guessed byte. First it tries
+//     UEVR's get_native_resource() + a real ID3D12Resource::GetDesc() (want x want + UEVR's device).
+//     But get_native_resource ITSELF is measured against ONE build and returns null/garbage on WinGDK
+//     (verified 2026-09-19), so a lax chain falls back to resolve_native_by_scan(): it finds the
+//     ID3D12Resource inside the FD3D12Texture by scanning (2 levels, bounded) for a heap object whose
+//     vtable is in UEVR's own D3D12 module -- the SAFETY gate, so GetDesc only ever runs on a proven
+//     D3D12 object -- and whose GetDesc agrees with aimwidgetdraw -- the CORRECTNESS gate. Still no
+//     hardcoded offset, still fail-closed. On Steam the strict chain resolves on the first
+//     get_native_resource try, so the scan is dead there.
+//   * probe() prefers a PLAUSIBLE candidate (Steam: latches a STRICT chain, byte-for-byte unchanged).
+//     Only if nothing plausible validates does it validate the IMPLAUSIBLE extent-matches through
+//     validate_native and latch a LAX chain (Chain::lax). The desc pre-filter is then disabled for
+//     that chain on BOTH the per-tick hit path (rhi-identity + extent is the invariant) and the miss
+//     path (validate_native is the gate). A lax latch is still a real, validated resource.
+// So Steam is unchanged and WinGDK gets the same crisp game art. A distinctive aimwidgetdraw still
+// helps on a lax build (fewer coincidental extent-matches to validate); the probe log says so.
+
 #pragma once
 
 #include <cstdint>
