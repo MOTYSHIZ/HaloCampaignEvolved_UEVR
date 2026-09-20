@@ -543,6 +543,77 @@ bool is_known_resource(const void* obj) {
     return *reinterpret_cast<void* const*>(obj) == kvt;
 }
 
+// ---- LEARNING the resource's offset from a pair UEVR already holds ---------------------------
+//
+// We never write down where the ID3D12Resource sits inside an FRHITexture. UEVR hands us its OWN UI
+// render target (stereo_hook->get_ui_render_target) and, by a completely separate path, that
+// target's true pixel size (vr->get_ui_width/height). That is a MATCHED PAIR on whatever binary we
+// are running: an object whose correct answer we already hold.
+//
+// So we find the resource ONCE inside UEVR's own texture -- accepting only a candidate that is an
+// ID3D12Resource BY VTABLE IDENTITY and whose real GetDesc reports exactly UEVR's reported UI size
+// on UEVR's device -- and remember the byte offset it sat at. That offset is then read straight out
+// of the reticule's texture. Steam and WinGDK resolve through the same code with NO measured
+// constant: this is co-variation against a reference we already hold, which is the doctrine.
+//
+// Nothing here calls a virtual method on an unproven object. get_native_resource is never used on a
+// lax candidate -- it walks vtable slots hunting for a resource, which is the hang class that froze
+// Game Pass -- and GetDesc only ever runs after the identity check.
+
+constexpr size_t kCalWindow = 0x400;   // bytes of UEVR's own texture swept looking for its resource
+
+int  g_res_off      = -1;      // learned byte offset, or -1 = not established
+bool g_res_off_done = false;   // calibration has RUN (not necessarily succeeded)
+
+// Does this resource's REAL GetDesc report exactly w x h TEXTURE2D on UEVR's device?
+bool resource_matches(void* native, int w, int h) {
+    D3D12_RESOURCE_DESC d{};
+    void* dev = nullptr;
+    if (!desc_guarded(native, &d, &dev)) return false;
+    if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    if ((int)d.Width != w || (int)d.Height != h) return false;
+    auto* p = API::get()->param();
+    void* uevr_dev = (p != nullptr && p->renderer != nullptr) ? p->renderer->device : nullptr;
+    return (uevr_dev == nullptr || dev == nullptr || dev == uevr_dev);
+}
+
+// One-shot, but safe to call every tick: it RETRIES without consuming its shot until UEVR's UI
+// target and reported size are actually available (they are not, at the main menu).
+int learned_resource_offset() {
+    if (g_res_off_done) return g_res_off;
+    auto* p = API::get()->param();
+    if (p == nullptr || p->sdk == nullptr || p->vr == nullptr ||
+        p->sdk->stereo_hook == nullptr || p->sdk->stereo_hook->get_ui_render_target == nullptr ||
+        p->vr->get_ui_width == nullptr || p->vr->get_ui_height == nullptr) {
+        return -1;
+    }
+    void* ui = (void*)p->sdk->stereo_hook->get_ui_render_target();
+    if (ui == nullptr) return -1;                       // stereo not up yet -- retry next tick
+    const int w = (int)p->vr->get_ui_width();
+    const int h = (int)p->vr->get_ui_height();
+    if (w <= 0 || h <= 0) return -1;                    // size not reported yet -- retry
+    if (known_resource_vtable() == nullptr) return -1;  // no identity available yet -- retry
+    if (!mem_is_private(ui, sizeof(void*))) return -1;
+
+    g_res_off_done = true;   // from here this is a one-shot answer
+
+    const size_t lim = scan_limit(ui, kCalWindow);
+    for (size_t off = 8; off + sizeof(void*) <= lim; off += sizeof(void*)) {
+        void* cand = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(ui) + off);
+        if (!is_known_resource(cand)) continue;
+        if (!resource_matches(cand, w, h)) continue;
+        g_res_off = (int)off;
+        logf("CALIBRATED: the ID3D12Resource sits at FRHITexture+0x%X on THIS build -- learned from "
+             "UEVR's own UI render target (%dx%d, resource %p). No measured offset is involved.",
+             (unsigned)off, w, h, cand);
+        return g_res_off;
+    }
+    logf("CALIBRATION FAILED: swept 0x%X bytes of UEVR's UI render target and found no "
+         "ID3D12Resource reporting its own %dx%d -- the lax resolve fails closed (generated ring).",
+         (unsigned)lim, w, h);
+    return -1;
+}
+
 // GetDesc-validate one ID3D12Resource candidate against `want`. Extracted so the get_native_resource
 // path AND the scan share the exact same correctness gate.
 //
@@ -695,12 +766,28 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
 void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt,
                       bool lax, bool allow_scan) {
     if (lax) {
-        if (!allow_scan) {
-            if (loud) logf("  rhi %p -> lax candidate and xrlayersrcscan=0: nothing called, not "
-                           "resolved (generated ring).", rhi);
-            return nullptr;
+        // NEVER call get_native_resource on a lax candidate -- see the calibration note above.
+        const int off = g_cfg.xr_layer_src_cal ? learned_resource_offset() : -1;
+        if (off >= 0) {
+            const size_t need = (size_t)off + sizeof(void*);
+            if (scan_limit(rhi, need) >= need) {
+                void* cand = *reinterpret_cast<void* const*>(
+                                 reinterpret_cast<const uint8_t*>(rhi) + off);
+                if (void* ok = validate_resource(cand, want, loud, out_dim, out_fmt,
+                                                 /*require_identity=*/true)) {
+                    if (loud) logf("  rhi %p -> resource resolved at the CALIBRATED +0x%X.",
+                                   rhi, (unsigned)off);
+                    return ok;
+                }
+                if (loud) logf("  rhi %p -> nothing valid at the calibrated +0x%X for this texture.",
+                               rhi, (unsigned)off);
+            }
+        } else if (loud && g_cfg.xr_layer_src_cal) {
+            logf("  rhi %p -> resource offset not calibrated yet (UEVR's UI target not up?); not "
+                 "resolved this tick.", rhi);
         }
-        return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
+        if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
+        return nullptr;
     }
     void* native;
     {

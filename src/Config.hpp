@@ -1921,6 +1921,17 @@ struct Config {
     // Canonical: present the game's OWN reticle render target rather than our generated ring. This
     // is what gives the layer real per-weapon art and live firing/reload animation.
     bool  xr_layer_src = true;
+    // The GENERATED ring -- the fallback the compositor draws when the game's own crosshair art is
+    // not resolved. Fractions of the cell: half-thickness of the band, and the centre dot's radius.
+    // Defaults halved from the original 0.055/0.045 (2026-09-19) because the old band covered ~11%
+    // of the cell and players look straight through it whenever the resolve fails.
+    // WinGDK / Store PARITY, the real fix (2026-09-19). Learn where the ID3D12Resource sits inside
+    // an FRHITexture by finding it ONCE in UEVR's own UI render target -- whose true size UEVR
+    // reports independently -- then read that learned offset out of the reticule's texture. No
+    // measured constant, identical code on Steam and WinGDK, fails closed. Set 0 to A/B it off.
+    bool  xr_layer_src_cal = true;
+    float xr_layer_ring_thick = 0.025f;
+    float xr_layer_ring_dot   = 0.030f;
     // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
     // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)
     // FD3D12Texture, so the source never resolves there and the layer draws the generated ring. With
