@@ -562,7 +562,8 @@ bool is_known_resource(const void* obj) {
 
 constexpr size_t kCalWindow = 0x800;   // bytes of UEVR's own texture swept looking for its resource
 
-int  g_res_off      = -1;      // learned byte offset, or -1 = not established
+int  g_res_off1     = -1;      // FRHITexture + off1 -> (intermediate | resource)
+int  g_res_off2     = -1;      // intermediate + off2 -> resource; < 0 = it sat at off1
 bool g_res_off_done = false;   // calibration has RUN (not necessarily succeeded)
 
 // Does this resource's REAL GetDesc report exactly w x h TEXTURE2D on UEVR's device?
@@ -626,82 +627,94 @@ void dump_object_shape(void* obj, const char* what) {
     }
 }
 
-// Sweep ONE reference texture for the resource. Logs every identity-confirmed resource it finds
-// with its real dimensions, so a failure says what was actually in there rather than just "no".
-int learn_from(void* tex, const int* ww, const int* hh, int n, const char* what) {
+// Defined below; resolve_by_learned_path() needs it before its definition.
+void* validate_resource(void* native, int want, bool loud, int* out_dim, uint32_t* out_fmt,
+                        bool require_identity);
+
+// Sweep ONE reference texture for the resource, learning the PATH to it. Measured on Game Pass
+// 2026-09-19: the resource is TWO levels in -- FRHITexture+0xB8 -> intermediate+0x20 -> resource --
+// so a flat offset was never going to work. Fills off1/off2 on an exact match; off2 < 0 means the
+// resource sat directly at off1.
+bool learn_from(void* tex, const int* ww, const int* hh, int n, const char* what,
+                int* off1, int* off2) {
     if (tex == nullptr || !mem_is_private(tex, sizeof(void*))) {
         logf("  CAL: %s %p is not readable -- skipped.", what, tex);
-        return -1;
+        return false;
     }
     const size_t lim = scan_limit(tex, kCalWindow);
-    int found = 0;
-    int deeper = 0;
-    for (size_t off = 8; off + sizeof(void*) <= lim; off += sizeof(void*)) {
-        void* cand = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(tex) + off);
-        // One level deeper: UE commonly holds the resource through an intermediate object.
-        if (!is_known_resource(cand) && deeper < 24 && mem_is_private(cand, sizeof(void*)) &&
-            cand != tex) {
-            ++deeper;
-            const size_t lim1 = scan_limit(cand, kCalWindow);
-            for (size_t o1 = 8; o1 + sizeof(void*) <= lim1; o1 += sizeof(void*)) {
-                void* c1 = *reinterpret_cast<void* const*>(
-                               reinterpret_cast<const uint8_t*>(cand) + o1);
-                if (!is_known_resource(c1)) continue;
-                D3D12_RESOURCE_DESC d1{};
-                void* dv1 = nullptr;
-                if (!desc_guarded(c1, &d1, &dv1)) continue;
-                ++found;
-                logf("  CAL: %s +0x%X -> obj+0x%X -> resource %p  dim=%d %llux%u fmt=%u", what,
-                     (unsigned)off, (unsigned)o1, c1, (int)d1.Dimension,
-                     (unsigned long long)d1.Width, (unsigned)d1.Height, (unsigned)d1.Format);
-                if (d1.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+    int found = 0, deeper = 0;
+    for (size_t o0 = 8; o0 + sizeof(void*) <= lim; o0 += sizeof(void*)) {
+        void* p0 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(tex) + o0);
+        if (p0 == nullptr || p0 == tex) continue;
+        D3D12_RESOURCE_DESC d{};
+        void* dev = nullptr;
+        if (is_known_resource(p0) && desc_guarded(p0, &d, &dev)) {
+            ++found;
+            logf("  CAL: %s +0x%X -> resource %p  dim=%d %llux%u fmt=%u", what, (unsigned)o0, p0,
+                 (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height,
+                 (unsigned)d.Format);
+            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
                 for (int i = 0; i < n; ++i) {
-                    if ((int)d1.Width == ww[i] && (int)d1.Height == hh[i]) {
-                        logf("CALIBRATED (one level deep): resource at FRHITexture+0x%X -> +0x%X on "
-                             "THIS build, learned from UEVR's %s (%dx%d). Not usable as a flat "
-                             "offset -- reported for diagnosis.", (unsigned)off, (unsigned)o1, what,
+                    if ((int)d.Width == ww[i] && (int)d.Height == hh[i]) {
+                        *off1 = (int)o0; *off2 = -1;
+                        logf("CALIBRATED: resource at FRHITexture+0x%X on THIS build (from UEVR's "
+                             "%s, %dx%d). No measured constant involved.", (unsigned)o0, what,
                              ww[i], hh[i]);
+                        return true;
                     }
                 }
             }
+            continue;
         }
-        if (!is_known_resource(cand)) continue;
-        D3D12_RESOURCE_DESC d{};
-        void* dev = nullptr;
-        if (!desc_guarded(cand, &d, &dev)) continue;
-        ++found;
-        logf("  CAL: %s +0x%X -> resource %p  dim=%d %llux%u fmt=%u", what, (unsigned)off, cand,
-             (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height, (unsigned)d.Format);
-        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
-        for (int i = 0; i < n; ++i) {
-            if ((int)d.Width == ww[i] && (int)d.Height == hh[i]) {
-                logf("CALIBRATED: the ID3D12Resource sits at FRHITexture+0x%X on THIS build -- "
-                     "learned from UEVR's %s (%dx%d). No measured offset is involved.",
-                     (unsigned)off, what, ww[i], hh[i]);
-                return (int)off;
+        if (deeper >= 32 || !mem_is_private(p0, sizeof(void*))) continue;
+        ++deeper;
+        const size_t lim1 = scan_limit(p0, kCalWindow);
+        for (size_t o1 = 8; o1 + sizeof(void*) <= lim1; o1 += sizeof(void*)) {
+            void* p1 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(p0) + o1);
+            if (!is_known_resource(p1)) continue;
+            D3D12_RESOURCE_DESC d1{};
+            void* dv1 = nullptr;
+            if (!desc_guarded(p1, &d1, &dv1)) continue;
+            ++found;
+            logf("  CAL: %s +0x%X -> obj+0x%X -> resource %p  dim=%d %llux%u fmt=%u", what,
+                 (unsigned)o0, (unsigned)o1, p1, (int)d1.Dimension,
+                 (unsigned long long)d1.Width, (unsigned)d1.Height, (unsigned)d1.Format);
+            if (d1.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+            for (int i = 0; i < n; ++i) {
+                if ((int)d1.Width == ww[i] && (int)d1.Height == hh[i]) {
+                    *off1 = (int)o0; *off2 = (int)o1;
+                    logf("CALIBRATED: resource at FRHITexture+0x%X -> +0x%X on THIS build (from "
+                         "UEVR's %s, %dx%d). No measured constant involved.", (unsigned)o0,
+                         (unsigned)o1, what, ww[i], hh[i]);
+                    return true;
+                }
             }
         }
     }
     logf("  CAL: %s -- swept 0x%X bytes, %d identity-confirmed resource(s), none at an expected "
          "size.", what, (unsigned)lim, found);
     if (found == 0) dump_object_shape(tex, what);
-    return -1;
+    return false;
 }
 
-// One-shot, but safe to call every tick: it RETRIES without consuming its shot until UEVR actually
-// has a reference target. Reports the SPECIFIC precondition that is missing (a few times, then
-// quietly), because "not up yet" covering six different causes is what cost us the first attempt.
-int learned_resource_offset() {
-    if (g_res_off_done) return g_res_off;
+// One-shot, retried until UEVR actually has a reference target.
+//
+// PREFER THE UI TARGET: UEVR reports its size unambiguously, so exactly one resource can match. The
+// scene target is AMBIGUOUS on this build -- it holds both a double-wide 4128x2208 at +0x20 and a
+// per-eye 2064x2208 at +0x720, and "expected" accepts either -- so it is only a fallback.
+bool learned_resource_path() {
+    if (g_res_off_done) return g_res_off1 >= 0;
     static int s_notes = 0;
     auto note = [&](const char* why) {
         if (s_notes < 4) { ++s_notes; logf("CAL: not ready -- %s.", why); }
     };
 
     auto* p = API::get()->param();
-    if (p == nullptr || p->sdk == nullptr || p->vr == nullptr) { note("plugin API surface not up"); return -1; }
-    if (p->sdk->stereo_hook == nullptr) { note("UEVR exposes no stereo_hook"); return -1; }
-    if (known_resource_vtable() == nullptr) { note("no reference ID3D12Resource vtable yet"); return -1; }
+    if (p == nullptr || p->sdk == nullptr || p->vr == nullptr) {
+        note("plugin API surface not up"); return false;
+    }
+    if (p->sdk->stereo_hook == nullptr) { note("UEVR exposes no stereo_hook"); return false; }
+    if (known_resource_vtable() == nullptr) { note("no reference ID3D12Resource vtable yet"); return false; }
 
     auto* sh = p->sdk->stereo_hook;
     void* ui  = (sh->get_ui_render_target    != nullptr) ? (void*)sh->get_ui_render_target()    : nullptr;
@@ -710,34 +723,49 @@ int learned_resource_offset() {
     const int uh = (p->vr->get_ui_height  != nullptr) ? (int)p->vr->get_ui_height()  : 0;
     const int hw = (p->vr->get_hmd_width  != nullptr) ? (int)p->vr->get_hmd_width()  : 0;
     const int hh = (p->vr->get_hmd_height != nullptr) ? (int)p->vr->get_hmd_height() : 0;
+    if (ui == nullptr && scn == nullptr) { note("UEVR reports no render target yet"); return false; }
 
-    if (ui == nullptr && scn == nullptr) {
-        note("UEVR reports neither a UI nor a scene render target (its Slate hook failed on this "
-             "game, so the UI target may never exist -- the scene target is the fallback)");
-        return -1;
-    }
-
-    g_res_off_done = true;   // from here this is a one-shot answer
+    g_res_off_done = true;
     logf("CALIBRATING: ui_rt=%p (%dx%d)  scene_rt=%p (hmd %dx%d)", ui, uw, uh, scn, hw, hh);
     probe_uevr_accessor(ui,  uw, uh, "UI render target");
     probe_uevr_accessor(scn, hw, hh, "scene render target");
 
-    // The UI target first: its size is reported independently and is unambiguous.
     if (ui != nullptr && uw > 0 && uh > 0) {
         const int w[1] = { uw }, h[1] = { uh };
-        const int off = learn_from(ui, w, h, 1, "UI render target");
-        if (off >= 0) { g_res_off = off; return off; }
+        if (learn_from(ui, w, h, 1, "UI render target", &g_res_off1, &g_res_off2)) return true;
     }
-    // Then the scene target. Accept the per-eye size OR a double-wide side-by-side stereo target,
-    // since which one UEVR allocates depends on the rendering method.
     if (scn != nullptr && hw > 0 && hh > 0) {
         const int w[2] = { hw, hw * 2 }, h[2] = { hh, hh };
-        const int off = learn_from(scn, w, h, 2, "scene render target");
-        if (off >= 0) { g_res_off = off; return off; }
+        if (learn_from(scn, w, h, 2, "scene render target", &g_res_off1, &g_res_off2)) return true;
     }
     logf("CALIBRATION FAILED: no ID3D12Resource at an expected size inside UEVR's own targets -- "
-         "the lax resolve fails closed (generated ring). The CAL lines above list what was there.");
-    return -1;
+         "the lax resolve fails closed (generated ring).");
+    return false;
+}
+
+// Apply the learned path to a candidate FRHITexture. NOTHING is called on an unproven object: two
+// bounded pointer reads, a vtable-equality check, and only then the real GetDesc.
+void* resolve_by_learned_path(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
+    if (g_res_off1 < 0) return nullptr;
+    auto read_at = [](void* base, int off) -> void* {
+        const size_t need = (size_t)off + sizeof(void*);
+        if (base == nullptr || scan_limit(base, need) < need) return nullptr;
+        return *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(base) + off);
+    };
+    void* cand = read_at(rhi, g_res_off1);
+    if (g_res_off2 >= 0) {
+        if (cand == nullptr || !mem_is_private(cand, sizeof(void*))) {
+            if (loud) logf("  rhi %p -> +0x%X is not a readable object; not resolved.", rhi,
+                           (unsigned)g_res_off1);
+            return nullptr;
+        }
+        cand = read_at(cand, g_res_off2);
+    }
+    if (void* ok = validate_resource(cand, want, loud, out_dim, out_fmt, true)) {
+        if (loud) logf("  rhi %p -> resource via the CALIBRATED path.", rhi);
+        return ok;
+    }
+    return nullptr;
 }
 
 // GetDesc-validate one ID3D12Resource candidate against `want`. Extracted so the get_native_resource
@@ -892,25 +920,15 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
 void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt,
                       bool lax, bool allow_scan) {
     if (lax) {
-        // NEVER call get_native_resource on a lax candidate -- see the calibration note above.
-        const int off = g_cfg.xr_layer_src_cal ? learned_resource_offset() : -1;
-        if (off >= 0) {
-            const size_t need = (size_t)off + sizeof(void*);
-            if (scan_limit(rhi, need) >= need) {
-                void* cand = *reinterpret_cast<void* const*>(
-                                 reinterpret_cast<const uint8_t*>(rhi) + off);
-                if (void* ok = validate_resource(cand, want, loud, out_dim, out_fmt,
-                                                 /*require_identity=*/true)) {
-                    if (loud) logf("  rhi %p -> resource resolved at the CALIBRATED +0x%X.",
-                                   rhi, (unsigned)off);
-                    return ok;
-                }
-                if (loud) logf("  rhi %p -> nothing valid at the calibrated +0x%X for this texture.",
-                               rhi, (unsigned)off);
-            }
+        // get_native_resource is NOT called here. It works on a REAL FRHITexture (proven on this
+        // build against UEVR's own target), but a lax candidate is by definition one we could not
+        // decode, and UEVR's SDK walks vtable slots hunting for a resource -- on a wrong object
+        // that is the hang class that froze Game Pass. The learned path calls nothing.
+        if (g_cfg.xr_layer_src_cal && learned_resource_path()) {
+            if (void* ok = resolve_by_learned_path(rhi, want, loud, out_dim, out_fmt)) return ok;
+            if (loud) logf("  rhi %p -> nothing valid at the calibrated path for this texture.", rhi);
         } else if (loud && g_cfg.xr_layer_src_cal) {
-            logf("  rhi %p -> no calibrated resource offset (see the CAL lines); not resolved.",
-                 rhi);
+            logf("  rhi %p -> no calibrated resource path (see the CAL lines); not resolved.", rhi);
         }
         if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
         return nullptr;

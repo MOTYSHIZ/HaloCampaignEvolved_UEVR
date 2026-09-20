@@ -1932,7 +1932,7 @@ struct Config {
     bool  xr_layer_src_cal = true;
     float xr_layer_ring_radius = 0.20f;    // was 0.40 -- halved 2026-09-19 (in-headset feedback)
     float xr_layer_ring_thick  = 0.009375f; // 75% of the previous 0.0125
-    float xr_layer_ring_dot    = 0.030f;
+    float xr_layer_ring_dot    = 0.010f;
     // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
     // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)
     // FD3D12Texture, so the source never resolves there and the layer draws the generated ring. With
