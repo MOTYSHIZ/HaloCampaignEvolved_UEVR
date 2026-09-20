@@ -124,7 +124,7 @@ constexpr int kMaxWeaponGrip = 24;
 // translation, and no notion of a "calibrated base" to be a delta against. Sharing one struct would
 // mean six fields that mean nothing on either half depending on which driver is running.
 //
-// ⚠️ THE FRAME IS OURS, NOT PR #1's, AND THE SHIPPED VALUES WERE CONVERTED INTO IT.
+// ?????? THE FRAME IS OURS, NOT PR #1's, AND THE SHIPPED VALUES WERE CONVERTED INTO IT.
 // blindcowboy24's wpnfix lines are a UE-convention quaternion (X forward / Y RIGHT / Z up) with
 // UE-axis metres; ours are Blam axes (X forward / Y LEFT / Z up), the basis everything in
 // src\palettearm\ works in. Relabelling Y is a REFLECTION, not a rotation, so it reverses the sense
@@ -180,7 +180,7 @@ constexpr int kHandFixSchema = 2;
 // carry puts it. Deleting halo_vr_weapons.cfg therefore reverts every weapon to the shipped fit --
 // the same "delete the file, get the shipped calibration back" contract as halo_vr_calib.cfg.
 //
-// ⚠️ NOTE THE INVERSION relative to wpnoff, which sits beside it in the same files: wpnoff takes the
+// ?????? NOTE THE INVERSION relative to wpnoff, which sits beside it in the same files: wpnoff takes the
 // FIRST match, so its specific entries go ABOVE general ones. wpnfix takes the LAST, so within one
 // file a specific entry goes BELOW. They differ because wpnoff has only ever had one tier.
 //
@@ -399,7 +399,7 @@ struct Config {
     //     apart. This is why the reticule TRACES: a marker on the surface reads correctly from any
     //     eye position, where a fixed-distance one does not.
     //
-    // ⚠️ ALL DISTANCES IN THIS FILE'S CONFIG KEYS ARE CENTIMETRES, matching Unreal. The FIELDS below
+    // ?????? ALL DISTANCES IN THIS FILE'S CONFIG KEYS ARE CENTIMETRES, matching Unreal. The FIELDS below
     // are stored in metres because every consumer works in VR pose space; the conversion happens once
     // at parse. A metres/cm mismatch here already cost a test -- hmdleashlat=50 was entered meaning
     // 50 cm, was obeyed as 50 METRES, and the setting looked broken while working perfectly.
@@ -704,7 +704,7 @@ struct Config {
     // the weapon's attach point; `Wrist_R` is the arm socket nearer the hand. Both exist on this
     // rig, they are centimetres apart, and which one feels right is a question about the art, not
     // one this code can answer -- so it is a dial, and both are logged on acquisition.
-    // ⚠️ EMPTY ON PURPOSE -- the real default ("PrimaryWeapon") lives at the consumer in
+    // ?????? EMPTY ON PURPOSE -- the real default ("PrimaryWeapon") lives at the consumer in
     // Plugin.cpp's pivot derivation, which already fell back on empty. That fallback existed
     // because this field was OBSERVED arriving empty with "cause not established" -- the cause
     // is now established: MSVC's constant-initialization of the global g_cfg drops char-array
@@ -1183,7 +1183,7 @@ struct Config {
     bool  nav_render  = true;
 
     // WORLD-SPACE NAVPOINTS -- the lane with no angular ceiling (the flat quad spans only
-    // ±20.7°×±12°, so no screen-space math can put a marker on an enemy 30° off-centre). One
+    // ??20.7??????12??, so no screen-space math can put a marker on an enemy 30?? off-centre). One
     // mesh marker per live navpoint, placed along the true world direction recovered by
     // inverting the game's own projection. Supersedes the nav_fix shift while on (the flat
     // layer stays game-native). See the nav_world_tick banner in Plugin.cpp.
@@ -1352,7 +1352,7 @@ struct Config {
     // inventory (/Game/UI/Hud/Navpoints/WBP_Navpoints) until a live session confirms; if the
     // scan logs "0 resolved", menudump the live widget names and correct this, not the code.
     //
-    // ⚠️ EMPTY ON PURPOSE -- the real default lives at the consumer (the widget scan falls back
+    // ?????? EMPTY ON PURPOSE -- the real default lives at the consumer (the widget scan falls back
     // to "WBP_Navpoints" when this is empty), the aim_widget_class pattern. A string-literal
     // initializer here DOES NOT SHIP: MSVC's constant-initialization of the global g_cfg drops
     // char-array string defaults while keeping numeric ones (measured 2026-08-12 -- a host
@@ -1511,7 +1511,7 @@ struct Config {
     // see-through and the ring does not hide what you are shooting -- but /Engine/BasicShapes ships
     // only Cube/Cone/Cylinder/Plane/Sphere, so the asset has to be found rather than assumed.
     //
-    // ⚠️ EMPTY ON PURPOSE -- the intended default (the game's SM_Torus_ThinDense_01) leads the
+    // ?????? EMPTY ON PURPOSE -- the intended default (the game's SM_Torus_ThinDense_01) leads the
     // candidate list at the consumer in Reticule.cpp instead. A string literal here DOES NOT
     // SHIP: MSVC's constant-initialization of the global g_cfg drops char-array string defaults
     // (see nav_class below for the measurement) -- which means the shipped reticule had silently
@@ -1930,8 +1930,8 @@ struct Config {
     // reports independently -- then read that learned offset out of the reticule's texture. No
     // measured constant, identical code on Steam and WinGDK, fails closed. Set 0 to A/B it off.
     bool  xr_layer_src_cal = true;
-    float xr_layer_ring_radius = 0.20f;    // was 0.40 -- halved 2026-09-19 (in-headset feedback)
-    float xr_layer_ring_thick  = 0.009375f; // 75% of the previous 0.0125
+    float xr_layer_ring_radius = 0.16f;    // was 0.40 -- halved 2026-09-19 (in-headset feedback)
+    float xr_layer_ring_thick  = 0.0046875f; // 75% of the previous 0.0125
     float xr_layer_ring_dot    = 0.010f;
     // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
     // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)
@@ -4333,7 +4333,7 @@ struct Config {
     // than a latched constant, a stock pose that is deliberately off the ray -- recoil, sway, the
     // reload animation -- stays off the ray by exactly the angle the animation asked for.
     //
-    // ⚠️ pa_wpn_yaw IS STILL REQUIRED, and is NOT made redundant by this. The trim's job is to map
+    // ?????? pa_wpn_yaw IS STILL REQUIRED, and is NOT made redundant by this. The trim's job is to map
     // the camera frame onto the ARTIST'S bone frame (a ~90 degree structural rotation on this
     // title); the lock's job is the few degrees left over. With the trim at 0 the residual is far
     // outside pa_barrel_release below and the lock simply stands down -- it can never supply a
@@ -4381,7 +4381,7 @@ struct Config {
     // it is the aim wandering off for no reason the player can see. Halo's one-handers are the
     // pistols, the Needler and the sword.
     //
-    // ⚠️ THESE NAMES ARE UNVERIFIED against this title's actual class names -- they are the
+    // ?????? THESE NAMES ARE UNVERIFIED against this title's actual class names -- they are the
     // obvious spellings, not measured ones. Check them with a weapon in hand (the per-weapon
     // offset log prints the class name) before trusting the defaults. A wrong entry fails in the
     // safe direction -- the weapon simply is not denied -- which is exactly why it needs checking
@@ -4500,7 +4500,7 @@ struct Config {
     // rewriting the global calibration.
     //   HOME=0x24  INSERT=0x2D  DELETE=0x2E  PGUP=0x21  PGDN=0x22   (0 disables)
     //
-    // ⚠️ INSERT, NOT HOME. PR #7 shipped this as 0x24, which is kill_key -- the mod's KILL
+    // ?????? INSERT, NOT HOME. PR #7 shipped this as 0x24, which is kill_key -- the mod's KILL
     // SWITCH. Both are polled with GetAsyncKeyState in the same block, so HOME would have
     // captured a weapon delta AND toggled the kill switch on the same press. The collision was
     // invisible in the fork rather than introduced by the rebase: kill_key was already 0x24 on

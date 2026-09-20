@@ -208,8 +208,8 @@
 # hides less of the scene, raise it if the ring is hard to see. Dot is the centre dot's radius;
 # 0 for no dot.
 # Ring radius, as a fraction of the cell (0.20 = a ring half the width of the old one).
-#xrlayerringradius=0.20
-#xrlayerringthick=0.009375
+#xrlayerringradius=0.16
+#xrlayerringthick=0.0046875
 #xrlayerringdot=0.010
 
 # ================================== CROSSHAIR BRIGHTNESS & HUD ==================================
