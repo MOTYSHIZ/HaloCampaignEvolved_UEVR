@@ -560,7 +560,7 @@ bool is_known_resource(const void* obj) {
 // lax candidate -- it walks vtable slots hunting for a resource, which is the hang class that froze
 // Game Pass -- and GetDesc only ever runs after the identity check.
 
-constexpr size_t kCalWindow = 0x400;   // bytes of UEVR's own texture swept looking for its resource
+constexpr size_t kCalWindow = 0x800;   // bytes of UEVR's own texture swept looking for its resource
 
 int  g_res_off      = -1;      // learned byte offset, or -1 = not established
 bool g_res_off_done = false;   // calibration has RUN (not necessarily succeeded)
@@ -577,6 +577,55 @@ bool resource_matches(void* native, int w, int h) {
     return (uevr_dev == nullptr || dev == nullptr || dev == uevr_dev);
 }
 
+// THE DECISIVE TEST. Ask UEVR's own accessor about UEVR's OWN render target -- an object UEVR uses
+// every frame, so if the accessor is sound on this build it must answer correctly here. If it does,
+// get_native_resource is fine and OUR chain walk is landing on the wrong objects; if it does not,
+// the accessor genuinely cannot decode this binary. Those are opposite bugs and we had no way to
+// tell them apart. Safe: this is UEVR's own texture, not an unproven candidate.
+void probe_uevr_accessor(void* tex, int w, int h, const char* what) {
+    auto* p = API::get()->param();
+    if (tex == nullptr || p == nullptr || p->sdk == nullptr || p->sdk->frhitexture2d == nullptr ||
+        p->sdk->frhitexture2d->get_native_resource == nullptr) return;
+    void* nat = call_native_guarded(tex);
+    if (nat == nullptr) {
+        logf("  CAL: get_native_resource(%s) -> NULL  [accessor cannot decode this build]", what);
+        return;
+    }
+    if (!is_known_resource(nat)) {
+        logf("  CAL: get_native_resource(%s) -> %p  NOT a resource by vtable  [accessor cannot "
+             "decode this build]", what, nat);
+        return;
+    }
+    D3D12_RESOURCE_DESC d{};
+    void* dev = nullptr;
+    if (!desc_guarded(nat, &d, &dev)) {
+        logf("  CAL: get_native_resource(%s) -> %p  identity OK but GetDesc faulted", what, nat);
+        return;
+    }
+    logf("  CAL: get_native_resource(%s) -> %p  IDENTITY OK  dim=%d %llux%u fmt=%u  (UEVR reports "
+         "%dx%d)%s", what, nat, (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height,
+         (unsigned)d.Format, w, h,
+         ((int)d.Width == w && (int)d.Height == h) ? "  <== ACCESSOR WORKS ON THIS BUILD" : "");
+}
+
+// What does this object actually look like? Printed once when calibration finds nothing, so a
+// failure hands back the object's shape instead of another dead end.
+void dump_object_shape(void* obj, const char* what) {
+    if (obj == nullptr || !mem_is_private(obj, sizeof(void*))) return;
+    const size_t lim = scan_limit(obj, 0x90);
+    logf("  CAL: shape of %s %p (first 0x%X bytes):", what, obj, (unsigned)lim);
+    for (size_t off = 0; off + sizeof(void*) <= lim; off += sizeof(void*)) {
+        void* v = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(obj) + off);
+        const char* kind = "-";
+        if (v == nullptr)                          kind = "null";
+        else if (mem_is_image(v))                  kind = "image/code";
+        else if (is_known_resource(v))             kind = "ID3D12Resource";
+        else if (mem_is_private(v, sizeof(void*))) kind = "heap obj";
+        else if ((uintptr_t)v < 0x100000)          kind = "small int";
+        logf("      +0x%02X = %p  %s", (unsigned)off, v, kind);
+    }
+}
+
 // Sweep ONE reference texture for the resource. Logs every identity-confirmed resource it finds
 // with its real dimensions, so a failure says what was actually in there rather than just "no".
 int learn_from(void* tex, const int* ww, const int* hh, int n, const char* what) {
@@ -586,8 +635,36 @@ int learn_from(void* tex, const int* ww, const int* hh, int n, const char* what)
     }
     const size_t lim = scan_limit(tex, kCalWindow);
     int found = 0;
+    int deeper = 0;
     for (size_t off = 8; off + sizeof(void*) <= lim; off += sizeof(void*)) {
         void* cand = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(tex) + off);
+        // One level deeper: UE commonly holds the resource through an intermediate object.
+        if (!is_known_resource(cand) && deeper < 24 && mem_is_private(cand, sizeof(void*)) &&
+            cand != tex) {
+            ++deeper;
+            const size_t lim1 = scan_limit(cand, kCalWindow);
+            for (size_t o1 = 8; o1 + sizeof(void*) <= lim1; o1 += sizeof(void*)) {
+                void* c1 = *reinterpret_cast<void* const*>(
+                               reinterpret_cast<const uint8_t*>(cand) + o1);
+                if (!is_known_resource(c1)) continue;
+                D3D12_RESOURCE_DESC d1{};
+                void* dv1 = nullptr;
+                if (!desc_guarded(c1, &d1, &dv1)) continue;
+                ++found;
+                logf("  CAL: %s +0x%X -> obj+0x%X -> resource %p  dim=%d %llux%u fmt=%u", what,
+                     (unsigned)off, (unsigned)o1, c1, (int)d1.Dimension,
+                     (unsigned long long)d1.Width, (unsigned)d1.Height, (unsigned)d1.Format);
+                if (d1.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+                for (int i = 0; i < n; ++i) {
+                    if ((int)d1.Width == ww[i] && (int)d1.Height == hh[i]) {
+                        logf("CALIBRATED (one level deep): resource at FRHITexture+0x%X -> +0x%X on "
+                             "THIS build, learned from UEVR's %s (%dx%d). Not usable as a flat "
+                             "offset -- reported for diagnosis.", (unsigned)off, (unsigned)o1, what,
+                             ww[i], hh[i]);
+                    }
+                }
+            }
+        }
         if (!is_known_resource(cand)) continue;
         D3D12_RESOURCE_DESC d{};
         void* dev = nullptr;
@@ -607,6 +684,7 @@ int learn_from(void* tex, const int* ww, const int* hh, int n, const char* what)
     }
     logf("  CAL: %s -- swept 0x%X bytes, %d identity-confirmed resource(s), none at an expected "
          "size.", what, (unsigned)lim, found);
+    if (found == 0) dump_object_shape(tex, what);
     return -1;
 }
 
@@ -641,6 +719,8 @@ int learned_resource_offset() {
 
     g_res_off_done = true;   // from here this is a one-shot answer
     logf("CALIBRATING: ui_rt=%p (%dx%d)  scene_rt=%p (hmd %dx%d)", ui, uw, uh, scn, hw, hh);
+    probe_uevr_accessor(ui,  uw, uh, "UI render target");
+    probe_uevr_accessor(scn, hw, hh, "scene render target");
 
     // The UI target first: its size is reported independently and is unambiguous.
     if (ui != nullptr && uw > 0 && uh > 0) {
@@ -829,8 +909,8 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
                                rhi, (unsigned)off);
             }
         } else if (loud && g_cfg.xr_layer_src_cal) {
-            logf("  rhi %p -> resource offset not calibrated yet (UEVR's UI target not up?); not "
-                 "resolved this tick.", rhi);
+            logf("  rhi %p -> no calibrated resource offset (see the CAL lines); not resolved.",
+                 rhi);
         }
         if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
         return nullptr;
