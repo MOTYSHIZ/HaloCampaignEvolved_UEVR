@@ -845,7 +845,22 @@ void vehprobe_tick() {
     const double cz = (double)vpz.load(std::memory_order_relaxed);
     const bool have_ctr = (cx != 0.0 || cy != 0.0 || cz != 0.0);
 
-    if (!g_vehprobe_scanned) { vehprobe_scan(have_ctr, cx, cy, cz); g_vehprobe_scanned = true; }
+    if (!g_vehprobe_scanned) {
+        vehprobe_scan(have_ctr, cx, cy, cz);
+        // Is the possessed pawn the VEHICLE (boom off it directly) or the biped (find its vehicle
+        // ref)? get_local_pawn is the cheap live handle -- no object-array walk. A
+        // "...VehicleActor_C_..." full name lets P0 match the chassis mesh by NAME PREFIX (robust,
+        // unlike proximity which picked a parked Banshee over the Wraith). Dump its UPROPERTIES too,
+        // in case the pawn is the biped and holds a vehicle reference.
+        if (auto* pawn = API::get()->get_local_pawn(0)) {
+            API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE pawn = %ls (class %ls)",
+                                 pawn->get_full_name().c_str(), class_name_of(pawn).c_str());
+            vehprobe_dump_props(pawn, "pawn");
+        } else {
+            API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE: get_local_pawn(0) returned null while seated");
+        }
+        g_vehprobe_scanned = true;
+    }
 
     // Heartbeat + comparison, ~every 60 ticks (~2 s). The heartbeat runs unconditionally in stick
     // mode so a silent no-op can never happen again: it prints exactly what is readable, and lets
