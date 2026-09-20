@@ -1277,6 +1277,16 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
     int   tried_n = 0;
 
     void* first_native = nullptr;
+    // THE ONE MEASUREMENT THAT MATTERS (2026-09-19). A Steam-vs-WinGDK comparison of existing logs
+    // shows the WinGDK candidate set is the Steam set MINUS the real entry: rt+0x110, res+0x78 and
+    // res+0xC8 are identical on both, junk descriptor bytes and all, and Steam rejects those two
+    // exactly as we do. What is missing on WinGDK is res+0x10 / res+0x58 --
+    // FTextureResource::TextureRHI. So there is NO descriptor-layout difference, and the whole lax
+    // premise is wrong. Dump the FTextureResource itself when nothing is accepted: res+0x10 reading
+    // null means the render target has no RHI texture at all (and the resolve lane is the wrong
+    // place to fix it); res+0x10 reading a live heap pointer means our walk is rejecting it, which
+    // is a small, safe fix in looks_like_object / the window sizes.
+    void* first_res = nullptr;
 
     // Extent matches whose desc bytes are NOT plausible at the Steam sub-offsets, deferred for the
     // lax pass after the loop. Stays EMPTY on the Steam build (the plausible pass latches first, so
@@ -1314,6 +1324,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 const uint8_t dim = *(q + 0x0E), fmt = *(q + 0x0F);
                 const bool plausible = desc_plausible(q);
 
+                if (first_res == nullptr) first_res = res;
                 ++candidates;
                 logf("CANDIDATE #%d%s  rt+0x%X -> res %p  res+0x%X -> rhi %p  rhi+0x%X = %dx%d "
                      "(mips=%u samples=%u dim=%u fmt=%u)",
@@ -1561,6 +1572,12 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                      : "Textures exist here but none at the widget's draw size -- see the SURVEY "
                        "lines.");
         }
+    }
+
+    if (accepted == 0 && first_res != nullptr) {
+        logf("NO CANDIDATE ACCEPTED -- dumping the FTextureResource so res+0x10 (TextureRHI) can be "
+             "read directly. On Steam this object carries a live FRHITexture at +0x10 and +0x58.");
+        dump_object_shape(first_res, "FTextureResource (res)");
     }
 
 done:
