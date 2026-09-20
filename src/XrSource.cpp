@@ -422,10 +422,10 @@ bool desc_plausible(const uint8_t* q) {
 // pointer that faults on GetDesc (measured 2026-09-19 on the actual GP build). So on a lax chain we
 // resolve the resource OURSELVES, build-agnostically and with no hardcoded offset:
 //
-//   * SAFETY filter -- an ID3D12Resource created by UEVR's ID3D12Device has its VTABLE IN THE SAME
-//     MODULE as that device's vtable (device and resources are the same D3D12 implementation DLL).
-//     We only ever call GetDesc on a heap object proven to live in that module, never on a random
-//     pointer. That is what makes probing memory for the resource safe.
+//   * SAFETY filter -- IDENTITY: the candidate must carry the SAME VTABLE as an ID3D12Resource we
+//     created ourselves on UEVR's device (known_resource_vtable). "Its vtable is in the D3D12 module"
+//     was the first version's filter and it is NOT enough -- see the IDENTITY block below for what
+//     that cost. Nothing is called on a candidate that has not passed the equality check.
 //   * CORRECTNESS filter -- the resource's GetDesc must report TEXTURE2D at exactly
 //     aim_widget_draw x aim_widget_draw on the SAME device UEVR reports. That is a ValueAgreement
 //     with a number we chose ourselves, not "does it look like a pointer".
@@ -471,9 +471,91 @@ bool com_in_module(const void* obj, const void* mod_base) {
     return true;
 }
 
+// ---- IDENTITY, not neighbourhood (2026-09-19) ------------------------------------------------
+//
+// com_in_module() above proves only that an object is implemented by the same DLL as the device.
+// That is NOT proof it is an ID3D12Resource: heaps, command queues, fences, pipeline states and the
+// device itself all pass it. The first version of this scan called GetDesc (vtable slot 8) on every
+// such object, which runs SOME OTHER CLASS'S slot-8 method with the wrong `this`. An SEH guard
+// catches the fault case and nothing catches the case where that method never returns -- measured
+// in-headset: with that scan merged, the Game Pass build froze at every mission entry; without it,
+// it played. Steam never reaches this rung, so no test we run saw it.
+//
+// So the gate is now vtable EQUALITY with a resource we made ourselves on the same device. Nothing
+// is ever called on a candidate that has not passed it. com_in_module survives as a DIAGNOSTIC only
+// (it lets the log say "same-module object, different class -- not called").
+
+// POD-only so __try is legal. Creates a throwaway 4x4 texture on UEVR's device, reads the vtable
+// its ID3D12Resource carries, and releases it.
+const void* make_reference_vtable(void* device) {
+    __try {
+        ID3D12Device* dev = (ID3D12Device*)device;
+        D3D12_HEAP_PROPERTIES hp;
+        memset(&hp, 0, sizeof(hp));
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width            = 4;
+        rd.Height           = 4;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        ID3D12Resource* r = nullptr;
+        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                IID_PPV_ARGS(&r))) || r == nullptr) {
+            return nullptr;
+        }
+        const void* vt = *reinterpret_cast<void* const*>(r);
+        r->Release();
+        return vt;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// The vtable every ID3D12Resource from UEVR's device carries. Resolved once; nullptr = could not be
+// established, and every caller treats that as "refuse" (fail closed -> generated ring).
+const void* known_resource_vtable() {
+    static const void* s_vt   = nullptr;
+    static bool        s_done = false;
+    if (s_done) return s_vt;
+    auto* p = API::get()->param();
+    void* dev = (p != nullptr && p->renderer != nullptr) ? p->renderer->device : nullptr;
+    if (dev == nullptr) return nullptr;            // renderer not up yet -- try again later
+    s_done = true;
+    s_vt = make_reference_vtable(dev);
+    if (s_vt != nullptr) logf("IDENTITY: reference ID3D12Resource vtable = %p (from a 4x4 texture we "
+                              "created on UEVR's device).", s_vt);
+    else                 logf("IDENTITY: could not create a reference ID3D12Resource -- the lax "
+                              "resolve will REFUSE every candidate (fail closed, generated ring).");
+    return s_vt;
+}
+
+// Is `obj` an ID3D12Resource of the device's own implementation? Reads one qword, calls nothing.
+bool is_known_resource(const void* obj) {
+    const void* kvt = known_resource_vtable();
+    if (kvt == nullptr || obj == nullptr) return false;
+    if ((reinterpret_cast<uintptr_t>(obj) & 7u) != 0u) return false;
+    if (!mem_is_private(obj, sizeof(void*))) return false;
+    return *reinterpret_cast<void* const*>(obj) == kvt;
+}
+
 // GetDesc-validate one ID3D12Resource candidate against `want`. Extracted so the get_native_resource
 // path AND the scan share the exact same correctness gate.
-void* validate_resource(void* native, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
+//
+// `require_identity` (every LAX caller): refuse -- WITHOUT calling anything -- a pointer that is not
+// provably an ID3D12Resource. A strict (Steam) chain passes false and behaves exactly as it always
+// has; its pointer comes from a get_native_resource that is known to decode that build.
+void* validate_resource(void* native, int want, bool loud, int* out_dim, uint32_t* out_fmt,
+                        bool require_identity) {
+    if (require_identity && !is_known_resource(native)) {
+        if (loud) logf("  native %p is not a known ID3D12Resource (vtable mismatch) -- REFUSED, "
+                       "nothing called on it", native);
+        return nullptr;
+    }
     D3D12_RESOURCE_DESC d{};
     void* dev = nullptr;
     bool desc_ok;
@@ -519,11 +601,16 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
         if (loud) logf("  SCAN: could not establish UEVR's D3D12 module -- refusing to scan (fail closed)");
         return nullptr;
     }
+    if (known_resource_vtable() == nullptr) {
+        if (loud) logf("  SCAN: no reference ID3D12Resource vtable -- refusing to scan (fail closed)");
+        return nullptr;
+    }
     void* seen[kScanMaxGets] = {};
     int   seen_n   = 0;
     int   gets     = 0;
     int   checks   = 0;
     int   recursed = 0;
+    int   foreign  = 0;   // same-module objects that were NOT resources (the old scan called into these)
 
     auto try_resource = [&](void* cand, unsigned o0, int o1) -> void* {
         for (int i = 0; i < seen_n; ++i) if (seen[i] == cand) return nullptr;
@@ -532,7 +619,7 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
         ++gets;
         int dim_out = 0;
         uint32_t fmt_out = 0;
-        void* found = validate_resource(cand, want, loud, &dim_out, &fmt_out);
+        void* found = validate_resource(cand, want, loud, &dim_out, &fmt_out, /*require_identity=*/true);
         if (found == nullptr) return nullptr;
         if (loud) {
             if (o1 < 0) logf("  SCAN: FRHITexture+0x%X holds ID3D12Resource %p (%dx%d, DXGI %u) -- "
@@ -552,10 +639,18 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
         void* p0 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(rhi) + o0);
         if (p0 == nullptr || p0 == rhi) continue;
         ++checks;
-        // (a) the resource may be cached directly in the FD3D12Texture
-        if (com_in_module(p0, mod)) {
+        // (a) the resource may be cached directly in the FD3D12Texture. IDENTITY gate: only an object
+        //     carrying the reference ID3D12Resource vtable is ever handed to GetDesc.
+        if (is_known_resource(p0)) {
             if (void* r = try_resource(p0, (unsigned)o0, -1)) return r;
-            continue;   // a same-module COM object is the resource or nothing -- do not recurse into it
+            continue;
+        }
+        if (com_in_module(p0, mod)) {   // same DLL, different class: NEVER call into it, never recurse
+            ++foreign;
+            if (loud && foreign <= 6) logf("  SCAN: FRHITexture+0x%X -> %p is a same-module object of "
+                                           "ANOTHER class (vtable %p) -- not called.", (unsigned)o0, p0,
+                                           *reinterpret_cast<void* const*>(p0));
+            continue;
         }
         // (b) otherwise follow p0 as an intermediate UE heap object and look one level deeper. Reading
         //     p0's bytes is safe (readable_bytes-bounded); GetDesc still only fires on a com_in_module
@@ -569,12 +664,16 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
             void* p1 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(p0) + o1);
             if (p1 == nullptr || p1 == p0 || p1 == rhi) continue;
             ++checks;
-            if (!com_in_module(p1, mod)) continue;
+            if (!is_known_resource(p1)) {
+                if (com_in_module(p1, mod)) ++foreign;
+                continue;
+            }
             if (void* r = try_resource(p1, (unsigned)o0, (int)o1)) return r;
         }
     }
     if (loud) logf("  SCAN: no ID3D12Resource in the FRHITexture validated %dx%d on UEVR's device "
-                   "(%d GetDesc, %d probes, %d objs) -- generated ring.", want, want, gets, checks, recursed);
+                   "(%d GetDesc, %d probes, %d objs, %d same-module non-resources skipped) -- generated "
+                   "ring.", want, want, gets, checks, recursed, foreign);
     return nullptr;
 }
 
@@ -588,8 +687,21 @@ void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint3
 // the WinGDK case, where it is measured against the wrong build -- fall back to
 // resolve_native_by_scan, which finds the ID3D12Resource in the FD3D12Texture build-agnostically.
 // A strict (Steam) chain never sets this, so the scan is dead code on Steam.
+//
+// `lax`: get_native_resource is NOT CALLED AT ALL. It is UEVR's SDK invoking virtual slots 2..15 on
+// the candidate to find the one that returns a resource, against a layout measured on another build
+// -- on a lax (undecodable-build) candidate that is calling unknown methods on an unproven object,
+// the same hang class as the old scan. A lax chain resolves by the identity scan or not at all.
 void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt,
-                      bool allow_scan) {
+                      bool lax, bool allow_scan) {
+    if (lax) {
+        if (!allow_scan) {
+            if (loud) logf("  rhi %p -> lax candidate and xrlayersrcscan=0: nothing called, not "
+                           "resolved (generated ring).", rhi);
+            return nullptr;
+        }
+        return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
+    }
     void* native;
     {
 #if HALO_VR_DEV
@@ -598,7 +710,8 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
         native = call_native_guarded(rhi);
     }
     if (native != nullptr) {
-        if (void* ok = validate_resource(native, want, loud, out_dim, out_fmt)) return ok;
+        if (void* ok = validate_resource(native, want, loud, out_dim, out_fmt,
+                                         /*require_identity=*/false)) return ok;
     } else if (loud) {
         logf("  rhi %p -> get_native_resource returned null", rhi);
     }
@@ -742,7 +855,7 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
 #if HALO_VR_DEV
     ++g_split.cache_miss;
 #endif
-    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt,
+    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt, /*lax=*/g_chain.lax,
                            /*allow_scan=*/(g_chain.lax && g_cfg.xr_layer_src_scan));
 }
 
@@ -888,7 +1001,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 int dim_out = 0;
                 uint32_t fmt_out = 0;
                 void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
-                                               /*allow_scan=*/false);
+                                               /*lax=*/false, /*allow_scan=*/false);
                 if (native == nullptr) continue;
 
                 ++accepted;
@@ -946,7 +1059,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
             int dim_out = 0;
             uint32_t fmt_out = 0;
             void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
-                                           /*allow_scan=*/g_cfg.xr_layer_src_scan);
+                                           /*lax=*/true, /*allow_scan=*/g_cfg.xr_layer_src_scan);
             if (native == nullptr) continue;
 
             ++accepted;

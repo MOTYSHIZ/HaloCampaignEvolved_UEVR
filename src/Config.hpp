@@ -1906,17 +1906,18 @@ struct Config {
     // Canonical: present the game's OWN reticle render target rather than our generated ring. This
     // is what gives the layer real per-weapon art and live firing/reload animation.
     bool  xr_layer_src = true;
-    // WinGDK / Microsoft Store PARITY (2026-09-19), and the A/B TOGGLE for it. get_native_resource()
-    // -- UEVR's SDK reading the ID3D12Resource out of the FD3D12Texture -- is measured against ONE
-    // build and returns null/garbage on the Game Pass (WinGDK) binary, so the source never resolves
-    // there and the layer falls back to the generated ring. With this ON, a lax chain that cannot
-    // decode via get_native_resource resolves the resource by SCANNING the FD3D12Texture for a
-    // same-D3D12-module object whose GetDesc agrees with aimwidgetdraw (safe -- GetDesc only ever runs
-    // on a proven D3D12 object -- build-agnostic, fail-closed). It NEVER runs on Steam (that latches a
-    // STRICT chain and resolves on the first get_native_resource try), so it is a no-op there.
-    // A/B: set 0 for the pre-fix behaviour (get_native_resource only -> generated ring on WinGDK), 1
-    // for the fix (crisp game art on WinGDK). Live-reloadable, so you can flip it in headset.
-    bool  xr_layer_src_scan = true;
+    // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
+    // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)
+    // FD3D12Texture, so the source never resolves there and the layer draws the generated ring. With
+    // this ON, a LAX chain resolves the resource by scanning the FD3D12Texture for an object that
+    // carries THE SAME VTABLE as an ID3D12Resource we created ourselves on UEVR's device, then
+    // GetDesc-validates it against aimwidgetdraw. Nothing is called on a candidate before that
+    // identity check, and a lax chain never calls get_native_resource at all.
+    // WHY OFF: the first version gated on "vtable is in the D3D12 module" and FROZE the Game Pass
+    // build at every mission entry (it called GetDesc on non-resources; SEH catches faults, not
+    // hangs). This version is unproven in a headset -- turn it on only to test on Game Pass.
+    // Never reached on Steam (strict chain). Live-reloadable.
+    bool  xr_layer_src_scan = false;
     // ms. HOW LONG THE LAYER KEEPS SHOWING THE LAST CAPTURED CROSSHAIR once the game thread stops
     // capturing, before it gives up and draws the generated ring instead.
     //
