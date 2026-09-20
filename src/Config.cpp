@@ -1295,7 +1295,6 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayersrcxcheck") == 0) { g_cfg.xr_layer_src_xcheck = (v != 0.0); return true; }
     // Perf fix, ships ON. 0 forces per-tick get_native_resource()+GetDesc (pre-fix) for A/B measuring.
     if (_stricmp(key, "xrlayersrccache") == 0) { g_cfg.xr_layer_src_cache  = (v != 0.0); return true; }
-    if (_stricmp(key, "xrlayersrcscan")  == 0) { g_cfg.xr_layer_src_scan   = (v != 0.0); return true; }
     if (_stricmp(key, "xrlayersrccal")    == 0) { g_cfg.xr_layer_src_cal    = (v != 0.0); return true; }
     if (_stricmp(key, "xrlayersrcverify") == 0) { g_cfg.xr_layer_src_verify = (v != 0.0); return true; }
     if (_stricmp(key, "xrlayerringradius")== 0) { g_cfg.xr_layer_ring_radius= (float)v;   return true; }

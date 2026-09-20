@@ -255,20 +255,26 @@ struct Chain {
     int32_t off_res = -1;   // UTextureRenderTarget2D -> FTextureResource*
     int32_t off_rhi = -1;   // FTextureResource       -> FRHITexture*
     int32_t off_ext = -1;   // FRHITexture            -> int32 SizeX (SizeY at +4)
-    // LAX (2026-09-19, WinGDK/Store parity): true when this build's FRHITexture descriptor bytes are
-    // NOT at the Steam-measured sub-offsets desc_plausible() reads. The Microsoft Store / Game Pass
-    // (WinGDK) binary lays them out differently, so the desc pre-filter reads garbage and would
-    // reject the real texture forever (never latching -> the generated ring + a re-walk stutter).
-    // A lax chain disables that pre-filter and leans on the build-AGNOSTIC validate_native()
-    // (get_native_resource + a real ID3D12Resource::GetDesc + want x want + UEVR's device) as the
-    // sole gate. A lax latch is still a REAL latch -- validate_native confirmed a want x want 2D
-    // resource on UEVR's own device -- and every per-tick resolve still re-validates size+identity.
-    // Steam always latches a STRICT (lax=false) chain first, so nothing here changes Steam.
-    bool    lax     = false;
-    // off_ext < 0 is legal ONLY on a lax chain: there the resource is reached by the learned
+    // BY_PATH: this chain was found by the STRUCTURAL search, which identifies the FRHITexture by
+    // following the learned resource path to an identity-confirmed ID3D12Resource rather than by
+    // matching two int32s. Such a chain has no extent sub-offset to re-check, so off_ext is -1 and
+    // the per-tick resolve re-validates by size + resource identity instead.
+    //
+    // This field was called `lax` and meant something else: "this build puts the descriptor
+    // somewhere we do not recognise, so skip the pre-filter". That premise was REFUTED on
+    // 2026-09-19 by reading WinGDK memory directly -- the descriptor is at the same rhi+0x44 with
+    // the same layout on both store binaries. Renamed so the old meaning cannot creep back in.
+    bool    by_path = false;
+    // The structural search can find the FRHITexture sitting DIRECTLY at rt+off_res, with no second
+    // hop. That case used to latch off_rhi = 0, which reads res+0 -- the VTABLE POINTER -- as the
+    // texture: a chain that passes valid(), never resolves, and (because a latched chain gates the
+    // probe off for good) kills the feature for the whole session. An explicit flag instead of an
+    // in-band 0, because 0 is a legal offset everywhere else.
+    bool    rhi_is_res = false;
+    // off_ext < 0 is legal ONLY on a by_path chain: there the resource is reached by the learned
     // path and validated with the REAL GetDesc, which is strictly better evidence than two
-    // int32s we found by sweeping. A strict chain still requires it.
-    bool valid() const { return off_res >= 0 && off_rhi >= 0 && (off_ext >= 0 || lax); }
+    // int32s we found by sweeping. An extent-matched chain still requires it.
+    bool valid() const { return off_res >= 0 && off_rhi >= 0 && (off_ext >= 0 || by_path); }
 };
 Chain g_chain;
 
@@ -891,128 +897,33 @@ void* validate_resource(void* native, int want, bool loud, int* out_dim, uint32_
     return native;
 }
 
-// Bounds for the scan. Structural limits, not addresses -- one-time cost on a lax latch / re-host.
-constexpr size_t kScanWindow    = 0x200;   // bytes of each object swept for pointers
-constexpr int    kScanMaxGets   = 24;      // hard cap on GetDesc attempts across the whole scan
-constexpr int    kScanMaxRecurse = 16;     // level-0 heap objects we descend into (FD3D12Resource, ...)
-constexpr int    kScanMaxChecks  = 512;    // hard cap on com_in_module probes (bounds the walk cost)
-
-// Resolve the ID3D12Resource for a candidate FRHITexture WITHOUT get_native_resource. The resource is
-// either cached directly in the FD3D12Texture (level 0) or one hop away through an intermediate UE
-// object such as FD3D12Resource (level 1); both are covered. Lax path only; fails closed.
-void* resolve_native_by_scan(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
-    const void* mod = device_impl_module_base();
-    if (mod == nullptr) {
-        if (loud) logf("  SCAN: could not establish UEVR's D3D12 module -- refusing to scan (fail closed)");
-        return nullptr;
-    }
-    if (known_resource_vtable() == nullptr) {
-        if (loud) logf("  SCAN: no reference ID3D12Resource vtable -- refusing to scan (fail closed)");
-        return nullptr;
-    }
-    void* seen[kScanMaxGets] = {};
-    int   seen_n   = 0;
-    int   gets     = 0;
-    int   checks   = 0;
-    int   recursed = 0;
-    int   foreign  = 0;   // same-module objects that were NOT resources (the old scan called into these)
-
-    auto try_resource = [&](void* cand, unsigned o0, int o1) -> void* {
-        for (int i = 0; i < seen_n; ++i) if (seen[i] == cand) return nullptr;
-        if (gets >= kScanMaxGets) return nullptr;
-        if (seen_n < kScanMaxGets) seen[seen_n++] = cand;
-        ++gets;
-        int dim_out = 0;
-        uint32_t fmt_out = 0;
-        void* found = validate_resource(cand, want, loud, &dim_out, &fmt_out, /*require_identity=*/true);
-        if (found == nullptr) return nullptr;
-        if (loud) {
-            if (o1 < 0) logf("  SCAN: FRHITexture+0x%X holds ID3D12Resource %p (%dx%d, DXGI %u) -- "
-                             "resolved WITHOUT get_native_resource.", o0, found, dim_out, dim_out, fmt_out);
-            else        logf("  SCAN: FRHITexture+0x%X -> obj+0x%X holds ID3D12Resource %p (%dx%d, "
-                             "DXGI %u) -- resolved WITHOUT get_native_resource.",
-                             o0, (unsigned)o1, found, dim_out, dim_out, fmt_out);
-        }
-        if (out_dim != nullptr) *out_dim = dim_out;
-        if (out_fmt != nullptr) *out_fmt = fmt_out;
-        return found;
-    };
-
-    const size_t lim0 = scan_limit(rhi, kScanWindow);
-    for (size_t o0 = 8; o0 + sizeof(void*) <= lim0 && gets < kScanMaxGets && checks < kScanMaxChecks;
-         o0 += sizeof(void*)) {
-        void* p0 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(rhi) + o0);
-        if (p0 == nullptr || p0 == rhi) continue;
-        ++checks;
-        // (a) the resource may be cached directly in the FD3D12Texture. IDENTITY gate: only an object
-        //     carrying the reference ID3D12Resource vtable is ever handed to GetDesc.
-        if (is_known_resource(p0)) {
-            if (void* r = try_resource(p0, (unsigned)o0, -1)) return r;
-            continue;
-        }
-        if (com_in_module(p0, mod)) {   // same DLL, different class: NEVER call into it, never recurse
-            ++foreign;
-            if (loud && foreign <= 6) logf("  SCAN: FRHITexture+0x%X -> %p is a same-module object of "
-                                           "ANOTHER class (vtable %p) -- not called.", (unsigned)o0, p0,
-                                           *reinterpret_cast<void* const*>(p0));
-            continue;
-        }
-        // (b) otherwise follow p0 as an intermediate UE heap object and look one level deeper. Reading
-        //     p0's bytes is safe (readable_bytes-bounded); GetDesc still only fires on a com_in_module
-        //     pointer found inside it.
-        if (recursed >= kScanMaxRecurse) continue;
-        if (!mem_is_private(p0, sizeof(void*))) continue;
-        ++recursed;
-        const size_t lim1 = scan_limit(p0, kScanWindow);
-        for (size_t o1 = 8; o1 + sizeof(void*) <= lim1 && gets < kScanMaxGets && checks < kScanMaxChecks;
-             o1 += sizeof(void*)) {
-            void* p1 = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(p0) + o1);
-            if (p1 == nullptr || p1 == p0 || p1 == rhi) continue;
-            ++checks;
-            if (!is_known_resource(p1)) {
-                if (com_in_module(p1, mod)) ++foreign;
-                continue;
-            }
-            if (void* r = try_resource(p1, (unsigned)o0, (int)o1)) return r;
-        }
-    }
-    if (loud) logf("  SCAN: no ID3D12Resource in the FRHITexture validated %dx%d on UEVR's device "
-                   "(%d GetDesc, %d probes, %d objs, %d same-module non-resources skipped) -- generated "
-                   "ring.", want, want, gets, checks, recursed, foreign);
-    return nullptr;
-}
-
 // Turn a candidate FRHITexture into a validated ID3D12Resource, or nullptr with a reason logged.
 //
 // THIS is the ValueAgreement rung. The dimensions are known independently (they are what we asked
 // UE for with SetDrawSize), so a resource that reports them is agreeing with a number we did not
 // read out of the same place we read the pointer.
 //
-// `allow_scan` (LAX PATH ONLY): when UEVR's get_native_resource does not yield a valid resource --
-// the WinGDK case, where it is measured against the wrong build -- fall back to
-// resolve_native_by_scan, which finds the ID3D12Resource in the FD3D12Texture build-agnostically.
-// A strict (Steam) chain never sets this, so the scan is dead code on Steam.
-//
-// `lax`: get_native_resource is NOT CALLED AT ALL. It is UEVR's SDK invoking virtual slots 2..15 on
-// the candidate to find the one that returns a resource, against a layout measured on another build
-// -- on a lax (undecodable-build) candidate that is calling unknown methods on an unproven object,
-// the same hang class as the old scan. A lax chain resolves by the identity scan or not at all.
-void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt,
-                      bool lax, bool allow_scan) {
-    if (lax) {
-        // get_native_resource is NOT called here. It works on a REAL FRHITexture (proven on this
-        // build against UEVR's own target), but a lax candidate is by definition one we could not
-        // decode, and UEVR's SDK walks vtable slots hunting for a resource -- on a wrong object
-        // that is the hang class that froze Game Pass. The learned path calls nothing.
-        if (g_cfg.xr_layer_src_cal && learned_resource_path()) {
-            if (void* ok = resolve_by_learned_path(rhi, want, loud, out_dim, out_fmt)) return ok;
-            if (loud) logf("  rhi %p -> nothing valid at the calibrated path for this texture.", rhi);
-        } else if (loud && g_cfg.xr_layer_src_cal) {
-            logf("  rhi %p -> no calibrated resource path (see the CAL lines); not resolved.", rhi);
-        }
-        if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
-        return nullptr;
-    }
+// There is no "lax" mode and no FD3D12Texture scan any more. Both existed to work around a
+// WinGDK descriptor layout that does not exist (see the note in probe()), and the scan is what
+// froze Game Pass at mission entry: it called a real vtable slot on an object it had only guessed
+// was a resource, and an SEH guard catches a FAULT, not an endless loop. The honest ladder is
+// get_native_resource when the vtable is long enough to call, and the call-free learned path
+// otherwise -- both ending at an identity-confirmed ID3D12Resource of exactly want x want.
+// The learned path's POINTER WALK only -- no GetDesc, no virtual call. Used by the per-tick cache
+// to confirm a by_path chain still ends at the same ID3D12Resource.
+void* learned_resource_ptr(void* rhi) {
+    if (rhi == nullptr || g_res_off1 < 0) return nullptr;
+    if (addrcascade::readable_bytes(rhi, (size_t)g_res_off1 + 8) < (size_t)g_res_off1 + 8) return nullptr;
+    void* mid = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(rhi) + g_res_off1);
+    // g_res_off2 < 0 is a LEGAL calibration: it means the resource sat at off1 with no intermediate
+    // hop. Treating that as "cannot derive" would silently disable the cache fast-hit on any build
+    // calibrated that way -- correct output, but paying get_native_resource + GetDesc every tick.
+    if (mid == nullptr || g_res_off2 < 0) return mid;
+    if (addrcascade::readable_bytes(mid, (size_t)g_res_off2 + 8) < (size_t)g_res_off2 + 8) return nullptr;
+    return *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(mid) + g_res_off2);
+}
+
+void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
     // THE ONLY PLACE THE FULL SLOT COUNT IS REQUIRED. A short-but-legitimate vtable (the game's
     // FRHITexture has 14 entries) must still be READ -- it just must not be CALLED, because
     // get_native_resource walks slots 2..15 and would run whatever follows the vtable. The learned
@@ -1026,8 +937,8 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
         }
         if (g_cfg.xr_layer_src_cal && learned_resource_path()) {
             if (void* ok = resolve_by_learned_path(rhi, want, loud, out_dim, out_fmt)) return ok;
+            if (loud) logf("  rhi %p -> nothing valid at the calibrated path for this texture.", rhi);
         }
-        if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
         return nullptr;
     }
 
@@ -1043,11 +954,6 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
                                          /*require_identity=*/false)) return ok;
     } else if (loud) {
         logf("  rhi %p -> get_native_resource returned null", rhi);
-    }
-    if (allow_scan) {
-        if (loud) logf("  rhi %p -> get_native_resource did not resolve; scanning the FD3D12Texture "
-                       "for the ID3D12Resource (WinGDK/Store path).", rhi);
-        return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
     }
     return nullptr;
 }
@@ -1123,14 +1029,21 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
         // ---- LIGHTWEIGHT HIT PATH: reach rhi with guarded reads, no vtable classification ---------
         if (cache_on) {
             // res only needs to be readable far enough to read the FRHITexture pointer out of it.
-            if (res != nullptr &&
-                addrcascade::readable_bytes(res, (size_t)g_chain.off_rhi + 8) >= (size_t)g_chain.off_rhi + 8) {
-                void* rhi2 = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
+            const size_t res_need = g_chain.rhi_is_res ? 0x40 : (size_t)g_chain.off_rhi + 8;
+            if (res != nullptr && addrcascade::readable_bytes(res, res_need) >= res_need) {
+                void* rhi2 = g_chain.rhi_is_res
+                                 ? res
+                                 : *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
                 if (rhi2 == cached_rhi && g_chain.off_ext < 0) {
-                    // No extent offset (lax): rhi-identity is the invariant, and the cached native
-                    // was validated through the learned path + real GetDesc at miss time.
-                    rhi = rhi2;
-                    fast_hit = true;
+                    // No extent offset (structural chain), so there is no size to re-check. Pointer
+                    // identity ALONE is not enough: if the texture were freed and another object
+                    // landed at the same address we would feed a dangling resource every frame. So
+                    // re-derive through the learned offsets and require the SAME resource we cached.
+                    // Two guarded derefs; no GetDesc, no virtual call.
+                    if (learned_resource_ptr(rhi2) == cached_native && cached_native != nullptr) {
+                        rhi = rhi2;
+                        fast_hit = true;
+                    }
                 } else if (rhi2 == cached_rhi &&
                     addrcascade::readable_bytes(rhi2, (size_t)g_chain.off_ext + 16) >= (size_t)g_chain.off_ext + 16) {
                     auto* rb = reinterpret_cast<const uint8_t*>(rhi2);
@@ -1140,7 +1053,7 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
                     // rhi-identity (rhi2 == cached_rhi, checked above) + extent agreement is the
                     // invariant, and the cached native was validated via real GetDesc at miss time.
                     // A strict chain is unchanged.
-                    if (x == want && y == want && (g_chain.lax || desc_plausible(rb + g_chain.off_ext))) {
+                    if (x == want && y == want && (g_chain.by_path || desc_plausible(rb + g_chain.off_ext))) {
                         rhi = rhi2;
                         fast_hit = true;
                     }
@@ -1150,8 +1063,12 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
 
         // ---- FULL PATH: classify each hop (safe for the virtual call), then the extent+desc gates --
         if (!fast_hit) {
-            if (!looks_like_object(res, (size_t)g_chain.off_rhi + 8)) return nullptr;
-            rhi = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
+            if (!looks_like_object(res, g_chain.rhi_is_res ? 0x40 : (size_t)g_chain.off_rhi + 8)) {
+                return nullptr;
+            }
+            rhi = g_chain.rhi_is_res
+                      ? res
+                      : *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
             if (!looks_like_object(rhi, (g_chain.off_ext >= 0) ? (size_t)g_chain.off_ext + 8 : 0x40)) {
                 return nullptr;
             }
@@ -1170,7 +1087,7 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
             // A LAX chain relies on the authoritative validate_native() below (get_native_resource +
             // real GetDesc + want x want + device) instead of the Steam-measured desc pre-filter,
             // which reads garbage on this build. A strict chain keeps the cheap pre-filter, unchanged.
-            if (!g_chain.lax && !desc_plausible(rhi_b + g_chain.off_ext)) return nullptr;
+            if (!g_chain.by_path && !desc_plausible(rhi_b + g_chain.off_ext)) return nullptr;
         }
         ext_done: ;
     }
@@ -1193,8 +1110,7 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
 #if HALO_VR_DEV
     ++g_split.cache_miss;
 #endif
-    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt, /*lax=*/g_chain.lax,
-                           /*allow_scan=*/(g_chain.lax && g_cfg.xr_layer_src_scan));
+    return validate_native(rhi, want, /*loud=*/false, out_dim, out_fmt);
 }
 
 // ============================================================================================
@@ -1350,15 +1266,6 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
     // is a small, safe fix in looks_like_object / the window sizes.
     void* first_res = nullptr;
 
-    // Extent matches whose desc bytes are NOT plausible at the Steam sub-offsets, deferred for the
-    // lax pass after the loop. Stays EMPTY on the Steam build (the plausible pass latches first, so
-    // it is never consumed); on the WinGDK / Microsoft Store binary every real match lands here and
-    // the lax pass validates them through the build-agnostic path. Bounded and de-duplicated by
-    // FRHITexture pointer, exactly like `tried`. See Chain::lax.
-    struct LaxCand { void* rhi; int32_t o1, o2, oe; };
-    LaxCand lax_cand[MAX_ATTEMPTS] = {};
-    int     lax_n = 0;
-
     // 0x28 skips the UObject header (vtable, flags, index, outer, name, class), none of which can
     // be an FTextureResource pointer.
     for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim; o1 += 8) {
@@ -1396,19 +1303,14 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
                 if (mode < 2) continue;   // mode 1 LOGS AND STOPS. No virtual call.
 
-                // EVERY extent match is LOGGED; a plausible one is CALLED here. An IMPLAUSIBLE one is
-                // DEFERRED to the lax pass after the loop: on the Steam build the real chain is
-                // plausible and latches below, so the deferred list is never consumed; on a build
-                // that lays the descriptor out differently (WinGDK / Microsoft Store) EVERY real match
-                // is "implausible" here, and the lax pass validates those via get_native_resource once
-                // the plausible pass has latched nothing. Filtering the log stays off -- the evidence
-                // of the actual layout is exactly what made this writable in the first place.
-                if (!plausible) {
-                    bool have = false;
-                    for (int i = 0; i < lax_n; ++i) if (lax_cand[i].rhi == rhi) { have = true; break; }
-                    if (!have && lax_n < MAX_ATTEMPTS) lax_cand[lax_n++] = { rhi, o1, o2, oe };
-                    continue;
-                }
+                // EVERY extent match is LOGGED; only a PLAUSIBLE one is validated. An implausible
+                // one is junk on BOTH store binaries -- measured 2026-09-19 by reading WinGDK memory
+                // directly: the descriptor sits at the same rhi+0x44 with the same layout there, and
+                // the implausible matches (res+0x78, res+0xC8) are the very same junk Steam rejects.
+                // The earlier belief that WinGDK "lays the descriptor out differently", and the lax
+                // pass built on it, were both wrong; what actually hid the real texture was our own
+                // 16-vtable-slot filter. Keep LOGGING them -- that evidence is what settled this.
+                if (!plausible) continue;
 
                 bool seen = false;
                 for (int i = 0; i < tried_n; ++i) if (tried[i] == rhi) { seen = true; break; }
@@ -1423,8 +1325,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
                 int dim_out = 0;
                 uint32_t fmt_out = 0;
-                void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
-                                               /*lax=*/false, /*allow_scan=*/false);
+                void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out);
                 if (native == nullptr) continue;
 
                 ++accepted;
@@ -1457,60 +1358,6 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
         }
     }
 
-    // ---- LAX PASS: nothing PLAUSIBLE latched, but this build may carry the descriptor at
-    //      sub-offsets we do not recognise (WinGDK / Microsoft Store). Validate the deferred
-    //      extent-matches through the build-AGNOSTIC path (get_native_resource + real GetDesc) and
-    //      latch a LAX chain if one is real. Never runs on Steam, where a plausible chain latches
-    //      above (first_native != nullptr). Reached only by falling off the loop, not by `goto done`
-    //      (the attempt-cap path is a Steam-shaped "many plausible candidates" case).
-    if (first_native == nullptr && lax_n > 0) {
-        logf("no plausible-desc candidate latched, but %d extent-match(es) had an unrecognised "
-             "descriptor layout -- validating them via get_native_resource (this may be the "
-             "Microsoft Store / WinGDK binary; see the LAX note in XrSource).", lax_n);
-        for (int i = 0; i < lax_n; ++i) {
-            void* rhi = lax_cand[i].rhi;
-            bool seen = false;
-            for (int k = 0; k < tried_n; ++k) if (tried[k] == rhi) { seen = true; break; }
-            if (seen) continue;   // already validated (and failed) as a plausible candidate above
-            if (attempts >= MAX_ATTEMPTS) {
-                logf("  attempt cap (%d) reached in the lax pass -- stopping.", MAX_ATTEMPTS);
-                break;
-            }
-            tried[tried_n++] = rhi;
-            ++attempts;
-
-            int dim_out = 0;
-            uint32_t fmt_out = 0;
-            void* native = validate_native(rhi, want, /*loud=*/true, &dim_out, &fmt_out,
-                                           /*lax=*/true, /*allow_scan=*/g_cfg.xr_layer_src_scan);
-            if (native == nullptr) continue;
-
-            ++accepted;
-            logf("ACCEPTED (LAX): chain rt+0x%X res+0x%X rhi+0x%X -> ID3D12Resource %p, %dx%d, DXGI "
-                 "format %u. The descriptor bytes are not at the Steam sub-offsets, but the resource "
-                 "VALIDATED at aimwidgetdraw on UEVR's own device (via get_native_resource or, on this "
-                 "build, the FD3D12Texture scan above) -- latching a LAX chain (desc pre-filter off for "
-                 "it; every resolve still re-validates size + identity).",
-                 (unsigned)lax_cand[i].o1, (unsigned)lax_cand[i].o2, (unsigned)lax_cand[i].oe,
-                 native, dim_out, dim_out, fmt_out);
-
-            if (first_native == nullptr) {
-                first_native = native;
-                out->off_res = lax_cand[i].o1;
-                out->off_rhi = lax_cand[i].o2;
-                out->off_ext = lax_cand[i].oe;
-                out->lax     = true;
-            } else if (native == first_native) {
-                logf("  (same resource reached by a second lax path -- corroboration, chain kept)");
-            } else {
-                logf("AMBIGUOUS (LAX): a second lax chain validated a DIFFERENT resource (%p vs %p). "
-                     "Refusing to latch either -- re-probe with a more distinctive aimwidgetdraw.",
-                     native, first_native);
-                *out = Chain{};
-                return;
-            }
-        }
-    }
 
     // ---- STRUCTURAL PASS: find the FRHITexture by WHAT IT IS, not by two int32s -------------
     //
@@ -1549,7 +1396,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                         logf("  SURVEY: rt+0x%X (direct) -> texture %p  dim=%d %dx%d fmt=%u%s",
                              (unsigned)o1, r, sd, sw, sh, sf, match ? "  <== MATCH" : "");
                     }
-                    if (match) { found = r; f_o1 = o1; f_o2 = 0; f_oe = -1; f_w = sw; break; }
+                    if (match) { found = r; f_o1 = o1; f_o2 = -1; f_oe = -1; f_w = sw; break; }
                 }
             }
 
@@ -1605,14 +1452,15 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
         } else if (found != nullptr) {
             ++accepted;
             logf("ACCEPTED (STRUCTURAL): chain rt+0x%X res+0x%X -> resource %p (%dx%d). Extent "
-                 "offset %s. Latching a LAX chain.", (unsigned)f_o1, (unsigned)f_o2, found, f_w,
-                 f_w, (f_oe >= 0) ? "found" : "not present -- GetDesc is the gate");
+                 "offset %s. Latching a STRUCTURAL chain.", (unsigned)f_o1, (unsigned)f_o2, found,
+                 f_w, f_w, (f_oe >= 0) ? "found" : "not present -- GetDesc is the gate");
             first_native = found;
             g_subject_empty = false;
-            out->off_res = f_o1;
-            out->off_rhi = f_o2;
-            out->off_ext = f_oe;
-            out->lax     = true;
+            out->off_res    = f_o1;
+            out->off_rhi    = (f_o2 >= 0) ? f_o2 : 0;   // unused when rhi_is_res
+            out->off_ext    = f_oe;
+            out->by_path    = true;
+            out->rhi_is_res = (f_o2 < 0);
         } else {
             // PROOF OF ABSENCE, not failure to decode -- only meaningful because the same search is
             // validated on Steam. surveyed == 0 means not one texture of any size hangs off this
@@ -2076,8 +1924,8 @@ void xrsource_tick(uint32_t tick) {
             if (g_chain.valid()) {
                 for (auto& t : g_t) t.next_resolve = tick;   // resolve through it next tick
                 logf("LATCHED %s chain rt+0x%X / res+0x%X / rhi+0x%X. Re-validated on every resolve.",
-                     g_chain.lax ? "LAX (Store/WinGDK: desc pre-filter off, validate_native is the gate)"
-                                 : "strict",
+                     g_chain.by_path ? "structural (learned resource path; no extent offset)"
+                                     : "extent-matched",
                      (unsigned)g_chain.off_res, (unsigned)g_chain.off_rhi, (unsigned)g_chain.off_ext);
             }
         }
