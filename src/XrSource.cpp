@@ -1360,21 +1360,28 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
 
     // ---- STRUCTURAL PASS: find the FRHITexture by WHAT IT IS, not by two int32s -------------
     //
-    // Measured on Game Pass 2026-09-19: every candidate above is chosen because some offset in it
-    // reads want x want as two int32s -- a weak signal that matches plenty of non-textures on this
-    // binary. Proof they were not textures: applying the learned resource path to them fails at the
-    // FIRST hop ("+0xB8 is not a readable object"), where every real FRHITexture has its resource.
+    // The probe's candidates are chosen because some offset reads want x want as two int32s -- a
+    // weak signal that matches plenty of non-textures. This searches instead for the object that IS
+    // a texture: one whose LEARNED resource path yields an identity-confirmed ID3D12Resource of
+    // exactly want x want on UEVR's device. Nothing is called on an unproven object.
     //
-    // So search for the object that IS one: sweep rt -> res -> rhi and accept the first rhi whose
-    // learned path yields an identity-confirmed ID3D12Resource reporting exactly want x want on
-    // UEVR's device. That is enormously stronger evidence than an extent match, and it calls nothing
-    // on an unproven object. The extent offset is then looked up for free if the texture happens to
-    // carry one; a lax chain does not need it.
-    if (first_native == nullptr && g_cfg.xr_layer_src_cal && learned_resource_path()) {
-        logf("no candidate validated -- searching for a REAL FRHITexture by the learned resource "
-             "path instead of by extent bytes.");
-        int surveyed = 0;
-        for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim && first_native == nullptr; o1 += 8) {
+    // xrlayersrcverify RUNS THIS AS A CONTROL even when the normal path already latched, and
+    // reports whether it agrees. On Steam the normal path always latches, so without that switch
+    // this code never executes there -- which means "it found nothing on Game Pass" could equally
+    // well mean "this search does not work anywhere". The control is how you tell those apart.
+    if ((first_native == nullptr || g_cfg.xr_layer_src_verify) && g_cfg.xr_layer_src_cal &&
+        learned_resource_path()) {
+        const bool latching = (first_native == nullptr);
+        logf(latching ? "no candidate validated -- searching for a REAL FRHITexture by the learned "
+                        "resource path instead of by extent bytes."
+                      : "VERIFY: normal path already latched; running the structural search anyway "
+                        "as a CONTROL (it will not change what is latched).");
+        void*   found   = nullptr;
+        int32_t f_o1 = -1, f_o2 = -1, f_oe = -1;
+        int     f_w  = 0;
+        int     surveyed = 0;
+
+        for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim && found == nullptr; o1 += 8) {
             void* res = *reinterpret_cast<void* const*>(rt_base + o1);
             if (!looks_like_object(res, 0x40)) continue;
 
@@ -1382,24 +1389,13 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
             {
                 int sw = 0, sh = 0, sd = 0; uint32_t sf = 0;
                 if (void* r = survey_learned_path(res, &sw, &sh, &sd, &sf)) {
+                    const bool match = (sd == 3 && sw == want && sh == want);
                     if (surveyed < 24) {
                         ++surveyed;
                         logf("  SURVEY: rt+0x%X (direct) -> texture %p  dim=%d %dx%d fmt=%u%s",
-                             (unsigned)o1, r, sd, sw, sh, sf,
-                             (sd == 3 && sw == want && sh == want) ? "  <== MATCH" : "");
+                             (unsigned)o1, r, sd, sw, sh, sf, match ? "  <== MATCH" : "");
                     }
-                    if (sd == 3 && sw == want && sh == want) {
-                        ++accepted;
-                        logf("ACCEPTED (STRUCTURAL, direct): chain rt+0x%X -> rhi %p -> resource %p "
-                             "(%dx%d). Latching a LAX chain with off_rhi=0.", (unsigned)o1, res, r,
-                             sw, sh);
-                        first_native = r;
-                        out->off_res = o1;
-                        out->off_rhi = 0;
-                        out->off_ext = -1;
-                        out->lax     = true;
-                        break;
-                    }
+                    if (match) { found = r; f_o1 = o1; f_o2 = 0; f_oe = -1; f_w = sw; break; }
                 }
             }
 
@@ -1409,28 +1405,17 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 if (rhi == res || rhi == (void*)rt) continue;
                 if (!looks_like_object(rhi, 0x40)) continue;
 
-                // Report ANY texture reachable by the learned path, whatever its size. If this
-                // render target has no GPU texture behind it at all, that is the real answer and it
-                // is not a memory-layout problem.
-                {
-                    int sw = 0, sh = 0, sd = 0; uint32_t sf = 0;
-                    if (void* r = survey_learned_path(rhi, &sw, &sh, &sd, &sf)) {
-                        if (surveyed < 24) {
-                            ++surveyed;
-                            logf("  SURVEY: rt+0x%X res+0x%X -> texture %p  dim=%d %dx%d fmt=%u%s",
-                                 (unsigned)o1, (unsigned)o2, r, sd, sw, sh, sf,
-                                 (sd == 3 && sw == want && sh == want) ? "  <== MATCH" : "");
-                        }
-                    }
+                int sw = 0, sh = 0, sd = 0; uint32_t sf = 0;
+                void* r = survey_learned_path(rhi, &sw, &sh, &sd, &sf);
+                if (r == nullptr) continue;
+                const bool match = (sd == 3 && sw == want && sh == want);
+                if (surveyed < 24) {
+                    ++surveyed;
+                    logf("  SURVEY: rt+0x%X res+0x%X -> texture %p  dim=%d %dx%d fmt=%u%s",
+                         (unsigned)o1, (unsigned)o2, r, sd, sw, sh, sf, match ? "  <== MATCH" : "");
                 }
+                if (!match) continue;
 
-                int dim_out = 0;
-                uint32_t fmt_out = 0;
-                void* native = resolve_by_learned_path(rhi, want, /*loud=*/false, &dim_out, &fmt_out);
-                if (native == nullptr) continue;
-
-                // Found a real texture of exactly the right size. Record an extent offset too if it
-                // carries one, so the cheap per-tick hit path can use it.
                 int32_t oe = -1;
                 const size_t ext_lim = scan_limit(rhi, EXT_WINDOW);
                 for (int32_t t = 0x08; (size_t)t + 16 <= ext_lim; t += 4) {
@@ -1438,30 +1423,46 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                     if (*reinterpret_cast<const int32_t*>(q) == want &&
                         *reinterpret_cast<const int32_t*>(q + 4) == want) { oe = t; break; }
                 }
-
-                ++accepted;
-                logf("ACCEPTED (STRUCTURAL): chain rt+0x%X res+0x%X -> rhi %p, resolved through the "
-                     "LEARNED resource path to ID3D12Resource %p (%dx%d, DXGI %u). Extent offset "
-                     "%s. Latching a LAX chain.", (unsigned)o1, (unsigned)o2, rhi, native,
-                     dim_out, dim_out, fmt_out,
-                     (oe >= 0) ? "found" : "not present -- GetDesc is the gate");
-                first_native = native;
-                out->off_res = o1;
-                out->off_rhi = o2;
-                out->off_ext = oe;
-                out->lax     = true;
+                found = r; f_o1 = o1; f_o2 = o2; f_oe = oe; f_w = sw;
                 break;
             }
         }
-        if (first_native == nullptr) {
+
+        if (!latching) {
+            // THE CONTROL VERDICT. This is the line that says whether the search works at all.
+            if (found == nullptr) {
+                logf("VERIFY: DISAGREE -- the normal path resolved %p, but the structural search "
+                     "found NOTHING (%d texture(s) of any size surveyed). THE STRUCTURAL SEARCH IS "
+                     "BROKEN, not the platform. Fix it here before reading anything into its Game "
+                     "Pass result.", first_native, surveyed);
+            } else if (found == first_native) {
+                logf("VERIFY: AGREE -- the structural search independently found the SAME resource "
+                     "%p at rt+0x%X res+0x%X (%dx%d). The search is correct on this build.",
+                     found, (unsigned)f_o1, (unsigned)f_o2, f_w, f_w);
+            } else {
+                logf("VERIFY: DIFFERENT -- normal path %p, structural search %p at rt+0x%X "
+                     "res+0x%X. Two textures of the right size exist; the search needs a tie-break.",
+                     first_native, found, (unsigned)f_o1, (unsigned)f_o2);
+            }
+        } else if (found != nullptr) {
+            ++accepted;
+            logf("ACCEPTED (STRUCTURAL): chain rt+0x%X res+0x%X -> resource %p (%dx%d). Extent "
+                 "offset %s. Latching a LAX chain.", (unsigned)f_o1, (unsigned)f_o2, found, f_w,
+                 f_w, (f_oe >= 0) ? "found" : "not present -- GetDesc is the gate");
+            first_native = found;
+            out->off_res = f_o1;
+            out->off_rhi = f_o2;
+            out->off_ext = f_oe;
+            out->lax     = true;
+        } else {
             logf("STRUCTURAL pass found no FRHITexture reporting %dx%d under this render target "
                  "(%d texture(s) of ANY size surveyed). %s", want, want, surveyed,
                  (surveyed == 0)
-                     ? "NOT ONE texture is reachable here, so this render target has no GPU "
-                       "resource behind it -- the widget never rendered into it. That is not a "
-                       "memory-layout problem."
+                     ? "NOT ONE texture is reachable here. Either this target has no GPU resource "
+                       "behind it, or this search does not work -- run it on Steam with "
+                       "xrlayersrcverify=1 before concluding anything."
                      : "Textures exist here but none at the widget's draw size -- see the SURVEY "
-                       "lines for what is actually allocated.");
+                       "lines.");
         }
     }
 

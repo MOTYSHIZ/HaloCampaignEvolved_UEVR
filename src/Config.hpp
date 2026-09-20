@@ -1915,6 +1915,12 @@ struct Config {
     // reports independently -- then read that learned offset out of the reticule's texture. No
     // measured constant, identical code on Steam and WinGDK, fails closed. Set 0 to A/B it off.
     bool  xr_layer_src_cal = true;
+    // CONTROL (2026-09-19). Run the structural search EVEN WHEN the normal path already
+    // latched, and report whether it finds the SAME resource. On Steam -- where the normal
+    // path works -- that is the only way to find out whether the structural search itself is
+    // correct, because on Steam it otherwise never executes. If it disagrees there, the search
+    // is the bug, not the platform. Diagnostic only: it never changes what is latched.
+    bool  xr_layer_src_verify = false;
     float xr_layer_ring_radius = 0.16f;    // was 0.40 -- halved 2026-09-19 (in-headset feedback)
     float xr_layer_ring_thick  = 0.0046875f; // 75% of the previous 0.0125
     float xr_layer_ring_dot    = 0.010f;
