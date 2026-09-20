@@ -746,6 +746,32 @@ bool learned_resource_path() {
     return false;
 }
 
+// SURVEY: what does the learned path yield for this object, at ANY size? Used to answer "is this
+// render target backed by a GPU texture at all", which is a different question from "is it 256x256".
+// Returns the resource and fills w/h, or nullptr. Calls nothing on an unproven object.
+void* survey_learned_path(void* obj, int* w, int* h, int* dim, uint32_t* fmt) {
+    if (g_res_off1 < 0 || obj == nullptr) return nullptr;
+    auto read_at = [](void* base, int off) -> void* {
+        const size_t need = (size_t)off + sizeof(void*);
+        if (base == nullptr || scan_limit(base, need) < need) return nullptr;
+        return *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(base) + off);
+    };
+    void* cand = read_at(obj, g_res_off1);
+    if (g_res_off2 >= 0) {
+        if (cand == nullptr || !mem_is_private(cand, sizeof(void*))) return nullptr;
+        cand = read_at(cand, g_res_off2);
+    }
+    if (!is_known_resource(cand)) return nullptr;
+    D3D12_RESOURCE_DESC d{};
+    void* dev = nullptr;
+    if (!desc_guarded(cand, &d, &dev)) return nullptr;
+    if (w != nullptr)   *w   = (int)d.Width;
+    if (h != nullptr)   *h   = (int)d.Height;
+    if (dim != nullptr) *dim = (int)d.Dimension;
+    if (fmt != nullptr) *fmt = (uint32_t)d.Format;
+    return cand;
+}
+
 // Apply the learned path to a candidate FRHITexture. NOTHING is called on an unproven object: two
 // bounded pointer reads, a vtable-equality check, and only then the real GetDesc.
 void* resolve_by_learned_path(void* rhi, int want, bool loud, int* out_dim, uint32_t* out_fmt) {
@@ -1347,14 +1373,56 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
     if (first_native == nullptr && g_cfg.xr_layer_src_cal && learned_resource_path()) {
         logf("no candidate validated -- searching for a REAL FRHITexture by the learned resource "
              "path instead of by extent bytes.");
+        int surveyed = 0;
         for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim && first_native == nullptr; o1 += 8) {
             void* res = *reinterpret_cast<void* const*>(rt_base + o1);
             if (!looks_like_object(res, 0x40)) continue;
+
+            // (a) the FRHITexture may sit DIRECTLY in the render target, not one hop down.
+            {
+                int sw = 0, sh = 0, sd = 0; uint32_t sf = 0;
+                if (void* r = survey_learned_path(res, &sw, &sh, &sd, &sf)) {
+                    if (surveyed < 24) {
+                        ++surveyed;
+                        logf("  SURVEY: rt+0x%X (direct) -> texture %p  dim=%d %dx%d fmt=%u%s",
+                             (unsigned)o1, r, sd, sw, sh, sf,
+                             (sd == 3 && sw == want && sh == want) ? "  <== MATCH" : "");
+                    }
+                    if (sd == 3 && sw == want && sh == want) {
+                        ++accepted;
+                        logf("ACCEPTED (STRUCTURAL, direct): chain rt+0x%X -> rhi %p -> resource %p "
+                             "(%dx%d). Latching a LAX chain with off_rhi=0.", (unsigned)o1, res, r,
+                             sw, sh);
+                        first_native = r;
+                        out->off_res = o1;
+                        out->off_rhi = 0;
+                        out->off_ext = -1;
+                        out->lax     = true;
+                        break;
+                    }
+                }
+            }
+
             const size_t res_lim = scan_limit(res, RES_WINDOW);
             for (int32_t o2 = 0x08; (size_t)o2 + 8 <= res_lim; o2 += 8) {
                 void* rhi = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + o2);
                 if (rhi == res || rhi == (void*)rt) continue;
                 if (!looks_like_object(rhi, 0x40)) continue;
+
+                // Report ANY texture reachable by the learned path, whatever its size. If this
+                // render target has no GPU texture behind it at all, that is the real answer and it
+                // is not a memory-layout problem.
+                {
+                    int sw = 0, sh = 0, sd = 0; uint32_t sf = 0;
+                    if (void* r = survey_learned_path(rhi, &sw, &sh, &sd, &sf)) {
+                        if (surveyed < 24) {
+                            ++surveyed;
+                            logf("  SURVEY: rt+0x%X res+0x%X -> texture %p  dim=%d %dx%d fmt=%u%s",
+                                 (unsigned)o1, (unsigned)o2, r, sd, sw, sh, sf,
+                                 (sd == 3 && sw == want && sh == want) ? "  <== MATCH" : "");
+                        }
+                    }
+                }
 
                 int dim_out = 0;
                 uint32_t fmt_out = 0;
@@ -1386,8 +1454,14 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
             }
         }
         if (first_native == nullptr) {
-            logf("STRUCTURAL pass found no FRHITexture reporting %dx%d anywhere under this render "
-                 "target -- generated ring.", want, want);
+            logf("STRUCTURAL pass found no FRHITexture reporting %dx%d under this render target "
+                 "(%d texture(s) of ANY size surveyed). %s", want, want, surveyed,
+                 (surveyed == 0)
+                     ? "NOT ONE texture is reachable here, so this render target has no GPU "
+                       "resource behind it -- the widget never rendered into it. That is not a "
+                       "memory-layout problem."
+                     : "Textures exist here but none at the widget's draw size -- see the SURVEY "
+                       "lines for what is actually allocated.");
         }
     }
 
