@@ -935,7 +935,6 @@ local function draw_user()
                      "changed shows an 'x' button: press it to go back to the default.")
     imgui.spacing()
     draw_catalog(user_catalog, "user")
-    draw_tier_sections()
 end
 
 local function draw_dev()
@@ -1478,6 +1477,14 @@ uevr.sdk.callbacks.on_draw_ui(function()
         if imgui.collapsing_header("Halo VR Calibration") then
             imgui.indent(4)
             draw_calib()
+            imgui.unindent(4)
+        end        -- Experimental LAST, and top level rather than buried in User Settings. These features are
+        -- off by default and change between releases, so they are a place you go deliberately --
+        -- not something to scroll past while looking for a normal setting. Last because a player
+        -- should meet the settled panels first.
+        if imgui.collapsing_header("Halo VR Experimental") then
+            imgui.indent(4)
+            draw_tier_sections()
             imgui.unindent(4)
         end
     end)
