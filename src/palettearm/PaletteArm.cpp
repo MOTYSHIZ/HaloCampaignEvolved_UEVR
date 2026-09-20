@@ -1388,15 +1388,18 @@ bool drive_palette(const pa::PaletteAccess& access) {
     const int melee_mode = s_melee_from_button.load(std::memory_order_relaxed) ? prefs.melee_btn_anim
                                                                                 : prefs.melee_anim;
     float join_w = 0.0f, off_w = 0.0f, stock_w_all = 0.0f, hold_w = 0.0f;
+    float melee_join_w = 0.0f;   // the MELEE gate's own join weight -- see the thrust below
     {
-        const struct { int mode; float w; } gates[3] = {
-            { melee_mode,        s_melee.weight },
-            { prefs.equip_anim,  s_equip.weight },
-            { prefs.sprint_anim, s_sprint.weight },
+        const struct { int mode; float w; bool is_melee; } gates[3] = {
+            { melee_mode,        s_melee.weight,  true  },
+            { prefs.equip_anim,  s_equip.weight,  false },
+            { prefs.sprint_anim, s_sprint.weight, false },
         };
         for (const auto& g : gates) {
             switch (g.mode) {
-                case 0:  join_w = (std::max)(join_w, g.w); break;
+                case 0:  join_w = (std::max)(join_w, g.w);
+                         if (g.is_melee) melee_join_w = g.w;
+                         break;
                 case 2:  stock_w_all = (std::max)(stock_w_all, g.w); break;
                 case 3:  hold_w = (std::max)(hold_w, g.w); off_w = (std::max)(off_w, g.w); break;
                 default: off_w = (std::max)(off_w, g.w); break;                        // 1
@@ -1547,8 +1550,19 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const bool frozen = s_rigw_frozen.load(std::memory_order_relaxed);
                 const bool had    = s_recoil.have_ref;
                 // ...and NOT while a sprint plays: its pose would become "rest" in a second and a half.
+                // THE MELEE LUNGE, THROUGH THE SAME DOOR AS RECOIL (pameleethrust, 2026-09-19).
+                // The rigid carry pins the weapon marker to the controller, so every authored
+                // TRANSLATION is cancelled -- including the punch's thrust, which is why a
+                // button melee flipped the Magnum on the spot with no forward travel ("no visible
+                // move forward for the hand and weapon"). RecoilPass already lets bounded authored
+                // motion through; the lunge is simply bigger than its cap (measured 13-87 cm
+                // against parecoilmax = 8). So while a JOINED melee plays, the cap is raised to
+                // pameleethrust, faded by the gate's own weight so the door opens and shuts with
+                // the animation. The aim hand rides the gun (pahandgun), so both travel together.
+                const float thrust_cap_cm = g_cfg.pa_recoil_max_cm +
+                    (std::max)(0.0f, g_cfg.pa_melee_thrust_cm - g_cfg.pa_recoil_max_cm) * melee_join_w;
                 kick = s_recoil.update(marker_now, stock_w, frozen ? 0.0f : g_cfg.pa_recoil,
-                                       g_cfg.pa_recoil_max_cm * 0.01f, live && !frozen && !s_sprint.active);
+                                       thrust_cap_cm * 0.01f, live && !frozen && !s_sprint.active);
                 if (live) {
                     // The STOCK support wrist in the STOCK marker's frame: neither has been touched
                     // yet (the carry is applied below, the arms after that).
@@ -2485,8 +2499,17 @@ bool drive_palette(const pa::PaletteAccess& access) {
             const float out = plan.left_side ? 1.0f : -1.0f;
             pole_dir = torso_basis.left * out - torso_basis.up * s_arm_tuning.pole_down;
         }
+        // NO STRETCH ON A HAND AN ANIMATION OWNS (pajoinstretch, 2026-09-19). Under a JOINED
+        // animation the support hand's target is the authored wrist carried onto the gun, and the
+        // gun is pinned to the aim controller -- so an authored punch that reaches far in front of
+        // the weapon asks for a target well beyond the arm, and the stretch obliges: "the left hand
+        // animation stretches the arm ridiculously". The stretch exists for the PLAYER over-reaching
+        // with their own hand; an animation asking is not the player asking. Clamped to real reach
+        // for that hand only; the aim arm and every un-joined frame keep pastretch.
+        pa::ArmTuning tune_this = tuning_w;
+        if (!plan.is_aim && g_cfg.pa_join_stretch == 0 && join_w > 0.001f) tune_this.stretch_max = 1.0f;
         if (!pa::solve_arm_for_tracked_wrist(access.palette, *plan.arm, wrist_target,
-                                             desired_wrist, pole_dir, tuning_w)) {
+                                             desired_wrist, pole_dir, tune_this)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[5];);
             continue;
         }

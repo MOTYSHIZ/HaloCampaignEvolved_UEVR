@@ -4166,6 +4166,18 @@ struct Config {
     // palettearm_note_pad(): the gesture's melee is the injected press (melee_press_active()), anything
     // else is a button. Same four values. Per weapon: the 7th wpnanim field.
     int   pa_melee_btn_anim = 0;      // DEV KEY pameleebtnanim
+    // TWO THINGS A **JOINED** ANIMATION (mode 0) NEEDS, both found on the first button-melee run
+    // (2026-09-19). Mode 0 hands the free hand to the authored animation while both hands still
+    // track, and the weapon stays pinned to the aim controller by the rigid carry:
+    //  * pameleethrust (cm): the cap RecoilPass is given while a joined MELEE plays, so the punch's
+    //    authored forward travel passes through the carry instead of being cancelled with every
+    //    other authored translation. Faded by the gate's weight. Set it to parecoilmax to switch
+    //    the lunge off. Melee only: a reload or a throw should NOT move the gun off the hand.
+    //  * pajoinstretch: 0 (DEFAULT) clamps the joined hand to its real reach -- the animation's
+    //    wrist can sit far in front of a gun that is pinned to the controller, and the stretch
+    //    turned that into a rubber arm. 1 = the old behaviour (pastretch applies to it as well).
+    float pa_melee_thrust_cm = 60.0f;  // DEV KEY pameleethrust
+    int   pa_join_stretch   = 0;       // DEV KEY pajoinstretch
     int   pa_equip_anim    = 1;       // DEV KEY paequipanim
     int   pa_sprint_anim   = 0;       // DEV KEY pasprintanim
     int   pa_sprint_mask   = 0x0040;  // DEV KEY pasprintmask: XInput LEFT_THUMB, the sprint button on the default pad map
