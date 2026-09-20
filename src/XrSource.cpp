@@ -1472,9 +1472,55 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 // is rendering into it. Report what the widget component and the target itself say,
                 // so the next question is a UE one (is the widget drawing?) rather than another
                 // memory hunt.
-                if (auto* wc = g_ret_widget_comp.get_checked(L"WidgetComponent")) {
-                    logf("  WIDGET: component %p class=%ls", wc,
-                         class_name_of(reinterpret_cast<API::UObject*>(wc)).c_str());
+                // WHY is nothing drawing? Read the component's own state through reflection.
+                // These are UE questions with UE answers -- on Steam the same component renders a
+                // 256x256 texture, so whichever of these differs IS the bug.
+                if (auto* wcp = g_ret_widget_comp.get_checked(L"WidgetComponent")) {
+                    auto* wc = reinterpret_cast<API::UObject*>(wcp);
+                    logf("  WIDGET: component %p class=%ls", wc, class_name_of(wc).c_str());
+
+                    // The hosted widget itself. NULL here is the whole bug: a WidgetComponent with
+                    // no Widget has nothing to render, so its render target is never allocated.
+                    void** wobj = wc->get_property_data<void*>(L"Widget");
+                    if (wobj == nullptr) {
+                        logf("  WIDGET: property 'Widget' NOT FOUND by reflection");
+                    } else if (*wobj == nullptr) {
+                        logf("  WIDGET: Widget = NULL  <== the component has nothing to draw. This "
+                             "is why the render target has no texture.");
+                    } else {
+                        logf("  WIDGET: Widget = %p class=%ls", *wobj,
+                             class_name_of(reinterpret_cast<API::UObject*>(*wobj)).c_str());
+                    }
+
+                    if (auto* ds = wc->get_property_data<int32_t>(L"DrawSize")) {
+                        logf("  WIDGET: DrawSize = %dx%d (want %d)", ds[0], ds[1], want);
+                    } else {
+                        logf("  WIDGET: property 'DrawSize' NOT FOUND");
+                    }
+                    if (auto* sp = wc->get_property_data<uint8_t>(L"Space")) {
+                        logf("  WIDGET: Space = %u (0=World, 1=Screen)", (unsigned)*sp);
+                    }
+                    if (auto* hid = wc->get_property_data<bool>(L"bHiddenInGame")) {
+                        logf("  WIDGET: bHiddenInGame = %d", (int)*hid);
+                    }
+                    if (auto* vis = wc->get_property_data<bool>(L"bVisible")) {
+                        logf("  WIDGET: bVisible = %d", (int)*vis);
+                    }
+                    if (auto* mr = wc->get_property_data<bool>(L"bManuallyRedraw")) {
+                        logf("  WIDGET: bManuallyRedraw = %d (if 1, it only redraws on request)",
+                             (int)*mr);
+                    }
+                    if (auto* rr = wc->get_property_data<bool>(L"bRedrawRequested")) {
+                        logf("  WIDGET: bRedrawRequested = %d", (int)*rr);
+                    }
+                    if (auto* rt2 = wc->get_property_data<float>(L"RedrawTime")) {
+                        logf("  WIDGET: RedrawTime = %.3f", (double)*rt2);
+                    }
+                    if (auto* tw = wc->get_property_data<void*>(L"WidgetClass")) {
+                        logf("  WIDGET: WidgetClass = %p%s", *tw,
+                             (*tw == nullptr) ? "  <== no class set, so no widget is ever built"
+                                              : "");
+                    }
                 }
                 logf("  WIDGET: render target %p class=%ls -- object exists, no GPU texture. On "
                      "Steam the same search finds a %dx%d texture here, so the difference is that "
