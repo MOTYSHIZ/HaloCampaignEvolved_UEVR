@@ -3964,6 +3964,26 @@ void xrlayer_tick() {
         g_regen.store(true, std::memory_order_relaxed);
     }
 
+    // SAME ARGUMENT, FOR THE RING'S GEOMETRY. xrlayerringradius / xrlayerringthick / xrlayerringdot
+    // feed generate_bitmap exactly as the colour does, so they need exactly the same edge -- and
+    // they are documented to players in halo_vr_user_reference.txt as things to tune. Without this
+    // they read back correctly, log nothing, and change nothing until the next session: the
+    // aimwidgettint failure the comment above was written about, repeated one key later.
+    //
+    // Tracked here rather than in the snapshot struct because these are fallback-ring cosmetics,
+    // not part of the layer's per-frame state.
+    {
+        static float s_ring_r = -1.0f, s_ring_t = -1.0f, s_ring_d = -1.0f;
+        if (s_ring_r != g_cfg.xr_layer_ring_radius || s_ring_t != g_cfg.xr_layer_ring_thick ||
+            s_ring_d != g_cfg.xr_layer_ring_dot) {
+            const bool first = (s_ring_r < 0.0f);
+            s_ring_r = g_cfg.xr_layer_ring_radius;
+            s_ring_t = g_cfg.xr_layer_ring_thick;
+            s_ring_d = g_cfg.xr_layer_ring_dot;
+            if (!first) g_regen.store(true, std::memory_order_relaxed);   // not on the first poll
+        }
+    }
+
     // SAME ARGUMENT, FOR THE GUIDE'S ART MODE. grabguidemode selects between the label and the beam
     // and they are two different pictures in one cell, so the cell has to be re-generated when it
     // moves -- otherwise the quad changes shape while still showing the other mode's art. Tracked
