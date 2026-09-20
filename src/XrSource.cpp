@@ -565,6 +565,13 @@ bool is_known_resource(const void* obj) {
 
 constexpr size_t kCalWindow = 0x800;   // bytes of UEVR's own texture swept looking for its resource
 
+// Set when a VALIDATED structural search proves the subject has NO GPU texture behind it at
+// any size (Game Pass). That is different from 'failed to decode it': there is nothing to
+// decode, so re-walking ~294k objects only buys a 290 ms hitch. Verified sound by running the
+// same search on Steam (xrlayersrcverify), where it independently finds the resource the
+// normal path uses.
+bool g_subject_empty = false;
+
 int  g_res_off1     = -1;      // FRHITexture + off1 -> (intermediate | resource)
 int  g_res_off2     = -1;      // intermediate + off2 -> resource; < 0 = it sat at off1
 bool g_res_off_done = false;   // calibration has RUN (not necessarily succeeded)
@@ -1450,11 +1457,30 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                  "offset %s. Latching a LAX chain.", (unsigned)f_o1, (unsigned)f_o2, found, f_w,
                  f_w, (f_oe >= 0) ? "found" : "not present -- GetDesc is the gate");
             first_native = found;
+            g_subject_empty = false;
             out->off_res = f_o1;
             out->off_rhi = f_o2;
             out->off_ext = f_oe;
             out->lax     = true;
         } else {
+            // PROOF OF ABSENCE, not failure to decode -- only meaningful because the same search is
+            // validated on Steam. surveyed == 0 means not one texture of any size hangs off this
+            // target.
+            if (surveyed == 0) {
+                g_subject_empty = true;
+                // WHY is it empty? The render target object exists (we are walking it) but nothing
+                // is rendering into it. Report what the widget component and the target itself say,
+                // so the next question is a UE one (is the widget drawing?) rather than another
+                // memory hunt.
+                if (auto* wc = g_ret_widget_comp.get_checked(L"WidgetComponent")) {
+                    logf("  WIDGET: component %p class=%ls", wc,
+                         class_name_of(reinterpret_cast<API::UObject*>(wc)).c_str());
+                }
+                logf("  WIDGET: render target %p class=%ls -- object exists, no GPU texture. On "
+                     "Steam the same search finds a %dx%d texture here, so the difference is that "
+                     "the widget is not being rendered into its target on this build.",
+                     rt, class_name_of(rt).c_str(), want, want);
+            }
             logf("STRUCTURAL pass found no FRHITexture reporting %dx%d under this render target "
                  "(%d texture(s) of ANY size surveyed). %s", want, want, surveyed,
                  (surveyed == 0)
@@ -1478,6 +1504,9 @@ done:
 // Driving it
 // ============================================================================================
 
+// ~5 minutes at the ~32 Hz game tick. The stood-down re-test interval: long enough that the
+// hitch stops being a symptom, short enough to self-heal without a level transition.
+constexpr uint32_t kProbeEmptyTicks = 32 * 60 * 5;
 uint32_t g_next_poll   = 0;   // cheap subject re-check gate: base cadence, NEVER decays (2026-09-18)
 uint32_t g_probe_ready = 0;   // expensive probe() gate: decays per-subject (renamed from g_next_probe)
 
@@ -1866,10 +1895,25 @@ void xrsource_tick(uint32_t tick) {
             g_probe_subject  = subject;
             g_probe_attempts = 0;
             g_probe_ready    = tick;   // due immediately
+            g_subject_empty  = false;  // a different target is a different question
         }
 
         if (subject == nullptr) {
             set_status("no render target to probe (neither the widget's nor a made one)");
+        } else if (g_subject_empty) {
+            // STOOD DOWN. This target has no GPU texture behind it, proven by a search that is
+            // validated on Steam -- so the expensive walk cannot succeed, and running it is pure
+            // hitch (measured 290-400 ms, a 2.8 Hz frame). Re-probe rarely rather than never, so a
+            // target that starts being rendered into is still picked up without a level change.
+            if ((int32_t)(tick - g_probe_ready) >= 0) {
+                g_probe_ready = tick + kProbeEmptyTicks;
+                g_subject_empty = false;   // let exactly one walk through to re-test
+                set_status("render target has no GPU texture behind it -- probe stood down "
+                           "(re-tests occasionally); generated ring");
+            } else {
+                set_status("render target has no GPU texture behind it -- probe stood down; "
+                           "generated ring");
+            }
         } else if ((int32_t)(tick - g_probe_ready) >= 0) {
             // This subject is due for the expensive walk. It decays only while THIS subject keeps
             // failing to latch (WinGDK); a subject change above already reset it to base cadence.
