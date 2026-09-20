@@ -1950,7 +1950,6 @@ struct Config {
     // build at every mission entry (it called GetDesc on non-resources; SEH catches faults, not
     // hangs). This version is unproven in a headset -- turn it on only to test on Game Pass.
     // Never reached on Steam (strict chain). Live-reloadable.
-    bool  xr_layer_src_scan = false;
     // ms. HOW LONG THE LAYER KEEPS SHOWING THE LAST CAPTURED CROSSHAIR once the game thread stops
     // capturing, before it gives up and draws the generated ring instead.
     //
