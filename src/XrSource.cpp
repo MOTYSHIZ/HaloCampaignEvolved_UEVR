@@ -1183,6 +1183,73 @@ constexpr int MAX_ATTEMPTS = 12;
 // `out` is where a successful walk LATCHES its chain. Parameterised rather than writing g_chain
 // directly so the cross-check can run a second walk into a scratch Chain and compare, instead of
 // overwriting the one nine slots are already resolving through.
+// Report the WidgetComponent's own state. Called on proof of absence (Game Pass, where the render
+// target has no texture) AND under xrlayersrcverify on a build where everything works (Steam) --
+// the DIFF between those two dumps is the bug. Reading it on the broken build alone proved little:
+// every field looked correct there, which rules things out but names nothing.
+//
+// CAVEAT ON BITFIELDS: bVisible/bHiddenInGame/bRegistered are UE bitfields (`uint8 bX : 1`), and
+// reflection hands back the byte they share. A value like 127 is several flags at once, NOT "true".
+// Compare the two platforms' bytes against each other; do not read one in isolation.
+void dump_widget_state(API::UObject* rt, int want, const char* why) {
+    logf("  WIDGET STATE (%s):", why);
+    auto* wcp = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    if (wcp == nullptr) {
+        logf("  WIDGET: no WidgetComponent handle");
+    } else {
+        auto* wc = reinterpret_cast<API::UObject*>(wcp);
+        logf("  WIDGET: component %p class=%ls", wc, class_name_of(wc).c_str());
+
+        void** wobj = wc->get_property_data<void*>(L"Widget");
+        if (wobj == nullptr)            logf("  WIDGET: 'Widget' property NOT FOUND");
+        else if (*wobj == nullptr)      logf("  WIDGET: Widget = NULL (nothing to draw)");
+        else                            logf("  WIDGET: Widget = %p class=%ls", *wobj,
+                                             class_name_of(reinterpret_cast<API::UObject*>(*wobj)).c_str());
+
+        if (auto* ds = wc->get_property_data<int32_t>(L"DrawSize"))
+            logf("  WIDGET: DrawSize = %dx%d (want %d)", ds[0], ds[1], want);
+        if (auto* sp = wc->get_property_data<uint8_t>(L"Space"))
+            logf("  WIDGET: Space = %u (0=World, 1=Screen)", (unsigned)*sp);
+        if (auto* tm = wc->get_property_data<uint8_t>(L"TickMode"))
+            logf("  WIDGET: TickMode = %u (0=Disabled, 1=Automatic, 2=EnabledWhenVisible)",
+                 (unsigned)*tm);
+        if (auto* gm = wc->get_property_data<uint8_t>(L"GeometryMode"))
+            logf("  WIDGET: GeometryMode = %u", (unsigned)*gm);
+        // Bitfield BYTES -- compare across platforms, never read in isolation (see caveat above).
+        if (auto* b = wc->get_property_data<uint8_t>(L"bHiddenInGame"))
+            logf("  WIDGET: bHiddenInGame byte = 0x%02X", (unsigned)*b);
+        if (auto* b = wc->get_property_data<uint8_t>(L"bVisible"))
+            logf("  WIDGET: bVisible byte = 0x%02X", (unsigned)*b);
+        if (auto* b = wc->get_property_data<uint8_t>(L"bManuallyRedraw"))
+            logf("  WIDGET: bManuallyRedraw byte = 0x%02X", (unsigned)*b);
+        if (auto* b = wc->get_property_data<uint8_t>(L"bRedrawRequested"))
+            logf("  WIDGET: bRedrawRequested byte = 0x%02X", (unsigned)*b);
+        if (auto* b = wc->get_property_data<uint8_t>(L"bDrawAtDesiredSize"))
+            logf("  WIDGET: bDrawAtDesiredSize byte = 0x%02X", (unsigned)*b);
+        if (auto* b = wc->get_property_data<uint8_t>(L"bWindowFocusable"))
+            logf("  WIDGET: bWindowFocusable byte = 0x%02X", (unsigned)*b);
+        if (auto* rtm = wc->get_property_data<float>(L"RedrawTime"))
+            logf("  WIDGET: RedrawTime = %.3f", (double)*rtm);
+        if (auto* op = wc->get_property_data<float>(L"Opacity"))
+            logf("  WIDGET: Opacity = %.3f", (double)*op);
+
+        // Does the component's OWN RenderTarget property point at the object we walk?
+        if (auto** crt = wc->get_property_data<void*>(L"RenderTarget"))
+            logf("  WIDGET: component RenderTarget = %p  (we are walking %p)%s", *crt, (void*)rt,
+                 (*crt == (void*)rt) ? "  same" : "  <== DIFFERENT OBJECT");
+    }
+    if (rt != nullptr) {
+        logf("  WIDGET: render target %p class=%ls", (void*)rt, class_name_of(rt).c_str());
+        if (auto* sx = rt->get_property_data<int32_t>(L"SizeX"))
+            logf("  WIDGET: target SizeX/SizeY = %dx%d", sx[0],
+                 rt->get_property_data<int32_t>(L"SizeY") ? *rt->get_property_data<int32_t>(L"SizeY") : -1);
+        if (auto* f = rt->get_property_data<uint8_t>(L"RenderTargetFormat"))
+            logf("  WIDGET: target RenderTargetFormat = %u", (unsigned)*f);
+        if (auto* b = rt->get_property_data<uint8_t>(L"bAutoGenerateMips"))
+            logf("  WIDGET: target bAutoGenerateMips byte = 0x%02X", (unsigned)*b);
+    }
+}
+
 void probe(API::UObject* rt, int want, int mode, Chain* out) {
     logf("PROBE mode %d: rt=%p looking for a %dx%d texture.", mode, (void*)rt, want, want);
     logf("  NOTE: %d is the value of aimwidgetdraw. If it is a round number you will get "
@@ -1442,7 +1509,11 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                      "found NOTHING (%d texture(s) of any size surveyed). THE STRUCTURAL SEARCH IS "
                      "BROKEN, not the platform. Fix it here before reading anything into its Game "
                      "Pass result.", first_native, surveyed);
+                dump_widget_state(rt, want, "CONTROL: this build RESOLVES -- diff against the "
+                                  "Game Pass dump");
             } else if (found == first_native) {
+                dump_widget_state(rt, want, "CONTROL: this build RESOLVES -- diff against the "
+                                  "Game Pass dump");
                 logf("VERIFY: AGREE -- the structural search independently found the SAME resource "
                      "%p at rt+0x%X res+0x%X (%dx%d). The search is correct on this build.",
                      found, (unsigned)f_o1, (unsigned)f_o2, f_w, f_w);
@@ -1468,64 +1539,8 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
             // target.
             if (surveyed == 0) {
                 g_subject_empty = true;
-                // WHY is it empty? The render target object exists (we are walking it) but nothing
-                // is rendering into it. Report what the widget component and the target itself say,
-                // so the next question is a UE one (is the widget drawing?) rather than another
-                // memory hunt.
-                // WHY is nothing drawing? Read the component's own state through reflection.
-                // These are UE questions with UE answers -- on Steam the same component renders a
-                // 256x256 texture, so whichever of these differs IS the bug.
-                if (auto* wcp = g_ret_widget_comp.get_checked(L"WidgetComponent")) {
-                    auto* wc = reinterpret_cast<API::UObject*>(wcp);
-                    logf("  WIDGET: component %p class=%ls", wc, class_name_of(wc).c_str());
-
-                    // The hosted widget itself. NULL here is the whole bug: a WidgetComponent with
-                    // no Widget has nothing to render, so its render target is never allocated.
-                    void** wobj = wc->get_property_data<void*>(L"Widget");
-                    if (wobj == nullptr) {
-                        logf("  WIDGET: property 'Widget' NOT FOUND by reflection");
-                    } else if (*wobj == nullptr) {
-                        logf("  WIDGET: Widget = NULL  <== the component has nothing to draw. This "
-                             "is why the render target has no texture.");
-                    } else {
-                        logf("  WIDGET: Widget = %p class=%ls", *wobj,
-                             class_name_of(reinterpret_cast<API::UObject*>(*wobj)).c_str());
-                    }
-
-                    if (auto* ds = wc->get_property_data<int32_t>(L"DrawSize")) {
-                        logf("  WIDGET: DrawSize = %dx%d (want %d)", ds[0], ds[1], want);
-                    } else {
-                        logf("  WIDGET: property 'DrawSize' NOT FOUND");
-                    }
-                    if (auto* sp = wc->get_property_data<uint8_t>(L"Space")) {
-                        logf("  WIDGET: Space = %u (0=World, 1=Screen)", (unsigned)*sp);
-                    }
-                    if (auto* hid = wc->get_property_data<bool>(L"bHiddenInGame")) {
-                        logf("  WIDGET: bHiddenInGame = %d", (int)*hid);
-                    }
-                    if (auto* vis = wc->get_property_data<bool>(L"bVisible")) {
-                        logf("  WIDGET: bVisible = %d", (int)*vis);
-                    }
-                    if (auto* mr = wc->get_property_data<bool>(L"bManuallyRedraw")) {
-                        logf("  WIDGET: bManuallyRedraw = %d (if 1, it only redraws on request)",
-                             (int)*mr);
-                    }
-                    if (auto* rr = wc->get_property_data<bool>(L"bRedrawRequested")) {
-                        logf("  WIDGET: bRedrawRequested = %d", (int)*rr);
-                    }
-                    if (auto* rt2 = wc->get_property_data<float>(L"RedrawTime")) {
-                        logf("  WIDGET: RedrawTime = %.3f", (double)*rt2);
-                    }
-                    if (auto* tw = wc->get_property_data<void*>(L"WidgetClass")) {
-                        logf("  WIDGET: WidgetClass = %p%s", *tw,
-                             (*tw == nullptr) ? "  <== no class set, so no widget is ever built"
-                                              : "");
-                    }
-                }
-                logf("  WIDGET: render target %p class=%ls -- object exists, no GPU texture. On "
-                     "Steam the same search finds a %dx%d texture here, so the difference is that "
-                     "the widget is not being rendered into its target on this build.",
-                     rt, class_name_of(rt).c_str(), want, want);
+                // Every field looked correct here, which is why the Steam diff matters.
+                dump_widget_state(rt, want, "Game Pass: target has NO GPU texture");
             }
             logf("STRUCTURAL pass found no FRHITexture reporting %dx%d under this render target "
                  "(%d texture(s) of ANY size surveyed). %s", want, want, surveyed,
