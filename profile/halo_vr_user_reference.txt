@@ -209,7 +209,7 @@
 # Ring radius, as a fraction of the cell (0.20 = a ring half the width of the old one).
 #xrlayerringradius=0.20
 #xrlayerringthick=0.009375
-#xrlayerringdot=0.030
+#xrlayerringdot=0.010
 
 # ================================== CROSSHAIR BRIGHTNESS & HUD ==================================
 # The crosshair the mod hosts at the aim point -- the game's own art, hit marker included.
