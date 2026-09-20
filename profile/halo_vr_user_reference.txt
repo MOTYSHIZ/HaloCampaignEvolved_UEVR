@@ -207,7 +207,9 @@
 # the band's width, so 0.025 draws a band 5% of the cell wide; lower it for a finer ring that
 # hides less of the scene, raise it if the ring is hard to see. Dot is the centre dot's radius;
 # 0 for no dot.
-#xrlayerringthick=0.0125
+# Ring radius, as a fraction of the cell (0.20 = a ring half the width of the old one).
+#xrlayerringradius=0.20
+#xrlayerringthick=0.009375
 #xrlayerringdot=0.030
 
 # ================================== CROSSHAIR BRIGHTNESS & HUD ==================================
