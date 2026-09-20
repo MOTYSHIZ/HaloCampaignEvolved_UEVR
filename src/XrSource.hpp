@@ -95,34 +95,35 @@
 // EVERY tick (the pre-fix behaviour): the safe fallback and the A/B control for the measurement.
 
 // ============================================================================================
-// BUILD PORTABILITY: STRICT vs LAX CHAINS (2026-09-19) -- Steam Win64 vs WinGDK / Microsoft Store
+// BUILD PORTABILITY (settled 2026-09-19) -- Steam Win64 vs WinGDK / Microsoft Store
 // ============================================================================================
-// desc_plausible() reads mips/samples/dimension/format at FIXED sub-offsets of the FRHITexture
-// descriptor, MEASURED ON THE STEAM Win64 BINARY. The Microsoft Store / Game Pass (WinGDK) binary
-// lays that descriptor out differently, so those bytes are garbage there -- and using desc_plausible
-// as a GATE meant the probe rejected every real extent-match on WinGDK, never latched, re-walked
-// forever (the "every other second" stutter a Game Pass player reported) and fell back to the
-// generated ring. That is a per-platform time bomb of exactly the kind the repo's address rule and
-// the PRE-RELEASE PLATFORM AUDIT exist to catch: a byte-offset measured on ONE store's binary.
+// A Game Pass player reported an "every other second" stutter and the generated ring instead of the
+// game's crosshair. The probe found nothing on that build, re-walked forever, and fell back.
 //
-// THE FIX is a two-speed acceptance, with NO hardcoded WinGDK offsets -- the layout is DISCOVERED
-// per build:
-//   * validate_native() is BUILD-AGNOSTIC: it asks the runtime, never a guessed byte. First it tries
-//     UEVR's get_native_resource() + a real ID3D12Resource::GetDesc() (want x want + UEVR's device).
-//     But get_native_resource ITSELF is measured against ONE build and returns null/garbage on WinGDK
-//     (verified 2026-09-19), so a lax chain falls back to resolve_native_by_scan(): it finds the
-//     ID3D12Resource inside the FD3D12Texture by scanning (2 levels, bounded) for a heap object whose
-//     vtable is in UEVR's own D3D12 module -- the SAFETY gate, so GetDesc only ever runs on a proven
-//     D3D12 object -- and whose GetDesc agrees with aimwidgetdraw -- the CORRECTNESS gate. Still no
-//     hardcoded offset, still fail-closed. On Steam the strict chain resolves on the first
-//     get_native_resource try, so the scan is dead there.
-//   * probe() prefers a PLAUSIBLE candidate (Steam: latches a STRICT chain, byte-for-byte unchanged).
-//     Only if nothing plausible validates does it validate the IMPLAUSIBLE extent-matches through
-//     validate_native and latch a LAX chain (Chain::lax). The desc pre-filter is then disabled for
-//     that chain on BOTH the per-tick hit path (rhi-identity + extent is the invariant) and the miss
-//     path (validate_native is the gate). A lax latch is still a real, validated resource.
-// So Steam is unchanged and WinGDK gets the same crisp game art. A distinctive aimwidgetdraw still
-// helps on a lax build (fewer coincidental extent-matches to validate); the probe log says so.
+// THE CAUSE WAS OURS, and it was not a layout difference. looks_like_object() rejected any candidate
+// unless the first SIXTEEN vtable slots were code in a mapped image. The game's FRHITexture class has
+// FOURTEEN virtual functions, so slots 14/15 are whatever read-only data the linker put after the
+// vtable -- on WinGDK, a `double` constant. The real texture was discarded before it could become a
+// candidate. STEAM PASSED THAT CHECK BY LUCK: the same 14-entry vtable survives there only because
+// the data after it happens to look like image addresses. A Steam relink would have broken Steam the
+// same silent way, so the rule was wrong on both platforms.
+//
+// Fixed by counting leading code slots instead of demanding 16, and requiring the full count ONLY
+// immediately before UEVR's get_native_resource(), which invokes slots 2..15 -- the hazard was always
+// the CALL, never the data walk. A class with a short vtable is read normally and resolved through
+// the call-free learned resource path.
+//
+// REFUTED, and do not re-derive it: "the WinGDK binary lays the FRHITexture descriptor out
+// differently, so desc_plausible() reads garbage there." Measured by reading WinGDK memory directly
+// -- the descriptor is at the same rhi+0x44 with the same layout on both store binaries (verified
+// against a render target whose true size UE reflection reported independently), and the
+// "implausible" matches at res+0x78 / res+0xC8 are the very same junk Steam rejects. The lax pass
+// and the FD3D12Texture scan built on that premise are GONE; the scan is also what froze Game Pass
+// at mission entry, by calling a real vtable slot on an object it had only guessed was a resource.
+//
+// Chain::by_path (formerly Chain::lax) survives with a different meaning: a chain found by the
+// STRUCTURAL search, which identifies the texture by following the learned resource path rather than
+// by matching two int32s, and so has no extent sub-offset to re-check.
 
 #pragma once
 
