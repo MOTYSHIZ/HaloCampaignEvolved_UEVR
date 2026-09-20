@@ -221,7 +221,10 @@ struct Chain {
     // resource on UEVR's own device -- and every per-tick resolve still re-validates size+identity.
     // Steam always latches a STRICT (lax=false) chain first, so nothing here changes Steam.
     bool    lax     = false;
-    bool valid() const { return off_res >= 0 && off_rhi >= 0 && off_ext >= 0; }
+    // off_ext < 0 is legal ONLY on a lax chain: there the resource is reached by the learned
+    // path and validated with the REAL GetDesc, which is strictly better evidence than two
+    // int32s we found by sweeping. A strict chain still requires it.
+    bool valid() const { return off_res >= 0 && off_rhi >= 0 && (off_ext >= 0 || lax); }
 };
 Chain g_chain;
 
@@ -1028,7 +1031,12 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
             if (res != nullptr &&
                 addrcascade::readable_bytes(res, (size_t)g_chain.off_rhi + 8) >= (size_t)g_chain.off_rhi + 8) {
                 void* rhi2 = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
-                if (rhi2 == cached_rhi &&
+                if (rhi2 == cached_rhi && g_chain.off_ext < 0) {
+                    // No extent offset (lax): rhi-identity is the invariant, and the cached native
+                    // was validated through the learned path + real GetDesc at miss time.
+                    rhi = rhi2;
+                    fast_hit = true;
+                } else if (rhi2 == cached_rhi &&
                     addrcascade::readable_bytes(rhi2, (size_t)g_chain.off_ext + 16) >= (size_t)g_chain.off_ext + 16) {
                     auto* rb = reinterpret_cast<const uint8_t*>(rhi2);
                     const int32_t x = *reinterpret_cast<const int32_t*>(rb + g_chain.off_ext);
@@ -1049,7 +1057,10 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
         if (!fast_hit) {
             if (!looks_like_object(res, (size_t)g_chain.off_rhi + 8)) return nullptr;
             rhi = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + g_chain.off_rhi);
-            if (!looks_like_object(rhi, (size_t)g_chain.off_ext + 8)) return nullptr;
+            if (!looks_like_object(rhi, (g_chain.off_ext >= 0) ? (size_t)g_chain.off_ext + 8 : 0x40)) {
+                return nullptr;
+            }
+            if (g_chain.off_ext < 0) goto ext_done;   // lax: validate_native() below is the gate
 
             // THE DIMENSION AND DESCRIPTOR GATES, ON EVERY (missed) RESOLVE -- not once at discovery.
             // If a patch moves any hop, what we land on will not read back the widget's exact draw
@@ -1066,6 +1077,7 @@ void* resolve_latched(API::UObject* rt, int want, void* cached_native, void* cac
             // which reads garbage on this build. A strict chain keeps the cheap pre-filter, unchanged.
             if (!g_chain.lax && !desc_plausible(rhi_b + g_chain.off_ext)) return nullptr;
         }
+        ext_done: ;
     }
 
     if (out_rhi != nullptr) *out_rhi = rhi;
@@ -1317,6 +1329,65 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 *out = Chain{};
                 return;
             }
+        }
+    }
+
+    // ---- STRUCTURAL PASS: find the FRHITexture by WHAT IT IS, not by two int32s -------------
+    //
+    // Measured on Game Pass 2026-09-19: every candidate above is chosen because some offset in it
+    // reads want x want as two int32s -- a weak signal that matches plenty of non-textures on this
+    // binary. Proof they were not textures: applying the learned resource path to them fails at the
+    // FIRST hop ("+0xB8 is not a readable object"), where every real FRHITexture has its resource.
+    //
+    // So search for the object that IS one: sweep rt -> res -> rhi and accept the first rhi whose
+    // learned path yields an identity-confirmed ID3D12Resource reporting exactly want x want on
+    // UEVR's device. That is enormously stronger evidence than an extent match, and it calls nothing
+    // on an unproven object. The extent offset is then looked up for free if the texture happens to
+    // carry one; a lax chain does not need it.
+    if (first_native == nullptr && g_cfg.xr_layer_src_cal && learned_resource_path()) {
+        logf("no candidate validated -- searching for a REAL FRHITexture by the learned resource "
+             "path instead of by extent bytes.");
+        for (int32_t o1 = 0x28; (size_t)o1 + 8 <= rt_lim && first_native == nullptr; o1 += 8) {
+            void* res = *reinterpret_cast<void* const*>(rt_base + o1);
+            if (!looks_like_object(res, 0x40)) continue;
+            const size_t res_lim = scan_limit(res, RES_WINDOW);
+            for (int32_t o2 = 0x08; (size_t)o2 + 8 <= res_lim; o2 += 8) {
+                void* rhi = *reinterpret_cast<void* const*>(reinterpret_cast<uint8_t*>(res) + o2);
+                if (rhi == res || rhi == (void*)rt) continue;
+                if (!looks_like_object(rhi, 0x40)) continue;
+
+                int dim_out = 0;
+                uint32_t fmt_out = 0;
+                void* native = resolve_by_learned_path(rhi, want, /*loud=*/false, &dim_out, &fmt_out);
+                if (native == nullptr) continue;
+
+                // Found a real texture of exactly the right size. Record an extent offset too if it
+                // carries one, so the cheap per-tick hit path can use it.
+                int32_t oe = -1;
+                const size_t ext_lim = scan_limit(rhi, EXT_WINDOW);
+                for (int32_t t = 0x08; (size_t)t + 16 <= ext_lim; t += 4) {
+                    auto* q = reinterpret_cast<const uint8_t*>(rhi) + t;
+                    if (*reinterpret_cast<const int32_t*>(q) == want &&
+                        *reinterpret_cast<const int32_t*>(q + 4) == want) { oe = t; break; }
+                }
+
+                ++accepted;
+                logf("ACCEPTED (STRUCTURAL): chain rt+0x%X res+0x%X -> rhi %p, resolved through the "
+                     "LEARNED resource path to ID3D12Resource %p (%dx%d, DXGI %u). Extent offset "
+                     "%s. Latching a LAX chain.", (unsigned)o1, (unsigned)o2, rhi, native,
+                     dim_out, dim_out, fmt_out,
+                     (oe >= 0) ? "found" : "not present -- GetDesc is the gate");
+                first_native = native;
+                out->off_res = o1;
+                out->off_rhi = o2;
+                out->off_ext = oe;
+                out->lax     = true;
+                break;
+            }
+        }
+        if (first_native == nullptr) {
+            logf("STRUCTURAL pass found no FRHITexture reporting %dx%d anywhere under this render "
+                 "target -- generated ring.", want, want);
         }
     }
 
