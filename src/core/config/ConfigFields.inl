@@ -1207,6 +1207,12 @@
     // CHASE-CAM ANCHOR PROBE: log the engine's own camera (before we overwrite it) every N
     // calls. 0 = off. Read-only measurement.
     int   veh_anchor = 0;
+    // AIM/CAMERA DECOUPLE PROBE (dev, vehprobe). Seated + dev build only: scans the nearby
+    // VehicleActor meshes' world rotations (hull, turret) and dumps the turret candidate's
+    // UPROPERTIES, logged beside the Blam control-record aim so divergence shows as you aim --
+    // to decide whether a vehicle exposes a weapon aim distinct from the chase-camera value.
+    // Read-only. See docs\VEHICLE_AIM_DECOUPLE_PROBE.md.
+    bool  veh_probe = false;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,
