@@ -120,33 +120,77 @@ bool mem_is_private(const void* p, size_t need) {
     return addrcascade::readable_bytes(p, need) >= need;
 }
 
+// How many LEADING vtable slots are real code in a mapped image, capped at `cap`.
+// 0 means "this does not look like a polymorphic object at all".
+//
+// A VTABLE'S LENGTH IS A PROPERTY OF THE CLASS, NOT A SAFETY MARGIN -- and getting that backwards
+// is what broke the crisp reticule on the Microsoft Store / WinGDK build for every player on it.
+// This used to REJECT any object unless the first 16 slots were all code. The game's FRHITexture
+// class has FOURTEEN virtual functions, so slots 14/15 are whatever read-only data the linker put
+// after the vtable. Measured live on WinGDK 2026-09-19:
+//
+//     slot 14 = 0x4059A72E696442BE   <-- a `double` constant, ~102.6. Not code.
+//     slot 15 = 0xAD0F04985C5B79BC
+//
+// so the real texture was thrown away before it could ever become a candidate, and the probe
+// honestly reported "no GPU texture behind this render target" while a perfectly good 256x256
+// FRHITexture sat at res+0x10 with a descriptor byte-identical to the one Steam accepts.
+//
+// STEAM PASSED THIS CHECK BY LUCK, NOT BY CORRECTNESS: the same 14-entry vtable survives there only
+// because whatever that binary happens to place after it looks like image addresses. A Steam patch
+// that relinks and changes that trailing data would kill the reticule on Steam in exactly the same
+// silent way. So this is not a WinGDK special case -- the old rule was simply wrong on both.
+//
+// Stopping at the first non-code slot is also no slower: the old loop scanned all 16 to reject.
+int vtable_code_slots(const void* p, int cap) {
+    if (p == nullptr) return 0;
+    if ((reinterpret_cast<uintptr_t>(p) & 7u) != 0u) return 0;
+    const void* vt = *reinterpret_cast<void* const*>(p);
+    if (!mem_is_image(vt)) return 0;
+    // Only require readability for the slots we are actually going to count. Demanding a full
+    // 16-slot window was a second way to reject a short vtable that sits near the end of a section.
+    const size_t have = addrcascade::readable_bytes(vt, sizeof(void*) * (size_t)cap);
+    const int    n    = (int)(have / sizeof(void*));
+    for (int i = 0; i < n; ++i) {
+        const void* fn = reinterpret_cast<void* const*>(vt)[i];
+        if (fn == nullptr || !mem_is_image(fn)) return i;   // short vtable: fine, just shorter
+    }
+    return n;
+}
+
+// Enough leading code slots to be a polymorphic object worth READING. Deliberately well below the
+// 14 a real FRHITexture has, and well above what random data lands on.
+constexpr int kMinVtableSlots = 4;
+
+// What UEVR's get_native_resource() actually needs: it walks vtable indices 2..15 hunting for the
+// one that returns a D3D resource, so every slot it can reach must be code. THIS is where the
+// strict count belongs -- on the CALL, never on a data walk. See safe_for_vcall().
+constexpr int kVCallVtableSlots = 16;
+
 // A pointer that behaves like a polymorphic C++ object allocated on the heap: 8-byte aligned, in
 // private committed memory with at least `need` readable bytes, and whose first qword points at a
-// vtable in a mapped image with at least 16 readable slots.
+// plausible vtable.
 //
-// The 16-slot requirement is not decoration. UEVR's get_native_resource() walks vtable indices 2..15
-// looking for the one that returns a D3D resource; handing it an object whose "vtable" is a mapped
-// image address with only a couple of readable qwords after it is precisely how that walk turns
-// into a fault.
 // `need` is the MINIMUM that must be readable, not the window a caller intends to scan. Those are
 // different numbers and conflating them silently loses real answers: an engine object can sit near
 // the end of its allocation region, so demanding a whole 0x200-byte window be readable would reject
 // the correct FTextureResource on some launches and not others. Callers scan up to
 // scan_limit(p, window) instead.
+//
+// This admits an object for DATA reads only (extents, offsets, the learned resource path). Nothing
+// here licenses a virtual call; ask safe_for_vcall() for that.
 bool looks_like_object(const void* p, size_t need) {
     if (p == nullptr) return false;
     if ((reinterpret_cast<uintptr_t>(p) & 7u) != 0u) return false;
     if (!mem_is_private(p, need)) return false;
-    const void* vt = *reinterpret_cast<void* const*>(p);
-    if (!mem_is_image(vt)) return false;
-    if (addrcascade::readable_bytes(vt, sizeof(void*) * 16) < sizeof(void*) * 16) return false;
-    // Every entry we might reach must itself be code.
-    for (int i = 0; i < 16; ++i) {
-        const void* fn = reinterpret_cast<void* const*>(vt)[i];
-        if (fn == nullptr) break;              // short vtable is fine; a BAD entry is not
-        if (!mem_is_image(fn)) return false;
-    }
-    return true;
+    return vtable_code_slots(p, kMinVtableSlots) >= kMinVtableSlots;
+}
+
+// May we hand this object to UEVR's get_native_resource, which invokes slots 2..15 on it?
+// A structured-exception guard catches a FAULT, not a HANG, so this gate is the real protection:
+// calling a live function with the wrong `this` can loop forever and take the game thread with it.
+bool safe_for_vcall(const void* p) {
+    return vtable_code_slots(p, kVCallVtableSlots) >= kVCallVtableSlots;
 }
 
 // How far into an object it is actually safe to read, capped at the window we care about.
@@ -969,6 +1013,24 @@ void* validate_native(void* rhi, int want, bool loud, int* out_dim, uint32_t* ou
         if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
         return nullptr;
     }
+    // THE ONLY PLACE THE FULL SLOT COUNT IS REQUIRED. A short-but-legitimate vtable (the game's
+    // FRHITexture has 14 entries) must still be READ -- it just must not be CALLED, because
+    // get_native_resource walks slots 2..15 and would run whatever follows the vtable. The learned
+    // resource path below calls nothing, so a short vtable costs us nothing but this one call.
+    if (!safe_for_vcall(rhi)) {
+        if (loud) {
+            logf("  rhi %p -> only %d leading vtable slot(s) are code; NOT calling "
+                 "get_native_resource (it invokes slots 2..15). Resolving by the learned path "
+                 "instead -- this is normal for a class with a short vtable, not a failure.",
+                 rhi, vtable_code_slots(rhi, kVCallVtableSlots));
+        }
+        if (g_cfg.xr_layer_src_cal && learned_resource_path()) {
+            if (void* ok = resolve_by_learned_path(rhi, want, loud, out_dim, out_fmt)) return ok;
+        }
+        if (allow_scan) return resolve_native_by_scan(rhi, want, loud, out_dim, out_fmt);
+        return nullptr;
+    }
+
     void* native;
     {
 #if HALO_VR_DEV
