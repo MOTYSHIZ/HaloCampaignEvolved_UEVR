@@ -1255,6 +1255,18 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
     int   tried_n = 0;
 
     void* first_native = nullptr;
+    // THE ONE MEASUREMENT THAT MATTERS (2026-09-19), and it is now SETTLED. A Steam-vs-WinGDK
+    // comparison showed the WinGDK candidate set is the Steam set MINUS the real entry: rt+0x110,
+    // res+0x78 and res+0xC8 are identical on both, junk descriptor bytes and all, and Steam
+    // rejects those two exactly as we do. What was missing on WinGDK is res+0x10 / res+0x58 --
+    // FTextureResource::TextureRHI. There is NO descriptor-layout difference and the lax premise
+    // was wrong.
+    //
+    // The dump below asked the deciding question -- is res+0x10 null, or is our walk rejecting a
+    // live pointer? -- and the answer was the SECOND: a perfectly good 256x256 FRHITexture sat
+    // there while looks_like_object() threw it away for having a 14-entry vtable. Kept because it
+    // is the one field diagnostic for this whole class of fault, and it fires only on failure.
+    void* first_res = nullptr;
 
     // 0x28 skips the UObject header (vtable, flags, index, outer, name, class), none of which can
     // be an FTextureResource pointer.
@@ -1283,6 +1295,7 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                 const uint8_t dim = *(q + 0x0E), fmt = *(q + 0x0F);
                 const bool plausible = desc_plausible(q);
 
+                if (first_res == nullptr) first_res = res;
                 ++candidates;
                 logf("CANDIDATE #%d%s  rt+0x%X -> res %p  res+0x%X -> rhi %p  rhi+0x%X = %dx%d "
                      "(mips=%u samples=%u dim=%u fmt=%u)",
@@ -1471,6 +1484,12 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
                      : "Textures exist here but none at the widget's draw size -- see the SURVEY "
                        "lines.");
         }
+    }
+
+    if (accepted == 0 && first_res != nullptr) {
+        logf("NO CANDIDATE ACCEPTED -- dumping the FTextureResource so res+0x10 (TextureRHI) can be "
+             "read directly. On Steam this object carries a live FRHITexture at +0x10 and +0x58.");
+        dump_object_shape(first_res, "FTextureResource (res)");
     }
 
 done:
