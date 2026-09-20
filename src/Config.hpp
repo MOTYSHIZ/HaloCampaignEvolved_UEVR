@@ -1915,7 +1915,7 @@ struct Config {
     // reports independently -- then read that learned offset out of the reticule's texture. No
     // measured constant, identical code on Steam and WinGDK, fails closed. Set 0 to A/B it off.
     bool  xr_layer_src_cal = true;
-    float xr_layer_ring_thick = 0.025f;
+    float xr_layer_ring_thick = 0.0125f;
     float xr_layer_ring_dot   = 0.030f;
     // WinGDK / Microsoft Store reticle resolve -- EXPERIMENTAL, DEFAULT OFF (2026-09-19).
     // get_native_resource() is measured against ONE build and cannot decode the Game Pass (WinGDK)

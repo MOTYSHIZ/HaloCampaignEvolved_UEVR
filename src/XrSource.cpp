@@ -577,40 +577,86 @@ bool resource_matches(void* native, int w, int h) {
     return (uevr_dev == nullptr || dev == nullptr || dev == uevr_dev);
 }
 
-// One-shot, but safe to call every tick: it RETRIES without consuming its shot until UEVR's UI
-// target and reported size are actually available (they are not, at the main menu).
-int learned_resource_offset() {
-    if (g_res_off_done) return g_res_off;
-    auto* p = API::get()->param();
-    if (p == nullptr || p->sdk == nullptr || p->vr == nullptr ||
-        p->sdk->stereo_hook == nullptr || p->sdk->stereo_hook->get_ui_render_target == nullptr ||
-        p->vr->get_ui_width == nullptr || p->vr->get_ui_height == nullptr) {
+// Sweep ONE reference texture for the resource. Logs every identity-confirmed resource it finds
+// with its real dimensions, so a failure says what was actually in there rather than just "no".
+int learn_from(void* tex, const int* ww, const int* hh, int n, const char* what) {
+    if (tex == nullptr || !mem_is_private(tex, sizeof(void*))) {
+        logf("  CAL: %s %p is not readable -- skipped.", what, tex);
         return -1;
     }
-    void* ui = (void*)p->sdk->stereo_hook->get_ui_render_target();
-    if (ui == nullptr) return -1;                       // stereo not up yet -- retry next tick
-    const int w = (int)p->vr->get_ui_width();
-    const int h = (int)p->vr->get_ui_height();
-    if (w <= 0 || h <= 0) return -1;                    // size not reported yet -- retry
-    if (known_resource_vtable() == nullptr) return -1;  // no identity available yet -- retry
-    if (!mem_is_private(ui, sizeof(void*))) return -1;
+    const size_t lim = scan_limit(tex, kCalWindow);
+    int found = 0;
+    for (size_t off = 8; off + sizeof(void*) <= lim; off += sizeof(void*)) {
+        void* cand = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(tex) + off);
+        if (!is_known_resource(cand)) continue;
+        D3D12_RESOURCE_DESC d{};
+        void* dev = nullptr;
+        if (!desc_guarded(cand, &d, &dev)) continue;
+        ++found;
+        logf("  CAL: %s +0x%X -> resource %p  dim=%d %llux%u fmt=%u", what, (unsigned)off, cand,
+             (int)d.Dimension, (unsigned long long)d.Width, (unsigned)d.Height, (unsigned)d.Format);
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+        for (int i = 0; i < n; ++i) {
+            if ((int)d.Width == ww[i] && (int)d.Height == hh[i]) {
+                logf("CALIBRATED: the ID3D12Resource sits at FRHITexture+0x%X on THIS build -- "
+                     "learned from UEVR's %s (%dx%d). No measured offset is involved.",
+                     (unsigned)off, what, ww[i], hh[i]);
+                return (int)off;
+            }
+        }
+    }
+    logf("  CAL: %s -- swept 0x%X bytes, %d identity-confirmed resource(s), none at an expected "
+         "size.", what, (unsigned)lim, found);
+    return -1;
+}
+
+// One-shot, but safe to call every tick: it RETRIES without consuming its shot until UEVR actually
+// has a reference target. Reports the SPECIFIC precondition that is missing (a few times, then
+// quietly), because "not up yet" covering six different causes is what cost us the first attempt.
+int learned_resource_offset() {
+    if (g_res_off_done) return g_res_off;
+    static int s_notes = 0;
+    auto note = [&](const char* why) {
+        if (s_notes < 4) { ++s_notes; logf("CAL: not ready -- %s.", why); }
+    };
+
+    auto* p = API::get()->param();
+    if (p == nullptr || p->sdk == nullptr || p->vr == nullptr) { note("plugin API surface not up"); return -1; }
+    if (p->sdk->stereo_hook == nullptr) { note("UEVR exposes no stereo_hook"); return -1; }
+    if (known_resource_vtable() == nullptr) { note("no reference ID3D12Resource vtable yet"); return -1; }
+
+    auto* sh = p->sdk->stereo_hook;
+    void* ui  = (sh->get_ui_render_target    != nullptr) ? (void*)sh->get_ui_render_target()    : nullptr;
+    void* scn = (sh->get_scene_render_target != nullptr) ? (void*)sh->get_scene_render_target() : nullptr;
+    const int uw = (p->vr->get_ui_width   != nullptr) ? (int)p->vr->get_ui_width()   : 0;
+    const int uh = (p->vr->get_ui_height  != nullptr) ? (int)p->vr->get_ui_height()  : 0;
+    const int hw = (p->vr->get_hmd_width  != nullptr) ? (int)p->vr->get_hmd_width()  : 0;
+    const int hh = (p->vr->get_hmd_height != nullptr) ? (int)p->vr->get_hmd_height() : 0;
+
+    if (ui == nullptr && scn == nullptr) {
+        note("UEVR reports neither a UI nor a scene render target (its Slate hook failed on this "
+             "game, so the UI target may never exist -- the scene target is the fallback)");
+        return -1;
+    }
 
     g_res_off_done = true;   // from here this is a one-shot answer
+    logf("CALIBRATING: ui_rt=%p (%dx%d)  scene_rt=%p (hmd %dx%d)", ui, uw, uh, scn, hw, hh);
 
-    const size_t lim = scan_limit(ui, kCalWindow);
-    for (size_t off = 8; off + sizeof(void*) <= lim; off += sizeof(void*)) {
-        void* cand = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(ui) + off);
-        if (!is_known_resource(cand)) continue;
-        if (!resource_matches(cand, w, h)) continue;
-        g_res_off = (int)off;
-        logf("CALIBRATED: the ID3D12Resource sits at FRHITexture+0x%X on THIS build -- learned from "
-             "UEVR's own UI render target (%dx%d, resource %p). No measured offset is involved.",
-             (unsigned)off, w, h, cand);
-        return g_res_off;
+    // The UI target first: its size is reported independently and is unambiguous.
+    if (ui != nullptr && uw > 0 && uh > 0) {
+        const int w[1] = { uw }, h[1] = { uh };
+        const int off = learn_from(ui, w, h, 1, "UI render target");
+        if (off >= 0) { g_res_off = off; return off; }
     }
-    logf("CALIBRATION FAILED: swept 0x%X bytes of UEVR's UI render target and found no "
-         "ID3D12Resource reporting its own %dx%d -- the lax resolve fails closed (generated ring).",
-         (unsigned)lim, w, h);
+    // Then the scene target. Accept the per-eye size OR a double-wide side-by-side stereo target,
+    // since which one UEVR allocates depends on the rendering method.
+    if (scn != nullptr && hw > 0 && hh > 0) {
+        const int w[2] = { hw, hw * 2 }, h[2] = { hh, hh };
+        const int off = learn_from(scn, w, h, 2, "scene render target");
+        if (off >= 0) { g_res_off = off; return off; }
+    }
+    logf("CALIBRATION FAILED: no ID3D12Resource at an expected size inside UEVR's own targets -- "
+         "the lax resolve fails closed (generated ring). The CAL lines above list what was there.");
     return -1;
 }
 
