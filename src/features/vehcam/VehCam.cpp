@@ -667,6 +667,63 @@ void driver_hide_update() {
 std::atomic<uintptr_t> g_hog_body_ptr{0};
 std::atomic<int32_t>   g_hog_body_idx{-1};
 
+// ---- ROUTE A P0: owned THIRD-PERSON camera chassis. Resolved off the PLAYER PAWN's world
+// position (the pawn sits in the vehicle; the Blam seat resolution reads dead), published game-side;
+// the render callbacks read its transform FRESH each frame. The yaw is published by the eye
+// callback (which already reads the transform) for the view override to consume.
+std::atomic<uintptr_t> g_tp_chassis_ptr{0};
+std::atomic<int32_t>   g_tp_chassis_idx{-1};
+std::atomic<float>     g_tp_chassis_yaw{0.0f};
+std::atomic<bool>      g_tp_chassis_yaw_valid{false};
+
+namespace {
+// GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
+// vehicle the player is in. No name gate (chassis naming varies: Banshee ".hull", Wraith
+// "SK_WraithMortar"); no rider-Blam seed (dead). Walks the object array, so callers throttle it.
+void resolve_tp_chassis() {
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) return;
+    auto* pawn = API::get()->get_local_pawn(0);
+    Vec3 ploc{};
+    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &ploc)) {
+        g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
+        g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
+        return;
+    }
+    const double px = (double)ploc.x, py = (double)ploc.y, pz = (double)ploc.z;
+    const int32_t n = arr->get_object_count();
+    API::UObject* best = nullptr; int32_t besti = -1; double bestd = 1e18;
+    for (int32_t i = 0; i < n; ++i) {
+        auto* o = static_cast<API::UObject*>(arr->get_object(i));
+        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
+        if (class_name_of(o) != L"SkeletalMeshComponent") continue;
+        const std::wstring full = o->get_full_name();
+        if (full.find(L"PersistentLevel") == std::wstring::npos) continue;
+        if (full.find(L"VehicleActor")   == std::wstring::npos) continue;
+        Vec3 w{}; if (!call_ret_vec3(o, L"K2_GetComponentLocation", &w)) continue;
+        const double d = std::sqrt(((double)w.x - px) * ((double)w.x - px)
+                                 + ((double)w.y - py) * ((double)w.y - py)
+                                 + ((double)w.z - pz) * ((double)w.z - pz));
+        if (d < bestd) { bestd = d; best = o; besti = i; }
+    }
+    if (best != nullptr && bestd < 800.0) {   // within 8 m of the pawn = the vehicle it is in
+        const uintptr_t prev = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+        g_tp_chassis_ptr.store((uintptr_t)best, std::memory_order_relaxed);
+        g_tp_chassis_idx.store(besti, std::memory_order_relaxed);
+        if ((uintptr_t)best != prev)
+            API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f)",
+                                 best->get_full_name().c_str(), bestd, px, py, pz);
+    } else {
+        g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
+        g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
+        static uint32_t s_warn = 0;
+        if ((s_warn++ % 90u) == 0u)
+            API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no VehicleActor mesh within 8 m of pawn "
+                                 "(best %.0f, pawn %.0f %.0f %.0f)", bestd < 1e17 ? bestd : -1.0, px, py, pz);
+    }
+}
+} // namespace
+
 namespace {
 
 void resolve_hog_body() {
@@ -755,15 +812,20 @@ bool vehprobe_record_deg(float* yaw_deg, float* pitch_deg) {
 // (RelativeRotation, or a bespoke aim field) that we could write for Route B shows itself by name.
 void vehprobe_dump_props(API::UObject* obj, const char* label) {
     if (obj == nullptr) return;
-    auto* cls = obj->get_class();
-    if (cls == nullptr) return;
-    API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE %s = %ls; UPROPERTIES:",
+    API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE %s = %ls; UPROPERTIES (leaf..base):",
                          label, obj->get_full_name().c_str());
-    for (auto* f = cls->get_child_properties(); f != nullptr; f = f->get_next()) {
-        auto* nm = f->get_fname();
-        const int32_t off = reinterpret_cast<API::FProperty*>(f)->get_offset();
-        API::get()->log_info("[Halo-CampE-UEVR]     %ls  @ +0x%X",
-                             nm ? nm->to_string().c_str() : L"?", (unsigned)off);
+    // Walk the WHOLE class chain (get_super_struct), not just the leaf: a seat/vehicle reference on
+    // a C++ base pawn class would be invisible in a leaf-only dump. Capped so a deep chain can't
+    // flood the log.
+    int total = 0;
+    for (API::UStruct* st = obj->get_class(); st != nullptr && total < 500; st = st->get_super_struct()) {
+        for (auto* f = st->get_child_properties(); f != nullptr && total < 500; f = f->get_next()) {
+            auto* nm = f->get_fname();
+            const int32_t off = reinterpret_cast<API::FProperty*>(f)->get_offset();
+            API::get()->log_info("[Halo-CampE-UEVR]     %ls  @ +0x%X",
+                                 nm ? nm->to_string().c_str() : L"?", (unsigned)off);
+            ++total;
+        }
     }
 }
 
@@ -976,6 +1038,8 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamsrc")      == 0) { g_cfg.veh_cam_src = (int)v; return true; }
     if (_stricmp(key, "vehanchor")      == 0) { g_cfg.veh_anchor = (int)v; return true; }
     if (_stricmp(key, "vehprobe")       == 0) { g_cfg.veh_probe = (v != 0.0); return true; }
+    if (_stricmp(key, "vehtp")          == 0) { g_cfg.veh_tp = (v != 0.0); return true; }
+    if (_stricmp(key, "vehtpboom")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_tp_boom[0], &g_cfg.veh_tp_boom[1], &g_cfg.veh_tp_boom[2]); return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -1031,6 +1095,26 @@ void vehcam_game_tick_vehicle() {
     g_tick_stage = "vehicle_body";
     vehicle_body_update();
     if (g_in_menu.load()) vehicle_reset(); else vehicle_update(g_last_dt.load());
+    // ROUTE A P0: resolve the third-person chassis off the pawn, on the stick-mode ENTER edge
+    // (reliable, unlike the dead mount flag) and retried every ~3 s while unresolved; cleared on
+    // exit so the next vehicle re-resolves. Only walks the object array when it must -- never per
+    // tick. The render callbacks read the resolved mesh's transform fresh.
+    {
+        static bool s_tp_was = false;
+        static uint32_t s_tp_tick = 0;
+        const bool tp_on = g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed);
+        if (tp_on && !s_tp_was) { resolve_tp_chassis(); s_tp_tick = 0; }
+        else if (tp_on && g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) {
+            if ((++s_tp_tick % 90u) == 0u) resolve_tp_chassis();
+        }
+        if (!tp_on && s_tp_was) {
+            g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
+            g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
+            g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
+        }
+        s_tp_was = tp_on;
+    }
+
     vehprobe_tick();   // dev-only; empty stub in a release build
 }
 
@@ -1040,6 +1124,50 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
     auto& g_view_pos_x = *host::g_plugin_state.view_pos_x;
     auto& g_view_pos_y = *host::g_plugin_state.view_pos_y;
     auto& g_view_pos_z = *host::g_plugin_state.view_pos_z;
+
+    // ---- ROUTE A P0: OWNED THIRD-PERSON CAMERA. Self-contained; bypasses bc24's first-person seat
+    // machinery below, and independent of veh_cam. Boom BEHIND the chassis mesh (g_tp_chassis,
+    // resolved game-side off the player pawn), read at render rate so it tracks the moving vehicle;
+    // the view yaw is published here for the view override. Gated on stick mode (the mount flag is
+    // dead). Head free-look composes on top via UEVR.
+    if (g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
+        static TrackedObject s_tpc;
+        static uintptr_t s_tpc_raw = 0;
+        const uintptr_t cp = halo::g_tp_chassis_ptr.load(std::memory_order_relaxed);
+        if (cp != s_tpc_raw) {
+            s_tpc_raw = cp;
+            s_tpc.set_at(reinterpret_cast<API::UObject*>(cp), halo::g_tp_chassis_idx.load(std::memory_order_relaxed));
+        }
+        auto* ch = (cp != 0) ? s_tpc.get_checked(L"SkeletalMeshComponent") : nullptr;
+        Vec3 cloc{}, crot{};
+        if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cloc)
+            && call_ret_vec3(ch, L"K2_GetComponentRotation", &crot)) {
+            const double D2R = 0.01745329252;
+            const double cpp = std::cos((double)crot.x * D2R), spp = std::sin((double)crot.x * D2R);
+            const double cyy = std::cos((double)crot.y * D2R), syy = std::sin((double)crot.y * D2R);
+            const double crr = std::cos((double)crot.z * D2R), srr = std::sin((double)crot.z * D2R);
+            const double ax[3] = { cpp * cyy, cpp * syy, spp };
+            const double ay[3] = { srr * spp * cyy - crr * syy, srr * spp * syy + crr * cyy, -srr * cpp };
+            const double az[3] = { -(crr * spp * cyy + srr * syy), cyy * srr - crr * spp * syy, crr * cpp };
+            const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
+            const double ecx = (double)cloc.x + ax[0] * bf + ay[0] * bl + az[0] * bu;
+            const double ecy = (double)cloc.y + ax[1] * bf + ay[1] * bl + az[1] * bu;
+            const double ecz = (double)cloc.z + ax[2] * bf + ay[2] * bl + az[2] * bu;
+            if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); p->x = ecx; p->y = ecy; p->z = ecz; }
+            else { position->x = (float)ecx; position->y = (float)ecy; position->z = (float)ecz; }
+            g_view_pos_x = (float)ecx; g_view_pos_y = (float)ecy; g_view_pos_z = (float)ecz;
+            halo::g_cam_x.store((float)ecx, std::memory_order_relaxed);
+            halo::g_cam_y.store((float)ecy, std::memory_order_relaxed);
+            halo::g_cam_z.store((float)ecz, std::memory_order_relaxed);
+            halo::g_tp_chassis_yaw.store(crot.y, std::memory_order_relaxed);
+            halo::g_tp_chassis_yaw_valid.store(true, std::memory_order_relaxed);
+            if (index == 0) { g_vcd.fc[0] = ecx; g_vcd.fc[1] = ecy; g_vcd.fc[2] = ecz; g_vcd.wrote = true; }
+        } else if (index == 0) {
+            g_vcd.wrote = false;
+            halo::g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
+        }
+        return;   // third-person owns the eye; skip the first-person path
+    }
 
     // Off: the camera is the engine's. The same bookkeeping the ungated path does on eye 0.
     if (g_cfg.veh_cam == 0) { if (index == 0) g_vcd.wrote = false; return; }
@@ -1440,6 +1568,26 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
     auto& g_dbg_view_in  = *host::g_plugin_state.dbg_view_in;
     auto& g_dbg_view_out = *host::g_plugin_state.dbg_view_out;
     auto& g_lock_primed  = *host::g_plugin_state.lock_primed;
+
+        // ---- ROUTE A P0: THIRD-PERSON VIEW YAW = the chassis yaw (published by the eye callback
+        // this frame), with head free-look composed on top by UEVR and pitch/roll flattened like
+        // the first-person path. Runs before the FP seated block, so third-person wins when on.
+        if (g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed)
+            && halo::g_tp_chassis_yaw_valid.load(std::memory_order_relaxed)) {
+            const float cyaw = halo::g_tp_chassis_yaw.load(std::memory_order_relaxed);
+            if (is_double) {
+                auto* r = reinterpret_cast<UEVR_Rotatord*>(rotation);
+                r->yaw = (double)cyaw;
+                if (g_cfg.veh_view_flat) { r->pitch = 0.0; r->roll = 0.0; }
+            } else {
+                rotation->yaw = cyaw;
+                if (g_cfg.veh_view_flat) { rotation->pitch = 0.0f; rotation->roll = 0.0f; }
+            }
+            g_dbg_view_in = cyaw; g_dbg_view_out = cyaw;
+            halo::g_view_base_yaw.store(cyaw, std::memory_order_relaxed);
+            g_lock_primed = false;   // re-prime the on-foot lock when you dismount
+            return true;
+        }
 
         // ---- IN-VEHICLE VIEW: ANCHOR FORWARD TO THE VEHICLE (vehview).
         //

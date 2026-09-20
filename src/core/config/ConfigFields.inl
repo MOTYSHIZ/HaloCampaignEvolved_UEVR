@@ -1213,6 +1213,13 @@
     // to decide whether a vehicle exposes a weapon aim distinct from the chase-camera value.
     // Read-only. See docs\VEHICLE_AIM_DECOUPLE_PROBE.md.
     bool  veh_probe = false;
+    // ROUTE A P0: owned THIRD-PERSON vehicle camera -- a sibling OPTION to bc24's first-person
+    // veh_cam (never modifies it), for players who get motion sick in first person and as a live
+    // toggle. Boom behind the chassis mesh (the nearest VehicleActor to the PLAYER PAWN, since the
+    // seat resolution reads dead); view yaw follows the chassis + head free-look. Gated on stick
+    // mode. 0 = off; the eventual left-X binding flips this live.
+    bool  veh_tp = false;
+    float veh_tp_boom[3] = { -450.0f, 0.0f, 180.0f };   // cm, CHASSIS frame: fwd(-=behind), left, up
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,
