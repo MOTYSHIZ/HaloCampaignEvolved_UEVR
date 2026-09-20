@@ -932,7 +932,8 @@ constexpr int RING_DIM = 128;
 void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
                      bool bgra) {
     const float c  = (float)dim * 0.5f - 0.5f;
-    const float R  = (float)dim * 0.40f;   // ring radius, px
+    float rf = g_cfg.xr_layer_ring_radius; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
+    const float R  = (float)dim * rf;      // ring radius, px
     // Thickness and dot are PLAYER-TUNABLE. This ring is the FALLBACK the player looks through
     // whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of scene
     // (reported 2026-09-19: "this ring blocks so much of the view"). Clamped so a bad value can
