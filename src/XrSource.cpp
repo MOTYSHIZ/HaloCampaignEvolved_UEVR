@@ -571,6 +571,7 @@ constexpr size_t kCalWindow = 0x800;   // bytes of UEVR's own texture swept look
 // same search on Steam (xrlayersrcverify), where it independently finds the resource the
 // normal path uses.
 bool g_subject_empty = false;
+uint32_t g_empty_rounds = 0;   // stand-down rounds so far, for the nudge re-test window
 
 int  g_res_off1     = -1;      // FRHITexture + off1 -> (intermediate | resource)
 int  g_res_off2     = -1;      // intermediate + off2 -> resource; < 0 = it sat at off1
@@ -1250,6 +1251,35 @@ void dump_widget_state(API::UObject* rt, int want, const char* why) {
     }
 }
 
+// Ask the WidgetComponent to draw. A UTextureRenderTarget2D creates its RHI texture on first
+// use, so a component that never draws leaves exactly what Game Pass shows: a correct UObject with
+// no GPU resource behind it. RequestRedraw is the engine's own "draw yourself" entry point.
+//
+// HYPOTHESIS, NOT A DIAGNOSIS. If the texture appears after this, the cause was a missing draw and
+// this is the fix. If it does not, the draw is being refused further down (RHI/Slate) and no amount
+// of UObject-level poking will help -- which is worth knowing just as much.
+//
+// Rate-limited to once per stand-down so it can never become a per-tick reflected call.
+void nudge_widget_redraw() {
+    static uint32_t s_tries = 0;
+    auto* wcp = g_ret_widget_comp.get_checked(L"WidgetComponent");
+    if (wcp == nullptr) return;
+    if (s_tries >= 8) return;          // it either works in the first few or it never will
+    ++s_tries;
+    auto* wc = reinterpret_cast<API::UObject*>(wcp);
+
+    // Mark it dirty as well: with bManuallyRedraw=0 the component redraws when this is set, and
+    // writing it costs nothing if RequestRedraw is not reflected on this build.
+    if (auto* rr = wc->get_property_data<uint8_t>(L"bRedrawRequested")) {
+        *rr = 1;
+        logf("  NUDGE: set bRedrawRequested=1 on the component (try %u).", s_tries);
+    }
+    struct { } noargs;
+    wc->call_function(L"RequestRedraw", &noargs);
+    logf("  NUDGE: called RequestRedraw (try %u). If a texture appears on the next probe, the "
+         "cause was simply that the widget never drew itself on this build.", s_tries);
+}
+
 void probe(API::UObject* rt, int want, int mode, Chain* out) {
     logf("PROBE mode %d: rt=%p looking for a %dx%d texture.", mode, (void*)rt, want, want);
     logf("  NOTE: %d is the value of aimwidgetdraw. If it is a round number you will get "
@@ -1539,8 +1569,12 @@ void probe(API::UObject* rt, int want, int mode, Chain* out) {
             // target.
             if (surveyed == 0) {
                 g_subject_empty = true;
-                // Every field looked correct here, which is why the Steam diff matters.
+                // Every field was byte-identical to Steam, so the difference is below the
+                // UObject layer: the render target's RHI resource was never created. A UE render
+                // target allocates lazily on its first draw, so if that draw never happens here,
+                // ASKING for one is both the test and, if it works, the fix.
                 dump_widget_state(rt, want, "Game Pass: target has NO GPU texture");
+                nudge_widget_redraw();
             }
             logf("STRUCTURAL pass found no FRHITexture reporting %dx%d under this render target "
                  "(%d texture(s) of ANY size surveyed). %s", want, want, surveyed,
@@ -1957,6 +1991,7 @@ void xrsource_tick(uint32_t tick) {
             g_probe_attempts = 0;
             g_probe_ready    = tick;   // due immediately
             g_subject_empty  = false;  // a different target is a different question
+            g_empty_rounds   = 0;
         }
 
         if (subject == nullptr) {
@@ -1967,7 +2002,10 @@ void xrsource_tick(uint32_t tick) {
             // hitch (measured 290-400 ms, a 2.8 Hz frame). Re-probe rarely rather than never, so a
             // target that starts being rendered into is still picked up without a level change.
             if ((int32_t)(tick - g_probe_ready) >= 0) {
-                g_probe_ready = tick + kProbeEmptyTicks;
+                // Re-test SOON for the first few stand-downs, so a redraw nudge has a chance to
+                // show up; only then settle into the long quiet interval.
+                g_probe_ready = tick + ((g_empty_rounds++ < 6) ? (kProbeBaseTicks * 3)
+                                                              : kProbeEmptyTicks);
                 g_subject_empty = false;   // let exactly one walk through to re-test
                 set_status("render target has no GPU texture behind it -- probe stood down "
                            "(re-tests occasionally); generated ring");
