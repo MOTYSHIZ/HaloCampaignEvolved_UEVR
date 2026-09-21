@@ -32,7 +32,7 @@ constinit const FeatureHooks kStabilityFixesHooks{
     .key       = "stabilityfixes",
     .parse_key = &stabilityfixes_parse_key,
     .enabled   = &stability_fixes_enabled,
-    .services  = SVC_STABILITY | SVC_RIG_GUARD | SVC_LEASH_GATE | SVC_RETICULE_FIXES | SVC_MELEE_INSTRUMENTS,
+    .services  = SVC_STABILITY | SVC_MELEE_INSTRUMENTS,
 };
 
 } // namespace halo

@@ -928,7 +928,7 @@ constinit const FeatureHooks kHeightCalHooks{
     .menu_command       = &heightcal_menu_command,
     .menu_status_line   = &heightcal_menu_status_line,
     .enabled                    = &height_cal_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE | SVC_LEASH_GATE,
+    .services                   = SVC_UNIT_STATE | SVC_EYE_TRACE,
 };
 
 }  // namespace halo
