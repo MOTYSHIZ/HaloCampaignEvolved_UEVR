@@ -1495,6 +1495,15 @@ uevr.sdk.callbacks.on_draw_ui(function()
         -- should meet the settled panels first.
         if imgui.collapsing_header("Halo VR Experimental") then
             imgui.indent(4)
+            -- The panel's own warning, before any tier. Colour rather than weight: this imgui
+            -- binding exposes no bold font, and push_style_color(0) is ImGuiCol_Text, so the
+            -- amber the calibration rows already use for "pay attention" carries it. Through
+            -- print_text_block so it wraps to the panel like every other paragraph here.
+            imgui.push_style_color(0, 0xFF2288DD)
+            print_text_block("These features are WIP, and they very likely will break things or " ..
+                             "feel incomplete. Mainly here if anyone wants to have a preview.")
+            imgui.pop_style_color(1)
+            imgui.spacing()
             draw_tier_sections(TIER_ORDER)
             imgui.unindent(4)
         end
