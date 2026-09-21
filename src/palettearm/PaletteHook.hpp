@@ -40,6 +40,20 @@ struct PaletteAccess {
     // consecutive successful writes and no change on screen at all.
     bool           is_capture_bank{};
     std::uint8_t   bank_index{};
+
+    // WHICH BANK THE GAME CALLS CURRENT, from the capture context's first byte -- the one the gate
+    // in drive_capture_banks() already range-checks to < 2. The renderer blends the two banks for
+    // sub-tick smoothness, so supplying two DIFFERENT endpoints is only meaningful if we know which
+    // end is "now"; see the pabankmirror modes in PaletteArm.cpp.
+    //
+    // NOT YET PROVEN to be a bank index. It is range-checked like one and nothing else in the
+    // context looks like one, but the only evidence that it ALTERNATES is the dev census this
+    // change adds. Until that census has been read in a live session, treat `live_bank_valid` as
+    // "the byte was in range", not as "the meaning is established" -- which is why every mode that
+    // depends on it has a sign-flipped twin, and why an invalid one falls back to writing both
+    // banks identically rather than guessing.
+    bool           live_bank_valid{};
+    std::uint8_t   live_bank{};
 };
 
 // Called from inside the detour, after the game's own builder has run. Return false to leave the
@@ -96,6 +110,12 @@ std::uint64_t palettehook_bank_writes();
 // Why the capture mirror declined, per reason -- see the counters in PaletteHook.cpp.
 void palettehook_capture_census(std::uint64_t* no_tls, std::uint64_t* no_ctx,
                                 std::uint64_t* gate, std::uint64_t* mismatch);
+
+// THE BANK CENSUS. How often the capture context named bank 0, how often bank 1, and how often the
+// name CHANGED between consecutive calls. This answers the one question the two-endpoint modes rest
+// on: if `flips` stays at zero while `bank0`/`bank1` climb, that byte is not a current-bank index
+// and pabankmirror 2-5 are writing endpoints into arbitrary buffers. Dev build only.
+void palettehook_bank_census(std::uint64_t* bank0, std::uint64_t* bank1, std::uint64_t* flips);
 
 // Per-tick watchdog. `gameplay_active` says whether a first-person weapon could be being built
 // right now; without it the alarm counts time in which the call was impossible and condemns a
