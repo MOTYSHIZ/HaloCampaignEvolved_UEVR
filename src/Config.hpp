@@ -3906,6 +3906,16 @@ struct Config {
     // shoulder to it. 0 = the aim hand IKs to the controller (it then only sits on the gun as well
     // as the two calibrations happen to agree). The support hand is unaffected. DEV KEY pahandgun.
     bool  pa_hand_on_gun  = true;
+    // THE BODY FOLLOWS YOUR HEAD AROUND THE PLAY AREA (2026-09-20, from a headset run with
+    // hmdleash=0: "the arms still stay in place centered around the pawn"). The shoulders hang off
+    // the palette root -- the game camera, i.e. the pawn -- and the hands are measured (grip - hmd),
+    // so physically stepping moves head and hands together and nothing in the arm chain notices.
+    // UEVR renders the eye at camera + (hmd - standing origin), so with this ON the shoulder anchor
+    // and every hand offset take that displacement too: the hand term becomes (grip - standing
+    // origin), which is what UEVR's own attachments use and what the rig route already measures the
+    // WEAPON from (so the gun followed you while the arms did not). A no-op under hmdleash=1, which
+    // keeps the origin on your head. 0 = the old head-relative body.
+    int   pa_body_anchor  = 1;        // DEV KEY pabodyanchor
 
     // TORSO YAW BLEND (patorsoframe=6). 1 = face where the HEAD faces. 0 = face where the HANDS
     // are (the midpoint of both controllers, or the single tracked one). Anything between blends

@@ -1443,6 +1443,7 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pameleebtnanim") == 0) { g_cfg.pa_melee_btn_anim = (int)v;  return true; }
     if (_stricmp(key, "pameleethrust")  == 0) { g_cfg.pa_melee_thrust_cm = (float)v; return true; }
     if (_stricmp(key, "pajoinstretch")  == 0) { g_cfg.pa_join_stretch   = (int)v;   return true; }
+    if (_stricmp(key, "pabodyanchor")   == 0) { g_cfg.pa_body_anchor    = (int)v;   return true; }
     if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }
     if (_stricmp(key, "pasprintmask")  == 0) { g_cfg.pa_sprint_mask    = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }

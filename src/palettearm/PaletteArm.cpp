@@ -387,6 +387,10 @@ struct TrackingSnapshot {
     pa::Vec3 support_grip_position{};
     pa::Quat support_grip_rotation{};
     pa::Quat support_aim_rotation{};  // the support controller's POINTING pose, like the aim hand uses
+    // THE STANDING ORIGIN -- the fixed room point UEVR measures roomscale from. The body hangs off
+    // this, not off the head: see the body shift in drive_palette().
+    pa::Vec3 standing_origin{};
+    bool     origin_valid = false;
     bool     valid = false;
     bool     support_valid = false;
 };
@@ -1078,6 +1082,33 @@ bool drive_palette(const pa::PaletteAccess& access) {
     // the view as game-camera * (recenter-offset * hmd), so the recenter offset is the exact map
     // from stage space onto that root.
     const pa::Quat composition = pa::normalized(tracking.stage_rotation);
+
+    // ---- THE BODY FOLLOWS YOUR HEAD AROUND THE ROOM (pabodyanchor, 2026-09-20).
+    //
+    // The shoulders hang off the palette ROOT (the game camera = the pawn) and every hand offset is
+    // measured (grip - hmd). Both are blind to where you are STANDING: step sideways in the play
+    // area and head and hands move together, so the offset does not change and the shoulders do not
+    // move -- the arms hold station on the pawn while UEVR walks your rendered eye away from it.
+    // Invisible under hmdleash=1, which pins the origin to your head; with hmdleash=0 it is the
+    // whole bug ("the arms still stay in place centered around the pawn").
+    //
+    // UEVR renders the eye at camera + gamespace(hmd - standing_origin), so that displacement is
+    // exactly what the body must carry. Adding it to BOTH the shoulder anchor and the hand offsets
+    // keeps them consistent: the hand term becomes (grip - standing_origin), which is the term UEVR
+    // uses for its own attachments and the one the rig route already measures the WEAPON from --
+    // which is why the gun follows you today and the arms do not.
+    //
+    // Capped: a runtime with no real standing origin would otherwise fling the body across the map.
+    pa::Vec3 body_shift{};
+    if (g_cfg.pa_body_anchor != 0 && tracking.origin_valid) {
+        const pa::Vec3 d{tracking.hmd_position.x - tracking.standing_origin.x,
+                         tracking.hmd_position.y - tracking.standing_origin.y,
+                         tracking.hmd_position.z - tracking.standing_origin.z};
+        const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (std::isfinite(len) && len < 3.0f) {
+            body_shift = xr_to_blam(pa::rotate(composition, d)) * wscale / pa::kMetresPerBlamUnit;
+        }
+    }
 
     // ---- THE TORSO FRAME HANGS OFF THE HEAD, NOT THE CAMERA.
     //
@@ -2049,6 +2080,9 @@ bool drive_palette(const pa::PaletteAccess& access) {
         pa::Vec3 stage_off =
             xr_to_blam(pa::rotate(composition, plan.grip_position - tracking.hmd_position)) * wscale /
             pa::kMetresPerBlamUnit;
+        // ...plus where you are standing, so the pair reads (grip - standing origin) -- the same
+        // anchor the shoulders just took. See the body shift above.
+        stage_off = stage_off + body_shift;
 
         // ---- THE SUPPORT-HAND RIGID FIX, and its capture freeze. SUPPORT HAND ONLY.
         //
@@ -2255,7 +2289,8 @@ bool drive_palette(const pa::PaletteAccess& access) {
             // into the body frame -- so no translation anchor and no separate rest lift.
             pa::apply_rigid_delta(access.palette, plan.arm->shoulder_subtree,
                                   plan.arm->shoulder_count, torso_basis, chest_pivot);
-        } else if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis, root_position,
+        } else if (!pa::anchor_shoulder_to_torso(access.palette, *plan.arm, torso_basis,
+                                                 root_position + body_shift,
                                                  plan.left_side, tuning_w)) {
             HALO_VR_DEV_ONLY(if (!plan.is_aim) ++s_bail[6];);
             continue;
@@ -2867,6 +2902,17 @@ bool capture_tracking_into(TrackingSnapshot& snap) {
     if (hmd < 0 || !get_pose(hmd, &p, &q, /*use_aim=*/false)) return false;
     snap.hmd_position = from_math(p);
     snap.hmd_rotation = from_math(q);
+
+    // THE STANDING ORIGIN, the same term UEVR's own controller attachments use (UObjectHook composes
+    // hand_world = view_location - gamespace(hand - standing_origin)) and the same one the rig route
+    // measures its hand from (rigbodyanchor). It is where the play area's origin sits; UEVR renders
+    // the eye at the camera displaced by (hmd - standing_origin), so it is what "your body" is
+    // anchored to when you physically walk. Zeroed and marked invalid if the runtime has none.
+    {
+        const auto so = API::VR::get_standing_origin();
+        snap.standing_origin = pa::Vec3{so.x, so.y, so.z};
+        snap.origin_valid = std::isfinite(so.x) && std::isfinite(so.y) && std::isfinite(so.z);
+    }
 
     // STAGE-ANCHORED COMPOSITION. The palette root is the stick-driven game camera with no HMD
     // content in it, and UEVR renders the view as game-camera * (recenter-offset * hmd). The
