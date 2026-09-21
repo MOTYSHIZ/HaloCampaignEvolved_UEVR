@@ -778,13 +778,20 @@ local function find_entry(key)
     return nil
 end
 
-local TIER_ORDER = { "beta", "preview", "experimental" }
-local TIER_WORD  = { beta = "Beta", preview = "Preview", experimental = "Experimental" }
+-- Which tiers each panel draws. devexperimental is deliberately NOT in TIER_ORDER: it belongs under
+-- DEV Settings, beside the other knobs that carry a warning, not in the panel a curious player opens.
+local TIER_ORDER     = { "beta", "preview", "experimental" }
+local TIER_ORDER_DEV = { "devexperimental" }
+local TIER_WORD  = { beta = "Beta", preview = "Preview", experimental = "Experimental",
+                     devexperimental = "Dev experimental" }
 local TIER_TEXT  = {
     beta = "Nearly finished features. They are on unless you switch them off.",
     preview = "Features close to ready. They are off until you switch them on.",
     experimental = "Features still being tested in the headset. They are off until you switch them on, " ..
                    "and they may change between releases.",
+    devexperimental = "*** NOT READY TO BE OFFERED *** Unverified, or suspected redundant against " ..
+                      "something the mod already does. These are here so they can be tested, not " ..
+                      "because they are ready to use. Expect breakage, and expect them to disappear.",
 }
 -- Settings shown with a feature group though they are not that feature's own sub-settings.
 local GROUP_EXTRAS = { Roomscale = { "hmdleashvert" } }
@@ -872,12 +879,12 @@ local function draw_feature(f)
     imgui.pop_id()
 end
 
-local function draw_tier_sections()
+local function draw_tier_sections(order)
     if features == nil then
         if status_seen then print_text_block("The list of features is loading.") end
         return
     end
-    for _, tier in ipairs(TIER_ORDER) do
+    for _, tier in ipairs(order or TIER_ORDER) do
         local groups, order, count = {}, {}, 0
         for _, f in ipairs(features) do
             if f.tier == tier then
@@ -950,6 +957,10 @@ local function draw_dev()
         return
     end
     draw_catalog(dev_catalog, "dev")
+    -- Dev-experimental tier, last in this panel: rows not ready to be offered to players at all.
+    -- Drawn here rather than in Halo VR Experimental so a curious player does not meet them first.
+    imgui.spacing()
+    draw_tier_sections(TIER_ORDER_DEV)
 end
 
 local function any_key_active(keys)
@@ -1484,7 +1495,7 @@ uevr.sdk.callbacks.on_draw_ui(function()
         -- should meet the settled panels first.
         if imgui.collapsing_header("Halo VR Experimental") then
             imgui.indent(4)
-            draw_tier_sections()
+            draw_tier_sections(TIER_ORDER)
             imgui.unindent(4)
         end
     end)
