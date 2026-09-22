@@ -1219,7 +1219,13 @@
     // seat resolution reads dead); view yaw follows the chassis + head free-look. Gated on stick
     // mode. 0 = off; the eventual left-X binding flips this live.
     bool  veh_tp = false;
-    float veh_tp_boom[3] = { -450.0f, 0.0f, 180.0f };   // cm, CHASSIS frame: fwd(-=behind), left, up
+    // cm, in a YAW-ONLY chase frame with WORLD UP (fwd -=behind, left, up). NOT the raw skeletal-mesh
+    // basis: that carries the mesh's baked axes plus the hull's live pitch/roll over terrain, which
+    // tumbles the boom (measured: up=+1000 gave world-Z -785..-105, camera diving below the hull).
+    float veh_tp_boom[3] = { -450.0f, 0.0f, 180.0f };
+    // vehtpyaw: 1 = the chase camera yaws to follow the vehicle heading (classic chase); 0 = it holds
+    // a fixed world heading and the hull turns within the view. Live tunable.
+    bool  veh_tp_yaw_follow = true;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,

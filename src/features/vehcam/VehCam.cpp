@@ -1040,6 +1040,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehprobe")       == 0) { g_cfg.veh_probe = (v != 0.0); return true; }
     if (_stricmp(key, "vehtp")          == 0) { g_cfg.veh_tp = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpboom")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_tp_boom[0], &g_cfg.veh_tp_boom[1], &g_cfg.veh_tp_boom[2]); return true; }
+    if (_stricmp(key, "vehtpyaw")       == 0) { g_cfg.veh_tp_yaw_follow = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -1138,33 +1139,68 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             s_tpc_raw = cp;
             s_tpc.set_at(reinterpret_cast<API::UObject*>(cp), halo::g_tp_chassis_idx.load(std::memory_order_relaxed));
         }
+        // The engine's camera as handed to us -- captured so the diagnostic can show whether our
+        // boom actually moves it (game vs eye), and so a failed resolve leaves it untouched.
+        double ogx = 0, ogy = 0, ogz = 0;
+        if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); ogx = p->x; ogy = p->y; ogz = p->z; }
+        else { ogx = position->x; ogy = position->y; ogz = position->z; }
         auto* ch = (cp != 0) ? s_tpc.get_checked(L"SkeletalMeshComponent") : nullptr;
         Vec3 cloc{}, crot{};
-        if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cloc)
-            && call_ret_vec3(ch, L"K2_GetComponentRotation", &crot)) {
+        const bool locOk = (ch != nullptr) && call_ret_vec3(ch, L"K2_GetComponentLocation", &cloc);
+        const bool rotOk = locOk && call_ret_vec3(ch, L"K2_GetComponentRotation", &crot);
+        double ecx = ogx, ecy = ogy, ecz = ogz;
+        if (rotOk) {
             const double D2R = 0.01745329252;
-            const double cpp = std::cos((double)crot.x * D2R), spp = std::sin((double)crot.x * D2R);
-            const double cyy = std::cos((double)crot.y * D2R), syy = std::sin((double)crot.y * D2R);
-            const double crr = std::cos((double)crot.z * D2R), srr = std::sin((double)crot.z * D2R);
-            const double ax[3] = { cpp * cyy, cpp * syy, spp };
-            const double ay[3] = { srr * spp * cyy - crr * syy, srr * spp * syy + crr * cyy, -srr * cpp };
-            const double az[3] = { -(crr * spp * cyy + srr * syy), cyy * srr - crr * spp * syy, crr * cpp };
+            // FRAME: build the boom basis from the chassis YAW ONLY, with WORLD UP -- never the raw
+            // SkeletalMesh rotation. That component basis carries the mesh's baked axis convention
+            // PLUS the hull's live pitch/roll over terrain, so the boom tumbled: measured, boom.up=
+            // +1000 produced world-Z of -785..-105 (the camera dived below the hull, reading as
+            // "first person"). This simplified basis is exactly the old one evaluated at pitch=roll=0.
+            // See the CLAUDE.md two-clocks / choose-the-right-frame doctrine.
+            static float s_frozen_yaw = 0.0f;
+            static bool  s_frozen_valid = false;
+            float eff_yaw;
+            if (g_cfg.veh_tp_yaw_follow) {
+                eff_yaw = crot.y;                                     // classic chase: yaw follows the hull
+                s_frozen_yaw = crot.y; s_frozen_valid = true;         // keep the freeze current -> seamless toggle
+            } else {
+                if (!s_frozen_valid) { s_frozen_yaw = crot.y; s_frozen_valid = true; }
+                eff_yaw = s_frozen_yaw;                               // hold a fixed world heading; the hull turns in view
+            }
+            const double yr = (double)eff_yaw * D2R;
+            const double cy = std::cos(yr), sy = std::sin(yr);
+            const double ax[3] = {  cy,  sy, 0.0 };   // hull forward, flattened to horizontal
+            const double ay[3] = { -sy,  cy, 0.0 };   // hull right,   flattened to horizontal
+            const double az[3] = { 0.0, 0.0, 1.0 };   // world up
             const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
-            const double ecx = (double)cloc.x + ax[0] * bf + ay[0] * bl + az[0] * bu;
-            const double ecy = (double)cloc.y + ax[1] * bf + ay[1] * bl + az[1] * bu;
-            const double ecz = (double)cloc.z + ax[2] * bf + ay[2] * bl + az[2] * bu;
+            ecx = (double)cloc.x + ax[0] * bf + ay[0] * bl + az[0] * bu;
+            ecy = (double)cloc.y + ax[1] * bf + ay[1] * bl + az[1] * bu;
+            ecz = (double)cloc.z + ax[2] * bf + ay[2] * bl + az[2] * bu;
             if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); p->x = ecx; p->y = ecy; p->z = ecz; }
             else { position->x = (float)ecx; position->y = (float)ecy; position->z = (float)ecz; }
             g_view_pos_x = (float)ecx; g_view_pos_y = (float)ecy; g_view_pos_z = (float)ecz;
             halo::g_cam_x.store((float)ecx, std::memory_order_relaxed);
             halo::g_cam_y.store((float)ecy, std::memory_order_relaxed);
             halo::g_cam_z.store((float)ecz, std::memory_order_relaxed);
-            halo::g_tp_chassis_yaw.store(crot.y, std::memory_order_relaxed);
+            halo::g_tp_chassis_yaw.store(eff_yaw, std::memory_order_relaxed);   // publish EFFECTIVE yaw -> view matches
             halo::g_tp_chassis_yaw_valid.store(true, std::memory_order_relaxed);
             if (index == 0) { g_vcd.fc[0] = ecx; g_vcd.fc[1] = ecy; g_vcd.fc[2] = ecz; g_vcd.wrote = true; }
         } else if (index == 0) {
             g_vcd.wrote = false;
             halo::g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
+        }
+        // vehprobe diagnostic: is the boom computed, and does it differ from the engine camera?
+        // If game vs eye differ here but you see no change in-headset, the write is being ignored
+        // downstream; if locOk/rotOk are 0, the render-side chassis read is the fault.
+        if (index == 0 && g_cfg.veh_probe) {
+            static uint32_t s_dbg = 0;
+            if ((s_dbg++ % 90u) == 0u)
+                API::get()->log_info("[Halo-CampE-UEVR] VEHTP eye: cp=0x%llX ch=%d locOk=%d rotOk=%d "
+                                     "game=(%.0f %.0f %.0f) chassis=(%.0f %.0f %.0f) eye=(%.0f %.0f %.0f) boom=(%.0f %.0f %.0f)",
+                                     (unsigned long long)cp, (int)(ch != nullptr), (int)locOk, (int)rotOk,
+                                     ogx, ogy, ogz, (double)cloc.x, (double)cloc.y, (double)cloc.z,
+                                     ecx, ecy, ecz,
+                                     (double)g_cfg.veh_tp_boom[0], (double)g_cfg.veh_tp_boom[1], (double)g_cfg.veh_tp_boom[2]);
         }
         return;   // third-person owns the eye; skip the first-person path
     }
