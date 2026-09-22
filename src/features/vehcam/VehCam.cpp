@@ -680,6 +680,15 @@ std::atomic<bool>      g_tp_chassis_yaw_valid{false};
 // and publishes a [floor..1] scale; the render eye multiplies the boom offset by it. 1 = unobstructed.
 std::atomic<float>     g_tp_collision_frac{1.0f};
 
+// vehaim: the Blam aim write (BlamDrive.cpp) consults this to lift its stick-mode hold-off in a
+// vehicle. True only when the owned TP camera is on AND vehaim is on AND the chassis is resolved
+// (= we are actually in a vehicle, not a cutscene/death, which also raise stick mode). POD g_cfg
+// reads + one atomic, so it is safe on the sim orientation getter's thread.
+bool veh_tp_motion_aim_active() {
+    return g_cfg.veh_tp && g_cfg.veh_aim
+        && g_tp_chassis_ptr.load(std::memory_order_relaxed) != 0;
+}
+
 namespace {
 // GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
 // vehicle the player is in. No name gate (chassis naming varies: Banshee ".hull", Wraith
@@ -1047,6 +1056,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehtpyaw")       == 0) { g_cfg.veh_tp_yaw_follow = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpcollide")   == 0) { g_cfg.veh_tp_collide = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpcollidemargin") == 0) { g_cfg.veh_tp_collide_margin = (float)v; return true; }
+    if (_stricmp(key, "vehaim")         == 0) { g_cfg.veh_aim = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }

@@ -81,4 +81,10 @@ void vehicle_body_update();
 // while stick mode holds the sim publish's normal path off. No-op when the key is 0.
 void seat_direct_refresh();
 
+// vehaim: true when the motion controller should drive the aim IN A VEHICLE (owned TP camera on,
+// vehaim on, and the chassis resolved so we know we are actually in a vehicle -- not a cutscene or
+// death, which also raise stick mode). The Blam aim write consults this to lift its stick-mode
+// hold-off. Any thread (reads g_cfg + an atomic); called from the sim orientation getter.
+bool veh_tp_motion_aim_active();
+
 } // namespace halo

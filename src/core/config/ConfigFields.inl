@@ -1231,6 +1231,12 @@
     // a published fraction. vehtpcollidemargin = cm the camera stops SHORT of the hit (no surface clip).
     bool  veh_tp_collide = true;
     float veh_tp_collide_margin = 30.0f;
+    // vehaim: 1 = while the owned third-person camera is on IN A VEHICLE, let the motion controller
+    // drive the aim (turret/hull), the same direct-drive write infantry uses. Safe only because we
+    // own the camera -- the historic reason the aim write is held off in stick mode is that Halo
+    // binds the chase cam to the aim, and we no longer read that camera. Default OFF (opt-in) until
+    // proven per vehicle. Gated on the chassis being resolved (= actually in a vehicle).
+    bool  veh_aim = false;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,

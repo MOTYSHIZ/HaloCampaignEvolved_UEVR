@@ -4,6 +4,7 @@
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
+#include "features/vehcam/VehCam.hpp"   // veh_tp_motion_aim_active(): lift the stick-mode aim hold in a vehicle
 #include "AimConverge.hpp"
 #include "AimDirect.hpp"
 #include "addrcascade/AddressCascade.hpp"
@@ -944,7 +945,16 @@ static void drive_angles_impl(bool off_thread) {
     // stick mode exists. The control law is disarmed at the stick-mode gate in Plugin.cpp, but this
     // write is driven from the sim's orientation getter and is NOT on that code path, so without
     // this it kept steering the seat camera from the hand while the player's stick did nothing.
-    if (g_stick_mode_active.load(std::memory_order_relaxed)) return features_sim_stick_mode_hold(off_thread);
+    // VEHICLE MOTION AIM (vehaim): with the owned third-person camera we no longer read Halo's
+    // aim-bound chase cam, so the reason this hold-off exists -- a motion aim swinging the seat
+    // camera -- is gone in a vehicle. Let the aim write through so the controller drives the
+    // turret/hull; the TP camera stays a comfortable chase. Cutscenes and death also raise stick
+    // mode but resolve no chassis, so veh_tp_motion_aim_active() is false there and they still hold.
+    if (g_stick_mode_active.load(std::memory_order_relaxed)) {
+        if (!veh_tp_motion_aim_active()) return features_sim_stick_mode_hold(off_thread);
+        // Still publish seat/unit state, but do NOT return -- fall through to the aim write below.
+        features_sim_stick_mode_hold(off_thread);
+    }
 
     uintptr_t rec = g_ctl_rec.load(std::memory_order_relaxed);
     if (rec == 0 || IsBadWritePtr((void*)rec, 8)) {
