@@ -685,6 +685,10 @@ std::atomic<float>     g_tp_collision_frac{1.0f};
 // so the player can swap FP<->TP mid-ride. false until the first mount edge sets it.
 std::atomic<bool>      g_veh_tp_active{false};
 
+// Right-stick orbit offset (deg) added to the chase-cam yaw when motion aim frees the stick
+// (vehstick=1). Accumulated on the game tick, read by the eye; eases back to 0 when idle.
+std::atomic<float>     g_veh_orbit_yaw{0.0f};
+
 // left-X: flip the runtime TP camera state. Called from the input hook (any thread).
 void veh_tp_toggle() {
     const bool now = !g_veh_tp_active.load(std::memory_order_relaxed);
@@ -1069,6 +1073,9 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehtpcollide")   == 0) { g_cfg.veh_tp_collide = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpcollidemargin") == 0) { g_cfg.veh_tp_collide_margin = (float)v; return true; }
     if (_stricmp(key, "vehaim")         == 0) { g_cfg.veh_aim = (v != 0.0); return true; }
+    if (_stricmp(key, "vehstick")       == 0) { g_cfg.veh_stick_mode = (int)v; return true; }
+    if (_stricmp(key, "vehorbitrate")   == 0) { g_cfg.veh_orbit_rate = (float)v; return true; }
+    if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -1149,6 +1156,29 @@ void vehcam_game_tick_vehicle() {
             g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
         }
         s_tp_was = tp_on;
+    }
+
+    // RIGHT-STICK ORBIT (vehstick=1): with motion aim freeing the stick (vehaim), the right stick X
+    // orbits the chase-cam yaw. Accumulated here (needs dt); the eye adds g_veh_orbit_yaw to eff_yaw
+    // and publishes it, so the view and the collision trace follow the orbit automatically. Eases
+    // back to centre when the stick is idle or orbit is off (vehorbitreturn), so the camera returns
+    // behind the vehicle. The game's own stick-look is masked by the aim write, so we need not eat it.
+    {
+        float orbit = g_veh_orbit_yaw.load(std::memory_order_relaxed);
+        const float dt = g_last_dt.load();
+        const bool can_orbit = veh_tp_motion_aim_active() && g_cfg.veh_stick_mode == 1;
+        const float sx = can_orbit ? host::g_plugin_state.raw_stick_x->load() : 0.0f;
+        const float dz = 0.15f;
+        if (std::fabs(sx) > dz) {
+            const float s = (sx - (sx > 0.0f ? dz : -dz)) / (1.0f - dz);   // rescale past the deadzone
+            orbit += s * g_cfg.veh_orbit_rate * dt;
+            while (orbit >  180.0f) orbit -= 360.0f;
+            while (orbit < -180.0f) orbit += 360.0f;
+        } else if (g_cfg.veh_orbit_return > 0.0f) {
+            const float step = g_cfg.veh_orbit_return * dt;
+            if (orbit > step) orbit -= step; else if (orbit < -step) orbit += step; else orbit = 0.0f;
+        }
+        g_veh_orbit_yaw.store(orbit, std::memory_order_relaxed);
     }
 
     // ROUTE A P0: CAMERA COLLISION (spring arm). Trace game-side from the chassis pivot to the
@@ -1249,6 +1279,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 if (!s_frozen_valid) { s_frozen_yaw = crot.y; s_frozen_valid = true; }
                 eff_yaw = s_frozen_yaw;                               // hold a fixed world heading; the hull turns in view
             }
+            eff_yaw += g_veh_orbit_yaw.load(std::memory_order_relaxed);   // right-stick orbit offset (vehstick=1)
             const double yr = (double)eff_yaw * D2R;
             const double cy = std::cos(yr), sy = std::sin(yr);
             const double ax[3] = {  cy,  sy, 0.0 };   // hull forward, flattened to horizontal
