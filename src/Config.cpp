@@ -1791,8 +1791,16 @@ bool parse_config_file(const char* path) {
         char* eq = strchr(line, '=');
         if (eq == nullptr) continue;
         *eq = '\0';
+        // Tolerate whitespace around '=' (e.g. "vehtpboom = -450,-500,450"). Without this, the space
+        // BEFORE '=' stays on the key ("vehtpboom ") and every _stricmp below silently misses, so the
+        // line is dropped and the setting keeps its compiled default -- a silent config failure that
+        // cost a debugging session. Trim the key both ends; skip leading space on the value (numeric
+        // parses skip it already, but string-valued keys copied it verbatim).
+        { char* ke = eq; while (ke > line && (ke[-1] == ' ' || ke[-1] == '\t')) *--ke = '\0'; }
         const char* key = line;
+        while (*key == ' ' || *key == '\t') ++key;
         const char* val = eq + 1;
+        while (*val == ' ' || *val == '\t') ++val;
         const double v = atof(val);
         features_note_key(key, val);   // FEATURE REGISTRY hook: this file set this key
 
