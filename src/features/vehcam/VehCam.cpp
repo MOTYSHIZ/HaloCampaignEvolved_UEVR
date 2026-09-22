@@ -8,6 +8,7 @@
 #include "Markers.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
+#include "HitTrace.hpp"           // hit_trace(): camera-collision spring arm (game-thread)
 #include "Rig.hpp"
 #include "UeObject.hpp"
 #include "core/MarkerFaces.hpp"
@@ -675,6 +676,9 @@ std::atomic<uintptr_t> g_tp_chassis_ptr{0};
 std::atomic<int32_t>   g_tp_chassis_idx{-1};
 std::atomic<float>     g_tp_chassis_yaw{0.0f};
 std::atomic<bool>      g_tp_chassis_yaw_valid{false};
+// Camera-collision spring arm: the game tick traces from the chassis to the desired boom endpoint
+// and publishes a [floor..1] scale; the render eye multiplies the boom offset by it. 1 = unobstructed.
+std::atomic<float>     g_tp_collision_frac{1.0f};
 
 namespace {
 // GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
@@ -1041,6 +1045,8 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehtp")          == 0) { g_cfg.veh_tp = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpboom")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_tp_boom[0], &g_cfg.veh_tp_boom[1], &g_cfg.veh_tp_boom[2]); return true; }
     if (_stricmp(key, "vehtpyaw")       == 0) { g_cfg.veh_tp_yaw_follow = (v != 0.0); return true; }
+    if (_stricmp(key, "vehtpcollide")   == 0) { g_cfg.veh_tp_collide = (v != 0.0); return true; }
+    if (_stricmp(key, "vehtpcollidemargin") == 0) { g_cfg.veh_tp_collide_margin = (float)v; return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -1116,6 +1122,53 @@ void vehcam_game_tick_vehicle() {
         s_tp_was = tp_on;
     }
 
+    // ROUTE A P0: CAMERA COLLISION (spring arm). Trace game-side from the chassis pivot to the
+    // desired boom endpoint and publish a boom scale the render eye applies -- hit_trace() is a
+    // reflection LineTraceSingle and must run on the tick, not render-side (two clocks: publish a
+    // fraction game-side, consume it at render rate). Ignore the vehicle actor (the chassis mesh's
+    // outer) and the pawn, or the trace collapses onto the hull. Same yaw-only world-up frame the
+    // eye builds, from the effective yaw the eye published last frame.
+    if (g_cfg.veh_tp && g_cfg.veh_tp_collide
+        && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
+        static TrackedObject s_tpc_col;
+        static uintptr_t s_tpc_col_raw = 0;
+        const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+        if (cp != s_tpc_col_raw) {
+            s_tpc_col_raw = cp;
+            s_tpc_col.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+        }
+        auto* ch = (cp != 0) ? s_tpc_col.get_checked(L"SkeletalMeshComponent") : nullptr;
+        Vec3 cloc{};
+        float frac = 1.0f;
+        if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cloc)) {
+            const double D2R = 0.01745329252;
+            const double yr = (double)g_tp_chassis_yaw.load(std::memory_order_relaxed) * D2R;
+            const double cy = std::cos(yr), sy = std::sin(yr);
+            const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
+            const double boom_len = std::sqrt(bf * bf + bl * bl + bu * bu);
+            const Vec3 desired{ (float)((double)cloc.x + cy * bf - sy * bl),
+                                (float)((double)cloc.y + sy * bf + cy * bl),
+                                (float)((double)cloc.z + bu) };
+            API::UObject* ignore[2] = {}; int ni = 0;
+            if (auto* pawn = API::get()->get_local_pawn(0)) ignore[ni++] = pawn;
+            if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
+            Vec3 hit{};
+            if (boom_len > 1.0 && hit_trace(cloc, desired, ignore, ni, &hit)) {
+                const double dx = (double)hit.x - (double)cloc.x;
+                const double dy = (double)hit.y - (double)cloc.y;
+                const double dz = (double)hit.z - (double)cloc.z;
+                const double hd = std::sqrt(dx * dx + dy * dy + dz * dz);
+                double f = (hd - (double)g_cfg.veh_tp_collide_margin) / boom_len;
+                if (f < 0.10) f = 0.10;   // never collapse into the hull / first person
+                if (f > 1.00) f = 1.00;
+                frac = (float)f;
+            }
+        }
+        g_tp_collision_frac.store(frac, std::memory_order_relaxed);
+    } else {
+        g_tp_collision_frac.store(1.0f, std::memory_order_relaxed);
+    }
+
     vehprobe_tick();   // dev-only; empty stub in a release build
 }
 
@@ -1173,9 +1226,12 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             const double ay[3] = { -sy,  cy, 0.0 };   // hull right,   flattened to horizontal
             const double az[3] = { 0.0, 0.0, 1.0 };   // world up
             const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
-            ecx = (double)cloc.x + ax[0] * bf + ay[0] * bl + az[0] * bu;
-            ecy = (double)cloc.y + ax[1] * bf + ay[1] * bl + az[1] * bu;
-            ecz = (double)cloc.z + ax[2] * bf + ay[2] * bl + az[2] * bu;
+            // Spring-arm pull-in from the game-side collision trace (1 = unobstructed).
+            const double cfrac = g_cfg.veh_tp_collide
+                ? (double)halo::g_tp_collision_frac.load(std::memory_order_relaxed) : 1.0;
+            ecx = (double)cloc.x + (ax[0] * bf + ay[0] * bl + az[0] * bu) * cfrac;
+            ecy = (double)cloc.y + (ax[1] * bf + ay[1] * bl + az[1] * bu) * cfrac;
+            ecz = (double)cloc.z + (ax[2] * bf + ay[2] * bl + az[2] * bu) * cfrac;
             if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); p->x = ecx; p->y = ecy; p->z = ecz; }
             else { position->x = (float)ecx; position->y = (float)ecy; position->z = (float)ecz; }
             g_view_pos_x = (float)ecx; g_view_pos_y = (float)ecy; g_view_pos_z = (float)ecz;

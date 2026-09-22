@@ -1226,6 +1226,11 @@
     // vehtpyaw: 1 = the chase camera yaws to follow the vehicle heading (classic chase); 0 = it holds
     // a fixed world heading and the hull turns within the view. Live tunable.
     bool  veh_tp_yaw_follow = true;
+    // vehtpcollide: 1 = the chase camera pulls in (spring arm) when world geometry blocks the boom,
+    // so it never ends up behind a wall; 0 = off. The trace is game-side; the eye scales the boom by
+    // a published fraction. vehtpcollidemargin = cm the camera stops SHORT of the hit (no surface clip).
+    bool  veh_tp_collide = true;
+    float veh_tp_collide_margin = 30.0f;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,
