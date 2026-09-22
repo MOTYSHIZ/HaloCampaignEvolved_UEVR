@@ -680,12 +680,24 @@ std::atomic<bool>      g_tp_chassis_yaw_valid{false};
 // and publishes a [floor..1] scale; the render eye multiplies the boom offset by it. 1 = unobstructed.
 std::atomic<float>     g_tp_collision_frac{1.0f};
 
+// RUNTIME third-person state: the EFFECTIVE TP on/off, initialised from the vehtp config on each
+// mount and flipped live by left-X (veh_tp_toggle). All the TP gates read this, not g_cfg.veh_tp,
+// so the player can swap FP<->TP mid-ride. false until the first mount edge sets it.
+std::atomic<bool>      g_veh_tp_active{false};
+
+// left-X: flip the runtime TP camera state. Called from the input hook (any thread).
+void veh_tp_toggle() {
+    const bool now = !g_veh_tp_active.load(std::memory_order_relaxed);
+    g_veh_tp_active.store(now, std::memory_order_relaxed);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHTP: camera toggled -> %s (left-X)", now ? "THIRD-PERSON" : "first-person/native");
+}
+
 // vehaim: the Blam aim write (BlamDrive.cpp) consults this to lift its stick-mode hold-off in a
-// vehicle. True only when the owned TP camera is on AND vehaim is on AND the chassis is resolved
+// vehicle. True only when the owned TP camera is ACTIVE AND vehaim is on AND the chassis is resolved
 // (= we are actually in a vehicle, not a cutscene/death, which also raise stick mode). POD g_cfg
-// reads + one atomic, so it is safe on the sim orientation getter's thread.
+// reads + atomics, so it is safe on the sim orientation getter's thread.
 bool veh_tp_motion_aim_active() {
-    return g_cfg.veh_tp && g_cfg.veh_aim
+    return g_veh_tp_active.load(std::memory_order_relaxed) && g_cfg.veh_aim
         && g_tp_chassis_ptr.load(std::memory_order_relaxed) != 0;
 }
 
@@ -1117,9 +1129,16 @@ void vehcam_game_tick_vehicle() {
     // exit so the next vehicle re-resolves. Only walks the object array when it must -- never per
     // tick. The render callbacks read the resolved mesh's transform fresh.
     {
+        static bool s_stick_was = false;
         static bool s_tp_was = false;
         static uint32_t s_tp_tick = 0;
-        const bool tp_on = g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed);
+        const bool stick = halo::g_stick_mode_active.load(std::memory_order_relaxed);
+        // MOUNT EDGE: the runtime TP state starts from the vehtp config each time you enter a
+        // vehicle; left-X (veh_tp_toggle) flips it live during the ride. Tracked off the STICK edge,
+        // not tp_on, so a mid-ride toggle-off is not immediately re-initialised back on next tick.
+        if (stick && !s_stick_was) g_veh_tp_active.store(g_cfg.veh_tp, std::memory_order_relaxed);
+        s_stick_was = stick;
+        const bool tp_on = stick && g_veh_tp_active.load(std::memory_order_relaxed);
         if (tp_on && !s_tp_was) { resolve_tp_chassis(); s_tp_tick = 0; }
         else if (tp_on && g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) {
             if ((++s_tp_tick % 90u) == 0u) resolve_tp_chassis();
@@ -1138,7 +1157,7 @@ void vehcam_game_tick_vehicle() {
     // fraction game-side, consume it at render rate). Ignore the vehicle actor (the chassis mesh's
     // outer) and the pawn, or the trace collapses onto the hull. Same yaw-only world-up frame the
     // eye builds, from the effective yaw the eye published last frame.
-    if (g_cfg.veh_tp && g_cfg.veh_tp_collide
+    if (g_veh_tp_active.load(std::memory_order_relaxed) && g_cfg.veh_tp_collide
         && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
         static TrackedObject s_tpc_col;
         static uintptr_t s_tpc_col_raw = 0;
@@ -1194,7 +1213,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
     // resolved game-side off the player pawn), read at render rate so it tracks the moving vehicle;
     // the view yaw is published here for the view override. Gated on stick mode (the mount flag is
     // dead). Head free-look composes on top via UEVR.
-    if (g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
+    if (g_veh_tp_active.load(std::memory_order_relaxed) && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
         static TrackedObject s_tpc;
         static uintptr_t s_tpc_raw = 0;
         const uintptr_t cp = halo::g_tp_chassis_ptr.load(std::memory_order_relaxed);
@@ -1674,7 +1693,7 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
         // ---- ROUTE A P0: THIRD-PERSON VIEW YAW = the chassis yaw (published by the eye callback
         // this frame), with head free-look composed on top by UEVR and pitch/roll flattened like
         // the first-person path. Runs before the FP seated block, so third-person wins when on.
-        if (g_cfg.veh_tp && halo::g_stick_mode_active.load(std::memory_order_relaxed)
+        if (g_veh_tp_active.load(std::memory_order_relaxed) && halo::g_stick_mode_active.load(std::memory_order_relaxed)
             && halo::g_tp_chassis_yaw_valid.load(std::memory_order_relaxed)) {
             const float cyaw = halo::g_tp_chassis_yaw.load(std::memory_order_relaxed);
             if (is_double) {

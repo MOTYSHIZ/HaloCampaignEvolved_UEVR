@@ -129,6 +129,7 @@
 
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
+#include "features/vehcam/VehCam.hpp"   // veh_tp_toggle(): left-X flips FP<->TP camera in a vehicle
 #include "AimTrace.hpp"
 #include "MemScan.hpp"
 
@@ -13620,6 +13621,19 @@ public:
             && (raw_btn & XINPUT_GAMEPAD_A) != 0) {
             state->Gamepad.wButtons |= (WORD)g_cfg.veh_a_mask;
             state->dwPacketNumber++;
+        }
+
+        // ---- VEHICLE LEFT-X -> TOGGLE FP<->TP CAMERA. Left-X is free in stick mode (the on-foot
+        // remaps stand down and the game has no seated use for it), so a rising edge flips our owned
+        // third-person chase cam against bc24's first-person seat cam / the native cam -- a live swap
+        // for players who get motion sick in first person. Edge off the physical snapshot (raw_btn),
+        // like the trick above; !g_in_menu belt-and-braces. Additive: X still passes through to the game.
+        {
+            static bool s_lx_was = false;
+            const bool lx_now = g_stick_mode.load() && !g_in_menu.load()
+                && (raw_btn & XINPUT_GAMEPAD_X) != 0;
+            if (lx_now && !s_lx_was) veh_tp_toggle();
+            s_lx_was = lx_now;
         }
 
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what

@@ -87,4 +87,10 @@ void seat_direct_refresh();
 // hold-off. Any thread (reads g_cfg + an atomic); called from the sim orientation getter.
 bool veh_tp_motion_aim_active();
 
+// RUNTIME effective third-person-camera state. Initialised from vehtp on each mount, flipped live
+// by left-X via veh_tp_toggle(). The TP gates read this so FP<->TP can swap mid-ride.
+extern std::atomic<bool> g_veh_tp_active;
+// Flip g_veh_tp_active (left-X in a vehicle). Called from the input hook.
+void veh_tp_toggle();
+
 } // namespace halo
