@@ -1031,14 +1031,21 @@ static void drive_angles_impl(bool off_thread) {
     if (!layout_gate(rec, off_thread)) return;
 
     float yaw = 0.0f, pitch = 0.0f;
-    if (!desired_aim_now(&yaw, &pitch)) return;
+    if (veh_aim_ray_angles(&yaw, &pitch)) {
+        // VEHICLE RAY AIM (vehaimray): already the CONVERGED direction -- from the seated unit
+        // through the point the controller's world ray hits (VehCam.cpp) -- so it must NOT also be
+        // bent by aim_converge_apply, whose delta and range describe the infantry eye, not this
+        // geometry. Only reachable in a vehicle with the owned third-person camera on.
+    } else {
+        if (!desired_aim_now(&yaw, &pitch)) return;
 
-    // 6DoF CONVERGENCE. desired_aim_now() returns the INTENT -- where the player is pointing --
-    // which is a direction and therefore only lands on the target when the shot leaves from the
-    // player's eye. It does not: it leaves from Blam's own origin. Bending the intent onto the
-    // traced range is what makes the two agree. Declines to act while the head is leashed, so this
-    // is a no-op in the shipped configuration. See AimConverge.hpp.
-    aim_converge_apply(&yaw, &pitch);
+        // 6DoF CONVERGENCE. desired_aim_now() returns the INTENT -- where the player is pointing --
+        // which is a direction and therefore only lands on the target when the shot leaves from the
+        // player's eye. It does not: it leaves from Blam's own origin. Bending the intent onto the
+        // traced range is what makes the two agree. Declines to act while the head is leashed, so
+        // this is a no-op in the shipped configuration. See AimConverge.hpp.
+        aim_converge_apply(&yaw, &pitch);
+    }
     features_sim_record_written(yaw, pitch);
 
     // YAW SIGN. desired_aim_now() returns UE-convention degrees, but this record stores BLAM yaw,

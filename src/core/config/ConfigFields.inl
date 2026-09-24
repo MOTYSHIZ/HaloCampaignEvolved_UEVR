@@ -1246,6 +1246,16 @@
     // vehorbitreturn: deg/sec the orbit offset eases back to centre (behind the vehicle) when the
     // stick is idle or orbit turns off. 0 = hold the offset where you left it.
     float veh_orbit_return = 60.0f;
+    // vehaimray: with vehaim on, aim the vehicle at WHERE THE CONTROLLER POINTS (1, default) --
+    // trace the controller's world ray, then aim from the seated unit through the hit -- instead of
+    // the infantry mapping (0), which turns hand ROTATION into aim rotation and, with the camera 10 m
+    // off the vehicle, reads as "rotate the controller in 3DoF to steer" (measured 2026-09-23: des
+    // pitch -85..-95 deg and a 70-90 deg yaw offset from the on-foot calibration frame).
+    bool  veh_aim_ray = true;
+    // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
+    float veh_aim_far = 10000.0f;
+    // vehaimpivotz: cm above the seated unit (the pawn) that the vehicle's aim is taken from.
+    float veh_aim_pivot_z = 0.0f;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,

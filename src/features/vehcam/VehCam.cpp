@@ -705,6 +705,24 @@ bool veh_tp_motion_aim_active() {
         && g_tp_chassis_ptr.load(std::memory_order_relaxed) != 0;
 }
 
+// VEHICLE RAY AIM (vehaimray), published by the game tick, consumed by the sim-thread aim write.
+// ANGLES, not positions: the target is a world-fixed point and the angle toward it changes only as
+// fast as the hand and the vehicle move, so a tick-rate publish is the same cadence the infantry aim
+// law already runs at. UE convention (yaw = atan2(y, x), pitch up positive); BlamDrive flips the yaw.
+std::atomic<float> g_veh_aim_yaw{0.0f}, g_veh_aim_pitch{0.0f};
+std::atomic<bool>  g_veh_aim_valid{false};
+// The last measured range along the pointing ray, HELD on a miss -- sky has no range, and inventing
+// one swings the aim every time the ray crosses a skyline (AimConverge.hpp's rule, same reason).
+std::atomic<float> g_veh_aim_range{0.0f};
+
+bool veh_aim_ray_angles(float* yaw, float* pitch) {
+    if (!veh_tp_motion_aim_active() || !g_cfg.veh_aim_ray) return false;
+    if (!g_veh_aim_valid.load(std::memory_order_relaxed)) return false;
+    *yaw   = g_veh_aim_yaw.load(std::memory_order_relaxed);
+    *pitch = g_veh_aim_pitch.load(std::memory_order_relaxed);
+    return true;
+}
+
 namespace {
 // GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
 // vehicle the player is in. No name gate (chassis naming varies: Banshee ".hull", Wraith
@@ -1076,6 +1094,9 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehstick")       == 0) { g_cfg.veh_stick_mode = (int)v; return true; }
     if (_stricmp(key, "vehorbitrate")   == 0) { g_cfg.veh_orbit_rate = (float)v; return true; }
     if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
+    if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
+    if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
+    if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehcamboomtau")  == 0) { g_cfg.veh_cam_boom_tau = clampf((float)v, 0.02f, 3.0f); return true; }
@@ -1179,6 +1200,111 @@ void vehcam_game_tick_vehicle() {
             if (orbit > step) orbit -= step; else if (orbit < -step) orbit += step; else orbit = 0.0f;
         }
         g_veh_orbit_yaw.store(orbit, std::memory_order_relaxed);
+    }
+
+    // VEHICLE RAY AIM (vehaimray) -- aim the vehicle at WHERE THE CONTROLLER POINTS.
+    //
+    // The infantry setpoint (desired_aim_now) is a RELATIVE mapping -- the hand's rotation since the
+    // on-foot calibration, added to the aim captured then. That is right while the view is pinned to
+    // the gun and wrong here both ways a player can feel: the calibration frame was measured in a view
+    // that is not this one (logged 2026-09-23: des yaw 70-90 deg off the camera forward, pitch
+    // -85..-95), and the camera sits ~10 m off the vehicle, so even a correct direction carries that
+    // much parallax. It read as "rotate the controller in 3DoF to steer".
+    //
+    // So in a vehicle: (1) the controller's ABSOLUTE world ray, through the same room->world transform
+    // the holsters and wheel markers use (anchored at g_cam = our boom eye, rotated by
+    // g_view_base_yaw = our view yaw, both published by the TP camera paths); (2) trace it for the point
+    // being pointed at, holding the last range on a miss; (3) aim from the seated unit through that
+    // point. aim.md's aim = normalize((eye - origin) + range * sightline), with the seated unit as the
+    // origin -- NOT Halo's chase camera, which orbits WITH the aim (logged 11-14 m above the Banshee
+    // while it aimed down) and would chase its own output. GAME THREAD: hit_trace is reflection.
+    // Publishes ANGLES for the sim-thread write (BlamDrive.cpp drive_angles_impl).
+    {
+        static TrackedObject s_tpc_aim;
+        static uintptr_t s_tpc_aim_raw = 0;
+        bool ok = false;
+        const bool want = veh_tp_motion_aim_active() && g_cfg.veh_aim_ray;
+        if (want) {
+            const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                     : API::VR::get_right_controller_index();
+            Vec3 hmd{}, cpos{}; Quat hq{}, cq{};
+            auto* pawn = API::get()->get_local_pawn(0);
+            Vec3 c{};
+            if (ridx >= 0 && pawn != nullptr
+                && get_pose(API::VR::get_hmd_index(), &hmd, &hq, false)
+                && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)
+                && call_ret_vec3(pawn, L"K2_GetActorLocation", &c)) {
+                const Vec3 f = quat_forward(cq);   // the pointing axis, room space
+                const Vec3 o = holster_room_to_world(cpos, hmd);
+                const Vec3 p = holster_room_to_world(Vec3{cpos.x + f.x, cpos.y + f.y, cpos.z + f.z}, hmd);
+                Vec3 d{p.x - o.x, p.y - o.y, p.z - o.z};
+                const float dl = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                if (dl > 1e-3f) {
+                    d = Vec3{d.x / dl, d.y / dl, d.z / dl};
+                    c.z += g_cfg.veh_aim_pivot_z;
+                    // Ignore our own vehicle and the pawn, so pointing THROUGH the hull reaches the
+                    // world beyond it instead of aiming the vehicle at itself.
+                    const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+                    if (cp != s_tpc_aim_raw) {
+                        s_tpc_aim_raw = cp;
+                        s_tpc_aim.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+                    }
+                    API::UObject* ignore[2] = {}; int ni = 0;
+                    ignore[ni++] = pawn;
+                    if (auto* ch = (cp != 0) ? s_tpc_aim.get_checked(L"SkeletalMeshComponent") : nullptr)
+                        if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
+                    // NOT `far`: <Windows.h> defines `far` (and `near`) as empty macros, which turns
+                    // `const float far = ...` into `const float = ...` and wrecks the whole TU.
+                    const float far_cm = g_cfg.veh_aim_far;
+                    const Vec3 e{o.x + d.x * far_cm, o.y + d.y * far_cm, o.z + d.z * far_cm};
+                    Vec3 hit{};
+                    float range = g_veh_aim_range.load(std::memory_order_relaxed);
+                    const bool hitok = far_cm > 1.0f && hit_trace(o, e, ignore, ni, &hit);
+                    if (hitok) {
+                        const float hx = hit.x - o.x, hy = hit.y - o.y, hz = hit.z - o.z;
+                        range = std::sqrt(hx * hx + hy * hy + hz * hz);
+                        g_veh_aim_range.store(range, std::memory_order_relaxed);
+                    } else if (!(range > 1.0f)) {
+                        range = far_cm;   // nothing measured yet on this ride: the far end of the ray
+                    }
+                    const Vec3 t{o.x + d.x * range, o.y + d.y * range, o.z + d.z * range};
+                    const float ax = t.x - c.x, ay = t.y - c.y, az = t.z - c.z;
+                    const float al = std::sqrt(ax * ax + ay * ay + az * az);
+                    if (al > 100.0f) {
+                        g_veh_aim_yaw.store(std::atan2(ay, ax) * RAD2DEG, std::memory_order_relaxed);
+                        g_veh_aim_pitch.store(std::asin(clampf(az / al, -1.0f, 1.0f)) * RAD2DEG, std::memory_order_relaxed);
+                        ok = true;
+                    } else {
+                        // Pointing at the unit itself: the direction is undefined there, so keep the
+                        // last good solution rather than falling back to the rotation mapping.
+                        ok = g_veh_aim_valid.load(std::memory_order_relaxed);
+                    }
+#if HALO_VR_DEV
+                    // VEHAIM: ray (world yaw/pitch, relative to the camera's yaw), hit/range, the
+                    // target, the pivot, the aim sent -- against the old rotation mapping (des).
+                    if (g_cfg.veh_probe) {
+                        static uint32_t s_aimlog = 0;
+                        if ((s_aimlog++ % 30u) == 0u) {
+                            float dy = 0.0f, dp = 0.0f;
+                            const bool hd = desired_aim_now(&dy, &dp);
+                            const float ry = std::atan2(d.y, d.x) * RAD2DEG;
+                            const float rp = std::asin(clampf(d.z, -1.0f, 1.0f)) * RAD2DEG;
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] VEHAIM ray(y=%.1f p=%.1f rel-cam=%.1f) %s range=%.0f "
+                                "o=(%.0f %.0f %.0f) t=(%.0f %.0f %.0f) pivot=(%.0f %.0f %.0f) "
+                                "aim(y=%.1f p=%.1f) des(y=%.1f p=%.1f ok%d) ok=%d",
+                                ry, rp, wrap180(ry - halo::g_view_base_yaw.load(std::memory_order_relaxed)),
+                                hitok ? "HIT" : "miss", range, o.x, o.y, o.z, t.x, t.y, t.z, c.x, c.y, c.z,
+                                g_veh_aim_yaw.load(), g_veh_aim_pitch.load(), dy, dp, (int)hd, (int)ok);
+                        }
+                    }
+#endif
+                }
+            }
+        } else {
+            g_veh_aim_range.store(0.0f, std::memory_order_relaxed);   // next ride measures afresh
+        }
+        g_veh_aim_valid.store(ok, std::memory_order_relaxed);
     }
 
     // ROUTE A P0: CAMERA COLLISION (spring arm). Trace game-side from the chassis pivot to the
@@ -1308,6 +1434,8 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
         // vehprobe diagnostic: is the boom computed, and does it differ from the engine camera?
         // If game vs eye differ here but you see no change in-headset, the write is being ignored
         // downstream; if locOk/rotOk are 0, the render-side chassis read is the fault.
+        // Compiled out of player builds: a config flag is not a sufficient guard (CLAUDE.md).
+#if HALO_VR_DEV
         if (index == 0 && g_cfg.veh_probe) {
             static uint32_t s_dbg = 0;
             if ((s_dbg++ % 90u) == 0u)
@@ -1318,6 +1446,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                                      ecx, ecy, ecz,
                                      (double)g_cfg.veh_tp_boom[0], (double)g_cfg.veh_tp_boom[1], (double)g_cfg.veh_tp_boom[2]);
         }
+#endif
         return;   // third-person owns the eye; skip the first-person path
     }
 

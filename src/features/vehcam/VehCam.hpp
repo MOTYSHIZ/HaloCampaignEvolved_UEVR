@@ -93,4 +93,10 @@ extern std::atomic<bool> g_veh_tp_active;
 // Flip g_veh_tp_active (left-X in a vehicle). Called from the input hook.
 void veh_tp_toggle();
 
+// vehaimray: the vehicle aim toward WHERE THE CONTROLLER POINTS (UE degrees), computed on the game
+// tick by tracing the controller's world ray and aiming from the seated unit through the hit. True
+// only when vehicle motion aim is active, vehaimray is on and a fresh solution exists; the caller
+// then uses these angles INSTEAD of desired_aim_now() + aim_converge_apply(). Any thread.
+bool veh_aim_ray_angles(float* yaw, float* pitch);
+
 } // namespace halo
