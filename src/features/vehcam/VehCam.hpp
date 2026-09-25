@@ -82,22 +82,23 @@ void vehicle_body_update();
 void seat_direct_refresh();
 
 // vehaim: true when the motion controller should drive the aim IN A VEHICLE (owned TP camera on,
-// vehaim on, and the chassis resolved so we know we are actually in a vehicle -- not a cutscene or
-// death, which also raise stick mode). The Blam aim write consults this to lift its stick-mode
-// hold-off. Any thread (reads g_cfg + an atomic); called from the sim orientation getter.
+// motion aim on for this vehicle -- its "motionAim" in halo_vr_vehcams.json, else vehaim -- and the
+// chassis resolved so we know we are actually in a vehicle, not a cutscene or death, which also raise
+// stick mode). The Blam aim write consults this to lift its stick-mode hold-off. Any thread (reads
+// g_cfg + atomics); called from the sim orientation getter.
 bool veh_tp_motion_aim_active();
 
-// vehtpanchor: true while the HEAD-ANCHORED third-person camera is actually drawing. With hmdleash=0
-// the leash block stands down on it (it would slide the standing origin onto the head and cancel the
-// free 6DoF lean off the anchor); with hmdleash=1 the leash keeps running and holds the head to the
-// anchor as it holds it to the body on foot. Any thread.
+// True while our HEAD-ANCHORED camera is actually drawing. With hmdleash=0 the leash block stands down
+// on it (it would slide the standing origin onto the head and cancel the free 6DoF lean off the
+// anchor); with hmdleash=1 the leash keeps running and holds the head to the anchor as it holds it to
+// the body on foot. Any thread.
 bool veh_tp_anchor_active();
 
-// RUNTIME effective third-person-camera state. Initialised from vehtp on each mount, flipped live
-// by left-X via veh_tp_toggle(). The TP gates read this so FP<->TP can swap mid-ride.
+// RUNTIME third-person-camera state: true while a chase camera from halo_vr_vehcams.json is selected
+// for the vehicle you are in (VehCamSelect.cpp). The TP gates read this.
 extern std::atomic<bool> g_veh_tp_active;
-// Flip g_veh_tp_active (left-X in a vehicle). Called from the input hook.
-void veh_tp_toggle();
+// Left X / left Y in a vehicle: +1 = next camera, -1 = previous. Called from the input hook.
+void veh_cam_next_prev(int dir);
 
 // vehaimray: the vehicle aim toward WHERE THE CONTROLLER POINTS (UE degrees), computed on the game
 // tick by tracing the controller's world ray and aiming through the hit from the game's own chase

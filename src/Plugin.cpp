@@ -129,7 +129,8 @@
 
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
-#include "features/vehcam/VehCam.hpp"   // veh_tp_toggle(): left-X flips FP<->TP camera in a vehicle
+#include "features/vehcam/VehCam.hpp"   // veh_cam_next_prev(): left X / left Y step the vehicle camera
+#include "features/vehcam/VehCamSelect.hpp"   // vehcam_presets_init/poll: halo_vr_vehcams.json
 #include "AimTrace.hpp"
 #include "MemScan.hpp"
 
@@ -6366,6 +6367,7 @@ void update() {
         }
         load_config();
         palettearm_hand_poses_poll();   // halo_vr_handposes.json: one stat, read on change
+        vehcam_presets_poll();          // halo_vr_vehcams.json: the same
         features_config_loaded();
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
@@ -6846,7 +6848,7 @@ void update() {
     //
     // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
     //
-    // UNDER THE HEAD-ANCHORED VEHICLE CAMERA (vehtpanchor) the leash is RESPECTED (the user's call,
+    // UNDER THE HEAD-ANCHORED VEHICLE CAMERA (vehtp, halo_vr_vehcams.json) the leash is RESPECTED (the user's call,
     // 2026-09-24): with hmdleash=1 this block runs as on foot and holds the head to the anchor -- the
     // anchor stands in for the body, and VehCam backs out no head offset of its own. Only with
     // hmdleash=0 does the block stand down there, so no feature-owned leash slides the standing origin
@@ -11702,6 +11704,15 @@ public:
                 strcpy_s(hp, MAX_PATH, "halo_vr_handposes.json");
             palettearm_hand_poses_init(hp);
         }
+        {   // The vehicle cameras: their own JSON file, same rule -- written from the built-in cameras
+            // if absent, user-owned after that.
+            char vc[MAX_PATH] = {0};
+            if (n > 0 && n < MAX_PATH)
+                sprintf_s(vc, MAX_PATH, "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_vehcams.json", appdata);
+            else
+                strcpy_s(vc, MAX_PATH, "halo_vr_vehcams.json");
+            vehcam_presets_init(vc);
+        }
         load_config();                // writes a commented default halo_vr.cfg if none exists
 
         // Every override layer now ships or is template-created, so file EXISTENCE says nothing --
@@ -13655,17 +13666,21 @@ public:
             state->dwPacketNumber++;
         }
 
-        // ---- VEHICLE LEFT-X -> TOGGLE FP<->TP CAMERA. Left-X is free in stick mode (the on-foot
-        // remaps stand down and the game has no seated use for it), so a rising edge flips our owned
-        // third-person chase cam against bc24's first-person seat cam / the native cam -- a live swap
-        // for players who get motion sick in first person. Edge off the physical snapshot (raw_btn),
-        // like the trick above; !g_in_menu belt-and-braces. Additive: X still passes through to the game.
+        // ---- VEHICLE LEFT X / LEFT Y -> NEXT / PREVIOUS CAMERA. Each vehicle has its own list of
+        // cameras in halo_vr_vehcams.json (VehCamSelect.cpp applies the step on the game tick). X and Y
+        // are free for a driver in stick mode (the on-foot remaps stand down and the game has no seated
+        // use for them). Edges off the physical snapshot (raw_btn), like the trick above; !g_in_menu
+        // belt-and-braces. Additive: both still pass through to the game -- which does mean a PASSENGER
+        // with a weapon also reloads (X) or swaps weapons (Y) when stepping cameras.
         {
-            static bool s_lx_was = false;
-            const bool lx_now = g_stick_mode.load() && !g_in_menu.load()
-                && (raw_btn & XINPUT_GAMEPAD_X) != 0;
-            if (lx_now && !s_lx_was) veh_tp_toggle();
+            static bool s_lx_was = false, s_ly_was = false;
+            const bool seated = g_stick_mode.load() && !g_in_menu.load();
+            const bool lx_now = seated && (raw_btn & XINPUT_GAMEPAD_X) != 0;
+            const bool ly_now = seated && (raw_btn & XINPUT_GAMEPAD_Y) != 0;
+            if (lx_now && !s_lx_was) veh_cam_next_prev(+1);
+            if (ly_now && !s_ly_was) veh_cam_next_prev(-1);
             s_lx_was = lx_now;
+            s_ly_was = ly_now;
         }
 
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what

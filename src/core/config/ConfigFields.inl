@@ -1213,39 +1213,17 @@
     // to decide whether a vehicle exposes a weapon aim distinct from the chase-camera value.
     // Read-only. See docs\VEHICLE_AIM_DECOUPLE_PROBE.md.
     bool  veh_probe = false;
-    // ROUTE A P0: owned THIRD-PERSON vehicle camera -- a sibling OPTION to bc24's first-person
-    // veh_cam (never modifies it), for players who get motion sick in first person and as a live
-    // toggle. Boom behind the chassis mesh (the nearest VehicleActor to the PLAYER PAWN, since the
-    // seat resolution reads dead); view yaw follows the chassis + head free-look. Gated on stick
-    // mode. 0 = off; the eventual left-X binding flips this live.
+    // ROUTE A P0: owned vehicle cameras -- a sibling OPTION to bc24's first-person veh_cam (never
+    // modifies it), for players who get motion sick in first person. 1 = on: in a vehicle, the
+    // cameras listed for it in halo_vr_vehcams.json, stepped with left X (next) / left Y (previous).
+    // EVERY per-camera setting lives in that file -- offset, origin (vehicle or seat), what carries the
+    // offset, which vehicle motions the view follows, collision, body hiding -- so each vehicle and
+    // each camera can differ. (The vehtpboom / vehtpyaw / vehtpanchor / vehtpattitude / vehtpcollide*
+    // keys that did this globally are gone; the file replaced them.) Always head-anchored: your head,
+    // not the play-space origin, is what rides the vehicle, and hmdleash is respected -- on, the leash
+    // holds your head to the camera's point as it holds it to your body on foot; off, you lean freely.
+    // Gated on stick mode. 0 = off.
     bool  veh_tp = false;
-    // cm, in a YAW-ONLY chase frame with WORLD UP (fwd -=behind, left, up). NOT the raw skeletal-mesh
-    // basis: that carries the mesh's baked axes plus the hull's live pitch/roll over terrain, which
-    // tumbles the boom (measured: up=+1000 gave world-Z -785..-105, camera diving below the hull).
-    float veh_tp_boom[3] = { -450.0f, 0.0f, 180.0f };
-    // vehtpyaw: 1 = the chase camera yaws to follow the vehicle heading (classic chase); 0 = it holds
-    // a fixed world heading and the hull turns within the view. Live tunable.
-    bool  veh_tp_yaw_follow = true;
-    // vehtpanchor: 1 = HEAD-ANCHORED (default). Your head's place relative to the vehicle rides with
-    // it -- position follows the vehicle's movement AND turning, so you stay e.g. behind it -- while the
-    // VIEW yaw is still vehtpyaw's choice, so the world need not spin around your eyes. Pivots on the
-    // HEAD, not the play-space origin: the head's room offset is captured once per ride and backed out,
-    // so where you stood when you got in cannot skew it. hmdleash is RESPECTED: with it on, the leash
-    // holds your head to the anchor exactly as it holds it to your body on foot (radius
-    // hmdleashlat/hmdleashvert; 0/0 = no offset); with it off, you lean freely off the anchor (6DoF).
-    // 0 = the old boom: the camera shares the view yaw.
-    bool  veh_tp_anchor = true;
-    // vehtpattitude: with the anchor on, 1 = it rides the vehicle's FULL attitude -- yaw, pitch AND
-    // bank -- so it holds its place as a Banshee dives or rolls (default); 0 = yaw only (a level boom:
-    // steadier over a ground vehicle's bumps). The VIEW never pitches or rolls either way; only its yaw
-    // is vehtpyaw's call. The anchor is captured in the mesh's own frame per ride, so the chassis
-    // mesh's baked modelling axes cancel -- that offset is what tumbled the old full-rotation boom.
-    bool  veh_tp_attitude = true;
-    // vehtpcollide: 1 = the chase camera pulls in (spring arm) when world geometry blocks the boom,
-    // so it never ends up behind a wall; 0 = off. The trace is game-side; the eye scales the boom by
-    // a published fraction. vehtpcollidemargin = cm the camera stops SHORT of the hit (no surface clip).
-    bool  veh_tp_collide = true;
-    float veh_tp_collide_margin = 30.0f;
     // vehaim: 1 = while the owned third-person camera is on IN A VEHICLE, let the motion controller
     // drive the aim (turret/hull), the same direct-drive write infantry uses. Safe only because we
     // own the camera -- the historic reason the aim write is held off in stick mode is that Halo
@@ -1257,8 +1235,8 @@
     // the stick to the game (no turn). Both live; may become per-vehicle later.
     int   veh_stick_mode = 1;
     // vehorbitrate: deg/sec the right stick X TURNS YOUR VIEW (a smooth turn) when vehstick=1. It turns
-    // the view yaw only -- pivoting on your head, never moving the anchor -- so under vehtpanchor you
-    // stay put relative to the vehicle and simply look another way. Uncapped. (Name kept from the
+    // the view yaw only -- pivoting on your head, never moving the anchor -- so you stay put relative to
+    // the vehicle and simply look another way (a camera whose offset rides the VIEW orbits instead). Uncapped. (Name kept from the
     // first cut, which orbited the camera around the vehicle; the headset said a turn is what it wants.)
     float veh_orbit_rate = 120.0f;
     // vehorbitreturn: deg/sec the turn eases back to zero when the stick is idle. 0 = HOLD (default):

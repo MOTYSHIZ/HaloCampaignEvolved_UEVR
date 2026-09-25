@@ -1791,8 +1791,8 @@ bool parse_config_file(const char* path) {
         char* eq = strchr(line, '=');
         if (eq == nullptr) continue;
         *eq = '\0';
-        // Tolerate whitespace around '=' (e.g. "vehtpboom = -450,-500,450"). Without this, the space
-        // BEFORE '=' stays on the key ("vehtpboom ") and every _stricmp below silently misses, so the
+        // Tolerate whitespace around '=' (e.g. "vehcamoff = -450,-500,450"). Without this, the space
+        // BEFORE '=' stays on the key ("vehcamoff ") and every _stricmp below silently misses, so the
         // line is dropped and the setting keeps its compiled default -- a silent config failure that
         // cost a debugging session. Trim the key both ends; skip leading space on the value (numeric
         // parses skip it already, but string-valued keys copied it verbatim).
