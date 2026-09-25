@@ -11212,9 +11212,29 @@ void update() {
             const Vec3 fwd{cp * std::cos(r_yaw * DEG2RAD),
                            cp * std::sin(r_yaw * DEG2RAD),
                            std::sin(r_pitch * DEG2RAD)};
-            const float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
-                          ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
-            const Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
+            float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
+                    ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
+            Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
+
+            // THIRD PERSON (our owned boom camera): the ray above starts at the CAMERA, ~10 m off the
+            // vehicle, so the marker would float on a line parallel to the shots. Same reticule,
+            // placed on what the vehicle's aim actually hits instead -- traced from the seated unit
+            // along this same aim (VehCam.cpp) -- then pulled toward the eye by the surface offset so
+            // it does not sink into the ground. d becomes the eye-to-marker range, which the
+            // apparent-size hold below needs. First person / native camera: unchanged.
+            {
+                Vec3 vt{};
+                if (veh_tp_reticle_target(r_yaw, r_pitch, &vt)) {
+                    float tx = vt.x - origin.x, ty = vt.y - origin.y, tz = vt.z - origin.z;
+                    const float tl = std::sqrt(tx * tx + ty * ty + tz * tz);
+                    if (tl > 1.0f) {
+                        const float back = std::fmin(g_cfg.aim_reticule_surface_off, tl * 0.5f);
+                        tx /= tl; ty /= tl; tz /= tl;
+                        target = Vec3{vt.x - tx * back, vt.y - ty * back, vt.z - tz * back};
+                        d = tl - back;
+                    }
+                }
+            }
 
             g_ret_origin = origin;
             g_have_ret_origin = true;

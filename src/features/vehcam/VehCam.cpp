@@ -723,6 +723,42 @@ bool veh_aim_ray_angles(float* yaw, float* pitch) {
     return true;
 }
 
+// THIRD-PERSON VEHICLE RETICULE. In a vehicle the ONE compositor reticule is fed by the tick path in
+// Plugin.cpp (the render-rate stamp stands down in stick mode: it follows the on-foot palette weapon),
+// built along ControlRotation -- where the vehicle's guns actually point. It took the rendered view
+// position as the ray origin, which is right while the eye sits in the vehicle and wrong behind our
+// owned boom camera: that ray starts ~10 m behind and above the vehicle, so the marker floated on a
+// line PARALLEL to the shots rather than on what they hit. In third person the ray starts at the
+// seated unit instead (the same origin the vehicle ray aim uses) and is traced, so the reticule sits
+// on the surface the shot reaches -- including a wall the camera sees over and the guns do not.
+// GAME THREAD (hit_trace is reflection). False = our third-person camera is not up; keep the old path.
+bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out) {
+    if (out == nullptr || !g_veh_tp_active.load(std::memory_order_relaxed)) return false;
+    const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+    if (cp == 0) return false;
+    auto* pawn = API::get()->get_local_pawn(0);
+    Vec3 c{};
+    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &c)) return false;
+    c.z += g_cfg.veh_aim_pivot_z;
+    const float cpch = std::cos(pitch * DEG2RAD);
+    const Vec3 u{cpch * std::cos(yaw * DEG2RAD), cpch * std::sin(yaw * DEG2RAD), std::sin(pitch * DEG2RAD)};
+    const float far_cm = (g_cfg.veh_aim_far > 1.0f) ? g_cfg.veh_aim_far : 10000.0f;   // not `far`: a <Windows.h> macro
+    const Vec3 e{c.x + u.x * far_cm, c.y + u.y * far_cm, c.z + u.z * far_cm};
+    static TrackedObject s_tpc_ret;
+    static uintptr_t s_tpc_ret_raw = 0;
+    if (cp != s_tpc_ret_raw) {
+        s_tpc_ret_raw = cp;
+        s_tpc_ret.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+    }
+    API::UObject* ignore[2] = {}; int ni = 0;
+    ignore[ni++] = pawn;
+    if (auto* ch = s_tpc_ret.get_checked(L"SkeletalMeshComponent"))
+        if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
+    Vec3 hit{};
+    *out = hit_trace(c, e, ignore, ni, &hit) ? hit : e;   // sky: along the aim at the trace length
+    return true;
+}
+
 namespace {
 // GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
 // vehicle the player is in. No name gate (chassis naming varies: Banshee ".hull", Wraith

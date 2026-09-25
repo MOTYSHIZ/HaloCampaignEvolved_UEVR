@@ -99,4 +99,10 @@ void veh_tp_toggle();
 // then uses these angles INSTEAD of desired_aim_now() + aim_converge_apply(). Any thread.
 bool veh_aim_ray_angles(float* yaw, float* pitch);
 
+// Third-person placement for the ONE compositor reticule in a vehicle: trace from the seated unit
+// along the given aim (UE degrees -- pass the reticule's own ray angles) and return the hit, or the
+// far end of the ray on a miss. False when our third-person camera is not up, and the caller keeps
+// its camera-origin placement (correct while the eye sits in the vehicle). GAME THREAD only.
+bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out);
+
 } // namespace halo
