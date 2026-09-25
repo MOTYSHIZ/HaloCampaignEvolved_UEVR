@@ -6846,12 +6846,13 @@ void update() {
     //
     // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
     //
-    // STANDS DOWN under the head-anchored vehicle camera (vehtpanchor): there the head is meant to lean
-    // off its anchor, and sliding the standing origin onto it would cancel exactly that. The standing
-    // origin then holds still for the ride, which is what the anchor's captured head offset assumes.
-    // Aim does not need the leash there: vehicle aim is ray-based and the reticule is traced from the
-    // vehicle. On exit the leash resumes and re-absorbs any offset, inside the cut to the game's view.
-    if ((g_cfg.hmd_leash || features_leash_block_wanted()) && !veh_tp_anchor_active()) {
+    // UNDER THE HEAD-ANCHORED VEHICLE CAMERA (vehtpanchor) the leash is RESPECTED (the user's call,
+    // 2026-09-24): with hmdleash=1 this block runs as on foot and holds the head to the anchor -- the
+    // anchor stands in for the body, and VehCam backs out no head offset of its own. Only with
+    // hmdleash=0 does the block stand down there, so no feature-owned leash slides the standing origin
+    // under a player who chose to lean freely off the anchor (VehCam's captured head offset assumes it
+    // holds still). On exit the leash resumes and re-absorbs any offset, inside the cut to the game's view.
+    if ((g_cfg.hmd_leash || features_leash_block_wanted()) && !(veh_tp_anchor_active() && !g_cfg.hmd_leash)) {
         Vec3 hp{}; Quat hq{};
         const auto hi = API::VR::get_hmd_index();
         if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false) && features_hmd_pose_plausible(hp)) {
@@ -11223,11 +11224,13 @@ void update() {
             Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
 
             // THIRD PERSON (our owned boom camera): the ray above starts at the CAMERA, ~10 m off the
-            // vehicle, so the marker would float on a line parallel to the shots. Same reticule,
-            // placed on what the vehicle's aim actually hits instead -- traced from the seated unit
-            // along this same aim (VehCam.cpp) -- then pulled toward the eye by the surface offset so
-            // it does not sink into the ground. d becomes the eye-to-marker range, which the
-            // apparent-size hold below needs. First person / native camera: unchanged.
+            // vehicle, so the marker would float on a line parallel to the shots. Aiming with the
+            // controller (vehaimray) the reticule sits on the INTENT point -- where the pointing ray
+            // reaches, which the vehicle is aimed through, the infantry rule; otherwise on what the
+            // vehicle's aim actually hits, traced from the seated unit along this same aim. Both from
+            // VehCam.cpp, then pulled toward the eye by the surface offset so it does not sink into
+            // the ground. d becomes the eye-to-marker range, which the apparent-size hold below needs.
+            // First person / native camera: unchanged.
             {
                 Vec3 vt{};
                 if (veh_tp_reticle_target(r_yaw, r_pitch, &vt)) {
@@ -11270,8 +11273,11 @@ void update() {
             // Compositor reticule, seated branch -- see the on-foot call for why it takes the
             // camera pose. g_ret_scale_mul already carries the seated distance compensation above,
             // so the layer inherits it and the three reticules stay the same apparent size.
-            xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
-                                                            g_ret_scale_mul.load());   // seated; see the on-foot call
+            // STANDS DOWN while the third-person eye stamps it every frame on the live controller
+            // ray (vehaimray): the layer's snapshot takes one writer, and the stamp is the fresher.
+            if (!veh_tp_reticle_stamp_owns())
+                xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
+                                                                g_ret_scale_mul.load());   // seated; see the on-foot call
 
             // ---- FORCE VISIBLE WHILE SEATED, and prove where it landed.
             //

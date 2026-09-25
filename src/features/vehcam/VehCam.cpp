@@ -9,6 +9,8 @@
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // get_pose, g_stick_mode_active
 #include "HitTrace.hpp"           // hit_trace(): camera-collision spring arm (game-thread)
+#include "Reticule.hpp"           // g_ret_scale_mul: the per-frame vehicle reticule stamp's apparent size
+#include "XrLayer.hpp"            // xrlayer_notice_reticule: the per-frame vehicle reticule stamp
 #include "Rig.hpp"
 #include "UeObject.hpp"
 #include "core/MarkerFaces.hpp"
@@ -681,6 +683,11 @@ std::atomic<bool>      g_tp_chassis_yaw_valid{false};
 // a yaw alone cannot describe an anchor that pitches and banks with the vehicle (vehtpattitude).
 // An offset, not a position -- the tick adds its own fresh chassis location (two clocks).
 std::atomic<float>     g_tp_boom_ox{0.0f}, g_tp_boom_oy{0.0f}, g_tp_boom_oz{0.0f};
+// The VIEW BASE the eye handed UEVR last frame, as an offset from the chassis: the anchor, the spring
+// arm and the head-offset subtraction all included. The ray aim rebuilds the controller's world ray on
+// the tick from it plus the tick's own chassis read -- the same two-clocks split as the boom offset.
+std::atomic<float>     g_tp_eye_ox{0.0f}, g_tp_eye_oy{0.0f}, g_tp_eye_oz{0.0f};
+std::atomic<bool>      g_tp_eye_valid{false};
 // Bumped on every rising edge of our camera (mount, or left-X back to TP). The eye re-arms its per-ride
 // captures -- the frozen view yaw and the head anchor -- when it changes.
 std::atomic<uint32_t>  g_tp_mount_gen{0};
@@ -693,9 +700,10 @@ std::atomic<float>     g_tp_collision_frac{1.0f};
 // so the player can swap FP<->TP mid-ride. false until the first mount edge sets it.
 std::atomic<bool>      g_veh_tp_active{false};
 
-// Right-stick orbit offset (deg) added to the chase-cam yaw when motion aim frees the stick
-// (vehstick=1). Accumulated on the game tick, read by the eye; eases back to 0 when idle.
-std::atomic<float>     g_veh_orbit_yaw{0.0f};
+// Right-stick TURN (deg) added to the VIEW yaw when motion aim frees the stick (vehstick=1). A turn,
+// not an orbit: under vehtpanchor it pivots on your head and never moves the anchor. Accumulated on
+// the game tick, read by the eye; zeroed on every new ride, held otherwise (vehorbitreturn=0).
+std::atomic<float>     g_veh_turn_yaw{0.0f};
 
 // left-X: flip the runtime TP camera state. Called from the input hook (any thread).
 void veh_tp_toggle() {
@@ -714,9 +722,10 @@ bool veh_tp_motion_aim_active() {
 }
 
 // vehtpanchor: true while the head-anchored camera is actually drawing (the eye wrote this frame --
-// g_tp_chassis_yaw_valid -- not merely "a chassis is resolved"). Plugin.cpp stands the head leash
-// down on it: the leash slides the standing origin onto the head, which is the opposite of letting
-// you lean off the anchor. Any thread.
+// g_tp_chassis_yaw_valid -- not merely "a chassis is resolved"). With hmdleash=0 Plugin.cpp stands the
+// leash block down on it, so nothing slides the standing origin and you lean freely off the anchor.
+// With hmdleash=1 the leash keeps running and holds your head to the anchor exactly as it holds it to
+// your body on foot. Any thread.
 bool veh_tp_anchor_active() {
     return g_cfg.veh_tp_anchor && g_veh_tp_active.load(std::memory_order_relaxed)
         && halo::g_stick_mode_active.load(std::memory_order_relaxed)
@@ -732,6 +741,9 @@ std::atomic<bool>  g_veh_aim_valid{false};
 // The last measured range along the pointing ray, HELD on a miss -- sky has no range, and inventing
 // one swings the aim every time the ray crosses a skyline (AimConverge.hpp's rule, same reason).
 std::atomic<float> g_veh_aim_range{0.0f};
+// The point the vehicle is aimed THROUGH (the pointing ray at that range), world cm, from this tick.
+// Consumed on the same tick by the world-space reticules; the compositor copy is re-stamped per frame.
+std::atomic<float> g_veh_aim_tx{0.0f}, g_veh_aim_ty{0.0f}, g_veh_aim_tz{0.0f};
 
 bool veh_aim_ray_angles(float* yaw, float* pitch) {
     if (!veh_tp_motion_aim_active() || !g_cfg.veh_aim_ray) return false;
@@ -741,19 +753,110 @@ bool veh_aim_ray_angles(float* yaw, float* pitch) {
     return true;
 }
 
-// THIRD-PERSON VEHICLE RETICULE. In a vehicle the ONE compositor reticule is fed by the tick path in
-// Plugin.cpp (the render-rate stamp stands down in stick mode: it follows the on-foot palette weapon),
-// built along ControlRotation -- where the vehicle's guns actually point. It took the rendered view
-// position as the ray origin, which is right while the eye sits in the vehicle and wrong behind our
-// owned boom camera: that ray starts ~10 m behind and above the vehicle, so the marker floated on a
-// line PARALLEL to the shots rather than on what they hit. In third person the ray starts at the
-// seated unit instead (the same origin the vehicle ray aim uses) and is traced, so the reticule sits
-// on the surface the shot reaches -- including a wall the camera sees over and the guns do not.
+// UE cm per REAL metre, as UEVR is rendering it right now: 100 x VR_WorldScale (the direction is
+// measured, not assumed -- HeightCal fitted 112.7 cm/m against 100 x 1.126 = 112.6). Read LIVE rather
+// than taken from rig_scale: rig_scale is a fixed number that matches the shipped profile's 1.312,
+// and players set their own world scale -- a mismatch puts the controller ray and the head anchor off
+// by the ratio. Polled on the game tick every ~2 s while our camera is up (a mod-value read is a string
+// search, not a render-thread job); the render side reads the atomic. 0 = not read yet.
+std::atomic<float> g_veh_cm_per_m{0.0f};
+
+namespace {
+float veh_cm_per_m() {
+    const float v = g_veh_cm_per_m.load(std::memory_order_relaxed);
+    if (v > 1.0f) return v;
+    return (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;   // before the first read
+}
+
+// GAME THREAD. Raw C accessor, as XrLayer/ScopeLayer/HeightCal read it: the header's float path runs
+// std::stof on an empty buffer when the key is absent. An absent or implausible value keeps the last
+// good one -- the mono-collapse view parks VR_WorldScale at its 0.01 floor, which is not a preference.
+void veh_poll_world_scale() {
+    char buf[64]{};
+    auto* p = API::get()->param();
+    if (p == nullptr || p->vr == nullptr || p->vr->get_mod_value == nullptr) return;
+    p->vr->get_mod_value("VR_WorldScale", buf, sizeof(buf));
+    if (buf[0] == 0) return;
+    const float ws = (float)std::atof(buf);
+    if (!(ws > 0.05f && ws < 100.0f)) return;
+    const float cmpm = 100.0f * ws;
+    const float prev = g_veh_cm_per_m.exchange(cmpm, std::memory_order_relaxed);
+    if (std::fabs(prev - cmpm) > 0.05f)
+        API::get()->log_info("[Halo-CampE-UEVR] VEHTP: world scale %.3f -> %.1f UE cm per real metre "
+                             "(vehicle controller ray + head anchor)", ws, cmpm);
+}
+
+// The range the reticule and the aim use: the held measurement, or the far end of the ray before this
+// ride has measured anything. ONE rule for the tick and the per-frame stamp, so they cannot disagree.
+float veh_aim_range_eff() {
+    const float r = g_veh_aim_range.load(std::memory_order_relaxed);
+    if (r > 1.0f) return r;
+    return (g_cfg.veh_aim_far > 1.0f) ? g_cfg.veh_aim_far : 10000.0f;
+}
+
+// The controller's world ray EXACTLY as UEVR draws it in our third-person camera:
+//     world = view_base + R(view_yaw) . swizzle(room - standing_origin) . (100 x VR_WorldScale)
+// -- the transform the head gets too (the anchor capture in the eye uses the same one).
+// room_to_world() is the wrong tool here, twice: it scales by 100 cm/m where UEVR renders at
+// 100 x VR_WorldScale (131.2 on the shipped profile, whatever the player chose on theirs), and without
+// room_anchor it hangs the offset off the HMD at g_cam, which in this camera is the VIEW BASE rather
+// than the head. Either one shifts the whole ray sideways -- centimetres to tens of centimetres -- so
+// the aim point and the crosshair sat off the line the hand actually points along. Direction is
+// scale-free. Any thread: pure maths, the cached world scale, and UEVR's standing origin (which the
+// eye callback already reads).
+void veh_room_ray(const Vec3& cpos, const Vec3& fwd, const double base[3], float view_yaw, Vec3* o, Vec3* d) {
+    const auto so = API::VR::get_standing_origin();
+    const double rs = (double)veh_cm_per_m();
+    const double vr = (double)view_yaw * 0.01745329252, vc = std::cos(vr), vs = std::sin(vr);
+    // room -> UE: X = -z, Y = x, Z = y. Same yaw rotation as the eye's anchor subtraction.
+    const double lx = -((double)cpos.z - (double)so.z) * rs;
+    const double ly =  ((double)cpos.x - (double)so.x) * rs;
+    const double lz =  ((double)cpos.y - (double)so.y) * rs;
+    *o = Vec3{ (float)(base[0] + lx * vc - ly * vs), (float)(base[1] + lx * vs + ly * vc), (float)(base[2] + lz) };
+    const double fx = -(double)fwd.z, fy = (double)fwd.x, fz = (double)fwd.y;
+    double dx = fx * vc - fy * vs, dy = fx * vs + fy * vc, dz = fz;
+    const double dl = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dl > 1e-9) { dx /= dl; dy /= dl; dz /= dl; }
+    *d = Vec3{ (float)dx, (float)dy, (float)dz };
+}
+} // namespace
+
+// Who publishes the ONE compositor reticule while you aim a vehicle with the controller: the eye
+// callback, every frame, on the live pointing ray (see the stamp in vehcam_stereo_pre_eye_seat). The
+// tick path in Plugin.cpp stands its compositor publish down on this -- the layer's snapshot takes one
+// writer at a time -- and keeps placing the world-space widget/mesh reticules. Any thread.
+bool veh_tp_reticle_stamp_owns() {
+    return g_cfg.xr_layer && g_cfg.aim_reticule
+        && veh_tp_motion_aim_active() && g_cfg.veh_aim_ray
+        && halo::g_stick_mode_active.load(std::memory_order_relaxed)
+        && g_tp_chassis_yaw_valid.load(std::memory_order_relaxed)
+        && g_veh_aim_valid.load(std::memory_order_relaxed);
+}
+
+// THIRD-PERSON VEHICLE RETICULE, tick placement (the world-space widget/mesh reticules, and the
+// compositor one whenever the per-frame stamp does not own it).
+//
+// Aiming with the controller (vehaimray), it is the INTENT point: where the pointing ray reaches, the
+// same point the vehicle is aimed through -- the infantry rule (intent ray -> impact point -> the shot
+// converged on it). Until 2026-09-24 it was instead re-traced along the vehicle's CURRENT aim from the
+// seated unit, which trailed the hand by the aim write and landed at a different depth than the
+// pointing ray, so it sat off the line you point along.
+//
+// Otherwise (stick-driven vehicle aim) it follows the aim that is actually there: traced from the
+// seated unit along ControlRotation. The old origin -- the rendered view position -- is right while the
+// eye sits in the vehicle and wrong behind our boom camera: that ray starts ~10 m behind and above the
+// vehicle, so the marker floated on a line PARALLEL to the shots rather than on what they hit.
 // GAME THREAD (hit_trace is reflection). False = our third-person camera is not up; keep the old path.
 bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out) {
     if (out == nullptr || !g_veh_tp_active.load(std::memory_order_relaxed)) return false;
     const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
     if (cp == 0) return false;
+    if (veh_tp_motion_aim_active() && g_cfg.veh_aim_ray && g_veh_aim_valid.load(std::memory_order_relaxed)) {
+        *out = Vec3{g_veh_aim_tx.load(std::memory_order_relaxed),
+                    g_veh_aim_ty.load(std::memory_order_relaxed),
+                    g_veh_aim_tz.load(std::memory_order_relaxed)};
+        return true;
+    }
     auto* pawn = API::get()->get_local_pawn(0);
     Vec3 c{};
     if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &c)) return false;
@@ -1223,9 +1326,14 @@ void vehcam_game_tick_vehicle() {
         if (stick && !s_stick_was) g_veh_tp_active.store(g_cfg.veh_tp, std::memory_order_relaxed);
         s_stick_was = stick;
         const bool tp_on = stick && g_veh_tp_active.load(std::memory_order_relaxed);
+        // The live world scale: read at the ride's start (before the eye's first head capture uses it)
+        // and re-read every ~2 s during it, so a world-scale change lands mid-ride. Never on foot.
+        static uint32_t s_ws_tick = 0;
+        if (tp_on && (!s_tp_was || (++s_ws_tick % 64u) == 0u)) veh_poll_world_scale();
         if (tp_on && !s_tp_was) {
             resolve_tp_chassis(); s_tp_tick = 0;
             g_tp_mount_gen.fetch_add(1, std::memory_order_relaxed);   // the eye re-arms its per-ride captures
+            g_veh_turn_yaw.store(0.0f, std::memory_order_relaxed);    // each ride starts facing its heading
         }
         else if (tp_on && g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) {
             if ((++s_tp_tick % 90u) == 0u) resolve_tp_chassis();
@@ -1234,31 +1342,34 @@ void vehcam_game_tick_vehicle() {
             g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
             g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
             g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
+            g_tp_eye_valid.store(false, std::memory_order_relaxed);
         }
         s_tp_was = tp_on;
     }
 
-    // RIGHT-STICK ORBIT (vehstick=1): with motion aim freeing the stick (vehaim), the right stick X
-    // orbits the chase-cam yaw. Accumulated here (needs dt); the eye adds g_veh_orbit_yaw to eff_yaw
-    // and publishes it, so the view and the collision trace follow the orbit automatically. Eases
-    // back to centre when the stick is idle or orbit is off (vehorbitreturn), so the camera returns
-    // behind the vehicle. The game's own stick-look is masked by the aim write, so we need not eat it.
+    // RIGHT-STICK TURN (vehstick=1): with motion aim freeing the stick (vehaim), the right stick X turns
+    // your VIEW -- a smooth turn, the in-vehicle counterpart of turning on foot. The eye adds
+    // g_veh_turn_yaw to the view yaw only: with vehtpyaw=0 that view is independent of the vehicle's
+    // own yaw, and under vehtpanchor the turn pivots on your head without moving the anchor. It HOLDS
+    // where you leave it (vehorbitreturn=0, default). The first cut orbited the boom and eased back at
+    // 60 deg/s, which in-headset read as "the stick lerps my head yaw back to the front of the
+    // vehicle". Zeroed on every new ride. The game's own stick-look is masked by the aim write.
     {
-        float orbit = g_veh_orbit_yaw.load(std::memory_order_relaxed);
+        float turn = g_veh_turn_yaw.load(std::memory_order_relaxed);
         const float dt = g_last_dt.load();
-        const bool can_orbit = veh_tp_motion_aim_active() && g_cfg.veh_stick_mode == 1;
-        const float sx = can_orbit ? host::g_plugin_state.raw_stick_x->load() : 0.0f;
+        const bool can_turn = veh_tp_motion_aim_active() && g_cfg.veh_stick_mode == 1;
+        const float sx = can_turn ? host::g_plugin_state.raw_stick_x->load() : 0.0f;
         const float dz = 0.15f;
         if (std::fabs(sx) > dz) {
             const float s = (sx - (sx > 0.0f ? dz : -dz)) / (1.0f - dz);   // rescale past the deadzone
-            orbit += s * g_cfg.veh_orbit_rate * dt;
-            while (orbit >  180.0f) orbit -= 360.0f;
-            while (orbit < -180.0f) orbit += 360.0f;
+            turn += s * g_cfg.veh_orbit_rate * dt;
+            while (turn >  180.0f) turn -= 360.0f;
+            while (turn < -180.0f) turn += 360.0f;
         } else if (g_cfg.veh_orbit_return > 0.0f) {
             const float step = g_cfg.veh_orbit_return * dt;
-            if (orbit > step) orbit -= step; else if (orbit < -step) orbit += step; else orbit = 0.0f;
+            if (turn > step) turn -= step; else if (turn < -step) turn += step; else turn = 0.0f;
         }
-        g_veh_orbit_yaw.store(orbit, std::memory_order_relaxed);
+        g_veh_turn_yaw.store(turn, std::memory_order_relaxed);
     }
 
     // VEHICLE RAY AIM (vehaimray) -- aim the vehicle at WHERE THE CONTROLLER POINTS.
@@ -1270,14 +1381,18 @@ void vehcam_game_tick_vehicle() {
     // -85..-95), and the camera sits ~10 m off the vehicle, so even a correct direction carries that
     // much parallax. It read as "rotate the controller in 3DoF to steer".
     //
-    // So in a vehicle: (1) the controller's ABSOLUTE world ray, through the same room->world transform
-    // the holsters and wheel markers use (anchored at g_cam = our boom eye, rotated by
-    // g_view_base_yaw = our view yaw, both published by the TP camera paths); (2) trace it for the point
-    // being pointed at, holding the last range on a miss; (3) aim from the seated unit through that
-    // point. aim.md's aim = normalize((eye - origin) + range * sightline), with the seated unit as the
-    // origin -- NOT Halo's chase camera, which orbits WITH the aim (logged 11-14 m above the Banshee
-    // while it aimed down) and would chase its own output. GAME THREAD: hit_trace is reflection.
-    // Publishes ANGLES for the sim-thread write (BlamDrive.cpp drive_angles_impl).
+    // So in a vehicle: (1) the controller's ABSOLUTE world ray, built exactly the way UEVR draws the
+    // controller in this camera (veh_room_ray: view base + R(view yaw) . (hand - standing origin) .
+    // the LIVE world scale), with the view base recomposed on THIS tick from the eye's published offset and a
+    // fresh chassis read; (2) trace it for the point being pointed at, holding the last range on a
+    // miss; (3) aim from the seated unit through that point. aim.md's
+    // aim = normalize((eye - origin) + range * sightline), with the seated unit as the origin -- NOT
+    // Halo's chase camera, which orbits WITH the aim (logged 11-14 m above the Banshee while it aimed
+    // down) and would chase its own output. GAME THREAD: hit_trace is reflection. Publishes ANGLES for
+    // the sim-thread write (BlamDrive.cpp drive_angles_impl), and the aim point for the reticules.
+    //
+    // (1) used room_to_world() until 2026-09-24: 100 cm/m instead of UEVR's 100 x VR_WorldScale, anchored
+    // at the view base instead of the head. Both shift the ray sideways off the line the hand points along.
     {
         static TrackedObject s_tpc_aim;
         static uintptr_t s_tpc_aim_raw = 0;
@@ -1286,47 +1401,56 @@ void vehcam_game_tick_vehicle() {
         if (want) {
             const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
                                                      : API::VR::get_right_controller_index();
-            Vec3 hmd{}, cpos{}; Quat hq{}, cq{};
+            Vec3 cpos{}; Quat cq{};
             auto* pawn = API::get()->get_local_pawn(0);
             Vec3 c{};
-            if (ridx >= 0 && pawn != nullptr
-                && get_pose(API::VR::get_hmd_index(), &hmd, &hq, false)
+            if (ridx >= 0 && pawn != nullptr && g_tp_eye_valid.load(std::memory_order_relaxed)
                 && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)
                 && call_ret_vec3(pawn, L"K2_GetActorLocation", &c)) {
-                const Vec3 f = quat_forward(cq);   // the pointing axis, room space
-                const Vec3 o = holster_room_to_world(cpos, hmd);
-                const Vec3 p = holster_room_to_world(Vec3{cpos.x + f.x, cpos.y + f.y, cpos.z + f.z}, hmd);
-                Vec3 d{p.x - o.x, p.y - o.y, p.z - o.z};
-                const float dl = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
-                if (dl > 1e-3f) {
-                    d = Vec3{d.x / dl, d.y / dl, d.z / dl};
+                const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+                if (cp != s_tpc_aim_raw) {
+                    s_tpc_aim_raw = cp;
+                    s_tpc_aim.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+                }
+                auto* ch = (cp != 0) ? s_tpc_aim.get_checked(L"SkeletalMeshComponent") : nullptr;
+                // The view base on this tick: the eye's offset from the chassis, hung off the chassis
+                // as read NOW -- the pawn, the trace and this read all describe the same game state.
+                // No chassis read: the eye's last base as published (off by one frame of travel).
+                double base[3] = { (double)g_cam_x.load(std::memory_order_relaxed),
+                                   (double)g_cam_y.load(std::memory_order_relaxed),
+                                   (double)g_cam_z.load(std::memory_order_relaxed) };
+                Vec3 cl{};
+                if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cl)) {
+                    base[0] = (double)cl.x + (double)g_tp_eye_ox.load(std::memory_order_relaxed);
+                    base[1] = (double)cl.y + (double)g_tp_eye_oy.load(std::memory_order_relaxed);
+                    base[2] = (double)cl.z + (double)g_tp_eye_oz.load(std::memory_order_relaxed);
+                }
+                Vec3 o{}, d{};
+                veh_room_ray(cpos, quat_forward(cq), base, g_tp_chassis_yaw.load(std::memory_order_relaxed), &o, &d);
+                if (d.x * d.x + d.y * d.y + d.z * d.z > 0.5f) {
                     c.z += g_cfg.veh_aim_pivot_z;
                     // Ignore our own vehicle and the pawn, so pointing THROUGH the hull reaches the
                     // world beyond it instead of aiming the vehicle at itself.
-                    const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
-                    if (cp != s_tpc_aim_raw) {
-                        s_tpc_aim_raw = cp;
-                        s_tpc_aim.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
-                    }
                     API::UObject* ignore[2] = {}; int ni = 0;
                     ignore[ni++] = pawn;
-                    if (auto* ch = (cp != 0) ? s_tpc_aim.get_checked(L"SkeletalMeshComponent") : nullptr)
+                    if (ch != nullptr)
                         if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
                     // NOT `far`: <Windows.h> defines `far` (and `near`) as empty macros, which turns
                     // `const float far = ...` into `const float = ...` and wrecks the whole TU.
                     const float far_cm = g_cfg.veh_aim_far;
                     const Vec3 e{o.x + d.x * far_cm, o.y + d.y * far_cm, o.z + d.z * far_cm};
                     Vec3 hit{};
-                    float range = g_veh_aim_range.load(std::memory_order_relaxed);
+                    float range = veh_aim_range_eff();   // held, or the far end before any hit this ride
                     const bool hitok = far_cm > 1.0f && hit_trace(o, e, ignore, ni, &hit);
                     if (hitok) {
                         const float hx = hit.x - o.x, hy = hit.y - o.y, hz = hit.z - o.z;
                         range = std::sqrt(hx * hx + hy * hy + hz * hz);
                         g_veh_aim_range.store(range, std::memory_order_relaxed);
-                    } else if (!(range > 1.0f)) {
-                        range = far_cm;   // nothing measured yet on this ride: the far end of the ray
                     }
                     const Vec3 t{o.x + d.x * range, o.y + d.y * range, o.z + d.z * range};
+                    g_veh_aim_tx.store(t.x, std::memory_order_relaxed);
+                    g_veh_aim_ty.store(t.y, std::memory_order_relaxed);
+                    g_veh_aim_tz.store(t.z, std::memory_order_relaxed);
                     const float ax = t.x - c.x, ay = t.y - c.y, az = t.z - c.z;
                     const float al = std::sqrt(ax * ax + ay * ay + az * az);
                     if (al > 100.0f) {
@@ -1457,10 +1581,11 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // +1000 produced world-Z of -785..-105 (the camera dived below the hull, reading as
             // "first person"). This simplified basis is exactly the old one evaluated at pitch=roll=0.
             // See the CLAUDE.md two-clocks / choose-the-right-frame doctrine.
-            // RE-ARM PER RIDE. The frozen view yaw and the head anchor are captured when our camera
-            // comes up: a new mount, left-X back to TP, a different chassis, or vehtpanchor flipped.
-            // (The frozen yaw used to latch once per SESSION, so every later vehicle inherited the
-            // first one's heading.)
+            // RE-ARM PER RIDE. The frozen view yaw, the attitude frame and the head anchor are captured
+            // when our camera comes up: a new mount, left-X back to TP, a different chassis, or
+            // vehtpanchor / vehtpattitude flipped. (The frozen yaw used to latch once per SESSION, so
+            // every later vehicle inherited the first one's heading.) An hmdleash flip re-captures only
+            // the head offset, so editing the leash does not also snap your view to the hull.
             static uint32_t  s_arm_gen = 0xFFFFFFFFu;
             static uintptr_t s_arm_cp = 0;
             static bool      s_arm_anchor = false;
@@ -1468,10 +1593,19 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             static bool      s_frozen_valid = false;
             static double    s_c0[3] = {0.0, 0.0, 0.0};   // head offset from the standing origin at capture, UE cm
             static bool      s_arm_att = false;
-            static double    s_bl[3] = {0.0, 0.0, 0.0};   // the anchor's offset in the MESH's own frame, per ride
+            static bool      s_arm_leash = false;
+            // Per ride: the level boom frame expressed in the MESH's own frame (C = R_mesh^T . R_level,
+            // row-major). The FRAME is captured, never the boom -- so vehtpboom stays live mid-ride.
+            static double    s_C[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0};
             const bool anchor = g_cfg.veh_tp_anchor;
             // vehtpattitude: the anchor rides the vehicle's full attitude, not just its yaw.
             const bool att = anchor && g_cfg.veh_tp_attitude;
+            // hmdleash IS RESPECTED here (the user's call, 2026-09-24). With it on, Plugin.cpp's leash
+            // keeps running under this camera and slides the standing origin onto your head exactly as
+            // on foot, so the anchor plays the part of your body: the head offset it backs out is zero
+            // by definition, and the leash radius (0/0 = none) is all the lean you get. With it off,
+            // the leash block stands down and you lean freely off the anchor -- the captured c0 below.
+            const bool leash = g_cfg.hmd_leash;
             const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
             // The mesh's FULL world axes -- the rows of UE's FRotationMatrix for crot (pitch x, yaw y,
             // roll z). This is the basis that tumbled the boom when the boom was applied IN it directly:
@@ -1485,21 +1619,36 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             const double MY[3] = { msr * msp * mcy - mcr * msy, msr * msp * msy + mcr * mcy, -msr * mcp };
             const double MZ[3] = { -(mcr * msp * mcy + msr * msy), mcy * msr - mcr * msp * msy, mcr * mcp };
             const uint32_t gen = halo::g_tp_mount_gen.load(std::memory_order_relaxed);
-            if (gen != s_arm_gen || cp != s_arm_cp || anchor != s_arm_anchor || att != s_arm_att) {
+            const bool rearm = (gen != s_arm_gen || cp != s_arm_cp || anchor != s_arm_anchor || att != s_arm_att);
+            // A world-scale change mid-ride re-captures too: c0 is in UE cm at the scale it was read at.
+            static float s_arm_cmpm = 0.0f;
+            const float cmpm = halo::veh_cm_per_m();
+            const bool recapture_head = rearm || leash != s_arm_leash || std::fabs(cmpm - s_arm_cmpm) > 0.05f;
+            s_arm_cmpm = cmpm;
+            if (rearm) {
                 s_arm_gen = gen; s_arm_cp = cp; s_arm_anchor = anchor; s_arm_att = att;
                 s_frozen_valid = false;
-                s_c0[0] = s_c0[1] = s_c0[2] = 0.0;
                 if (att) {
-                    // Capture the anchor IN THE MESH'S FRAME: the level boom offset for this instant
-                    // (R_yaw(mesh yaw) . boom -- exactly where the yaw-only anchor puts it), expressed
-                    // along the mesh's own axes (R_mesh^T . off0). Re-applied as R_mesh . s_bl every
-                    // frame, it lands on the same spot now and rides every later yaw, pitch and bank.
-                    const double o0 = mcy * bf - msy * bl, o1 = msy * bf + mcy * bl, o2 = bu;
-                    s_bl[0] = MX[0] * o0 + MX[1] * o1 + MX[2] * o2;
-                    s_bl[1] = MY[0] * o0 + MY[1] * o1 + MY[2] * o2;
-                    s_bl[2] = MZ[0] * o0 + MZ[1] * o1 + MZ[2] * o2;
+                    // Capture the LEVEL BOOM FRAME in the mesh's own frame: C = R_mesh^T . R_level, where
+                    // R_level is yaw-only at the mesh's yaw with world up (the frame the yaw-only anchor
+                    // uses). Every frame the CURRENT boom goes through it -- R_mesh . C . boom -- so on
+                    // this frame it lands exactly where the yaw-only anchor would, rides every later yaw,
+                    // pitch and bank, and still answers a live vehtpboom edit. (The first cut captured
+                    // C . boom instead, which baked the boom in until the next mount.)
+                    const double LX[3] = {  mcy, msy, 0.0 };
+                    const double LY[3] = { -msy, mcy, 0.0 };
+                    const double LZ[3] = {  0.0, 0.0, 1.0 };
+                    const double* const M[3] = { MX, MY, MZ };
+                    const double* const L[3] = { LX, LY, LZ };
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c)
+                            s_C[r * 3 + c] = M[r][0] * L[c][0] + M[r][1] * L[c][1] + M[r][2] * L[c][2];
                 }
-                if (anchor) {
+            }
+            if (recapture_head) {
+                s_arm_leash = leash;
+                s_c0[0] = s_c0[1] = s_c0[2] = 0.0;
+                if (anchor && !leash) {
                     // HEAD-CENTRIC, NOT PLAY-SPACE-CENTRIC. UEVR draws the head at
                     //   view_base + R(view_yaw) . conv(hmd - standing_origin) . scale
                     // so rotating the view base swings an off-centre head around the ROOM origin, and the
@@ -1507,13 +1656,16 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     // stand when they got in. Capture that offset once and back it out below
                     // (view_base = anchor - R(view_yaw) . c0): the HEAD then sits on the anchor and is the
                     // rotation pivot, and the live head position cancels out of the sum, so leaning
-                    // still moves you off the anchor (6DoF). Plugin.cpp stands the leash down meanwhile,
-                    // so the standing origin holds still and c0 stays valid.
+                    // still moves you off the anchor (6DoF). With hmdleash off Plugin.cpp stands the leash
+                    // block down, so the standing origin holds still and c0 stays valid. With it ON there
+                    // is nothing to capture: the leash keeps the head on the standing origin, so c0 = 0.
+                    // Re-captured on a live leash flip, so turning the leash off mid-ride leaves your
+                    // head exactly where it was instead of jumping by the offset it had absorbed.
                     Vec3 hp{}; Quat hq{};
                     const auto hi = API::VR::get_hmd_index();
                     if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
                         const auto so = API::VR::get_standing_origin();
-                        const double rs = (double)g_cfg.rig_scale;    // UE cm per room metre, this profile
+                        const double rs = (double)halo::veh_cm_per_m(); // UE cm per real metre, LIVE world scale
                         s_c0[0] = -((double)hp.z - (double)so.z) * rs; // room -> UE: X = -z, Y = x, Z = y
                         s_c0[1] =  ((double)hp.x - (double)so.x) * rs;
                         s_c0[2] =  ((double)hp.y - (double)so.y) * rs;
@@ -1522,29 +1674,32 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             }
             if (!s_frozen_valid) { s_frozen_yaw = crot.y; s_frozen_valid = true; }
             if (g_cfg.veh_tp_yaw_follow) s_frozen_yaw = crot.y;   // keep the freeze current -> seamless toggle
-            const float orbit = g_veh_orbit_yaw.load(std::memory_order_relaxed);   // right-stick orbit (vehstick=1)
+            const float turn = g_veh_turn_yaw.load(std::memory_order_relaxed);   // right-stick turn (vehstick=1)
             // VIEW yaw: which way the room -- and so your view -- faces. vehtpyaw=1 follows the hull;
-            // 0 holds the heading captured this ride, and the hull turns within view.
-            const float view_yaw = (g_cfg.veh_tp_yaw_follow ? crot.y : s_frozen_yaw) + orbit;
-            // BOOM yaw: where the camera sits around the vehicle. With the anchor it always rides the
-            // hull, so your head keeps its place relative to the vehicle as it turns, whatever the view
-            // does. Without it the boom shares the view yaw -- the old behaviour, kept for A/B.
-            const float boom_yaw = anchor ? (crot.y + orbit) : view_yaw;
+            // 0 holds the heading captured this ride, and the hull turns within view. The right-stick
+            // turn adds to THIS and to nothing else.
+            const float view_yaw = (g_cfg.veh_tp_yaw_follow ? crot.y : s_frozen_yaw) + turn;
+            // BOOM yaw: where the camera sits around the vehicle. With the anchor it rides the hull and
+            // only the hull, so your head keeps its place relative to the vehicle as it turns -- and the
+            // stick turns your view ABOUT your head instead of carrying you round the vehicle. Without
+            // the anchor the boom shares the view yaw (a chase cam, so turning swings it round the
+            // vehicle) -- the old behaviour, kept for A/B.
+            const float boom_yaw = anchor ? crot.y : view_yaw;
             // Spring-arm pull-in from the game-side collision trace (1 = unobstructed).
             const double cfrac = g_cfg.veh_tp_collide
                 ? (double)halo::g_tp_collision_frac.load(std::memory_order_relaxed) : 1.0;
             // The anchor's world offset from the chassis, before the spring arm.
             double off[3];
             if (att) {
-                // RIGID: the per-ride mesh-local offset carried by the mesh's FULL attitude, then the
-                // right-stick orbit about world up. Yaw, pitch and bank all hold the head's place.
-                const double w0 = s_bl[0] * MX[0] + s_bl[1] * MY[0] + s_bl[2] * MZ[0];
-                const double w1 = s_bl[0] * MX[1] + s_bl[1] * MY[1] + s_bl[2] * MZ[1];
-                const double w2 = s_bl[0] * MX[2] + s_bl[1] * MY[2] + s_bl[2] * MZ[2];
-                const double orr = (double)orbit * D2R, oc = std::cos(orr), os = std::sin(orr);
-                off[0] = w0 * oc - w1 * os;
-                off[1] = w0 * os + w1 * oc;
-                off[2] = w2;
+                // RIGID: the CURRENT boom, through this ride's captured frame into mesh-local, carried
+                // by the mesh's FULL attitude. Yaw, pitch and bank all hold the head's place, and a live
+                // vehtpboom edit lands immediately. The stick turn does not touch it (see boom_yaw).
+                const double l0 = s_C[0] * bf + s_C[1] * bl + s_C[2] * bu;
+                const double l1 = s_C[3] * bf + s_C[4] * bl + s_C[5] * bu;
+                const double l2 = s_C[6] * bf + s_C[7] * bl + s_C[8] * bu;
+                off[0] = l0 * MX[0] + l1 * MY[0] + l2 * MZ[0];
+                off[1] = l0 * MX[1] + l1 * MY[1] + l2 * MZ[1];
+                off[2] = l0 * MX[2] + l1 * MY[2] + l2 * MZ[2];
             } else {
                 // LEVEL: yaw-only basis with world up -- exactly the old one at pitch = roll = 0.
                 const double yr = (double)boom_yaw * D2R;
@@ -1575,11 +1730,42 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             halo::g_tp_boom_ox.store((float)off[0], std::memory_order_relaxed);  // the anchor OFFSET, unscaled ->
             halo::g_tp_boom_oy.store((float)off[1], std::memory_order_relaxed);  //   the collision trace (it adds
             halo::g_tp_boom_oz.store((float)off[2], std::memory_order_relaxed);  //   its own fresh chassis location)
+            halo::g_tp_eye_ox.store((float)(ecx - (double)cloc.x), std::memory_order_relaxed);   // the VIEW BASE as an
+            halo::g_tp_eye_oy.store((float)(ecy - (double)cloc.y), std::memory_order_relaxed);   //   offset -> the tick's
+            halo::g_tp_eye_oz.store((float)(ecz - (double)cloc.z), std::memory_order_relaxed);   //   controller ray
+            halo::g_tp_eye_valid.store(true, std::memory_order_relaxed);
             halo::g_tp_chassis_yaw_valid.store(true, std::memory_order_relaxed);
             if (index == 0) { g_vcd.fc[0] = ecx; g_vcd.fc[1] = ecy; g_vcd.fc[2] = ecz; g_vcd.wrote = true; }
+
+            // PER-FRAME RETICULE STAMP (vehaimray). The ONE compositor reticule on the LIVE pointing
+            // ray, at the range the tick measured -- the on-foot stamp's rule (AimReticuleStamp: intent
+            // at render rate, trace depth from the tick), with the ray starting at the hand. Publishing
+            // the tick's world point instead left it up to a tick behind the hand, and head-relative
+            // re-anchoring carried a GROUND point along with the vehicle between ticks. Built against
+            // this frame's view base and view yaw, so hand, camera and marker share one instant: a
+            // RANGE crosses the clock boundary, never a position. Eye 0 only (one mono publish; the
+            // layer re-anchors it for both eyes against this same view base).
+            if (index == 0 && halo::veh_tp_reticle_stamp_owns()) {
+                const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                                                         : API::VR::get_right_controller_index();
+                Vec3 cpos{}; Quat cq{};
+                if (ridx >= 0 && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) {
+                    const double base[3] = { ecx, ecy, ecz };
+                    Vec3 o{}, d{};
+                    halo::veh_room_ray(cpos, quat_forward(cq), base, view_yaw, &o, &d);
+                    const float range = halo::veh_aim_range_eff();
+                    // The same surface pull-back the tick placement uses, so the three reticules agree.
+                    const float r = range - std::fmin(g_cfg.aim_reticule_surface_off, range * 0.5f);
+                    const Vec3 t{o.x + d.x * r, o.y + d.y * r, o.z + d.z * r};
+                    const auto layer_anchor = host::g_plugin_state.layer_anchor;
+                    halo::xrlayer_note_publish_gate(0);
+                    halo::xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, t), g_ret_scale_mul.load());
+                }
+            }
         } else if (index == 0) {
             g_vcd.wrote = false;
             halo::g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
+            halo::g_tp_eye_valid.store(false, std::memory_order_relaxed);
         }
         // vehprobe diagnostic: is the boom computed, and does it differ from the engine camera?
         // If game vs eye differ here but you see no change in-headset, the write is being ignored

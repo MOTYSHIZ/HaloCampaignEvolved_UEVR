@@ -1230,9 +1230,10 @@
     // it -- position follows the vehicle's movement AND turning, so you stay e.g. behind it -- while the
     // VIEW yaw is still vehtpyaw's choice, so the world need not spin around your eyes. Pivots on the
     // HEAD, not the play-space origin: the head's room offset is captured once per ride and backed out,
-    // so where you stood when you got in cannot skew it. The head leash stands down meanwhile, so you
-    // can lean off the anchor (6DoF). 0 = the old boom: the camera shares the view yaw and the head
-    // leash stays on.
+    // so where you stood when you got in cannot skew it. hmdleash is RESPECTED: with it on, the leash
+    // holds your head to the anchor exactly as it holds it to your body on foot (radius
+    // hmdleashlat/hmdleashvert; 0/0 = no offset); with it off, you lean freely off the anchor (6DoF).
+    // 0 = the old boom: the camera shares the view yaw.
     bool  veh_tp_anchor = true;
     // vehtpattitude: with the anchor on, 1 = it rides the vehicle's FULL attitude -- yaw, pitch AND
     // bank -- so it holds its place as a Banshee dives or rolls (default); 0 = yaw only (a level boom:
@@ -1251,20 +1252,25 @@
     // binds the chase cam to the aim, and we no longer read that camera. Default OFF (opt-in) until
     // proven per vehicle. Gated on the chassis being resolved (= actually in a vehicle).
     bool  veh_aim = false;
-    // vehstick: with motion aim on (vehaim), what the right thumbstick does in a vehicle. 1 = ORBIT
-    // the chase camera yaw (default -- the aim is on the controller, so the stick is free); 2 = leave
-    // the stick to the game (no orbit). Both live; may become per-vehicle later.
+    // vehstick: with motion aim on (vehaim), what the right thumbstick does in a vehicle. 1 = TURN your
+    // view (default -- the aim is on the controller, so the stick is free; see vehorbitrate); 2 = leave
+    // the stick to the game (no turn). Both live; may become per-vehicle later.
     int   veh_stick_mode = 1;
-    // vehorbitrate: deg/sec the right stick X orbits the TP camera yaw when vehstick=1. Uncapped.
+    // vehorbitrate: deg/sec the right stick X TURNS YOUR VIEW (a smooth turn) when vehstick=1. It turns
+    // the view yaw only -- pivoting on your head, never moving the anchor -- so under vehtpanchor you
+    // stay put relative to the vehicle and simply look another way. Uncapped. (Name kept from the
+    // first cut, which orbited the camera around the vehicle; the headset said a turn is what it wants.)
     float veh_orbit_rate = 120.0f;
-    // vehorbitreturn: deg/sec the orbit offset eases back to centre (behind the vehicle) when the
-    // stick is idle or orbit turns off. 0 = hold the offset where you left it.
-    float veh_orbit_return = 60.0f;
+    // vehorbitreturn: deg/sec the turn eases back to zero when the stick is idle. 0 = HOLD (default):
+    // the view stays where you turned it. The first cut defaulted to 60, and in-headset that read as
+    // "the stick lerps my head yaw back to the front of the vehicle".
+    float veh_orbit_return = 0.0f;
     // vehaimray: with vehaim on, aim the vehicle at WHERE THE CONTROLLER POINTS (1, default) --
     // trace the controller's world ray, then aim from the seated unit through the hit -- instead of
     // the infantry mapping (0), which turns hand ROTATION into aim rotation and, with the camera 10 m
     // off the vehicle, reads as "rotate the controller in 3DoF to steer" (measured 2026-09-23: des
-    // pitch -85..-95 deg and a 70-90 deg yaw offset from the on-foot calibration frame).
+    // pitch -85..-95 deg and a 70-90 deg yaw offset from the on-foot calibration frame). The reticule
+    // follows the same rule as on foot: drawn every frame on the pointing ray at the traced depth.
     bool  veh_aim_ray = true;
     // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
     float veh_aim_far = 10000.0f;

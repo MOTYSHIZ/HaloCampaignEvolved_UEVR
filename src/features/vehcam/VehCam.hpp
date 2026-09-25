@@ -87,9 +87,10 @@ void seat_direct_refresh();
 // hold-off. Any thread (reads g_cfg + an atomic); called from the sim orientation getter.
 bool veh_tp_motion_aim_active();
 
-// vehtpanchor: true while the HEAD-ANCHORED third-person camera is actually drawing. The head leash
-// stands down on it (it would slide the standing origin onto the head and cancel the 6DoF lean off
-// the anchor). Any thread.
+// vehtpanchor: true while the HEAD-ANCHORED third-person camera is actually drawing. With hmdleash=0
+// the leash block stands down on it (it would slide the standing origin onto the head and cancel the
+// free 6DoF lean off the anchor); with hmdleash=1 the leash keeps running and holds the head to the
+// anchor as it holds it to the body on foot. Any thread.
 bool veh_tp_anchor_active();
 
 // RUNTIME effective third-person-camera state. Initialised from vehtp on each mount, flipped live
@@ -104,10 +105,17 @@ void veh_tp_toggle();
 // then uses these angles INSTEAD of desired_aim_now() + aim_converge_apply(). Any thread.
 bool veh_aim_ray_angles(float* yaw, float* pitch);
 
-// Third-person placement for the ONE compositor reticule in a vehicle: trace from the seated unit
-// along the given aim (UE degrees -- pass the reticule's own ray angles) and return the hit, or the
-// far end of the ray on a miss. False when our third-person camera is not up, and the caller keeps
-// its camera-origin placement (correct while the eye sits in the vehicle). GAME THREAD only.
+// Third-person placement for the vehicle reticules on the TICK. Aiming with the controller
+// (vehaimray): the point the pointing ray reaches, which the vehicle is aimed through -- the infantry
+// rule; `yaw`/`pitch` are then unused. Otherwise: trace from the seated unit along the given aim (UE
+// degrees -- pass the reticule's own ray angles) and return the hit, or the far end of the ray on a
+// miss. False when our third-person camera is not up, and the caller keeps its camera-origin
+// placement (correct while the eye sits in the vehicle). GAME THREAD only.
 bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out);
+
+// True while the third-person camera's eye callback stamps the ONE compositor reticule itself, every
+// frame, on the live controller ray (vehaimray). The tick's compositor publish must stand down on it:
+// the layer's snapshot takes one writer at a time. Any thread.
+bool veh_tp_reticle_stamp_owns();
 
 } // namespace halo
