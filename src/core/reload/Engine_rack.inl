@@ -241,10 +241,7 @@ bool slide_rack_available() { return g_slide_rack_found; }
 // The pistol rules (lock-back, phantom round, rack-fired reload) apply only to these.
 bool slide_chamber_ok() { return weapon_in_list(g_cfg.slide_chamber_weapons); }
 void slide_haptic(float dur, float amp) {
-    const bool off_right = g_cfg.aim_left_hand;
-    API::VR::trigger_haptic_vibration(0.0f, dur, 0.0f, amp,
-                                      off_right ? API::VR::get_right_joystick_source()
-                                                : API::VR::get_left_joystick_source());
+    reload_haptic_raw(reload_gun_hand() ? 0 : 1, dur, amp);   // the off hand
 }
 // THE GAME-THREAD WRITE. The sim rebuilds the slide node every tick (readback measured 2026-09-03),
 // and the mesh sync reads it on the game thread during component ticks -- AFTER this pre-engine
@@ -1144,6 +1141,7 @@ void reload_press_now(const char* why) {
     }
     g_reload_hold_until.store(nowt + ms_to_ticks(net_is_coop() ? g_cfg.reload_press_ms_coop : g_cfg.reload_press_ms), std::memory_order_relaxed);
     s_sl_press_at = nowt;
+    reload_hold_note_seat();   // any reload press the game receives starts armdriver 2's gun hold (reloadgunhold)
     if (reload_hidden_mode()) reload_pose_hold(g_cfg.reload_mask_ms);   // the hidden reload's hand hold ends here (0 releases)
     else if (g_cfg.reload_mask_ms > 0) reload_pose_hold(g_cfg.reload_mask_ms);
     reload_anim_rate_begin();

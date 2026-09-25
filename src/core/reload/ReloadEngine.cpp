@@ -84,6 +84,13 @@ bool s_reload_on = true;   // one release on the off edge (at a boot with reload
 // A reload tap made while a reset's window held the tick, dropped at the next press test. Declared
 // here because reload_release_windows (the reload state fragment) sets it and the press test below reads it.
 bool s_reset_drop_tap = false;
+// When that reset last held the tick. The drop is only for a tap that belongs to the reset: one made
+// during it, or released within kResetTapMs of its end. It used to wait for the NEXT tap whenever
+// that came, so every loading screen, cutscene, death or ride silently ate the player's next
+// reload press, however much later ("why do i have to hit reload twice", 2026-09-24: 121 resets
+// during one loading screen, then the first reload press after it did nothing).
+long long s_reset_drop_at = 0;
+constexpr int kResetTapMs = 300;
 
 // ================================================================ THE SNAPSHOT (zonesnap)
 //
@@ -167,6 +174,10 @@ Vec3 mag_belt_point() {
 
 void reload_engine_tick_begin(float dt, bool active) {
     s_gest_dt = dt;
+    // RELOADHOLD's window, sampled here and nowhere else. Above the `active` return on purpose: an
+    // engine that switches off mid-reload must close the window rather than leave it standing.
+    reload_hold_window_publish();
+    reload_rumble_tick();   // the game's rumble rides the same window, from the same published level
     // The fork's manual reload family (reloadvr / slidevr, experimental, default off). Every tick below
     // is idle-cheap on its own, but several resolve the weapon actor by reflection, so with both
     // masters off none of them runs and this function is the author's again. The two restore
@@ -348,9 +359,13 @@ bool reload_engine_press_ignored() {
     // it belongs to the gun that went away with the body. reloadresetholds 0 restores the old path.
     if (s_reset_drop_tap) {
         s_reset_drop_tap = false;
-        if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
-            API::get()->log_info("[Halo-CampE-UEVR] RELOAD dropped a reload tap made during the reset's window");
-        return true;
+        const long long since = now_ticks() - s_reset_drop_at;
+        if (since < ms_to_ticks(kResetTapMs)) {
+            if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
+                API::get()->log_info("[Halo-CampE-UEVR] RELOAD dropped a reload tap made during the reset's window");
+            return true;
+        }
+        // Long after the reset: this tap is the player's, on the body they have now. Let it through.
     }
     if (!weapon_in_list(g_cfg.reload_skip_weapons)) return false;
     // No magazine on this weapon (plasma rifle, plasma pistol, sentinel beam): nothing to
@@ -510,8 +525,13 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
         const bool in_mouth = axis_ok
             ? (lateral_m <= jd && d_axis_cm >= -(reload_insert_for_weapon() + jd) * 100.0f && d_axis_cm <= jd * 100.0f)
             : (join <= jd);
-        const bool pulled_clear = axis_ok ? (lateral_m > jd * 2.5f || d_axis_cm < -(reload_insert_for_weapon() + jd * 2.5f) * 100.0f)
-                                         : (join > jd * 2.5f);
+        // HOW FAR THE HAND MAY DRIFT ONCE THE SLIDE HAS STARTED (reloadslidekeep). It used to be 2.5 x the
+        // capture radius, so widening it meant grabbing the magazine from further away as well. The
+        // controllers meet on the way up and the fetch hand is pushed off the axis, so the slide
+        // aborted mid-insert. 0 = the old 2.5 x capture.
+        const float keep = g_cfg.reload_slide_keep_m > 0.0f ? g_cfg.reload_slide_keep_m + reload_gate_pad_m() : jd * 2.5f;
+        const bool pulled_clear = axis_ok ? (lateral_m > keep || d_axis_cm < -(reload_insert_for_weapon() + keep) * 100.0f)
+                                         : (join > keep);
 
         if (s_slide_start == 0) {
             if (in_mouth && lifted) {
@@ -523,7 +543,8 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
             }
         } else if (pulled_clear) {
             if (g_cfg.reload_vr_log)
-                API::get()->log_info("[Halo-CampE-UEVR] RELOAD slide aborted, hand pulled clear (%.0fcm)", join * 100.0f);
+                API::get()->log_info("[Halo-CampE-UEVR] RELOAD slide aborted, hand pulled clear (%.0fcm between hands, %.0fcm off the axis, %.0fcm along it, keep %.0fcm)",
+                                     join * 100.0f, lateral_m * 100.0f, d_axis_cm, keep * 100.0f);
             reload_slide_reset();
         } else {
             const float ms = (float)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -558,6 +579,8 @@ bool reload_engine_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r_p
                 done = (t >= 1.0f);
             }
             if (done) {
+                reload_hold_note_seat();   // the magazine is fully in: armdriver 2's gun hold (reloadgunhold) starts here
+                reload_haptic_step("seated", 3, 0.08f, 1.0f);
                 reload_slide_reset();
                 // Locked back until racked ONLY if the gun was empty when the mag left --
                 // a chambered round needs no rack, that is how a pistol works.
@@ -601,6 +624,7 @@ void reload_engine_state_set(ReloadState prev, ReloadState next) {
     mag_hide_apply(next != ReloadState::Idle);
     // ...and on the way out it FALLS: the drop is spawned from the component just hidden.
     if (prev == ReloadState::Idle && next == ReloadState::MagOut && !s_restoring_mag_out) { if (!slide_parts_mag_drop()) mag_drop_spawn(); ak_dump("drop"); ak_step_sound("drop"); ak_step_sound("open");
+        reload_haptic_step("drop", reload_gun_hand() ? 2 : 1, 0.05f, 0.6f);
         if (g_cfg.reload_press_at == 1 && slide_weapon_ok()) {
             const bool empty_now = weapon_empty_now();
             if (empty_now) { s_sl_pressed_early = true; reload_press_now("mag drop"); }
@@ -966,5 +990,94 @@ bool reload_engine_mag_in_hand(API::UObject* m, const Vec3& gpos, const Vec3& hp
 }
 
 bool reload_engine_reload_busy() { return reload_engine_active() && reload_gestures_busy(); }
+
+// ---- RELOADHOLD'S WINDOW (doctrine at the Config key; the hold itself is features/reloadvr).
+//
+// WHY THIS IS NOT reload_pose_freeze_wanted(). That predicate is the same window with
+// g_cfg.reload_pose_freeze on the front, and that key is the armdriver 3 publisher's own: it says
+// "the published pose stops being written". Asking it here would give one key two meanings across
+// two arm drivers and would make the armdriver 2 hold silently depend on an armdriver 3 setting.
+// So this asks the two engine predicates that key sits on top of, and nothing is re-detected:
+// reload_engine_reload_busy() is the engine's own "a reload is in progress", and
+// reload_manual_available() in front of it is the sub-behaviour rule -- the busy predicate is also
+// true for a rack the player performs on its own, because slidevr's lock rides it.
+//
+// SAMPLED ON THE GAME THREAD, ONCE A TICK, because the state it reads is the game thread's. What
+// consumes it is the base mod's first-person pose builder, which runs on the SIM thread and must
+// never touch that state machine. Published as a level plus the steady-clock instant it last
+// changed, so the reader derives its ramp from one sample rather than integrating a second clock.
+namespace {
+std::atomic<bool>      s_rh_busy{false};
+std::atomic<long long> s_rh_edge{0};
+std::atomic<long long> s_rh_press{0};   // steady-clock instant the last magazine was fully seated
+}  // namespace
+
+void reload_hold_note_seat() {
+    s_rh_press.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+}
+
+void reload_hold_window_publish() {
+    // THE WINDOW IS THE SEAT, not the reload and not the press: from the instant the magazine is fully
+    // in, for reload_gun_hold_ms. See the doctrine at the Config key.
+    const long long pressed = s_rh_press.load(std::memory_order_relaxed);
+    const long long age_ms = pressed == 0 ? -1 :
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::duration(
+            std::chrono::steady_clock::now().time_since_epoch().count() - pressed)).count();
+    // Like the state hold's own window: it outlives reload_gun_hold_ms while OUR reload is still in
+    // progress (the magazine is out, the seat is pending, or the lock waits for the rack), capped at
+    // +6 s. A press sent at the drop or on the chambered shot therefore stays covered through the
+    // fetch, and the seat restarts it for the tail.
+    // THE DRY SHOT (hidden reload, reloadhidesolo / coop): the last round is fired and the game reloads
+    // underneath with NO press from us, and it stays hidden "until our gesture". The play build hides
+    // it with reload_pose_hold (coop_mask_ms), a palette node hold only the fork's own placement driver
+    // reads; under the base mod's arm driver nothing covered it and the whole auto-reload showed
+    // (2026-09-24: DRY at 11:52:13, the gun hold only at the mag drop 6 s later). So the window is
+    // also open for as long as the gun sits truly empty under the hidden reload. Our own press clears
+    // s_true_empty and starts the press window above, so the two meet.
+    const bool dry_hidden = reload_hidden_mode() && s_true_empty;
+    const bool want = reload_manual_available()
+                   && (dry_hidden
+                       || (pressed != 0 && age_ms >= 0
+                           && (age_ms < g_cfg.reload_gun_hold_ms || (reload_gestures_busy() && age_ms < g_cfg.reload_gun_hold_ms + 6000))));
+    if (want == s_rh_busy.load(std::memory_order_relaxed)) return;
+    s_rh_edge.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                    std::memory_order_relaxed);
+    s_rh_busy.store(want, std::memory_order_release);   // the edge is visible before the level
+}
+
+ReloadHoldWindow reload_hold_window() {
+    ReloadHoldWindow w{};
+    w.busy       = s_rh_busy.load(std::memory_order_acquire);
+    w.edge_ticks = s_rh_edge.load(std::memory_order_relaxed);
+    return w;
+}
+
+// RELOADPOSEFREEZE (doctrine at the Config key). The window only -- the holding itself is done by
+// whoever publishes the pose, by not publishing.
+//
+// THE AVAILABILITY TEST IS WHAT MAKES THIS MANUAL RELOAD'S. reload_engine_reload_busy() is also
+// true for a rack the player performs on its own, because slidevr's lock rides the same predicate,
+// so asking it alone would let the freeze open in a build with manual reload switched off. Asking
+// reload_manual_available() first is the sub-behaviour rule in one line: reloadvr off, no window.
+// With reloadvr on and slidevr off the window is the magazine gesture alone, which is the whole
+// behaviour on its own; with both on it also covers the rack the seat is waiting for, which is part
+// of the same reload.
+//
+// The edge is logged on the reload's own log switch, so the evidence sits beside the rest of the
+// reload's lines and costs nothing with the log off. Game thread only, like the state it reads.
+bool reload_pose_freeze_wanted() {
+    if (g_cfg.reload_pose_freeze == 0) return false;
+    if (!reload_manual_available()) return false;
+    const bool want = reload_engine_reload_busy();
+    static bool s_frozen = false;
+    if (want != s_frozen) {
+        s_frozen = want;
+        if (g_cfg.reload_vr_log)
+            API::get()->log_info("[Halo-CampE-UEVR] RELOAD pose freeze %s",
+                                 want ? "engages: the published pose is held where it is"
+                                      : "releases: the published pose tracks the hand again");
+    }
+    return want;
+}
 
 } // namespace halo

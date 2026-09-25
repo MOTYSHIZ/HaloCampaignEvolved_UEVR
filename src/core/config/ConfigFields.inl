@@ -326,6 +326,7 @@
     float force_tube_radius = 0.5f;
     int   force_tube_fire_ms = 250;
     int   force_tube_channel = 0;
+    int   force_tube_log = 0;      // forcetubelog: spawn filter summary and connection re-check
 
     // ---- WRIST HUD (wristhud, doctrine in WristHud.hpp) ----------------------------------------
     // The game's own status widgets re-hosted onto the off-hand forearm. wristhudclasses is a
@@ -974,6 +975,11 @@
     //       snaps to whichever the newest sample is nearer, never averaging across the flip --
     //       the mode to use if 1 is seen to smear during the frame or two after a respawn.
     // Cancellation only ever applies while a measurement exists; with none, every mode is 0.
+    // Default 3, measured 2026-09-20. The separation does not drift, it JUMPS: a rig instance
+    // change hands over a socket 20 to 38 cm from the last one, so mode 1's running average
+    // spends its life travelling between two correct answers and sitting on neither. Mode 3 held
+    // 1.00x drawn/hand on both weapons through a respawn, where mode 0 broke to 0.44x at 35 cm
+    // and never recovered without a weapon swap.
     int   palette_socket_fix = 1;
     // How many agreeing samples mode 2 wants before it latches, and how far apart two samples may
     // sit (palette units) and still be called agreeing. Also the radius mode 3 calls "the same
@@ -1121,6 +1127,106 @@
     // does not play out over the reload the player just performed. Covers the animation's length;
     // tune per weapon if a long one shows its tail. 0 = let the animation play.
     int   reload_mask_ms = 0;
+    // RELOADPOSEFREEZE. The PUBLISHED VR POSE held still for the length of a manual reload.
+    //
+    // WHAT IT IS NOT: this is not reload_mask_ms above. That one holds the PALETTE NODES -- the
+    // bones the game just posed -- so the reload animation cannot play out; it ships 0 because the
+    // whole-palette hold wrecked the weapon rotation under the live placement (2026-09-07). This
+    // holds the INPUT instead: the published controller/head snapshot the weapon placement solves
+    // its position and rotation against. The bones keep animating, the placement keeps running,
+    // and what stops moving is the target it is chasing.
+    //
+    // WHY. During a reload the aim hand is doing gesture work -- the drop, the seat, the rack --
+    // and every bit of that motion goes straight into the placement, so the gun is dragged about
+    // by the very gesture that is supposed to be performed ON it. Freezing the published pose for
+    // the length of the reload leaves the gun where the player last had it and lets the gesture
+    // happen against a still weapon.
+    //
+    // THE MECHANISM IS THE PLAY BUILD'S, VERBATIM. There it is the global test key posefreeze
+    // (still present, still a dev key): the publisher returns before it writes anything, so the
+    // last published snapshot stands untouched. Nothing is captured, nothing is recomposed and no
+    // calibration solve fires, which is exactly why every term of that snapshot stays consistent
+    // with every other -- the one-snapshot rule is satisfied by not writing rather than by
+    // re-reading. What is new here is only the WINDOW: the play build has no reload gate on it.
+    //
+    // THE WINDOW is the reload engine's own "a reload is in progress" (core/reload), so the freeze
+    // opens and closes with the reload rather than re-detecting it, and the availability test keeps
+    // it a sub-behaviour of manual reload: with reloadvr off the window never opens at all.
+    // 0 = the published pose tracks live through the reload, which is what the play build does.
+    int   reload_pose_freeze = 1;
+    // RELOADHOLD. THE SAME HOLD, FOR THE BASE MOD'S OWN ARM DRIVER (armdriver 2).
+    //
+    // reload_pose_freeze above holds the PUBLISHED POSE, and the thing that reads that pose is the
+    // fork's own placement driver (armdriver 3). Under armdriver 2 the weapon is drawn by the base
+    // mod's arm driver, through its own weapon carry, and that publisher never runs -- so a manual
+    // reload under armdriver 2 has no hold at all. The aim hand is the hand doing the work, every
+    // bit of its motion goes into where the gun is drawn, and the player is trying to push a
+    // magazine into a target that moves because they moved.
+    //
+    // WHAT IT ASKS. Not a second reload detector: the window is the reload engine's own
+    //   reload_manual_available() && reload_engine_reload_busy()
+    // which is reload_pose_freeze_wanted()'s window with its own key taken off the front. That key
+    // belongs to the armdriver 3 publisher and must keep meaning only that, so this asks the two
+    // predicates it is made of rather than borrowing it. The availability test is the sub-behaviour
+    // rule in one line: with manual reload off, no window, whatever the rack is doing.
+    //
+    // THREE MECHANISMS, one at a time, because none of them has been in a headset yet:
+    //   1 = his own hold                the animation hold the base mod already has (pasprintanim 3
+    //                                   and its siblings) raised for the length of the reload: the
+    //                                   gun and the aim wrist eased onto their rest pose, the aim
+    //                                   fingers with them, the kick faded, the off hand left on its
+    //                                   controller to bring the magazine. His code does the work;
+    //                                   this only raises the weight, never lowers one.
+    //   2 = the target latched         the base mod's rig weapon target as it was at the start of
+    //                                   the reload, fed back in until the reload ends. The gun (and
+    //                                   the aim hand that rides it) stay where they were.
+    //   3 = the gun only               mode 2's latch, with the aim wrist left on the player's
+    //                                   controller: the gun is pinned and the drawn hand keeps
+    //                                   tracking, so the two separate. For comparison against 2.
+    //   0 = off, the base mod's carry exactly as released.
+    // DEFAULT 1 (from the headset, 2026-09-24: "no matter what setting that is, if manual reload is
+    // enabled, it should always hold the animation / pose, so the default never appears"). This is a
+    // sub-behaviour of reloadvr, so it only exists while manual reload is on, and mode 1 raises the
+    // base mod's hold gate itself, independent of its own per-action settings (pasprintanim etc.).
+    //
+    // A NO-OP OUTSIDE ARMDRIVER 2 BY CONSTRUCTION: every hook it uses is inside the base mod's
+    // palette drive, which only runs while armdriver 2 owns the arms. Armdriver 3 keeps the pose
+    // freeze above and is not touched.
+    int   reload_hold = 1;
+    // THE WINDOW (from the headset, 2026-09-24: "it shouldnt hold reload, it should hold it for
+    // something like 90 or 120ms when the mag is inserted", then "it should always happen when the
+    // mag is fully inserted"). Not the whole reload, and not tied to the reload press: the press goes
+    // to the game at the drop on an empty gun (reloadpressat=1, so the sim's reload runs under the
+    // belt grab). Then (same day): "on empty, its auto reloading" -- a press sent when the chambered
+    // round is fired with the magazine out starts the game's reload mid-fetch. So the hold starts at
+    // EVERY reload press AND at the full seat, lasts this many ms, and outlives it while the manual
+    // reload is still in progress (capped +6 s): the play build's state-hold window. The play build
+    // never needed it for the pose because its own placement driver overwrote the gun throughout.
+    // 2000 (from the headset, 2026-09-24: "the animation is like 1 second to 2 seconds"). Mode 1 holds
+    // the AUTHORED pose at rest before the base mod's carry, so the gun keeps following the hand for
+    // the whole window: a long hold costs no tracking, it only keeps the reload animation off.
+    int   reload_gun_hold_ms = 2000;
+    // Milliseconds the hold eases in and out. The animation starts on the press itself, so a slow
+    // ease-in lets its first frames through; 0 = instant at both edges, the default.
+    float reload_hold_ramp_ms = 0.0f;
+    // One RELOADHOLD line per reload: when the hold engaged and released, which mechanism, and how
+    // far the base mod's weapon target drifted while it was held. 0 = silent.
+    int   reload_hold_log = 0;
+    // reloadhaptic: a pulse on the controllers for the reload's steps (from the headset, 2026-09-24:
+    // "could we get vibration feedback for mag drop/in, slide racked"). The drop pulses the gun hand,
+    // the seat both hands. The rack already pulses the rack hand (slidevr's own). 0 = none.
+    int   reload_haptic = 1;
+    // reloadhapticamp: strength of those pulses, 1 = as authored (drop 0.6, seat 1.0), capped at 1.
+    float reload_haptic_amp = 1.0f;
+    // reloadhapticms: 0 = each pulse's own length (drop 50 ms, seat 80 ms); more = every pulse lasts this.
+    int   reload_haptic_ms = 0;
+    // reloadrumblemute: the game's own rumble held off while its reload runs hidden (from the headset,
+    // 2026-09-24: "the host will reload underneath, and the animation is off, but the vibration is
+    // still happening"). Bits, doctrine in core/reload/ReloadHaptics.cpp: 1 replace UEVR's pulse,
+    // 2 the controller's ForceFeedbackScale to 0, 4 ClientStopForceFeedback every tick. 7 = all three.
+    int   reload_rumble_mute = 7;
+    // reloadrumblelog: one line each time the game starts a rumble, with whether it was held off.
+    int   reload_rumble_log = 0;
     // FAST-FORWARD the game's own reload animation after the seat (it lives in the weapon's and
     // arms' Animation Blueprints, ANIMDUMP 2026-09-02): GlobalAnimRateScale on those components
     // is set to reload_anim_rate for reload_anim_ms, then restored. The reload completes in a
@@ -1168,6 +1274,15 @@
     // the LEFT hand's A-face action is down, grenade_code is stripped from the pad (measured: left
     // X arrives as 0x2000 and the game throws on it). The raw code is logged the first time.
     int   grenade_swallow = 0;
+    // worldscalefollow: rig_scale follows UEVR's VR_WorldScale (100 x it), so the arms and the weapon
+    // carry match the world UEVR draws. See features/worldscalefollow/WorldScaleFollow.hpp.
+    int   world_scale_follow = 0;
+    // grenadegunhold: the weapon held still through a grenade throw under armdriver 2. See
+    // features/grenadegunhold/GrenadeGunHold.hpp. grenadegunholdms: 1800, the measured throw action
+    // (1.54 to 1.60 s from the press) plus margin.
+    int   grenade_gun_hold = 0;
+    int   grenade_gun_hold_ms = 1800;
+    int   grenade_gun_hold_log = 0;
     int   grenade_code = 0x2000;
 
     // ---- (after the author's Config.hpp line 4529)
@@ -1251,7 +1366,14 @@
     // Peak speed a release must have made to count as a throw; below it the grenade goes back
     // wherever the hand is (2026-09-01, for new players who miss the pouch-cancel). 0 = off,
     // the positional-only doctrine. Throws measured >=2.04 peak, put-back 0.16 -- 1.2 is safe.
-    float gren_min_throw = 0.0f;
+    float gren_min_throw = 1.5f;   // on with holstergren; see stability_throw_too_slow
+    // stabilityrendertime: the base mod's gun and hands re-placed at render time from the render-time
+    // controller poses (core/fixes/RenderTime.hpp). 0 off, 1 measure only, 2 full, 3 rotation only,
+    // 4 gun and aim hand only. stabilityrendertimelog: one summary line a second.
+    // Default OFF: measured 2026-09-25, mode 2 spread the drawn lag (1 to 5 frames) and raised frozen
+    // frames from 1.65 to 3.93 per s; its writes land out of step with what the renderer reads.
+    int   stab_render_time = 0;
+    int   stab_render_time_log = 0;
 
     // ---- (after the author's Config.hpp line 4555)
     // ANIMDUMP: for 2.5 s after each seat, log the weapon's and arms' skeletal components'
@@ -1591,6 +1713,12 @@
     // per weapon, while the two controllers are always both known. 0.30 (his) captures the magazine
     // from a foot away; 0.07 is the measured reach of the real gesture.
     float reload_seat_dist = 0.07f;
+    // reloadslidekeep: once the slide into the well has started, how far (m) the fetch hand may drift
+    // off the well's axis, or back down it, before the slide aborts. From the headset, 2026-09-24:
+    // the controllers meet on the way up and push the fetch hand off the axis, so the insert
+    // cancelled at ~17 cm (2.5 x reloadseat). Separate from reloadseat so the capture stays tight.
+    // 0 = the old 2.5 x reloadseat.
+    float reload_slide_keep_m = 0.30f;
     // reloadmagbelt: body-frame belt point (x right, y up, z back, metres) the spare magazine hangs
     // from -- the LEFT hip, the fetch hand's side. A reloadmagoffw entry for the weapon in hand
     // replaces it.
@@ -1615,6 +1743,10 @@
     float palette_two_hand_agree_full = 0.50f;   // cos: at this the blend is full
     bool  palette_two_hand_log = false;          // the palette hold's own evidence lines
     int   cutscene_grab = 0;                     // the cutscene frame grab (core/dev)
+    // DRIVERPROBE (dev, core/dev/DriverProbe): the hand to drawn weapon and performance instrument,
+    // the same measurement under any arm driver. 0 off (nothing runs, nothing is allocated), 1 on:
+    // one CSV per session under data, a summary line each second. Capped at 15 minutes or 200000 rows.
+    int   driver_probe = 0;
     char  reload_mag_off_w[256] = "Magnum:-0.22/-0.50/0.00";
     // THE RELOAD WHILE RUNNING (from the headset, 2026-09-11: the mag is not keeping up, reloading on the
     // move is nearly impossible). Root cause, verified in code: the seat and rack tests map the
@@ -1770,8 +1902,8 @@
     // from stashes the tick publisher writes. Aim hand only (the weapon is the smoothness ask);
     // the left hand and arms stay tick-published. It only refreshes a pose the tick publisher
     // has already validated -- never creates one -- and the dead-tracking reach gate is
-    // replicated. 0 = tick publishing only (the old behaviour). Default 0: the value the weapon
-    // placement is tuned with.
+    // replicated. 0 = tick publishing only (the old behaviour). Default 1: the value the weapon
+    // placement is tuned with, and the reason the drawn gun is not a tick behind the hand.
     int   pal_pub_frame = 0;
     // Mode 5's lead fraction of one build interval along the smoothed camera rate. The 2026-09-03
     // fit measured the gun missing by 0.86 of a tick; dial live in the headset.
@@ -2049,7 +2181,8 @@
     //       after the build is snapshot-out + memcpy-in, a few microseconds instead of a full
     //       camera read and per-node recompose. Falls back to the in-place path on the first
     //       build after a weapon swap or a stale snapshot.
-    // Default 6, the window cure the weapon placement is tuned with.
+    // Default 0, the value the weapon placement is tuned with: every call applies. Mode 6 was
+    // available in the tuned build and was not chosen there, so it stays an opt-in comparison arm.
     int   pal_build_gate = 6;
     // POSEFREEZE (2026-09-11, the bisection): 1 = the publisher stops updating the published
     // pose, so the target side of the whole pipeline is a CONSTANT by construction -- no
@@ -2231,7 +2364,8 @@
     // Hz, 120 means about 2.4 deg of reversal per frame, which clips the measured tail (p99 3.6
     // deg, max 16.7) while leaving the bulk (p95 ~1.1 deg) untouched.
     float rev_clamp_dps = 120.0f;
-    // Default: the value the weapon placement is tuned with.
+    // Default 1: the value the weapon placement is tuned with. One publish per tick, one thread,
+    // one instant, so the embed never reads a transform the game thread is still moving.
     int   mesh_const = 0;
     // Degrees of camera movement between the brackets above which the sample is contaminated.
     // Modes 1 and 3 only. The reflected-call gap runs ~10-20 ms, so at 100 deg/s of camera motion

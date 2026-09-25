@@ -49,6 +49,11 @@ local CMD_FILE    = "halo_vr_menu_set.txt"
 local EFF_FILE    = "halo_vr_effective.txt"
 local FEAT_FILE   = "halo_vr_features.txt"
 
+-- NOT DRAWN. The fork's weapon placement driver (palettewpn, armdriver 3) is deprecated in favour of
+-- the base mod's own arms: its switch, its two capture keys and its calibration resets are left out
+-- of every panel. The keys still work from a cfg file. Deleting the driver starts with this list.
+local MENU_HIDDEN = { palettewpn = true, palettecalibkey = true, palettewpncalibkey = true }
+
 -- Which calibration keys belong to which gesture (mirror of the plugin's own lists) -- used
 -- only to show the per-gesture "overridden" state and its 'x'.
 local POSE_KEYS = { "calibver", "grip", "gripyaw", "griproll", "dirgrip", "dirgripyaw",
@@ -180,6 +185,22 @@ local HINTS = {
     reloadholdfire = { t = "bool" },
     reloadvrlog    = { t = "bool" },
     reloadresetholds = { t = "bool" },
+    reloadposefreeze = { t = "bool" },
+    reloadgunhold     = { t = "enum", items = { "off", "the base mod's own hold", "leave the gun where it was", "gun only, hand keeps tracking" }, values = { 0, 1, 2, 3 } },
+    reloadgunholdms = { t = "drag", min = 0, max = 3000 },
+    reloadslidekeep = { t = "drag", min = 0, max = 1 },
+    reloadgunholdramp = { t = "drag", min = 0, max = 1000 },
+    reloadgunholdlog  = { t = "bool" },
+    reloadhaptic      = { t = "bool" },
+    reloadhapticamp   = { t = "drag", min = 0, max = 2 },
+    reloadhapticms    = { t = "drag", min = 0, max = 500 },
+    reloadrumblemute  = { t = "enum", items = { "off", "cancel", "strength 0", "cancel + strength 0", "stop", "cancel + stop", "strength 0 + stop", "all three" }, values = { 0, 1, 2, 3, 4, 5, 6, 7 } },
+    reloadrumblelog   = { t = "bool" },
+    grenadegunholdms  = { t = "drag", min = 0, max = 4000 },
+    grenadegunholdlog = { t = "bool" },
+    holstergren       = { t = "bool" },
+    stabilitygrenminthrow = { t = "drag", min = 0, max = 6 },
+    forcetubelog      = { t = "bool" },
     reloadshotgunlog     = { t = "enum", items = { "off", "shotguns only", "every weapon" }, values = { 0, 1, 2 } },
     holsterpollthrowlog = { t = "bool" },
     grenadeswallowlog = { t = "bool" },
@@ -238,6 +259,22 @@ local LABELS = {
     aimbore = "Where your shots go", gripexclusive = "The grip never throws grenades",
     reloadseat = "Magazine seating distance", reloadmagbelt = "Belt magazine spot",
     reloadmagpick = "How the magazine is found", zonesnap = "When the gun and your hand are measured",
+    reloadposefreeze = "Hold the weapon still while you reload",
+    reloadgunhold = "Hold the weapon still under the base mod's arms",
+    reloadgunholdms = "How long the reload animation is kept off the gun",
+    reloadslidekeep = "How far your hand can drift while sliding the magazine in",
+    reloadgunholdramp = "How gently the weapon is handed back",
+    reloadgunholdlog = "Record the reload hold",
+    reloadhaptic = "Buzz for the magazine out and in",
+    reloadhapticamp = "How strong the reload buzz is",
+    reloadhapticms = "How long the reload buzz lasts",
+    reloadrumblemute = "No game rumble during the hidden reload",
+    reloadrumblelog = "Record the game's rumble",
+    grenadegunholdms = "How long the throw animation is kept off the gun",
+    grenadegunholdlog = "Record the throw hold",
+    holstergren = "Grab grenades from your chest pouches",
+    stabilitygrenminthrow = "Slowest swing that still throws",
+    forcetubelog = "Record the gunstock kicks",
     reloadholdfire = "No firing while the magazine is out", reloadvrlog = "Record the reload gesture", reloadresetholds = "Clear the reload after a death or a ride", reloadshotgunlog = "Record every reload value",
     holsterpollthrowlog = "Record grenade throws",
     grenadeswallowlog = "Record the grenade button strip",
@@ -609,6 +646,7 @@ local function default_label(entry, hint)
 end
 
 local function draw_entry(entry, layer)
+    if MENU_HIDDEN[entry.key] then return end
     local key = entry.key
     local hint = HINTS[key]
     if layer == "dev" then hint = nil end   -- dev knobs render generically; hints are player UX
@@ -794,7 +832,7 @@ local TIER_TEXT  = {
                       "because they are ready to use. Expect breakage, and expect them to disappear.",
 }
 -- Settings shown with a feature group though they are not that feature's own sub-settings.
-local GROUP_EXTRAS = { Roomscale = { "hmdleashvert" } }
+local GROUP_EXTRAS = { Roomscale = { "hmdleashvert" }, ["Melee and grenades"] = { "holstergren", "stabilitygrenminthrow" } }
 
 local function tier_switch_row(tier)
     local key = "tier" .. tier
@@ -845,28 +883,33 @@ local function draw_height_calibration()
     imgui.pop_id()
 end
 
-local function draw_feature(f)
+-- part: nil draws the checkbox and its settings; "master" only the checkbox line; "subs" only the
+-- settings, under a label (used when two masters share one line, see the Reload group below).
+local function draw_feature(f, part)
     imgui.push_id("feature:" .. f.key)
     local p = pending_user[f.key]
     local cur = (p ~= nil and p ~= false) and p or user_over[f.key] or tostring(f.value)
     if p == false then cur = tostring(f.value) end
     local on = (tonumber(cur) or 0) ~= 0
-    local missing = unmet_needs(f)
-    if missing ~= nil then imgui.text("  (needs " .. need_names(missing) .. " on)") end
-    -- Greyed only while off: a feature whose prerequisite went away can still be switched off.
-    local dis = begin_disabled(missing ~= nil and not on)
-    local changed, v = imgui.checkbox(f.name, on)
-    if changed then queue("user", f.key, v and f.on or "0") end
-    end_disabled(dis)
-    if imgui.is_item_hovered() then imgui.set_tooltip(f.desc) end
-    imgui.same_line()
-    imgui.text("(" .. feature_source_text(f, on) .. ")")
-    if user_over[f.key] ~= nil and p == nil then
+    if part ~= "subs" then
+        local missing = unmet_needs(f)
+        if missing ~= nil then imgui.text("  (needs " .. need_names(missing) .. " on)") end
+        -- Greyed only while off: a feature whose prerequisite went away can still be switched off.
+        local dis = begin_disabled(missing ~= nil and not on)
+        local changed, v = imgui.checkbox(f.name, on)
+        if changed then queue("user", f.key, v and f.on or "0") end
+        end_disabled(dis)
+        if imgui.is_item_hovered() then imgui.set_tooltip(f.desc) end
         imgui.same_line()
-        if imgui.small_button("x") then queue("user", f.key, false) end
-        if imgui.is_item_hovered() then imgui.set_tooltip("Back to this feature's default") end
+        imgui.text("(" .. feature_source_text(f, on) .. ")")
+        if user_over[f.key] ~= nil and p == nil then
+            imgui.same_line()
+            if imgui.small_button("x") then queue("user", f.key, false) end
+            if imgui.is_item_hovered() then imgui.set_tooltip("Back to this feature's default") end
+        end
     end
-    if #f.subkeys > 0 then
+    if part ~= "master" and #f.subkeys > 0 then
+        if part == "subs" then imgui.text(f.name .. " settings") end
         imgui.indent(20)
         local sub_dis = begin_disabled(not on)
         for _, sk in ipairs(f.subkeys) do
@@ -905,7 +948,23 @@ local function draw_tier_sections(order)
                 for _, g in ipairs(order) do
                     local open = (g == "") or imgui.tree_node(g)
                     if open then
-                        for _, f in ipairs(groups[g]) do draw_feature(f) end
+                        -- RELOAD: Manual reload and Rack the slide side by side at the top, so both
+                        -- switches are seen at once; each one's settings follow under its own label.
+                        local lead = {}
+                        if g == "Reload" then
+                            local fr, fs
+                            for _, f in ipairs(groups[g]) do
+                                if f.key == "reloadvr" then fr = f elseif f.key == "slidevr" then fs = f end
+                            end
+                            if fr ~= nil and fs ~= nil then
+                                draw_feature(fr, "master"); imgui.same_line(); draw_feature(fs, "master")
+                                draw_feature(fr, "subs"); draw_feature(fs, "subs")
+                                lead[fr.key] = true; lead[fs.key] = true
+                            end
+                        end
+                        for _, f in ipairs(groups[g]) do
+                            if not lead[f.key] and not MENU_HIDDEN[f.key] then draw_feature(f) end
+                        end
                         for _, xk in ipairs(GROUP_EXTRAS[g] or {}) do
                             local e = find_entry(xk)
                             if e ~= nil then draw_entry(e, "user") end
@@ -1018,6 +1077,8 @@ local function draw_calib()
     imgui.spacing()
 
     -- THE WEAPON PLACEMENT ("Weapon follows your hand") keeps its captures in its own file, so it has its own resets.
+    -- Not drawn while that driver is hidden (MENU_HIDDEN).
+    if not MENU_HIDDEN.palettewpn then
     if imgui.button("Use shipped weapon placement calibration") then fire("calibreset:palette") end
     if imgui.is_item_hovered() then
         imgui.set_tooltip("Deletes halo_vr_palette_calib.cfg -- the shipped grip, aim and per-weapon\n" ..
@@ -1031,6 +1092,7 @@ local function draw_calib()
                           "back to its shipped placement. If it has none, this does nothing and says so.")
     end
     imgui.spacing()
+    end
 
     -- ARMED STATE COMES FROM THE PLUGIN for every one of these: the mode is cleared by a RIGHT
     -- trigger save, so a button tracking its own click would keep claiming "armed" after the

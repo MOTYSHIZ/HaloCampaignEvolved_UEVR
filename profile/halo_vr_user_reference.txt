@@ -391,6 +391,49 @@
 # Trigger while the magazine is out. 1 swallows it, so you are genuinely defenceless until you
 # finish the reload. 0 makes the whole gesture cosmetic.
 #reloadholdfire=1
+# Hold the weapon still while you reload. Your weapon hand is busy performing the reload, and every
+# bit of that motion normally goes into where the weapon is drawn, so the gun is pulled about by the
+# very gesture you are making on it. 1 leaves the weapon exactly where you last had it from the
+# moment the magazine comes out until the reload finishes, then hands it straight back to your hand.
+# 0 lets it follow your hand throughout.
+#reloadposefreeze=1
+# Keep the game's own reload animation off the gun, for the base mod's own arms and weapon
+# (armdriver 2). When the magazine goes in, the game is told to reload and starts its reload
+# animation, and with the base mod's arms that animation moves the gun you are holding. This holds
+# the gun for a moment from that press so it stays on your hand. Three ways of doing it: 1 uses the
+# base mod's own hold, the one it uses for sprinting, so the gun and your weapon hand stay on their
+# resting pose. 2 keeps the gun exactly where it was when the magazine went in. 3 keeps the gun
+# where it was but lets your weapon hand keep following your controller. 0 is off. On by default
+# whenever manual reload is on, so the game's reload animation never shows.
+#reloadgunhold=1
+# Once the magazine has started sliding in, how far, in metres, your hand can drift off the line
+# into the gun before the slide gives up. Your controllers can bump each other on the way up and
+# push your hand aside; this keeps the slide going. 0 uses the old, tighter limit.
+#reloadslidekeep=0.30
+# How long, in milliseconds, the reload animation is kept off the gun from the moment the magazine
+# is fully in. The gun still follows your hand the whole time. The game's animation runs 1 to 2 s.
+#reloadgunholdms=2000
+# How long, in milliseconds, the hold takes to come on and to let go. 0 is instant, which is what
+# you want at the start, since the animation begins on the press itself.
+#reloadgunholdramp=0
+# How long, in milliseconds, the game's grenade throw animation is kept off your weapon, from the
+# moment the throw goes to the game (grenadegunhold). The throw animation runs about 1.6 s.
+#grenadegunholdms=1800
+# A buzz on the controllers for the reload's steps: the gun hand when the magazine drops out, both
+# hands when the new one is fully in. Racking the slide already buzzes the hand that racks it.
+# 0 is off.
+#reloadhaptic=1
+# How strong those buzzes are. 1 is as designed, 0 turns them off, 2 doubles them (up to the
+# controller's maximum).
+#reloadhapticamp=1.0
+# How long each buzz lasts, in milliseconds. 0 keeps each one's own length (50 for the drop, 80 for
+# the magazine going in).
+#reloadhapticms=0
+# Stop the game's own controller rumble while its reload runs hidden underneath yours, so you only
+# feel your own reload. Three ways, added together: 1 cancels the buzz right after it starts, 2 turns
+# the game's rumble strength down to nothing, 4 tells the game to stop every rumble. 7 uses all
+# three, 0 is off.
+#reloadrumblemute=7
 # Clear the reload's holds on a reset. A death, a ride or a cutscene already puts the reload state
 # back; 1 also ends the reload press on its way to the game, the weapon animation hold, the
 # animation speed-up, the reload sound mute and the hand pose hold, and drops a reload press made
@@ -1066,6 +1109,14 @@
 #holsterlc=-0.12,-0.30,-0.12
 # Right chest, in front: PLASMA grenades.
 #holsterrc=0.12,-0.30,-0.12
+# Grab grenades from the pouches on your chest and throw them with your hand. 0 = off (default),
+# 1 = on. Off by default because a gesture that throws a grenade with no button pressed must be
+# switched on on purpose. Independent of holster, which also does the over-the-shoulder weapon swap.
+#holstergren=0
+# The slowest a grenade release can be and still count as a throw, in metres per second at the
+# peak of the swing. On whenever grenade grabbing is. A slower release outside a pouch puts the
+# grenade back instead of throwing it. Real throws measured 2 or faster. 0 = every release throws.
+#stabilitygrenminthrow=1.5
 # Which hand works the grenade pouches. 2 = either (default): with the off hand your gun stays
 # up and live, with the aim hand the weapon hides while the grenade shares it. 1 = off hand
 # only, 0 = aim hand only. Weapon slots always use the aim hand.

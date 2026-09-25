@@ -678,9 +678,27 @@ void anim_seq_set_tick() {
     comp->call_function(L"SetPosition", p);
 }
 void reload_state_hold_begin() {
-    if (!g_cfg.reload_hold_state || g_cfg.reload_anim_ms <= 0) return;
+    // EVERY EXIT SAYS WHY (2026-09-24). Under the base mod's arm driver the reload animation showed
+    // and not one STATEHOLD line was logged with reloadvrlog on: the hold never began, and each of
+    // these returns used to be silent.
+    if (!g_cfg.reload_hold_state || g_cfg.reload_anim_ms <= 0) {
+        if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: not started, off (reloadholdstate=%d, reloadanimms=%d)", (int)g_cfg.reload_hold_state, g_cfg.reload_anim_ms);
+        return;
+    }
+    if (fp_weapon_actor() == nullptr) {
+        if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: not started, no first-person weapon actor");
+        return;
+    }
+    auto* comp = reload_weapon_default_comp();
+    if (comp == nullptr) {
+        if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: not started, the weapon actor has no SkeletalMeshComponent named Default");
+        return;
+    }
     auto* animbp = reload_weapon_anim_instance();
-    if (animbp == nullptr) return;
+    if (animbp == nullptr) {
+        if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: not started, no animation instance on %ls", class_name_of(comp).c_str());
+        return;
+    }
     auto* p = animbp->get_property_data<uint8_t>(L"FirstPersonState");
     if (p == nullptr || IsBadReadPtr(p, 1)) {
         if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: no FirstPersonState on %ls", class_name_of(animbp).c_str());
@@ -691,6 +709,7 @@ void reload_state_hold_begin() {
     s_sh_press_at = now_ticks();
     s_sh_until = s_sh_press_at + ms_to_ticks((g_cfg.coop_auto && net_is_coop()) ? g_cfg.reload_anim_ms_coop : g_cfg.reload_anim_ms);
     s_sh_reasserts = 0; s_sh_ticks = 0;
+    if (g_cfg.reload_vr_log) API::get()->log_info("[Halo-CampE-UEVR] STATEHOLD: begins, FirstPersonState held at %d on %ls", (int)s_sh_idle, class_name_of(animbp).c_str());
 }
 bool reload_gestures_busy();   // the mag is out, the seat is pending, or the lock waits for the rack (defined below)
 void reload_state_hold_tick() {

@@ -5,6 +5,7 @@
 #include "core/UnitState.hpp"
 #include "core/reload/ReloadEngine.hpp"   // the reload engine's pose hold request
 #include "core/WeaponObject.hpp"   // the weapon object service and the slide node it publishes
+#include "core/dev/DriverProbe.hpp"   // the arm driver comparison instrument: this detour's cost, the intended socket
 #include "Config.hpp"
 #include "features/palettewpn/PaletteTwoHand.hpp"
 #include "ArmDriver.hpp"            // palette_weapon_mode(): this file acts only while armdriver mode 3 owns
@@ -1956,6 +1957,8 @@ bool apply_weapon_branch(PaletteNode* palette, Mat3* out_delta_basis = nullptr, 
     // Subtracting the separation here puts the SOCKET on the hand instead, which is what the
     // player is aiming at. The measurement is taken from the same two numbers after the
     // subtraction (socket minus what we wrote), so it does not chase itself.
+    // The driver probe's record of the target: where the SOCKET is meant to be, before the separation is cancelled.
+    driver_probe_note_intent_mesh(desired_pos.x, desired_pos.y, desired_pos.z);
     {
         float sep[3] = {0.0f, 0.0f, 0.0f};
         if (palette_socket_fix_value(sep)) {
@@ -4144,6 +4147,7 @@ static void obscam_capture() {
 
 void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_palette) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
+    const long long probe_in = driver_probe_clock();   // 0 while the driver probe is off
     if (local_player == 0 && weapon_slot == 0) g_n8_gate6.store(0u, std::memory_order_relaxed);
     if (g_cfg.palette_weapon_log) {
         palslot::note_call(local_player, weapon_slot);
@@ -4171,8 +4175,13 @@ void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_
     // gate 7: ONE WRITER. With a valid precompose the game's builder is not called at all for
     // the local FP slot -- stock never enters the banks (doctrine at the Config key).
     g_pre7_no_original = (g_cfg.pal_build_gate == 7 && local_player == 0 && weapon_slot == 0 && g_pre6.valid);
+    // The driver probe charges this detour with everything EXCEPT the game's own builder: the part before it and the
+    // part after it, as one span.
+    const long long probe_pre = driver_probe_clock();
+    long long probe_post = probe_pre;
     if (g_pose_original != nullptr && !g_pre7_no_original) {
         g_pose_original(local_player, weapon_slot, capture_render_palette);
+        probe_post = driver_probe_clock();
         if (local_player == 0 && weapon_slot == 0) obscam_capture();
     }
     if (local_player == 0) {
@@ -4248,6 +4257,8 @@ void hooked_pose(int32_t local_player, int32_t weapon_slot, bool capture_render_
     g_hook_n.fetch_add(1, std::memory_order_relaxed);
     uint32_t prev = g_hook_us_max.load(std::memory_order_relaxed);
     while (us_u > prev && !g_hook_us_max.compare_exchange_weak(prev, us_u, std::memory_order_relaxed)) {}
+    if (probe_in != 0 && probe_pre != 0 && probe_post != 0)
+        driver_probe_pose_hook_done(probe_post - (probe_pre - probe_in), 3);
 }
 
 } // namespace
@@ -4447,6 +4458,12 @@ void blam_palette_publish_poses() {
     if (!palette_weapon_mode()) { g_p_valid.store(false, std::memory_order_release); return; }
     // POSEFREEZE (doctrine at the Config key): the published pose is left exactly as it is.
     if (g_cfg.pose_freeze != 0 && g_p_valid.load(std::memory_order_acquire)) return;
+    // RELOADPOSEFREEZE (doctrine at the Config key): the SAME hold, for the length of a manual
+    // reload, so the reload gesture does not drag the placement about. The window belongs to the
+    // reload engine (core/reload) and is asked for HERE, at the instant the pose would be written,
+    // so the window and the pose are one snapshot. With manual reload off (no feature publishing
+    // SVC_MANUAL_RELOAD_AVAILABLE) the call answers false on its first test and the line is inert.
+    if (reload_pose_freeze_wanted() && g_p_valid.load(std::memory_order_acquire)) return;
 
     // MIRROR the file, both directions. This used to adopt an offset from disk and never let it
     // go: once g_grip_fix_valid was true in memory, deleting gripfix= from the file changed

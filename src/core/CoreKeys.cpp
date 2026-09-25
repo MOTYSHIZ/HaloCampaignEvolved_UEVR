@@ -37,6 +37,7 @@ bool core_parse_key(const char* key, const char* val, double v) {
     // holster evidence and core/dev's cutscene frame grab).
     if (_stricmp(key, "holsterpollthrowlog") == 0) { g_cfg.holster_throw_log = (v != 0.0); return true; }
     if (_stricmp(key, "cutscenegrab")    == 0) { g_cfg.cutscene_grab = (int)v; return true; }
+    if (_stricmp(key, "driverprobe")     == 0) { g_cfg.driver_probe = (int)v; return true; }
     // The palette weapon's diagnostic log switch, also read by the wrist HUD's one-shot widget log.
     if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
     // The reload engine's keys (core/reload).

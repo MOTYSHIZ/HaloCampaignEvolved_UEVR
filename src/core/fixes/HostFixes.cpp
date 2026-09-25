@@ -346,8 +346,10 @@ void stability_holster_marker_tint(uevr::API::UObject* marker) {
 bool stability_throw_too_slow(float peak_speed) {
     // MIN THROW SPEED (stabilitygrenminthrow, 0 = off): a release that never swung is a put-back wherever
     // the hand is. Judged on the PEAK: every measured throw peaked at 2.04 or above and the
-    // deliberate put-back at 0.16.
-    return stab_on() && g_cfg.gren_min_throw > 0.0f && peak_speed < g_cfg.gren_min_throw;
+    // deliberate put-back at 0.16. PART OF THE GRENADE GESTURE, not of stabilityfixes: on whenever the
+    // pouch grab is (holstergren), 1.5 by default, because a small move and a release near the chest
+    // threw grenades the player never meant to throw. 0 = every release outside a pouch is a throw.
+    return g_cfg.holster_grenades && g_cfg.gren_min_throw > 0.0f && peak_speed < g_cfg.gren_min_throw;
 }
 
 const char* stability_putback_text(const char* his_text, bool in_pouch) {
@@ -398,7 +400,7 @@ void stability_log_off_parity() {
         { "teardown_early",          "no-op",             "his teardown order is unchanged" },
         { "teardown_restore",        "no-op",             "he has no projection rewrite to restore" },
         { "holster_marker_tint",     "no tint",           "his pouch markers are untinted" },
-        { "throw_too_slow",          "false",             "any release is a throw in his release" },
+        { "render_time",             "no-op",             "his banks are drawn as his build wrote them" },
         // Not in this file, listed because they are the same shape and were checked with it.
         { "hmd_pose_plausible",      "true",              "get_pose alone, no plausibility test" },
         { "widget_log",              "true",              "if ((t++ % 32) == 0), UNGATED (Reticule.cpp:1639)" },

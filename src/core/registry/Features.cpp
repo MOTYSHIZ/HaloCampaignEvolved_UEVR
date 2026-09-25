@@ -168,22 +168,6 @@ const FeatureRow kFeatures[] = {
       "scopeabtest,scopecamfwd,scopecvardump,scopehz,scopepp,scopeprobe,scopereticle,scopereticlescale,"
       "scoperollfix,scoperound,scopewpn",
       "scope", FEATURE_BOOL(scope_lens) },
-    { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
-      "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
-      "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
-      "reloadhidearms,reloadhidesolo,reloadholdfire,reloadlift,reloadmagbelt,reloadmagoffw,reloadmagpick,reloadresetholds,"
-      "reloadroomanchor,reloadseat,reloadslidems,reloadstate,reloadstatedeath,reloadstatedrop,"
-      "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker,zonesnap",
-      "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"
-      "akmimic4event,akmutenames,akpostrva,akrtpc,akrtpcglobal,akrtpcrestore,akrtpcvalue,akstack,akvtcount,"
-      "akvtdump,akvtglobal,ammoscrub,ammoseq,animdump,animobjs,animseqset,animvars,animvarset,coopauto,"
-      "coopmaskms,coopstopat,magdrop,magdropms,magdump,maghide,maghidename,reloadanimms,reloadanimmscoop,"
-      "reloadaudiodump,reloadframe,reloadholdstate,reloadinsert,reloadinsertdone,reloadinsertmode,"
-      "reloadinsertsign,reloadmaskms,reloadmutems,reloadmutevariant,reloadpauseanim,reloadpressat,"
-      "reloadpressms,reloadpressmscoop,reloadshotgunlog,reloadskipweapons,reloadstatelog,reloadstepsound,"
-      "reloadstepvariant,reloadstepvia,reloadvrlog,reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,"
-      "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel",
-      "", FEATURE_BOOL(reload_vr) },
     { "slidevr",      1, Tier::Experimental, "Reload", "Rack the slide",
       "Rack the slide, pump or charging handle with your other hand.",
       "slidefire,slidefireback,slidefireentry,slideoff,slidepartrotaxis,slideradius,slidetravel,"
@@ -199,6 +183,24 @@ const FeatureRow kFeatures[] = {
       "slidepartsign,slideparttest,slidepartui,slidephantom,slideseq,slideseqback,slideseqfwd,slideseqsweep,"
       "slidesign,slideslot,slideundoreload,slideweapons,slidezone",
       "", FEATURE_BOOL(slide_vr) },
+    { "reloadvr",     1, Tier::Experimental, "Reload", "Manual reload",
+      "Drop the magazine, fetch a fresh one from your belt and push it into the gun.",
+      "gripexclusive,reloadakmimic,reloadakmute,reloadanimrate,reloadcoophide,reloadhandoff,reloadhandrot,"
+      "reloadhaptic,reloadhapticamp,reloadhapticms,reloadrumblemute,reloadhidearms,reloadhidesolo,reloadgunhold,reloadgunholdms,reloadslidekeep,reloadholdfire,reloadgunholdramp,reloadlift,reloadmagbelt,"
+      "reloadmagoffw,reloadmagpick,"
+      "reloadposefreeze,reloadresetholds,"
+      "reloadroomanchor,reloadseat,reloadslidems,reloadstate,reloadstatedeath,reloadstatedrop,"
+      "reloadstatehide,reloadstatelevel,reloadstatesave,reloadstatewaitms,reloadwellmarker,zonesnap",
+      "akfnregister,akfnsetlisteners,akfnsetposition,akfnsetrtpc,akfnsetswitch,akfnunregister,aklog,"
+      "akmimic4event,akmutenames,akpostrva,akrtpc,akrtpcglobal,akrtpcrestore,akrtpcvalue,akstack,akvtcount,"
+      "akvtdump,akvtglobal,ammoscrub,ammoseq,animdump,animobjs,animseqset,animvars,animvarset,coopauto,"
+      "coopmaskms,coopstopat,magdrop,magdropms,magdump,maghide,maghidename,reloadanimms,reloadanimmscoop,"
+      "reloadaudiodump,reloadframe,reloadgunholdlog,reloadrumblelog,reloadholdstate,reloadinsert,reloadinsertdone,reloadinsertmode,"
+      "reloadinsertsign,reloadmaskms,reloadmutems,reloadmutevariant,reloadpauseanim,reloadpressat,"
+      "reloadpressms,reloadpressmscoop,reloadshotgunlog,reloadskipweapons,reloadstatelog,reloadstepsound,"
+      "reloadstepvariant,reloadstepvia,reloadvrlog,reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,"
+      "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel",
+      "", FEATURE_BOOL(reload_vr) },
     { "grenadeswallow", 1, Tier::Experimental, "Melee and grenades", "Grenades from the pouches only",
       "The left face button stops throwing grenades; grenades come from your chest pouches.",
       "",
@@ -224,7 +226,7 @@ const FeatureRow kFeatures[] = {
     { "forcetube",    1, Tier::Experimental, "Haptics", "ForceTube gunstock",
       "A kick in the ForceTube gunstock on every round you fire.",
       "forcetubekick,forcetuberadius",
-      "forcetubechannel,forcetubefirems",
+      "forcetubechannel,forcetubefirems,forcetubelog",
       "", FEATURE_BOOL(force_tube) },
     { "vehcam",       1, Tier::Experimental, "Vehicles", "Vehicle seat camera",
       "A first-person view from your seat in vehicles.",
@@ -256,10 +258,20 @@ const FeatureRow kFeatures[] = {
       "headblockradius",
       "headblockchannel,headblocklean,headblocklog,headblockrelease",
       "", FEATURE_INT(head_block) },
-    { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
-      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate, holster marker tint and minimum throw speed.",
+    { "grenadegunhold", 1, Tier::Experimental, "Melee and grenades", "Hold the weapon through a throw",
+      "Keeps the game's grenade throw animation off your weapon under the base mod's arms.",
+      "grenadegunholdms",
+      "grenadegunholdlog",
+      "", FEATURE_INT(grenade_gun_hold) },
+    { "worldscalefollow", 1, Tier::Experimental, "Arms", "Arms follow the world scale",
+      "Keeps the arms and the weapon at your hand when you change UEVR's world scale.",
       "",
-      "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityturnlog,stabilitywidgetlog",
+      "",
+      "", FEATURE_INT(world_scale_follow) },
+    { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
+      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate and holster marker tint.",
+      "",
+      "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityrendertime,stabilityrendertimelog,stabilityturnlog,stabilitywidgetlog",
       "", FEATURE_BOOL(stability_fixes) },
 };
 
@@ -271,6 +283,7 @@ const FeatureRow kFeatures[] = {
 // whichever consumer keyed it, or when more than one feature reads it:
 //   bobcancel/bobtau/boblog          core/CameraBob, the camera bob cancel
 //   cutscenegrab                     core/dev/CutsceneDump
+//   driverprobe                      core/dev/DriverProbe, the arm driver comparison instrument
 //   magrender                        core/WeaponObject, the drawn-magazine pass
 //   markertint                       core/MarkerFaces -- the tint gate for EVERY marker: the holster
 //                                    pouches (stabilityfixes), the reload well, the rack part and
@@ -281,7 +294,7 @@ const FeatureRow kFeatures[] = {
 //   slidehook / slidenode            core/WeaponObject, the node the rack drives
 //   wpnnode*                         core/WeaponObject node probes, also read by the reload engine
 const char* const kCoreKeys =
-    "bobcancel,boblog,bobtau,cutscenegrab,magrender,markertint,moveprobe,palettewpnlog,slidehook,"
+    "bobcancel,boblog,bobtau,cutscenegrab,driverprobe,magrender,markertint,moveprobe,palettewpnlog,slidehook,"
     "slidenode,stealextra,wpnnodecopyscan,wpnnodedump,wpnnodepoke,wpnnodepokeamt";
 
 constexpr int kCount = (int)(sizeof(kFeatures) / sizeof(kFeatures[0]));
@@ -581,6 +594,8 @@ static const EffectiveKey kEffectiveKeys[] = {
     { "vehiclewheel",     [] { return (double)g_cfg.vehicle_wheel; } },
     { "vehhidebody",      [] { return (double)g_cfg.veh_hide_body; } },
     { "stabilityfixes",   [] { return (double)g_cfg.stability_fixes; } },
+    { "worldscalefollow", [] { return (double)g_cfg.world_scale_follow; } },
+    { "grenadegunhold",   [] { return (double)g_cfg.grenade_gun_hold; } },
 };
 
 static void effective_mirror_path(char* out, size_t cap) {

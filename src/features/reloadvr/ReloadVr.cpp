@@ -1,4 +1,5 @@
 #include "features/reloadvr/ReloadVr.hpp"
+#include "features/reloadvr/ReloadHold.hpp"   // reloadgunhold: the weapon held still under armdriver 2
 #include "core/config/CfgRead.hpp"
 
 #include "Arms.hpp"                       // arms_release_hide: the author's release path
@@ -39,6 +40,13 @@ bool reload_vr_arm_hide_held_off() {
 constinit const FeatureHooks kReloadVrHooks{
     .key      = "reloadvr",
     .arm_hide_held_off = &reload_vr_arm_hide_held_off,
+    // RELOADHOLD (ReloadHold.hpp): the weapon held still through a manual reload under the base
+    // mod's own arm driver. Its own key, compiled default 0, so these four are dead weight until a
+    // cfg turns it on; they are on this table because the hold is a sub-behaviour of this reload.
+    .pa_anim_gates     = &reload_hold_pa_anim_gates,
+    .pa_rig_target     = &reload_hold_pa_rig_target,
+    .pa_aim_wrist_note = &reload_hold_pa_aim_wrist_note,
+    .pa_aim_wrist_keep = &reload_hold_pa_aim_wrist_keep,
     .enabled  = &reload_vr_enabled,
     .services = SVC_FIRE_INPUT | SVC_MARKER_ANCHOR | SVC_HIDDEN_RELOAD | SVC_WEAPON_OBJECT | SVC_MANUAL_RELOAD_AVAILABLE,
 };

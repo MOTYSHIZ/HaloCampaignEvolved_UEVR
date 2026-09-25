@@ -10996,6 +10996,7 @@ void update() {
                     const bool finite_ok = std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)
                                         && std::isfinite(f.x) && std::isfinite(r.x) && std::isfinite(u.x);
                     halo::palettearm_note_rig_weapon(rw_ok && finite_ok, fa, ra, ua, wa, calibrating);
+                    features_rig_weapon_target(rw_ok && finite_ok, wpn_t, q_gun);
                     // ---- THE VIRTUAL RIG FRAME, for the scope (see g_palrig_off_*). Rig mode's rig
                     // root is weapon - R*socket_local; socket_local is the stock weapon marker the
                     // palette holds. Published as a world offset from the rig parent (the render
@@ -13074,11 +13075,12 @@ public:
     // Read-only. Runs after UEVR has composed HMD tracking, so `rotation` here is the finished
     // view in GAME space -- what the player is actually looking along. Published for the movement
     // frame; nothing is written back.
-    void on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int index, float,
+    void on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle, int index, float world_to_meters,
                                               UEVR_Vector3f* position, UEVR_Rotatorf* rotation,
                                               bool is_double) override {
         if (g_shutting_down.load(std::memory_order_acquire)) return;
         features_stereo_post_eye(index, position, is_double);
+        features_stereo_post_view(index, world_to_meters, position, rotation, is_double);
         // THE EYE HALF of the eye-to-shot-origin offset. Same callback pair, same eye index, one
         // subtraction apart -- see the pre callback. `position` has been through UEVR's HMD
         // transform by now, so this IS the rendered eye.
@@ -13206,6 +13208,8 @@ public:
                                    g_render_view_yaw.load(), g_render_view_pitch.load(), view_roll);
         }
     }
+
+    void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) override { features_xinput_set_state(user_index, vibration); }
 
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override {
         if (g_shutting_down.load(std::memory_order_acquire)) return;
