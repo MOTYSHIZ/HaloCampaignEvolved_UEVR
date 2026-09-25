@@ -1226,6 +1226,14 @@
     // vehtpyaw: 1 = the chase camera yaws to follow the vehicle heading (classic chase); 0 = it holds
     // a fixed world heading and the hull turns within the view. Live tunable.
     bool  veh_tp_yaw_follow = true;
+    // vehtpanchor: 1 = HEAD-ANCHORED (default). Your head's place relative to the vehicle rides with
+    // it -- position follows the vehicle's movement AND turning, so you stay e.g. behind it -- while the
+    // VIEW yaw is still vehtpyaw's choice, so the world need not spin around your eyes. Pivots on the
+    // HEAD, not the play-space origin: the head's room offset is captured once per ride and backed out,
+    // so where you stood when you got in cannot skew it. The head leash stands down meanwhile, so you
+    // can lean off the anchor (6DoF). 0 = the old boom: the camera shares the view yaw and the head
+    // leash stays on.
+    bool  veh_tp_anchor = true;
     // vehtpcollide: 1 = the chase camera pulls in (spring arm) when world geometry blocks the boom,
     // so it never ends up behind a wall; 0 = off. The trace is game-side; the eye scales the boom by
     // a published fraction. vehtpcollidemargin = cm the camera stops SHORT of the hit (no surface clip).

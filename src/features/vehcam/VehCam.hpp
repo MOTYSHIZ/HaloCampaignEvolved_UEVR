@@ -87,6 +87,11 @@ void seat_direct_refresh();
 // hold-off. Any thread (reads g_cfg + an atomic); called from the sim orientation getter.
 bool veh_tp_motion_aim_active();
 
+// vehtpanchor: true while the HEAD-ANCHORED third-person camera is actually drawing. The head leash
+// stands down on it (it would slide the standing origin onto the head and cancel the 6DoF lean off
+// the anchor). Any thread.
+bool veh_tp_anchor_active();
+
 // RUNTIME effective third-person-camera state. Initialised from vehtp on each mount, flipped live
 // by left-X via veh_tp_toggle(). The TP gates read this so FP<->TP can swap mid-ride.
 extern std::atomic<bool> g_veh_tp_active;

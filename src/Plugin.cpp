@@ -6845,7 +6845,13 @@ void update() {
     // value that changes at human speed.
     //
     // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
-    if (g_cfg.hmd_leash || features_leash_block_wanted()) {
+    //
+    // STANDS DOWN under the head-anchored vehicle camera (vehtpanchor): there the head is meant to lean
+    // off its anchor, and sliding the standing origin onto it would cancel exactly that. The standing
+    // origin then holds still for the ride, which is what the anchor's captured head offset assumes.
+    // Aim does not need the leash there: vehicle aim is ray-based and the reticule is traced from the
+    // vehicle. On exit the leash resumes and re-absorbs any offset, inside the cut to the game's view.
+    if ((g_cfg.hmd_leash || features_leash_block_wanted()) && !veh_tp_anchor_active()) {
         Vec3 hp{}; Quat hq{};
         const auto hi = API::VR::get_hmd_index();
         if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false) && features_hmd_pose_plausible(hp)) {
