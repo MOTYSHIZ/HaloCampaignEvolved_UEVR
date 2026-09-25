@@ -676,10 +676,11 @@ std::atomic<uintptr_t> g_tp_chassis_ptr{0};
 std::atomic<int32_t>   g_tp_chassis_idx{-1};
 std::atomic<float>     g_tp_chassis_yaw{0.0f};   // the VIEW yaw: the view override + room_to_world read it
 std::atomic<bool>      g_tp_chassis_yaw_valid{false};
-// The BOOM yaw: where the camera actually sits around the vehicle. Equal to the view yaw on the old
-// boom; they diverge under vehtpanchor with vehtpyaw=0, and the collision trace must follow THIS one
-// or it traces toward where the camera is not.
-std::atomic<float>     g_tp_boom_yaw{0.0f};
+// The anchor's world OFFSET from the chassis, unscaled by the spring arm, as the eye built it last
+// frame. The collision trace follows THIS, not the view yaw: the two diverge under vehtpanchor, and
+// a yaw alone cannot describe an anchor that pitches and banks with the vehicle (vehtpattitude).
+// An offset, not a position -- the tick adds its own fresh chassis location (two clocks).
+std::atomic<float>     g_tp_boom_ox{0.0f}, g_tp_boom_oy{0.0f}, g_tp_boom_oz{0.0f};
 // Bumped on every rising edge of our camera (mount, or left-X back to TP). The eye re-arms its per-ride
 // captures -- the frozen view yaw and the head anchor -- when it changes.
 std::atomic<uint32_t>  g_tp_mount_gen{0};
@@ -1142,6 +1143,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehtpboom")      == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.veh_tp_boom[0], &g_cfg.veh_tp_boom[1], &g_cfg.veh_tp_boom[2]); return true; }
     if (_stricmp(key, "vehtpyaw")       == 0) { g_cfg.veh_tp_yaw_follow = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpanchor")    == 0) { g_cfg.veh_tp_anchor = (v != 0.0); return true; }
+    if (_stricmp(key, "vehtpattitude")  == 0) { g_cfg.veh_tp_attitude = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpcollide")   == 0) { g_cfg.veh_tp_collide = (v != 0.0); return true; }
     if (_stricmp(key, "vehtpcollidemargin") == 0) { g_cfg.veh_tp_collide_margin = (float)v; return true; }
     if (_stricmp(key, "vehaim")         == 0) { g_cfg.veh_aim = (v != 0.0); return true; }
@@ -1383,16 +1385,17 @@ void vehcam_game_tick_vehicle() {
         Vec3 cloc{};
         float frac = 1.0f;
         if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cloc)) {
-            const double D2R = 0.01745329252;
-            // The BOOM yaw, not the view yaw: under vehtpanchor with vehtpyaw=0 they differ, and the
-            // spring arm has to trace toward where the camera actually is.
-            const double yr = (double)g_tp_boom_yaw.load(std::memory_order_relaxed) * D2R;
-            const double cy = std::cos(yr), sy = std::sin(yr);
-            const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
-            const double boom_len = std::sqrt(bf * bf + bl * bl + bu * bu);
-            const Vec3 desired{ (float)((double)cloc.x + cy * bf - sy * bl),
-                                (float)((double)cloc.y + sy * bf + cy * bl),
-                                (float)((double)cloc.z + bu) };
+            // Trace toward where the camera ACTUALLY is: the eye's own anchor offset from last frame,
+            // unscaled. Under vehtpanchor the boom and view yaws diverge, and under vehtpattitude the
+            // anchor also pitches and banks -- a yaw-only boom rebuilt here would trace somewhere else.
+            // An offset, so this tick's fresh chassis location is what it hangs off (two clocks).
+            const double ox = (double)g_tp_boom_ox.load(std::memory_order_relaxed);
+            const double oy = (double)g_tp_boom_oy.load(std::memory_order_relaxed);
+            const double oz = (double)g_tp_boom_oz.load(std::memory_order_relaxed);
+            const double boom_len = std::sqrt(ox * ox + oy * oy + oz * oz);
+            const Vec3 desired{ (float)((double)cloc.x + ox),
+                                (float)((double)cloc.y + oy),
+                                (float)((double)cloc.z + oz) };
             API::UObject* ignore[2] = {}; int ni = 0;
             if (auto* pawn = API::get()->get_local_pawn(0)) ignore[ni++] = pawn;
             if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
@@ -1464,12 +1467,38 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             static float     s_frozen_yaw = 0.0f;
             static bool      s_frozen_valid = false;
             static double    s_c0[3] = {0.0, 0.0, 0.0};   // head offset from the standing origin at capture, UE cm
+            static bool      s_arm_att = false;
+            static double    s_bl[3] = {0.0, 0.0, 0.0};   // the anchor's offset in the MESH's own frame, per ride
             const bool anchor = g_cfg.veh_tp_anchor;
+            // vehtpattitude: the anchor rides the vehicle's full attitude, not just its yaw.
+            const bool att = anchor && g_cfg.veh_tp_attitude;
+            const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
+            // The mesh's FULL world axes -- the rows of UE's FRotationMatrix for crot (pitch x, yaw y,
+            // roll z). This is the basis that tumbled the boom when the boom was applied IN it directly:
+            // it carries the mesh's baked modelling axes. The attitude anchor never does that -- it
+            // captures its offset through this same basis and re-applies it through this same basis,
+            // so the baked part cancels and only the vehicle's real motion is left.
+            const double mcp = std::cos(crot.x * D2R), msp = std::sin(crot.x * D2R);
+            const double mcy = std::cos(crot.y * D2R), msy = std::sin(crot.y * D2R);
+            const double mcr = std::cos(crot.z * D2R), msr = std::sin(crot.z * D2R);
+            const double MX[3] = { mcp * mcy, mcp * msy, msp };
+            const double MY[3] = { msr * msp * mcy - mcr * msy, msr * msp * msy + mcr * mcy, -msr * mcp };
+            const double MZ[3] = { -(mcr * msp * mcy + msr * msy), mcy * msr - mcr * msp * msy, mcr * mcp };
             const uint32_t gen = halo::g_tp_mount_gen.load(std::memory_order_relaxed);
-            if (gen != s_arm_gen || cp != s_arm_cp || anchor != s_arm_anchor) {
-                s_arm_gen = gen; s_arm_cp = cp; s_arm_anchor = anchor;
+            if (gen != s_arm_gen || cp != s_arm_cp || anchor != s_arm_anchor || att != s_arm_att) {
+                s_arm_gen = gen; s_arm_cp = cp; s_arm_anchor = anchor; s_arm_att = att;
                 s_frozen_valid = false;
                 s_c0[0] = s_c0[1] = s_c0[2] = 0.0;
+                if (att) {
+                    // Capture the anchor IN THE MESH'S FRAME: the level boom offset for this instant
+                    // (R_yaw(mesh yaw) . boom -- exactly where the yaw-only anchor puts it), expressed
+                    // along the mesh's own axes (R_mesh^T . off0). Re-applied as R_mesh . s_bl every
+                    // frame, it lands on the same spot now and rides every later yaw, pitch and bank.
+                    const double o0 = mcy * bf - msy * bl, o1 = msy * bf + mcy * bl, o2 = bu;
+                    s_bl[0] = MX[0] * o0 + MX[1] * o1 + MX[2] * o2;
+                    s_bl[1] = MY[0] * o0 + MY[1] * o1 + MY[2] * o2;
+                    s_bl[2] = MZ[0] * o0 + MZ[1] * o1 + MZ[2] * o2;
+                }
                 if (anchor) {
                     // HEAD-CENTRIC, NOT PLAY-SPACE-CENTRIC. UEVR draws the head at
                     //   view_base + R(view_yaw) . conv(hmd - standing_origin) . scale
@@ -1501,18 +1530,32 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // hull, so your head keeps its place relative to the vehicle as it turns, whatever the view
             // does. Without it the boom shares the view yaw -- the old behaviour, kept for A/B.
             const float boom_yaw = anchor ? (crot.y + orbit) : view_yaw;
-            const double yr = (double)boom_yaw * D2R;
-            const double cy = std::cos(yr), sy = std::sin(yr);
-            const double ax[3] = {  cy,  sy, 0.0 };   // hull forward, flattened to horizontal
-            const double ay[3] = { -sy,  cy, 0.0 };   // hull right,   flattened to horizontal
-            const double az[3] = { 0.0, 0.0, 1.0 };   // world up
-            const double bf = (double)g_cfg.veh_tp_boom[0], bl = (double)g_cfg.veh_tp_boom[1], bu = (double)g_cfg.veh_tp_boom[2];
             // Spring-arm pull-in from the game-side collision trace (1 = unobstructed).
             const double cfrac = g_cfg.veh_tp_collide
                 ? (double)halo::g_tp_collision_frac.load(std::memory_order_relaxed) : 1.0;
-            ecx = (double)cloc.x + (ax[0] * bf + ay[0] * bl + az[0] * bu) * cfrac;
-            ecy = (double)cloc.y + (ax[1] * bf + ay[1] * bl + az[1] * bu) * cfrac;
-            ecz = (double)cloc.z + (ax[2] * bf + ay[2] * bl + az[2] * bu) * cfrac;
+            // The anchor's world offset from the chassis, before the spring arm.
+            double off[3];
+            if (att) {
+                // RIGID: the per-ride mesh-local offset carried by the mesh's FULL attitude, then the
+                // right-stick orbit about world up. Yaw, pitch and bank all hold the head's place.
+                const double w0 = s_bl[0] * MX[0] + s_bl[1] * MY[0] + s_bl[2] * MZ[0];
+                const double w1 = s_bl[0] * MX[1] + s_bl[1] * MY[1] + s_bl[2] * MZ[1];
+                const double w2 = s_bl[0] * MX[2] + s_bl[1] * MY[2] + s_bl[2] * MZ[2];
+                const double orr = (double)orbit * D2R, oc = std::cos(orr), os = std::sin(orr);
+                off[0] = w0 * oc - w1 * os;
+                off[1] = w0 * os + w1 * oc;
+                off[2] = w2;
+            } else {
+                // LEVEL: yaw-only basis with world up -- exactly the old one at pitch = roll = 0.
+                const double yr = (double)boom_yaw * D2R;
+                const double cy = std::cos(yr), sy = std::sin(yr);
+                off[0] = cy * bf - sy * bl;
+                off[1] = sy * bf + cy * bl;
+                off[2] = bu;
+            }
+            ecx = (double)cloc.x + off[0] * cfrac;
+            ecy = (double)cloc.y + off[1] * cfrac;
+            ecz = (double)cloc.z + off[2] * cfrac;
             if (anchor) {
                 // view_base = anchor - R(view_yaw) . c0 -- puts the HEAD (not the room origin) on the
                 // anchor just computed. Same yaw rotation and axis convention as room_to_world.
@@ -1529,7 +1572,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             halo::g_cam_y.store((float)ecy, std::memory_order_relaxed);
             halo::g_cam_z.store((float)ecz, std::memory_order_relaxed);
             halo::g_tp_chassis_yaw.store(view_yaw, std::memory_order_relaxed);   // the VIEW yaw -> view override
-            halo::g_tp_boom_yaw.store(boom_yaw, std::memory_order_relaxed);      // the BOOM yaw -> collision trace
+            halo::g_tp_boom_ox.store((float)off[0], std::memory_order_relaxed);  // the anchor OFFSET, unscaled ->
+            halo::g_tp_boom_oy.store((float)off[1], std::memory_order_relaxed);  //   the collision trace (it adds
+            halo::g_tp_boom_oz.store((float)off[2], std::memory_order_relaxed);  //   its own fresh chassis location)
             halo::g_tp_chassis_yaw_valid.store(true, std::memory_order_relaxed);
             if (index == 0) { g_vcd.fc[0] = ecx; g_vcd.fc[1] = ecy; g_vcd.fc[2] = ecz; g_vcd.wrote = true; }
         } else if (index == 0) {
@@ -1545,11 +1590,14 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             static uint32_t s_dbg = 0;
             if ((s_dbg++ % 90u) == 0u)
                 API::get()->log_info("[Halo-CampE-UEVR] VEHTP eye: cp=0x%llX ch=%d locOk=%d rotOk=%d "
-                                     "game=(%.0f %.0f %.0f) chassis=(%.0f %.0f %.0f) eye=(%.0f %.0f %.0f) boom=(%.0f %.0f %.0f)",
+                                     "game=(%.0f %.0f %.0f) chassis=(%.0f %.0f %.0f) rot(p=%.1f y=%.1f r=%.1f) "
+                                     "eye=(%.0f %.0f %.0f) boom=(%.0f %.0f %.0f) anchor=%d att=%d",
                                      (unsigned long long)cp, (int)(ch != nullptr), (int)locOk, (int)rotOk,
                                      ogx, ogy, ogz, (double)cloc.x, (double)cloc.y, (double)cloc.z,
+                                     (double)crot.x, (double)crot.y, (double)crot.z,
                                      ecx, ecy, ecz,
-                                     (double)g_cfg.veh_tp_boom[0], (double)g_cfg.veh_tp_boom[1], (double)g_cfg.veh_tp_boom[2]);
+                                     (double)g_cfg.veh_tp_boom[0], (double)g_cfg.veh_tp_boom[1], (double)g_cfg.veh_tp_boom[2],
+                                     (int)g_cfg.veh_tp_anchor, (int)(g_cfg.veh_tp_anchor && g_cfg.veh_tp_attitude));
         }
 #endif
         return;   // third-person owns the eye; skip the first-person path

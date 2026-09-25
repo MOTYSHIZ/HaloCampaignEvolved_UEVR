@@ -1234,6 +1234,12 @@
     // can lean off the anchor (6DoF). 0 = the old boom: the camera shares the view yaw and the head
     // leash stays on.
     bool  veh_tp_anchor = true;
+    // vehtpattitude: with the anchor on, 1 = it rides the vehicle's FULL attitude -- yaw, pitch AND
+    // bank -- so it holds its place as a Banshee dives or rolls (default); 0 = yaw only (a level boom:
+    // steadier over a ground vehicle's bumps). The VIEW never pitches or rolls either way; only its yaw
+    // is vehtpyaw's call. The anchor is captured in the mesh's own frame per ride, so the chassis
+    // mesh's baked modelling axes cancel -- that offset is what tumbled the old full-rotation boom.
+    bool  veh_tp_attitude = true;
     // vehtpcollide: 1 = the chase camera pulls in (spring arm) when world geometry blocks the boom,
     // so it never ends up behind a wall; 0 = off. The trace is game-side; the eye scales the boom by
     // a published fraction. vehtpcollidemargin = cm the camera stops SHORT of the hit (no surface clip).
