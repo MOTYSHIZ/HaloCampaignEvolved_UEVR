@@ -1274,8 +1274,18 @@
     bool  veh_aim_ray = true;
     // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
     float veh_aim_far = 10000.0f;
-    // vehaimpivotz: cm above the seated unit (the pawn) that the vehicle's aim is taken from.
+    // vehaimpivotz: cm above the seated unit (the pawn) that the vehicle's aim is taken from, under
+    // vehaimorigin=0.
     float veh_aim_pivot_z = 0.0f;
+    // vehaimorigin: where the vehicle's aim is taken FROM, toward the point the controller reaches.
+    //   1 = the GAME'S OWN CHASE CAMERA (default). A vehicle's guns converge on what that camera's
+    //       line of sight hits, so the aim has to put THAT line through your crosshair. The camera
+    //       orbits a pivot along the aim, so aiming from wherever it sits converges on the exact line
+    //       from any start (error x D/(range + D) per tick: fast at range, slower up close).
+    //   0 = the seated unit (pawn + vehaimpivotz). Measured 2026-09-24 on the Banshee: the camera's
+    //       line ran 1.5-3 m off the seat-to-crosshair line -- mostly ABOVE it on level and downward
+    //       aims -- and shots "regularly landed above the crosshair". Kept for A/B.
+    int   veh_aim_origin = 1;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,

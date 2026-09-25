@@ -688,6 +688,11 @@ std::atomic<float>     g_tp_boom_ox{0.0f}, g_tp_boom_oy{0.0f}, g_tp_boom_oz{0.0f
 // the tick from it plus the tick's own chassis read -- the same two-clocks split as the boom offset.
 std::atomic<float>     g_tp_eye_ox{0.0f}, g_tp_eye_oy{0.0f}, g_tp_eye_oz{0.0f};
 std::atomic<bool>      g_tp_eye_valid{false};
+// The GAME'S OWN chase camera, as the engine handed it to the eye callback before our override, as an
+// offset from the chassis read at the same instant. The ray aim takes its origin from it
+// (vehaimorigin=1): the vehicle's guns converge on what that camera's line of sight hits.
+std::atomic<float>     g_tp_ncam_ox{0.0f}, g_tp_ncam_oy{0.0f}, g_tp_ncam_oz{0.0f};
+std::atomic<bool>      g_tp_ncam_valid{false};
 // Bumped on every rising edge of our camera (mount, or left-X back to TP). The eye re-arms its per-ride
 // captures -- the frozen view yaw and the head anchor -- when it changes.
 std::atomic<uint32_t>  g_tp_mount_gen{0};
@@ -1253,6 +1258,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehstick")       == 0) { g_cfg.veh_stick_mode = (int)v; return true; }
     if (_stricmp(key, "vehorbitrate")   == 0) { g_cfg.veh_orbit_rate = (float)v; return true; }
     if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
+    if (_stricmp(key, "vehaimorigin")   == 0) { g_cfg.veh_aim_origin = (int)v; return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
@@ -1343,6 +1349,7 @@ void vehcam_game_tick_vehicle() {
             g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
             g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
             g_tp_eye_valid.store(false, std::memory_order_relaxed);
+            g_tp_ncam_valid.store(false, std::memory_order_relaxed);
         }
         s_tp_was = tp_on;
     }
@@ -1386,10 +1393,20 @@ void vehcam_game_tick_vehicle() {
     // the LIVE world scale), with the view base recomposed on THIS tick from the eye's published offset and a
     // fresh chassis read; (2) trace it for the point being pointed at, holding the last range on a
     // miss; (3) aim from the seated unit through that point. aim.md's
-    // aim = normalize((eye - origin) + range * sightline), with the seated unit as the origin -- NOT
-    // Halo's chase camera, which orbits WITH the aim (logged 11-14 m above the Banshee while it aimed
-    // down) and would chase its own output. GAME THREAD: hit_trace is reflection. Publishes ANGLES for
-    // the sim-thread write (BlamDrive.cpp drive_angles_impl), and the aim point for the reticules.
+    // aim = normalize((eye - origin) + range * sightline). GAME THREAD: hit_trace is reflection.
+    // Publishes ANGLES for the sim-thread write (BlamDrive.cpp drive_angles_impl), and the aim point
+    // for the reticules.
+    //
+    // THE ORIGIN (vehaimorigin) is where the shot's LINE actually runs, and for a vehicle that is the
+    // game's own chase camera, not the seat. The guns converge on what that camera's line of sight
+    // hits, so the aim must put THAT line through the crosshair. Aiming from the seat left it 1.5-3 m
+    // off (fitted from 112 camera/aim pairs, 2026-09-24) and the Banshee's shots "regularly landed
+    // above the crosshair". The camera orbits a pivot along the aim (logged 11-14 m above the Banshee
+    // while it aimed down), so it moves when the aim does -- but aiming FROM wherever it sits is a
+    // fixed-point iteration whose fixed point is exactly the line through the pivot and T, and it
+    // contracts the error by D/(range + D) per tick, monotonically, from ANY start: no pivot or boom
+    // length to model or measure per vehicle. Recomposed from the eye's published offset against this
+    // tick's chassis read (two clocks). vehaimorigin=0 keeps the seated unit, for A/B.
     //
     // (1) used room_to_world() until 2026-09-24: 100 cm/m instead of UEVR's 100 x VR_WorldScale, anchored
     // at the view base instead of the head. Both shift the ray sideways off the line the hand points along.
@@ -1420,7 +1437,8 @@ void vehcam_game_tick_vehicle() {
                                    (double)g_cam_y.load(std::memory_order_relaxed),
                                    (double)g_cam_z.load(std::memory_order_relaxed) };
                 Vec3 cl{};
-                if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cl)) {
+                const bool have_cl = ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cl);
+                if (have_cl) {
                     base[0] = (double)cl.x + (double)g_tp_eye_ox.load(std::memory_order_relaxed);
                     base[1] = (double)cl.y + (double)g_tp_eye_oy.load(std::memory_order_relaxed);
                     base[2] = (double)cl.z + (double)g_tp_eye_oz.load(std::memory_order_relaxed);
@@ -1428,7 +1446,18 @@ void vehcam_game_tick_vehicle() {
                 Vec3 o{}, d{};
                 veh_room_ray(cpos, quat_forward(cq), base, g_tp_chassis_yaw.load(std::memory_order_relaxed), &o, &d);
                 if (d.x * d.x + d.y * d.y + d.z * d.z > 0.5f) {
-                    c.z += g_cfg.veh_aim_pivot_z;
+                    // The aim origin: the game's chase camera (vehaimorigin=1), else the seated unit.
+                    // Without a fresh chassis read or a published camera, the seat is the safe fallback.
+                    bool from_cam = false;
+                    if (g_cfg.veh_aim_origin == 1 && have_cl && g_tp_ncam_valid.load(std::memory_order_relaxed)) {
+                        c = Vec3{cl.x + g_tp_ncam_ox.load(std::memory_order_relaxed),
+                                 cl.y + g_tp_ncam_oy.load(std::memory_order_relaxed),
+                                 cl.z + g_tp_ncam_oz.load(std::memory_order_relaxed)};
+                        from_cam = true;
+                    } else {
+                        c.z += g_cfg.veh_aim_pivot_z;
+                    }
+                    (void)from_cam;   // read only by the dev VEHAIM line below
                     // Ignore our own vehicle and the pawn, so pointing THROUGH the hull reaches the
                     // world beyond it instead of aiming the vehicle at itself.
                     API::UObject* ignore[2] = {}; int ni = 0;
@@ -1474,10 +1503,11 @@ void vehcam_game_tick_vehicle() {
                             const float rp = std::asin(clampf(d.z, -1.0f, 1.0f)) * RAD2DEG;
                             API::get()->log_info(
                                 "[Halo-CampE-UEVR] VEHAIM ray(y=%.1f p=%.1f rel-cam=%.1f) %s range=%.0f "
-                                "o=(%.0f %.0f %.0f) t=(%.0f %.0f %.0f) pivot=(%.0f %.0f %.0f) "
+                                "o=(%.0f %.0f %.0f) t=(%.0f %.0f %.0f) pivot=(%.0f %.0f %.0f) org=%s "
                                 "aim(y=%.1f p=%.1f) des(y=%.1f p=%.1f ok%d) ok=%d",
                                 ry, rp, wrap180(ry - halo::g_view_base_yaw.load(std::memory_order_relaxed)),
                                 hitok ? "HIT" : "miss", range, o.x, o.y, o.z, t.x, t.y, t.z, c.x, c.y, c.z,
+                                from_cam ? "cam" : "seat",
                                 g_veh_aim_yaw.load(), g_veh_aim_pitch.load(), dy, dp, (int)hd, (int)ok);
                         }
                     }
@@ -1734,6 +1764,10 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             halo::g_tp_eye_oy.store((float)(ecy - (double)cloc.y), std::memory_order_relaxed);   //   offset -> the tick's
             halo::g_tp_eye_oz.store((float)(ecz - (double)cloc.z), std::memory_order_relaxed);   //   controller ray
             halo::g_tp_eye_valid.store(true, std::memory_order_relaxed);
+            halo::g_tp_ncam_ox.store((float)(ogx - (double)cloc.x), std::memory_order_relaxed);   // the GAME's camera
+            halo::g_tp_ncam_oy.store((float)(ogy - (double)cloc.y), std::memory_order_relaxed);   //   as an offset -> the
+            halo::g_tp_ncam_oz.store((float)(ogz - (double)cloc.z), std::memory_order_relaxed);   //   tick's aim origin
+            halo::g_tp_ncam_valid.store(true, std::memory_order_relaxed);
             halo::g_tp_chassis_yaw_valid.store(true, std::memory_order_relaxed);
             if (index == 0) { g_vcd.fc[0] = ecx; g_vcd.fc[1] = ecy; g_vcd.fc[2] = ecz; g_vcd.wrote = true; }
 
@@ -1766,6 +1800,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             g_vcd.wrote = false;
             halo::g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
             halo::g_tp_eye_valid.store(false, std::memory_order_relaxed);
+            halo::g_tp_ncam_valid.store(false, std::memory_order_relaxed);
         }
         // vehprobe diagnostic: is the boom computed, and does it differ from the engine camera?
         // If game vs eye differ here but you see no change in-headset, the write is being ignored
@@ -1774,16 +1809,28 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
 #if HALO_VR_DEV
         if (index == 0 && g_cfg.veh_probe) {
             static uint32_t s_dbg = 0;
-            if ((s_dbg++ % 90u) == 0u)
+            if ((s_dbg++ % 90u) == 0u) {
+                // gcam = the GAME camera's own rotation as handed to us (the override runs after this
+                // callback), beside the aim we are writing: the camera-origin aim assumes the camera
+                // looks along that aim, and this pair is what checks it -- at the same instant as game=.
+                double gp = 0.0, gy = 0.0;
+                if (rotation != nullptr) {
+                    if (is_double) { auto* r = reinterpret_cast<UEVR_Rotatord*>(rotation); gp = r->pitch; gy = r->yaw; }
+                    else { gp = rotation->pitch; gy = rotation->yaw; }
+                }
                 API::get()->log_info("[Halo-CampE-UEVR] VEHTP eye: cp=0x%llX ch=%d locOk=%d rotOk=%d "
                                      "game=(%.0f %.0f %.0f) chassis=(%.0f %.0f %.0f) rot(p=%.1f y=%.1f r=%.1f) "
-                                     "eye=(%.0f %.0f %.0f) boom=(%.0f %.0f %.0f) anchor=%d att=%d",
+                                     "eye=(%.0f %.0f %.0f) boom=(%.0f %.0f %.0f) anchor=%d att=%d "
+                                     "gcam(p=%.1f y=%.1f) aimw(p=%.1f y=%.1f)",
                                      (unsigned long long)cp, (int)(ch != nullptr), (int)locOk, (int)rotOk,
                                      ogx, ogy, ogz, (double)cloc.x, (double)cloc.y, (double)cloc.z,
                                      (double)crot.x, (double)crot.y, (double)crot.z,
                                      ecx, ecy, ecz,
                                      (double)g_cfg.veh_tp_boom[0], (double)g_cfg.veh_tp_boom[1], (double)g_cfg.veh_tp_boom[2],
-                                     (int)g_cfg.veh_tp_anchor, (int)(g_cfg.veh_tp_anchor && g_cfg.veh_tp_attitude));
+                                     (int)g_cfg.veh_tp_anchor, (int)(g_cfg.veh_tp_anchor && g_cfg.veh_tp_attitude),
+                                     gp, gy, (double)halo::g_veh_aim_pitch.load(std::memory_order_relaxed),
+                                     (double)halo::g_veh_aim_yaw.load(std::memory_order_relaxed));
+            }
         }
 #endif
         return;   // third-person owns the eye; skip the first-person path

@@ -100,7 +100,8 @@ extern std::atomic<bool> g_veh_tp_active;
 void veh_tp_toggle();
 
 // vehaimray: the vehicle aim toward WHERE THE CONTROLLER POINTS (UE degrees), computed on the game
-// tick by tracing the controller's world ray and aiming from the seated unit through the hit. True
+// tick by tracing the controller's world ray and aiming through the hit from the game's own chase
+// camera (vehaimorigin=1: the guns converge on that camera's line) or the seated unit (0). True
 // only when vehicle motion aim is active, vehaimray is on and a fresh solution exists; the caller
 // then uses these angles INSTEAD of desired_aim_now() + aim_converge_apply(). Any thread.
 bool veh_aim_ray_angles(float* yaw, float* pitch);
