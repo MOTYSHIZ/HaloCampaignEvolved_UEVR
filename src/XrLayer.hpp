@@ -309,6 +309,17 @@ void xrlayer_clear_quad_orientation(int slot);
 // trailing a tick of travel behind during locomotion.
 void xrlayer_set_quad_head_relative(int slot, bool on);
 
+// GAME THREAD. Treat this slot's next target as an offset IN THE ROOM'S OWN AXES (forward, right, up
+// of the view BASE -- the rotation UEVR turns your whole room by, before your head's own) from the mono
+// camera. Rebuilt every rendered frame against the base's rotation AS IT IS THEN, so the quad stays put
+// in your room when the room itself turns -- a vehicle camera that yaws, pitches or rolls with the
+// vehicle -- as well as when it moves. Head-relative only cancels the movement, which is why the text
+// panel swung away in exactly those cameras. Takes precedence over head-relative; cleared on retire.
+void xrlayer_set_quad_view_relative(int slot, bool on);
+
+// RENDER THREAD, each frame before xrlayer_note_eye: the view base's rotation for this frame.
+void xrlayer_note_view_base(float pitch, float yaw, float roll);
+
 // RENDER THREAD. The rig's world rotation for the frame being drawn.
 //
 // Plugin.cpp already recomposes the rig against a live parent every frame -- its own instrument

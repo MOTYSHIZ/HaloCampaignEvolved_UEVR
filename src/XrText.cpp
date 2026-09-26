@@ -7,6 +7,7 @@
 #include "XrText.hpp"
 
 #include "Config.hpp"
+#include "Markers.hpp"          // g_view_base_*: the room's rotation the panel is placed in
 #include "XrLayer.hpp"
 #include "XrTextRaster.hpp"
 #include "core/host/PluginState.hpp"
@@ -61,9 +62,12 @@ bool xrtext_show(const std::string& markup, const XrTextPlacement& where, const 
     xrlayer_text_cell(&w, &h);
     if (w <= 0 || h <= 0) return false;
 
-    // WHERE: placed once, now. In front of where you look -- level, so looking down does not put it on
-    // the floor -- then held as an offset from the camera, so it rides with a moving vehicle but does
-    // not chase your head. Or at a world point, for a notice about a place or a thing.
+    // WHERE: placed once, now. In front of where you look, then held IN YOUR ROOM -- in the view base's
+    // own axes, rebuilt every frame against the base as it is then (xrlayer_set_quad_view_relative).
+    // So it stays put when the room moves with a vehicle AND when the room turns with one (a camera
+    // that tracks the vehicle's yaw, pitch or roll), and it does not chase your head. "Level" and "up"
+    // here are the ROOM's: on a tilted cockpit camera the panel sits relative to the cockpit's floor.
+    // Or at a world point, for a notice about a place or a thing.
     Vec3 pos{};
     if (where.anchor == XrTextAnchor::View) {
         Vec3 fwd{}, up{}, mono{};
@@ -73,13 +77,31 @@ bool xrtext_show(const std::string& markup, const XrTextPlacement& where, const 
         if (ps.have_eye_pos->load(std::memory_order_relaxed))
             head = Vec3{ps.eye_pos_x->load(std::memory_order_relaxed), ps.eye_pos_y->load(std::memory_order_relaxed),
                         ps.eye_pos_z->load(std::memory_order_relaxed)};
-        float fx = fwd.x, fy = fwd.y;
-        const float fl = std::sqrt(fx * fx + fy * fy);
-        if (fl < 1e-3f) { fx = 1.0f; fy = 0.0f; } else { fx /= fl; fy /= fl; }
-        const float rx = -fy, ry = fx;   // UE: the right of a level forward
-        pos = Vec3{head.x + fx * where.dist_cm + rx * where.right_cm - mono.x,
-                   head.y + fy * where.dist_cm + ry * where.right_cm - mono.y,
-                   head.z + where.up_cm - mono.z};
+        // The view base's axes (UE FRotationMatrix rows): the room's forward / right / up in the world.
+        const double D2R = 0.01745329252;
+        const double bp = (double)g_view_base_pitch.load(std::memory_order_relaxed) * D2R;
+        const double by = (double)g_view_base_yaw.load(std::memory_order_relaxed) * D2R;
+        const double br = (double)g_view_base_roll.load(std::memory_order_relaxed) * D2R;
+        const double cp = std::cos(bp), sp = std::sin(bp), cy = std::cos(by), sy = std::sin(by);
+        const double cr = std::cos(br), sr = std::sin(br);
+        const double X[3] = { cp * cy, cp * sy, sp };
+        const double Y[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp };
+        const double Z[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+        auto to_room = [&](double wx, double wy, double wz, double out[3]) {
+            out[0] = wx * X[0] + wy * X[1] + wz * X[2];
+            out[1] = wx * Y[0] + wy * Y[1] + wz * Y[2];
+            out[2] = wx * Z[0] + wy * Z[1] + wz * Z[2];
+        };
+        double f[3], h[3];
+        to_room(fwd.x, fwd.y, fwd.z, f);                                  // where you look, in the room
+        to_room(head.x - mono.x, head.y - mono.y, head.z - mono.z, h);    // your head, in the room
+        double fx = f[0], fy = f[1];
+        const double fl = std::sqrt(fx * fx + fy * fy);
+        if (fl < 1e-3) { fx = 1.0; fy = 0.0; } else { fx /= fl; fy /= fl; }   // level IN THE ROOM
+        const double rx = -fy, ry = fx;                                    // UE: the right of that
+        pos = Vec3{(float)(h[0] + fx * where.dist_cm + rx * where.right_cm),
+                   (float)(h[1] + fy * where.dist_cm + ry * where.right_cm),
+                   (float)(h[2] + where.up_cm)};
     } else {
         pos = where.world;
     }
@@ -114,8 +136,11 @@ void xrtext_tick() {
         return;
     }
     // Re-published every tick: the layer drops a quad whose pose has gone stale, which is how it tells
-    // a live notice from a forgotten one.
-    xrlayer_set_quad_head_relative(XRLAYER_SLOT_TEXT, s_anchor == XrTextAnchor::View);
+    // a live notice from a forgotten one. A View panel is ROOM-relative (its offset is in the view
+    // base's axes); a World panel is neither.
+    const bool view = (s_anchor == XrTextAnchor::View);
+    xrlayer_set_quad_head_relative(XRLAYER_SLOT_TEXT, false);
+    xrlayer_set_quad_view_relative(XRLAYER_SLOT_TEXT, view);
     xrlayer_notice_quad(XRLAYER_SLOT_TEXT, s_pos, s_w_cm, 0.0f, /*priority=*/1, s_h_cm);
 }
 

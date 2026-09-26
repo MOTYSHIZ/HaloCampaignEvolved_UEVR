@@ -12718,6 +12718,10 @@ public:
             halo::g_cam_y.store(py, std::memory_order_relaxed);
             halo::g_cam_z.store(pz, std::memory_order_relaxed);
             g_view_base_yaw.store(g_dbg_view_out.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            // The base is LEVEL unless a vehicle camera tilts it: zeroed here, first in the frame, and
+            // set by VehCam's view override (later in this same callback) while one does.
+            halo::g_view_base_pitch.store(0.0f, std::memory_order_relaxed);
+            halo::g_view_base_roll.store(0.0f, std::memory_order_relaxed);
             g_have_view_pos = true;
             features_stereo_pre_eye(index, position, is_double);
 
@@ -13248,6 +13252,11 @@ public:
         features_stereo_post_eye_publish(index);
         features_stereo_post_eye_late(index);
         if (g_have_eye_pos.load()) {
+            // The view BASE's rotation for this frame -- what room-relative quads (the text panel) are
+            // rebuilt against. Set by this callback's view override, so it is this frame's.
+            halo::xrlayer_note_view_base(halo::g_view_base_pitch.load(std::memory_order_relaxed),
+                                         halo::g_view_base_yaw.load(std::memory_order_relaxed),
+                                         halo::g_view_base_roll.load(std::memory_order_relaxed));
             halo::xrlayer_note_eye(index,
                                    Vec3{g_eye_pos_x.load(), g_eye_pos_y.load(), g_eye_pos_z.load()},
                                    Vec3{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()},

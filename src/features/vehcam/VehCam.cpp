@@ -2402,6 +2402,8 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
             }
             g_dbg_view_in = cyaw; g_dbg_view_out = cyaw;
             halo::g_view_base_yaw.store(cyaw, std::memory_order_relaxed);
+            halo::g_view_base_pitch.store(cpitch, std::memory_order_relaxed);   // the whole base rotation:
+            halo::g_view_base_roll.store(croll, std::memory_order_relaxed);     //   room-anchored quads need it
             g_lock_primed = false;   // re-prime the on-foot lock when you dismount
             return true;
         }

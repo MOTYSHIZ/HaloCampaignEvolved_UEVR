@@ -362,6 +362,10 @@ std::atomic<bool>     g_tgt_live[XRLAYER_SLOTS]{};
 // back at render rate, so the two sides of the subtraction come from the same instant and the
 // translation cancels. What remains is sub-frame, not sub-tick.
 std::atomic<bool>     g_tgt_headrel[XRLAYER_SLOTS]{};
+// TARGET IS AN OFFSET IN THE ROOM'S OWN AXES (see xrlayer_set_quad_view_relative): rebuilt at render
+// rate as mono camera + R(view base) . offset, against the base rotation noted for that frame.
+std::atomic<bool>     g_tgt_viewrel[XRLAYER_SLOTS]{};
+std::atomic<float>    g_vb_pitch{0.0f}, g_vb_yaw{0.0f}, g_vb_roll{0.0f};
 // The MONO camera the head-relative offsets were measured against, published for readers on the
 // SUBMIT thread that need to turn an offset back into a world point. note_eye writes it every
 // frame. Anything reading g_tgt_* for WORLD-SPACE maths must add this back when the slot's
@@ -3297,6 +3301,8 @@ void xrlayer_retire_quad(int slot) {
     // stale WEAPON ANGLE inherited by whatever occupies this slot next would point a quad somewhere
     // nothing asked for. Retirement is the one moment we know the slot's meaning may change.
     g_slot_orient_on[slot].store(false, std::memory_order_release);
+    // Same reasoning for room-relative: the next user of the slot must opt in, not inherit it.
+    g_tgt_viewrel[slot].store(false, std::memory_order_relaxed);
 }
 
 void xrlayer_invalidate_capture(int slot) {
@@ -3328,6 +3334,17 @@ void xrlayer_set_quad_orientation(int slot, const Vec3& fwd_world, const Vec3& u
 void xrlayer_set_quad_head_relative(int slot, bool on) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     g_tgt_headrel[slot].store(on, std::memory_order_relaxed);
+}
+
+void xrlayer_set_quad_view_relative(int slot, bool on) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    g_tgt_viewrel[slot].store(on, std::memory_order_relaxed);
+}
+
+void xrlayer_note_view_base(float pitch, float yaw, float roll) {
+    g_vb_pitch.store(pitch, std::memory_order_relaxed);
+    g_vb_yaw.store(yaw, std::memory_order_relaxed);
+    g_vb_roll.store(roll, std::memory_order_relaxed);
 }
 
 // Clamped HERE as well as at the caller. The caller clamps because an off-pane impact point should
@@ -3817,7 +3834,26 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
         //
         // The mono pre-hook camera is the same value for both eyes, so the offset survives the
         // round trip unchanged and compute_pose's per-eye subtraction still produces parallax.
-        if (g_tgt_headrel[s].load(std::memory_order_relaxed)) {
+        //
+        // ROOM-RELATIVE (view-relative) goes one step further: the stored vector is in the view
+        // BASE's own axes, so it is turned by this frame's base rotation as well as moved by its
+        // position -- a quad that stays put in your room when the room itself turns with a vehicle.
+        if (g_tgt_viewrel[s].load(std::memory_order_relaxed)) {
+            const double D2R = 0.01745329252;
+            const double p = (double)g_vb_pitch.load(std::memory_order_relaxed) * D2R;
+            const double y = (double)g_vb_yaw.load(std::memory_order_relaxed) * D2R;
+            const double r = (double)g_vb_roll.load(std::memory_order_relaxed) * D2R;
+            const double cp = std::cos(p), sp = std::sin(p), cy = std::cos(y), sy = std::sin(y);
+            const double cr = std::cos(r), sr = std::sin(r);
+            // UE's FRotationMatrix rows: the base's forward / right / up in the world.
+            const double X[3] = { cp * cy, cp * sy, sp };
+            const double Y[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp };
+            const double Z[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+            const double lx = tgt.x, ly = tgt.y, lz = tgt.z;
+            tgt.x = mono_view_pos.x + (float)(lx * X[0] + ly * Y[0] + lz * Z[0]);
+            tgt.y = mono_view_pos.y + (float)(lx * X[1] + ly * Y[1] + lz * Z[1]);
+            tgt.z = mono_view_pos.z + (float)(lx * X[2] + ly * Y[2] + lz * Z[2]);
+        } else if (g_tgt_headrel[s].load(std::memory_order_relaxed)) {
             tgt.x += mono_view_pos.x; tgt.y += mono_view_pos.y; tgt.z += mono_view_pos.z;
         }
 
