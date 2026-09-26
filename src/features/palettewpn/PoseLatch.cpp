@@ -2,6 +2,7 @@
 #include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
+#include "core/HandSmooth.hpp"   // hand_smooth_apply: the snapshot is taken through the filter
 #include "core/Services.hpp"   // SVC_POSE_INTENTS: a consumer wants the stamped intents
 #include "Math.hpp"
 #include "MotionAimControl.hpp"   // desired_aim_now
@@ -106,6 +107,9 @@ void pose_latch_refresh(int site) {
         if (ids[i] < 0) continue;
         fresh[i].grip = API::VR::get_pose(ids[i]);
         fresh[i].aim  = API::VR::get_aim_pose(ids[i]);
+        // HANDSMOOTH: the snapshot holds the smoothed hands, so a latched read and a live read agree
+        // on which filter they went through. A no-op for the HMD and while the service is off.
+        hand_smooth_apply(ids[i], &fresh[i].grip, &fresh[i].aim);
     }
     const long long now = snap_now_ms();
     AcquireSRWLockExclusive(&g_snap_lock);

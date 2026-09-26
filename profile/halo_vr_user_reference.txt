@@ -594,6 +594,26 @@
 # Head block: how far your head is kept from a surface, in centimetres.
 #headblockradius=12
 
+# ------------------------------------------------------------------- HAND SMOOTHING (handsmooth)
+# Hand smoothing: which hands are steadied (0 both, 1 only the hand you aim with, 2 only your other
+# hand). 2 steadies two-handed holds and the arms without adding any lag to your aim.
+#handsmoothhands=0
+# Position steadiness while still. How much a still hand's position is steadied, in Hz: lower is
+# steadier but slower to follow a slow move. 0 turns position smoothing off.
+#handsmoothposmin=0.1
+# Position follow speed. How quickly smoothing lets go as the hand moves faster (per metre per
+# second). Raise it if slow moves feel laggy, lower it if a moving hand still shakes.
+#handsmoothposbeta=1000
+# Rotation steadiness while still. How much a still hand's angle is steadied, in Hz: lower is
+# steadier but slower to follow a slow turn of the wrist. 0 turns rotation smoothing off.
+#handsmoothrotmin=0.1
+# Rotation follow speed. How quickly smoothing lets go as the wrist turns faster (per radian per
+# second). Raise it if slow aiming feels laggy, lower it if a turning hand still shakes.
+#handsmoothrotbeta=5
+# Speed estimate smoothing, in Hz. Rarely needs changing; lower it if the hand twitches between
+# steady and free.
+#handsmoothdcut=10
+
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 
 # ---- pahands -- HANDS ONLY (hide the arms, keep the hands) -------------------------------------
