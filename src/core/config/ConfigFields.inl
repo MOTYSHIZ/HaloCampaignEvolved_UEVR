@@ -1252,6 +1252,27 @@
     bool  veh_aim_ray = true;
     // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
     float veh_aim_far = 10000.0f;
+    // vehcamreadout: 1 = a short readout on the text panel whenever the vehicle camera changes (you get
+    // in, step with left X / Y, or the camera file is saved): the vehicle, the camera's number and name,
+    // and its settings. Placed and timed by the xrtext* defaults below.
+    bool  veh_cam_readout = true;
+    // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
+    // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
+    // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every
+    // distance here. All live -- except the panel's pixel size, which applies at the next start (the
+    // compositor's atlas is laid out once and is never resized under a live submit thread).
+    bool  xr_text = true;             // xrtext: 0 = no panel at all (no atlas row is reserved)
+    int   xr_text_cell_w = 512;       // xrlayertextw: the panel's pixels, width  (next start)
+    int   xr_text_cell_h = 320;       // xrlayertexth: the panel's pixels, height (next start)
+    float xr_text_dist_cm = 130.0f;   // xrtextdist: how far in front of your eyes
+    float xr_text_up_cm = -20.0f;     // xrtextup: above (+) / below (-) your eye line
+    float xr_text_right_cm = 0.0f;    // xrtextright: right (+) / left (-) of where you look
+    float xr_text_width_cm = 48.0f;   // xrtextwidth: the panel's width; its height follows its shape
+    int   xr_text_fade_in_ms = 150;   // xrtextfadein
+    int   xr_text_hold_ms = 1500;     // xrtexthold
+    int   xr_text_fade_out_ms = 1500; // xrtextfadeout
+    float xr_text_bg = 0.55f;         // xrtextbg: the backing panel's opacity, 0 = text only
+    float xr_text_scale = 1.0f;       // xrtextscale: text size within the panel (shrinks to fit)
     // vehaimpivotz: cm above the seated unit (the pawn) that the vehicle's aim is taken from, under
     // vehaimorigin=0.
     float veh_aim_pivot_z = 0.0f;

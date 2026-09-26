@@ -44,6 +44,7 @@ using vehcammath::rot_axes;
 using vehcammath::rotator_from_axes;
 using vehcammath::capture_vehicle_frame;
 using vehcammath::vehicle_axes;
+using vehcammath::tracked_frame;
 
 // Defined with the third-person camera below; bc24's seat-camera gates above it consult them.
 bool veh_fp_selected();
@@ -1341,6 +1342,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehorbitrate")   == 0) { g_cfg.veh_orbit_rate = (float)v; return true; }
     if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
     if (_stricmp(key, "vehaimorigin")   == 0) { g_cfg.veh_aim_origin = (int)v; return true; }
+    if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
@@ -1746,6 +1748,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             static uint32_t  s_arm_gen = 0xFFFFFFFFu;
             static uintptr_t s_arm_cp = 0;
             static float     s_frozen_yaw = 0.0f;
+            static float     s_loc_heading = 0.0f;   // the vehicle's heading at mount: an untracked-yaw offset keeps it
             static double    s_c0[3] = {0.0, 0.0, 0.0};   // head offset from the standing origin at capture, UE cm
             static bool      s_arm_leash = false;
             // Per ride: the VEHICLE's frame along the chassis mesh's axes (capture_vehicle_frame). The
@@ -1775,10 +1778,12 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 s_arm_gen = gen; s_arm_cp = cp;
                 bool snapped = false;
                 capture_vehicle_frame(MX, MY, MZ, crot.y, s_C, &snapped);
-                // The frozen view heading starts as the vehicle's own heading.
+                // The frozen view heading starts as the vehicle's own heading -- and so does the fixed
+                // heading an offset keeps when its location does not track yaw.
                 const double f0 = s_C[0] * MX[0] + s_C[3] * MY[0] + s_C[6] * MZ[0];
                 const double f1 = s_C[0] * MX[1] + s_C[3] * MY[1] + s_C[6] * MZ[1];
                 s_frozen_yaw = (float)(std::atan2(f1, f0) * R2D);
+                s_loc_heading = s_frozen_yaw;
 #if HALO_VR_DEV
                 // Once per ride; dev only -- the render thread does not log in a player build.
                 API::get()->log_info("[Halo-CampE-UEVR] VEHTP: vehicle frame %s (mesh rot p=%.1f y=%.1f r=%.1f)",
@@ -1820,25 +1825,21 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             double VF[3], VR[3], VU[3];
             vehicle_axes(s_C, MX, MY, MZ, VF, VR, VU);
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
-            if (ac.follow_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
+            if (ac.rot_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
             const float turn = g_veh_turn_yaw.load(std::memory_order_relaxed);   // right-stick turn (vehstick=1)
-            // THE VIEW ROTATION, from the camera's viewFollows. Nothing followed: the heading captured
-            // this ride, and the vehicle turns within your view. Yaw: the vehicle's heading. Pitch / roll
-            // too: the vehicle's whole frame, turned about ITS OWN up by the stick -- look sideways in a
-            // banking cockpit and the horizon rolls, as it would. The right-stick turn adds to the view
-            // and to nothing else. UEVR keeps this pitch and roll only with its decoupled pitch off,
+            // THE VIEW ROTATION, from the camera's rotationTracking (vehcammath::tracked_frame). Nothing
+            // tracked: the heading captured this ride, level, and the vehicle turns within your view. Yaw:
+            // the vehicle's heading. Pitch / roll: your view tilts with the vehicle's deck -- about the
+            // vehicle's OWN axes, so with yaw untracked a pitching Banshee seen side-on rolls your
+            // horizon, as it would standing on its deck. The right-stick turn turns the view about its
+            // own up, and nothing else. UEVR keeps pitch and roll only with its decoupled pitch off,
             // which VehCamSelect.cpp arranges while such a camera is up.
+            double WF[3], WR[3], WU[3];
+            tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, (double)turn,
+                          WF, WR, WU);
             double vp = 0.0, vy = 0.0, vrl = 0.0;
-            if (ac.follow_pitch || ac.follow_roll) {
-                const double t = (double)turn * D2R, ct = std::cos(t), st = std::sin(t);
-                double WF[3], WR[3];
-                for (int k = 0; k < 3; ++k) { WF[k] = ct * VF[k] + st * VR[k]; WR[k] = ct * VR[k] - st * VF[k]; }
-                rotator_from_axes(WF, WR, VU, &vp, &vy, &vrl);
-                if (!ac.follow_pitch) vp = 0.0;
-                if (!ac.follow_roll) vrl = 0.0;
-            } else {
-                vy = (ac.follow_yaw ? heading : (double)s_frozen_yaw) + (double)turn;
-            }
+            rotator_from_axes(WF, WR, WU, &vp, &vy, &vrl);
+            if (!ac.rot_pitch && !ac.rot_roll) { vp = 0.0; vrl = 0.0; }   // exactly level, not level to rounding
             const float view_yaw = (float)vy;
             // Spring-arm pull-in from the game-side collision trace (1 = unobstructed).
             const double cfrac = ac.collide ? (double)halo::g_tp_collision_frac.load(std::memory_order_relaxed) : 1.0;
@@ -1853,22 +1854,23 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 const double sz = halo::g_tp_seat_z.load(std::memory_order_relaxed);
                 for (int k = 0; k < 3; ++k) org[k] = sx * MX[k] + sy * MY[k] + sz * MZ[k];
             }
-            // THE OFFSET, in whatever carries it (offsetRides). "vehicle": the vehicle's full frame, so
-            // yaw, pitch and bank all hold its place, and a live edit to the file lands immediately.
-            // "vehicleYaw": level, at the vehicle's heading. "view": level, at your VIEW's yaw -- an
-            // orbiting chase cam that swings round the vehicle as you turn. The stick turn moves the
-            // offset only in that last case; otherwise it turns your view ABOUT your head.
+            // THE OFFSET, in the frame its locationTracking describes -- the same builder, so "pitch" means
+            // the same thing for where the camera sits as for where it looks. All three: rigid to the
+            // vehicle, holding its place through yaw, pitch and bank. Yaw only: a level offset that turns
+            // with it. None: a fixed world direction from the vehicle (its heading when you got in).
+            // "view": the VIEW's own frame, so the camera orbits the vehicle as you turn -- the only case
+            // the stick turn moves it; otherwise the stick turns your view ABOUT your head. A live edit to
+            // the file lands immediately either way: the frame is captured, never the offset.
             const double bf = (double)ac.offset[0], bl = (double)ac.offset[1], bu = (double)ac.offset[2];
-            double off[3];
-            if (ac.rides == static_cast<uint8_t>(vehcampresets::Rides::Vehicle)) {
-                for (int k = 0; k < 3; ++k) off[k] = bf * VF[k] + bl * VR[k] + bu * VU[k];
+            double LF[3], LR[3], LU[3];
+            if (ac.loc_view) {
+                for (int k = 0; k < 3; ++k) { LF[k] = WF[k]; LR[k] = WR[k]; LU[k] = WU[k]; }
             } else {
-                const double yr = ((ac.rides == static_cast<uint8_t>(vehcampresets::Rides::View)) ? (double)view_yaw : heading) * D2R;
-                const double cy = std::cos(yr), sy = std::sin(yr);
-                off[0] = cy * bf - sy * bl;
-                off[1] = sy * bf + cy * bl;
-                off[2] = bu;
+                tracked_frame(VF, VR, VU, ac.loc_yaw, ac.loc_pitch, ac.loc_roll, (double)s_loc_heading, 0.0,
+                              LF, LR, LU);
             }
+            double off[3];
+            for (int k = 0; k < 3; ++k) off[k] = bf * LF[k] + bl * LR[k] + bu * LU[k];
             ecx = (double)cloc.x + org[0] + off[0] * cfrac;
             ecy = (double)cloc.y + org[1] + off[1] * cfrac;
             ecz = (double)cloc.z + org[2] + off[2] * cfrac;
@@ -1958,14 +1960,15 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 const VehActiveCam lac = halo::veh_active_cam();
                 API::get()->log_info("[Halo-CampE-UEVR] VEHTP eye: cp=0x%llX ch=%d locOk=%d rotOk=%d "
                                      "game=(%.0f %.0f %.0f) chassis=(%.0f %.0f %.0f) rot(p=%.1f y=%.1f r=%.1f) "
-                                     "eye=(%.0f %.0f %.0f) cam=%d/%d offset=(%.0f %.0f %.0f) origin=%d rides=%d "
+                                     "eye=(%.0f %.0f %.0f) cam=%d/%d offset=(%.0f %.0f %.0f) origin=%d loc=%d%d%d%s rot=%d%d%d "
                                      "view(p=%.1f y=%.1f r=%.1f) gcam(p=%.1f y=%.1f) aimw(p=%.1f y=%.1f)",
                                      (unsigned long long)cp, (int)(ch != nullptr), (int)locOk, (int)rotOk,
                                      ogx, ogy, ogz, (double)cloc.x, (double)cloc.y, (double)cloc.z,
                                      (double)crot.x, (double)crot.y, (double)crot.z,
                                      ecx, ecy, ecz, lac.index + 1, lac.count,
                                      (double)lac.offset[0], (double)lac.offset[1], (double)lac.offset[2],
-                                     (int)lac.origin, (int)lac.rides,
+                                     (int)lac.origin, (int)lac.loc_yaw, (int)lac.loc_pitch, (int)lac.loc_roll,
+                                     lac.loc_view ? "(view)" : "", (int)lac.rot_yaw, (int)lac.rot_pitch, (int)lac.rot_roll,
                                      (double)halo::g_tp_view_pitch.load(std::memory_order_relaxed),
                                      (double)halo::g_tp_chassis_yaw.load(std::memory_order_relaxed),
                                      (double)halo::g_tp_view_roll.load(std::memory_order_relaxed),

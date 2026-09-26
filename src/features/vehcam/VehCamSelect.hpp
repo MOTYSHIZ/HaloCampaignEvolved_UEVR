@@ -17,8 +17,8 @@ struct VehActiveCam {
     bool    valid = false;                    // a vehicle is identified and one of its cameras selected
     uint8_t type = 0;                         // vehcampresets::CamType
     uint8_t origin = 0;                       // vehcampresets::Origin
-    uint8_t rides = 0;                        // vehcampresets::Rides
-    bool    follow_yaw = false, follow_pitch = false, follow_roll = false;
+    bool    loc_yaw = true, loc_pitch = true, loc_roll = true, loc_view = false;   // locationTracking
+    bool    rot_yaw = false, rot_pitch = false, rot_roll = false;                  // rotationTracking
     bool    collide = true;
     bool    hide_body = false;
     float   offset[3] = {-450.0f, 0.0f, 180.0f};

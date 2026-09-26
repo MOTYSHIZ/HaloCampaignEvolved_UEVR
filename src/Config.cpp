@@ -1253,6 +1253,19 @@ const WeaponFix* weapon_fix_for(const char* class_name) {
 // connection to the keys that caused it. Extract the next group too; do not extend the chain.
 static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayer")       == 0) { g_cfg.xr_layer       = (v != 0.0); return true; }
+    // The text panel (XrText.cpp): the cell size at bring-up, the rest live.
+    if (_stricmp(key, "xrtext")        == 0) { g_cfg.xr_text        = (v != 0.0); return true; }
+    if (_stricmp(key, "xrlayertextw")  == 0) { g_cfg.xr_text_cell_w = (int)clampf((float)v, 64.0f, 2048.0f); return true; }
+    if (_stricmp(key, "xrlayertexth")  == 0) { g_cfg.xr_text_cell_h = (int)clampf((float)v, 32.0f, 2048.0f); return true; }
+    if (_stricmp(key, "xrtextdist")    == 0) { g_cfg.xr_text_dist_cm = clampf((float)v, 10.0f, 5000.0f); return true; }
+    if (_stricmp(key, "xrtextup")      == 0) { g_cfg.xr_text_up_cm = (float)v; return true; }
+    if (_stricmp(key, "xrtextright")   == 0) { g_cfg.xr_text_right_cm = (float)v; return true; }
+    if (_stricmp(key, "xrtextwidth")   == 0) { g_cfg.xr_text_width_cm = clampf((float)v, 1.0f, 2000.0f); return true; }
+    if (_stricmp(key, "xrtextfadein")  == 0) { g_cfg.xr_text_fade_in_ms = (int)clampf((float)v, 0.0f, 60000.0f); return true; }
+    if (_stricmp(key, "xrtexthold")    == 0) { g_cfg.xr_text_hold_ms = (int)clampf((float)v, 0.0f, 600000.0f); return true; }
+    if (_stricmp(key, "xrtextfadeout") == 0) { g_cfg.xr_text_fade_out_ms = (int)clampf((float)v, 0.0f, 60000.0f); return true; }
+    if (_stricmp(key, "xrtextbg")      == 0) { g_cfg.xr_text_bg = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "xrtextscale")   == 0) { g_cfg.xr_text_scale = clampf((float)v, 0.2f, 5.0f); return true; }
     if (_stricmp(key, "xrlayerspace")  == 0) { g_cfg.xr_layer_space = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "xrlayerhrel")   == 0) { g_cfg.xr_layer_head_rel = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "xrlayersize")   == 0) { g_cfg.xr_layer_size  = clampf((float)v, 0.05f, 20.0f); return true; }

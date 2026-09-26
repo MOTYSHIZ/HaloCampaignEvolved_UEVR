@@ -73,6 +73,57 @@ inline void capture_vehicle_frame(const double MX[3], const double MY[3], const 
     for (int r = 0; r < 3; ++r) { C[r * 3 + 0] = F[r]; C[r * 3 + 1] = R[r]; C[r * 3 + 2] = U[r]; }
 }
 
+// A FRAME THAT TRACKS ONLY SOME OF THE VEHICLE'S ROTATIONS -- what a camera's rotationTracking /
+// locationTracking lists mean. VF/VR/VU is the vehicle's own frame this instant.
+//
+//   The TILT: the frame's up leans with the vehicle only by the tracked parts of its pitch and roll,
+//   taken about the vehicle's OWN axes (its nose up/down, its bank) -- so "pitch" means the vehicle's
+//   pitch whatever way the frame itself faces.
+//   The HEADING: the vehicle's when yaw is tracked; otherwise `free_heading_deg` (a world yaw), laid
+//   onto that tilted deck -- the frame stands on the vehicle's floor but faces its own way. Look
+//   sideways in a pitching Banshee with only pitch and roll tracked and you see the horizon ROLL, as
+//   you would standing on its deck.
+//   Then turned by `turn_deg` about its own up (the right-stick turn).
+//
+// With all three tracked and no turn it IS the vehicle's frame; with none it is level at the free
+// heading. Degenerate only when the deck stands on its edge relative to the free heading (the tilt
+// then keeps the vehicle's forward rather than inventing one).
+inline void tracked_frame(const double VF[3], const double VR[3], const double VU[3],
+                          bool track_yaw, bool track_pitch, bool track_roll,
+                          double free_heading_deg, double turn_deg,
+                          double F[3], double R[3], double U[3]) {
+    const double D2R = 0.01745329252;
+    double vp = 0.0, vy = 0.0, vr = 0.0;
+    rotator_from_axes(VF, VR, VU, &vp, &vy, &vr);
+    double TX[3], TY[3], TZ[3];
+    rot_axes(track_pitch ? vp : 0.0, vy, track_roll ? vr : 0.0, TX, TY, TZ);
+    double F0[3] = { TX[0], TX[1], TX[2] };
+    if (!track_yaw) {
+        // Laid onto the deck VERTICALLY: raise or lower the level heading until it lies in the deck.
+        // Its compass bearing (seen from above) is then EXACTLY the free heading however the deck
+        // tilts -- the view never yaws, it only tilts. Projecting along the deck's own normal instead
+        // (the first cut) nudged the bearing whenever the deck banked, a small unwanted yaw that a unit
+        // test caught. Degenerate only when the deck stands on edge (up nearly horizontal).
+        const double h[3] = { std::cos(free_heading_deg * D2R), std::sin(free_heading_deg * D2R), 0.0 };
+        if (std::fabs(TZ[2]) > 0.1) {
+            const double t = -(h[0] * TZ[0] + h[1] * TZ[1]) / TZ[2];
+            const double p[3] = { h[0], h[1], t };
+            const double pl = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            for (int k = 0; k < 3; ++k) F0[k] = p[k] / pl;
+        }
+    }
+    // R0 = U x F0 (UE: X forward, Y right, Z up, and Z = X x Y component-wise).
+    const double R0[3] = { TZ[1] * F0[2] - TZ[2] * F0[1],
+                           TZ[2] * F0[0] - TZ[0] * F0[2],
+                           TZ[0] * F0[1] - TZ[1] * F0[0] };
+    const double t = turn_deg * D2R, ct = std::cos(t), st = std::sin(t);
+    for (int k = 0; k < 3; ++k) {
+        F[k] = ct * F0[k] + st * R0[k];
+        R[k] = ct * R0[k] - st * F0[k];
+        U[k] = TZ[k];
+    }
+}
+
 // The vehicle's forward / right / up in the world this frame, from the mesh's axes and the captured C.
 inline void vehicle_axes(const double C[9], const double MX[3], const double MY[3], const double MZ[3],
                          double F[3], double R[3], double U[3]) {

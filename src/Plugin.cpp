@@ -115,6 +115,7 @@
 // and exposure cannot dim it. Default off, draws alongside the two above, never instead of them.
 #include "XrLayer.hpp"
 #include "XrSource.hpp"
+#include "XrText.hpp"      // the text panel: fading notices on the compositor layer
 #include "CutsceneHint.hpp"
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
@@ -6554,6 +6555,9 @@ void update() {
     // Config-only, so it needs nothing that gameplay provides. See scopelayer_configure_cell_early.
     scopelayer_configure_cell_early();
     { PerfScope _perf(PERF_XRLAYER); xrlayer_tick(); }
+    // The text panel (slot 11): keeps a showing notice posed and retires it when its fade is done.
+    // A no-op while nothing is showing.
+    xrtext_tick();
 
     // Hide the in-scene crosshair ONLY while the compositor layer is proven live.
     //

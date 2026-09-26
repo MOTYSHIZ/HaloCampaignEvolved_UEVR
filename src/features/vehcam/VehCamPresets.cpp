@@ -18,25 +18,31 @@ std::string lower(std::string s) {
 
 bool ieq(const std::string& a, const char* b) { return lower(a) == lower(std::string(b)); }
 
-Camera cam(const char* name, CamType type, Origin origin, float f, float r, float u, Rides rides,
-           bool fy, bool fp, bool fr) {
+struct Axes { bool yaw, pitch, roll; };
+constexpr Axes kAll{true, true, true};
+constexpr Axes kYaw{true, false, false};
+constexpr Axes kNone{false, false, false};
+
+Camera cam(const char* name, Origin origin, float f, float r, float u, Axes loc, Axes rot) {
     Camera c;
-    c.name = name; c.type = type; c.origin = origin;
+    c.name = name; c.origin = origin;
     c.offset[0] = f; c.offset[1] = r; c.offset[2] = u;
-    c.rides = rides; c.follow_yaw = fy; c.follow_pitch = fp; c.follow_roll = fr;
+    c.loc_yaw = loc.yaw; c.loc_pitch = loc.pitch; c.loc_roll = loc.roll;
+    c.rot_yaw = rot.yaw; c.rot_pitch = rot.pitch; c.rot_roll = rot.roll;
     return c;
 }
 
 // The starter set every vehicle gets until the player tunes it. Onboard first: it is the closest to
 // the view the owned camera was tuned with (at the vehicle, the world holding still), and the one a
-// motion-sensitive player should land in. No "firstperson" entry: that hands the view to the older
-// seat camera, which stays available by adding one to the file.
+// motion-sensitive player should land in. The names say WHERE; the readout says what each tracks. No
+// "firstperson" entry: that hands the view to the older seat camera, which stays available by adding
+// one to the file.
 std::vector<Camera> starter_cameras() {
     return {
-        cam("Onboard",                 CamType::Chase, Origin::Seat,    0.0f,    0.0f, 0.0f,   Rides::Vehicle, false, false, false),
-        cam("Cockpit (tilts with it)", CamType::Chase, Origin::Seat,    0.0f,    0.0f, 0.0f,   Rides::Vehicle, true,  true,  true),
-        cam("Chase",                   CamType::Chase, Origin::Vehicle, -450.0f, 0.0f, 180.0f, Rides::Vehicle, false, false, false),
-        cam("Chase (turns with it)",   CamType::Chase, Origin::Vehicle, -450.0f, 0.0f, 180.0f, Rides::Vehicle, true,  false, false),
+        cam("Onboard", Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kNone),
+        cam("Cockpit", Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kAll),
+        cam("Chase",   Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kNone),
+        cam("Follow",  Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kYaw),
     };
 }
 
@@ -75,6 +81,21 @@ struct Apply {
         dst = v.b;
         return true;
     }
+    // A list of any of "yaw", "pitch", "roll" ([] = none).
+    bool axes(const Value& x, const std::string& w, bool& yaw, bool& pitch, bool& roll) {
+        if (!x.is_arr()) return type_error(x, w, "a list of any of \"yaw\", \"pitch\", \"roll\" ([] = none)");
+        yaw = pitch = roll = false;
+        for (std::size_t i = 0; i < x.items.size(); ++i) {
+            const Value& e = x.items[i];
+            const std::string we = w + "[" + std::to_string(i) + "]";
+            if (!e.is_str()) return type_error(e, we, "\"yaw\", \"pitch\" or \"roll\"");
+            if (ieq(e.s, "yaw")) yaw = true;
+            else if (ieq(e.s, "pitch")) pitch = true;
+            else if (ieq(e.s, "roll")) roll = true;
+            else return type_error(e, we, "\"yaw\", \"pitch\" or \"roll\"");
+        }
+        return true;
+    }
     bool camera(const Value& v, const std::string& where, Camera& c) {
         if (!v.is_obj()) return type_error(v, where, "an object { \"name\": ..., \"offset\": [...] }");
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
@@ -84,6 +105,7 @@ struct Apply {
             if (!key.empty() && key[0] == '_') continue;
             bool ok = true;
             if (key == "name") {
+                if (x.is_null()) { c.name.clear(); continue; }
                 if (!x.is_str()) return type_error(x, w, "text");
                 c.name = x.s;
             } else if (key == "type") {
@@ -100,24 +122,24 @@ struct Apply {
                 if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", c.offset[i]);
-            } else if (key == "offsetRides") {
-                if (!x.is_str()) return type_error(x, w, "\"vehicle\", \"vehicleYaw\" or \"view\"");
-                if (ieq(x.s, "vehicle")) c.rides = Rides::Vehicle;
-                else if (ieq(x.s, "vehicleYaw")) c.rides = Rides::VehicleYaw;
-                else if (ieq(x.s, "view")) c.rides = Rides::View;
-                else return type_error(x, w, "\"vehicle\", \"vehicleYaw\" or \"view\"");
-            } else if (key == "viewFollows") {
-                if (!x.is_arr()) return type_error(x, w, "a list of any of \"yaw\", \"pitch\", \"roll\" ([] = none)");
-                c.follow_yaw = c.follow_pitch = c.follow_roll = false;
-                for (std::size_t i = 0; i < x.items.size(); ++i) {
-                    const Value& e = x.items[i];
-                    const std::string we = w + "[" + std::to_string(i) + "]";
-                    if (!e.is_str()) return type_error(e, we, "\"yaw\", \"pitch\" or \"roll\"");
-                    if (ieq(e.s, "yaw")) c.follow_yaw = true;
-                    else if (ieq(e.s, "pitch")) c.follow_pitch = true;
-                    else if (ieq(e.s, "roll")) c.follow_roll = true;
-                    else return type_error(e, we, "\"yaw\", \"pitch\" or \"roll\"");
+            } else if (key == "locationTracking") {
+                if (x.is_str()) {
+                    if (!ieq(x.s, "view")) return type_error(x, w, "a list of any of \"yaw\", \"pitch\", \"roll\", or \"view\"");
+                    c.loc_view = true;
+                    c.loc_yaw = c.loc_pitch = c.loc_roll = false;
+                } else {
+                    c.loc_view = false;
+                    ok = axes(x, w, c.loc_yaw, c.loc_pitch, c.loc_roll);
                 }
+            } else if (key == "rotationTracking" || key == "viewFollows") {   // viewFollows: the first file
+                ok = axes(x, w, c.rot_yaw, c.rot_pitch, c.rot_roll);
+            } else if (key == "offsetRides") {                                 // the first file's form
+                if (!x.is_str()) return type_error(x, w, "\"vehicle\", \"vehicleYaw\" or \"view\"");
+                c.loc_view = false;
+                if (ieq(x.s, "vehicle")) { c.loc_yaw = c.loc_pitch = c.loc_roll = true; }
+                else if (ieq(x.s, "vehicleYaw")) { c.loc_yaw = true; c.loc_pitch = c.loc_roll = false; }
+                else if (ieq(x.s, "view")) { c.loc_view = true; c.loc_yaw = c.loc_pitch = c.loc_roll = false; }
+                else return type_error(x, w, "\"vehicle\", \"vehicleYaw\" or \"view\"");
             } else if (key == "collide") {
                 ok = boolean(x, w, c.collide);
             } else if (key == "collideMargin") {
@@ -165,7 +187,6 @@ struct Apply {
                 if (static_cast<int>(x.items.size()) > kMaxCameras) return type_error(x, w, "at most 16 cameras");
                 for (std::size_t i = 0; i < x.items.size(); ++i) {
                     Camera c;
-                    c.name = "Camera " + std::to_string(i + 1);
                     if (!camera(x.items[i], w + "[" + std::to_string(i) + "]", c)) return false;
                     out.cameras.push_back(c);
                 }
@@ -198,16 +219,30 @@ std::string quoted(const std::string& s) {
     return o + "\"";
 }
 
+std::string axes_json(bool yaw, bool pitch, bool roll) {
+    std::string s = "[";
+    if (yaw)   s += "\"yaw\"";
+    if (pitch) s += std::string(s.size() > 1 ? ", " : "") + "\"pitch\"";
+    if (roll)  s += std::string(s.size() > 1 ? ", " : "") + "\"roll\"";
+    return s + "]";
+}
+
+std::string axes_text(bool yaw, bool pitch, bool roll) {
+    std::string s;
+    if (yaw)   s += "Yaw";
+    if (pitch) s += std::string(s.empty() ? "" : ", ") + "Pitch";
+    if (roll)  s += std::string(s.empty() ? "" : ", ") + "Roll";
+    return s.empty() ? "None" : s;
+}
+
 } // namespace
 
 const char* type_name(CamType t)  { return t == CamType::FirstPerson ? "firstperson" : "chase"; }
 const char* origin_name(Origin o) { return o == Origin::Seat ? "seat" : "vehicle"; }
-const char* rides_name(Rides r) {
-    switch (r) {
-        case Rides::VehicleYaw: return "vehicleYaw";
-        case Rides::View:       return "view";
-        default:                return "vehicle";
-    }
+
+std::string rotation_tracking_text(const Camera& c) { return axes_text(c.rot_yaw, c.rot_pitch, c.rot_roll); }
+std::string location_tracking_text(const Camera& c) {
+    return c.loc_view ? std::string("Your view (orbit)") : axes_text(c.loc_yaw, c.loc_pitch, c.loc_roll);
 }
 
 Table default_table() {
@@ -269,16 +304,17 @@ std::string table_to_json(const Table& t) {
     s += "    \"Each vehicle has its own list, used in order. The first entry whose 'match' text appears in the\",\n";
     s += "    \"vehicle's name is used (case does not matter); 'default' covers any vehicle not listed.\",\n";
     s += "    \"Camera fields -- all optional; anything left out takes its default:\",\n";
-    s += "    \"  name           shown in the log when you switch\",\n";
-    s += "    \"  type           chase (this mod's camera) | firstperson (the seat camera)\",\n";
-    s += "    \"  origin         vehicle | seat : where 'offset' is measured from\",\n";
-    s += "    \"  offset         [forward, right, up] in cm (negative forward = behind)\",\n";
-    s += "    \"  offsetRides    vehicle (turns, pitches and rolls with it) | vehicleYaw (turns with it, stays level)\",\n";
-    s += "    \"                 | view (swings round the vehicle as you turn your view)\",\n";
-    s += "    \"  viewFollows    which vehicle motions turn your VIEW: [] = none (the world holds still), or any of\",\n";
-    s += "    \"                 yaw, pitch, roll. Pitch or roll also follows yaw.\",\n";
-    s += "    \"  collide        pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
-    s += "    \"  hideBody       true | false: hide your character's body (left out = hidden for seat cameras)\",\n";
+    s += "    \"  name              shown when you switch to it (left out = just its number)\",\n";
+    s += "    \"  type              chase (this mod's camera) | firstperson (the older seat camera)\",\n";
+    s += "    \"  origin            seat | vehicle : where 'offset' is measured from (your seat, or the vehicle's centre)\",\n";
+    s += "    \"  offset            [forward, right, up] in cm (negative forward = behind)\",\n";
+    s += "    \"  locationTracking  which vehicle rotations carry the camera's position round: any of yaw, pitch,\",\n";
+    s += "    \"                    roll ([] = a fixed world direction), or \\\"view\\\" to orbit with YOUR view\",\n";
+    s += "    \"  rotationTracking  which vehicle rotations turn your VIEW: any of yaw, pitch, roll ([] = the world\",\n";
+    s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
+    s += "    \"                    while you keep your own heading.\",\n";
+    s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
+    s += "    \"  hideBody          true | false: hide your character's body (left out = hidden for seat cameras)\",\n";
     s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim.\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
@@ -298,16 +334,13 @@ std::string table_to_json(const Table& t) {
         s += "      \"cameras\": [\n";
         for (std::size_t ci = 0; ci < v.cameras.size(); ++ci) {
             const Camera& c = v.cameras[ci];
-            std::string follows;
-            if (c.follow_yaw)   follows += std::string(follows.empty() ? "" : ", ") + "\"yaw\"";
-            if (c.follow_pitch) follows += std::string(follows.empty() ? "" : ", ") + "\"pitch\"";
-            if (c.follow_roll)  follows += std::string(follows.empty() ? "" : ", ") + "\"roll\"";
-            s += "        { \"name\": " + quoted(c.name)
-               + ", \"type\": \"" + type_name(c.type) + "\""
+            s += "        { ";
+            if (!c.name.empty()) s += "\"name\": " + quoted(c.name) + ", ";
+            s += std::string("\"type\": \"") + type_name(c.type) + "\""
                + ", \"origin\": \"" + origin_name(c.origin) + "\""
                + ", \"offset\": [" + fmt_num(c.offset[0]) + ", " + fmt_num(c.offset[1]) + ", " + fmt_num(c.offset[2]) + "]"
-               + ", \"offsetRides\": \"" + rides_name(c.rides) + "\""
-               + ", \"viewFollows\": [" + follows + "]"
+               + ", \"locationTracking\": " + (c.loc_view ? std::string("\"view\"") : axes_json(c.loc_yaw, c.loc_pitch, c.loc_roll))
+               + ", \"rotationTracking\": " + axes_json(c.rot_yaw, c.rot_pitch, c.rot_roll)
                + ", \"collide\": " + (c.collide ? "true" : "false")
                + ", \"collideMargin\": " + fmt_num(c.collide_margin)
                + (c.hide_body < 0 ? std::string() : std::string(", \"hideBody\": ") + (c.hide_body ? "true" : "false"))

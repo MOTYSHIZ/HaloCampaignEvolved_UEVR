@@ -1,6 +1,7 @@
 #include "features/vehcam/VehCamSelect.hpp"
 
 #include "Config.hpp"
+#include "XrText.hpp"                           // the camera readout on the text panel
 #include "features/vehcam/VehCam.hpp"          // g_veh_tp_active
 #include "features/vehcam/VehCamPresets.hpp"
 #include "uevr/API.hpp"
@@ -72,12 +73,10 @@ VehActiveCam make_active(int vi, int ci) {
     a.valid = true;
     a.type = static_cast<uint8_t>(c.type);
     a.origin = static_cast<uint8_t>(c.origin);
-    a.rides = static_cast<uint8_t>(c.rides);
-    a.follow_pitch = c.follow_pitch;
-    a.follow_roll = c.follow_roll;
-    // Tilting implies turning: a pitch or roll measured in a heading the view does not share would
-    // tip the horizon about the wrong axis.
-    a.follow_yaw = c.follow_yaw || c.follow_pitch || c.follow_roll;
+    a.loc_yaw = c.loc_yaw; a.loc_pitch = c.loc_pitch; a.loc_roll = c.loc_roll; a.loc_view = c.loc_view;
+    // Independent: pitch and roll without yaw tilt the view with the vehicle's deck while it keeps its
+    // own heading (vehcammath::tracked_frame says exactly what that means).
+    a.rot_yaw = c.rot_yaw; a.rot_pitch = c.rot_pitch; a.rot_roll = c.rot_roll;
     a.collide = c.collide;
     a.collide_margin = c.collide_margin;
     a.hide_body = c.hides_body();
@@ -111,16 +110,30 @@ void select(int vi, int ci, const char* why) {
     g_veh_tp_active.store(g_cfg.veh_tp && a.type == static_cast<uint8_t>(vcp::CamType::Chase),
                           std::memory_order_relaxed);
     const vcp::Camera& c = v.cameras[ci];
-    std::string follows;
-    if (a.follow_yaw)   follows += "yaw ";
-    if (a.follow_pitch) follows += "pitch ";
-    if (a.follow_roll)  follows += "roll ";
-    if (follows.empty()) follows = "nothing ";
+    const std::string loc = vcp::location_tracking_text(c), rot = vcp::rotation_tracking_text(c);
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\" (%s): %s, origin %s, "
-                         "offset (%.0f %.0f %.0f), rides %s, view follows %s, body %s",
+                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
-                         vcp::rides_name(c.rides), follows.c_str(), a.hide_body ? "hidden" : "shown");
+                         loc.c_str(), rot.c_str(), a.hide_body ? "hidden" : "shown");
+
+    // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name
+    // when it has one, and what it does. Placed and timed by the xrtext* defaults.
+    if (g_cfg.veh_cam_readout) {
+        std::string md = "# " + v.name + " \xC2\xB7 Camera " + std::to_string(ci + 1) + " of " + std::to_string(n) + "\n";
+        if (!c.name.empty()) md += "## " + c.name + "\n";
+        if (c.type == vcp::CamType::FirstPerson) {
+            md += "**Type:** First-person seat camera\n";
+        } else {
+            md += std::string("**Origin:** ") + (c.origin == vcp::Origin::Seat ? "Seat" : "Vehicle") + "\n";
+            char off[96];
+            std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", c.offset[0], c.offset[1], c.offset[2]);
+            md += off;
+            md += "**Location Tracking:** " + loc + "\n";
+            md += "**Rotation Tracking:** " + rot + "\n";
+        }
+        xrtext_show(md);
+    }
 }
 
 // UEVR FLATTENS the view to its yaw right after our callback while VR_DecoupledPitch is on
@@ -300,7 +313,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
 
     const VehActiveCam a = veh_active_cam();
     decoupled_pitch_update(a.valid && g_veh_tp_active.load(std::memory_order_relaxed)
-                           && (a.follow_pitch || a.follow_roll));
+                           && (a.rot_pitch || a.rot_roll));
 }
 
 } // namespace halo

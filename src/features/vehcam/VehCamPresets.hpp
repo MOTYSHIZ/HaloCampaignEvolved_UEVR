@@ -6,14 +6,16 @@
 //   { "version": 1,
 //     "vehicles": {
 //       "Banshee": { "match": ["BansheeVehicleActor"], "defaultCamera": 0,
-//                    "cameras": [ { "name": "Onboard", "origin": "seat", "offset": [0, 0, 0],
-//                                   "offsetRides": "vehicle", "viewFollows": [] }, ... ] },
+//                    "cameras": [ { "name": "Cockpit", "origin": "seat", "offset": [0, 0, 0],
+//                                   "locationTracking": ["yaw", "pitch", "roll"],
+//                                   "rotationTracking": ["yaw", "pitch", "roll"] }, ... ] },
 //       ...
 //       "default": { "cameras": [ ... ] } } }
 //
 // A vehicle is picked by the FIRST entry whose "match" strings (case-insensitive substrings; the
 // entry's own key when absent) occur in the vehicle actor's name; "default" catches the rest. A camera
 // field the file leaves out takes its built-in default. Keys starting with '_' are notes and ignored.
+// The first release of the file said "viewFollows" / "offsetRides"; both are still read.
 //
 // Pure: no engine, no file I/O. VehCam.cpp reads the file and hands the text in.
 
@@ -26,17 +28,20 @@ namespace halo::vehcampresets {
 enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
 // Where the camera's offset is measured FROM: the vehicle's own origin, or the seat you sit in.
 enum class Origin : uint8_t { Vehicle = 0, Seat = 1 };
-// What carries the offset round: the vehicle's full attitude (yaw, pitch, roll), its yaw only (a
-// level offset), or your VIEW's yaw (an orbiting chase cam: turning your view swings it round).
-enum class Rides : uint8_t { Vehicle = 0, VehicleYaw = 1, View = 2 };
 
 struct Camera {
-    std::string name;
+    std::string name;                         // optional; empty = unnamed (shown by its number)
     CamType type = CamType::Chase;
     Origin  origin = Origin::Vehicle;
     float   offset[3] = {0.0f, 0.0f, 0.0f};   // cm: forward, right, up
-    Rides   rides = Rides::Vehicle;
-    bool    follow_yaw = false, follow_pitch = false, follow_roll = false;   // the VIEW turns with the vehicle
+    // LOCATION TRACKING: which of the vehicle's rotations carry the offset round. All three = rigid to
+    // the vehicle; yaw only = a level offset that turns with it; none = a fixed world direction.
+    // loc_view instead makes it ride YOUR VIEW -- an orbiting camera that swings round as you turn.
+    bool    loc_yaw = true, loc_pitch = true, loc_roll = true;
+    bool    loc_view = false;
+    // ROTATION TRACKING: which of the vehicle's rotations turn your VIEW. Independent of each other:
+    // pitch and roll without yaw tilt your view with the vehicle's deck while you keep your own heading.
+    bool    rot_yaw = false, rot_pitch = false, rot_roll = false;
     bool    collide = true;
     float   collide_margin = 30.0f;           // cm short of whatever blocks the offset
     int     hide_body = -1;                   // -1 = auto (hide your body when the origin is your seat)
@@ -81,6 +86,9 @@ int match_vehicle(const Table& t, const std::string& actor_name);
 
 const char* type_name(CamType t);
 const char* origin_name(Origin o);
-const char* rides_name(Rides r);
+
+// For readouts and logs: "Yaw, Pitch, Roll" / "Pitch, Roll" / "None"; location adds "Your view (orbit)".
+std::string rotation_tracking_text(const Camera& c);
+std::string location_tracking_text(const Camera& c);
 
 } // namespace halo::vehcampresets

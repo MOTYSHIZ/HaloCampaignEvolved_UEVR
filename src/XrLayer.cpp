@@ -59,6 +59,7 @@
 #include "core/XrDisplayTime.hpp"
 
 #include <atomic>
+#include <mutex>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -440,8 +441,28 @@ int32_t      g_sc_w = 0, g_sc_h = 0;
 // the swapchain" to "source dims must equal ITS CELL".
 struct Cell {
     int32_t x = 0, y = 0, dim = 0;   // dim 0 = this slot has no cell
+    // HEIGHT, for the one cell that is not square (the text panel, slot 11); 0 = square, which every
+    // other cell is. `dim` is then the width. Read through cell_h() so no call site can forget it.
+    int32_t h = 0;
 };
+inline int32_t cell_h(const Cell& c) { return (c.h > 0) ? c.h : c.dim; }
 Cell g_cell[XRLAYER_SLOTS]{};
+
+// ---- THE TEXT PANEL (slot 11) ---------------------------------------------------------------------
+//
+// The panel's pixels cross from the game thread (XrText.cpp rasterises them) to the submit thread
+// (which writes them into the staging buffer) under a mutex the submit side only ever TRY-locks: a
+// frame that finds it busy simply uploads next frame. Timing is plain atomics.
+std::mutex            g_text_mx;
+std::vector<uint8_t>  g_text_px;                 // premultiplied RGBA, the text cell's size; g_text_mx
+std::atomic<uint32_t> g_text_gen{0};             // bumped per new panel
+std::atomic<uint64_t> g_text_t0{0};              // GetTickCount64 at show
+std::atomic<uint32_t> g_text_in_ms{0}, g_text_hold_ms{0}, g_text_out_ms{0};
+// SUBMIT THREAD ONLY: what the staging buffer holds now.
+uint32_t              g_text_up_gen = 0;
+int                   g_text_up_level = -1;      // alpha step last written (0..kTextSteps)
+std::atomic<bool>     g_text_reupload{false};    // fill_upload wiped the cell: write it again
+constexpr int         kTextSteps = 16;           // fade resolution: 16 rewrites over a fade, no more
 
 // The generated ring's cell edge when no atlas is built (nav off) -- kept as its own name so the
 // reticule-only layout reads the same as it did before slots existed.
@@ -1228,6 +1249,9 @@ bool fill_upload(float r, float g, float b, float a) {
                            g_is_bgra);
         }
     }
+    // The text panel's cell is left at zero here like any unfed cell -- and this pass has just wiped
+    // whatever notice it held, so the submit thread writes the current one back in.
+    g_text_reupload.store(true, std::memory_order_relaxed);
 
     void* mapped = nullptr;
     D3D12_RANGE none{0, 0};
@@ -1241,6 +1265,57 @@ bool fill_upload(float r, float g, float b, float a) {
                (size_t)g_sc_w * 4);
     }
     g_upload->Unmap(0, nullptr);
+    return true;
+}
+
+// THE TEXT PANEL'S STAGING WRITE. SUBMIT THREAD, before this frame's copy: a new panel, the next step
+// of its fade, or a re-write after fill_upload wiped the cell. It NEVER blocks -- the staging buffer may
+// only be written once the GPU has finished every copy already issued from it, and on a frame where it
+// has not (or the game thread holds the panel's pixels) this simply tries again next frame. A fade is
+// kTextSteps rewrites of one cell, each a few hundred KB of plain stores: nothing per frame beyond a
+// handful of atomic loads while nothing changes. Returns true when it wrote (the caller dirties images).
+bool text_upload_step(uint64_t now) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (tc.dim <= 0 || g_upload == nullptr) return false;
+    const uint32_t gen = g_text_gen.load(std::memory_order_acquire);
+    const uint64_t t0  = g_text_t0.load(std::memory_order_relaxed);
+    const uint64_t fin = g_text_in_ms.load(std::memory_order_relaxed);
+    const uint64_t hld = g_text_hold_ms.load(std::memory_order_relaxed);
+    const uint64_t fot = g_text_out_ms.load(std::memory_order_relaxed);
+    float a = 0.0f;
+    if (gen != 0 && t0 != 0 && now >= t0) {
+        const uint64_t t = now - t0;
+        if (t < fin)                    a = (float)t / (float)fin;
+        else if (t < fin + hld)         a = 1.0f;
+        else if (t < fin + hld + fot)   a = 1.0f - (float)(t - fin - hld) / (float)fot;
+    }
+    const int level = (int)(a * (float)kTextSteps + 0.5f);
+    const bool reup = g_text_reupload.load(std::memory_order_relaxed);
+    if (gen == g_text_up_gen && level == g_text_up_level && !reup) return false;
+    if (g_fence != nullptr && g_fence_v != 0 && g_fence->GetCompletedValue() < g_fence_v) return false;
+    std::unique_lock<std::mutex> lk(g_text_mx, std::try_to_lock);
+    if (!lk.owns_lock()) return false;
+
+    const int w = tc.dim, h = cell_h(tc);
+    const bool have = g_text_px.size() == (size_t)w * (size_t)h * 4;
+    const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+                           ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    void* mapped = nullptr;
+    D3D12_RANGE none{0, 0};
+    if (FAILED(g_upload->Map(0, &none, &mapped)) || mapped == nullptr) return false;
+    // PREMULTIPLIED, so a fade scales all four channels alike (the layer treats cells as premultiplied).
+    const uint32_t sc = (uint32_t)(level * 256 / kTextSteps);   // 0..256
+    for (int y = 0; y < h; ++y) {
+        uint8_t* d = (uint8_t*)mapped + (size_t)(tc.y + y) * row_pitch + (size_t)tc.x * 4;
+        if (!have || level <= 0) { memset(d, 0, (size_t)w * 4); continue; }
+        const uint8_t* s = g_text_px.data() + (size_t)y * (size_t)w * 4;
+        if (level >= kTextSteps) { memcpy(d, s, (size_t)w * 4); continue; }
+        for (int i = 0; i < w * 4; ++i) d[i] = (uint8_t)(((uint32_t)s[i] * sc) >> 8);
+    }
+    g_upload->Unmap(0, nullptr);
+    g_text_up_gen = gen;
+    g_text_up_level = level;
+    g_text_reupload.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -1419,7 +1494,7 @@ constexpr D3D12_RESOURCE_STATES ENGINE_SRC_COLOR =
 //
 // Every upstream instrument said "healthy", because every upstream stage WAS healthy. The one
 // question none of them asked is whether the pixels the quad points at survived the frame.
-bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell) {
+bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell, bool text_cell) {
     if (dst == nullptr || g_list == nullptr || g_queue == nullptr) return false;
 
     // Pick this frame's allocator and wait ONLY if the GPU has not finished what that allocator
@@ -1478,8 +1553,8 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 
     // The staging-buffer path: either the WHOLE generated atlas (nothing captured yet), or the
     // GENERATED cells laid back over a captured atlas -- cell 0 for the reticule's stale fall-back,
-    // and the guide's cell whenever the guide is being drawn.
-    if (src == nullptr || ring_cell0 || guide_cell) {
+    // the guide's cell whenever the guide is being drawn, and the text panel's while a notice shows.
+    if (src == nullptr || ring_cell0 || guide_cell || text_cell) {
         const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
                                ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 
@@ -1519,7 +1594,7 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
                 box.top    = (UINT)c.y;
                 box.front  = 0;
                 box.right  = (UINT)(c.x + c.dim);
-                box.bottom = (UINT)(c.y + c.dim);
+                box.bottom = (UINT)(c.y + cell_h(c));
                 box.back   = 1;
                 g_list->CopyTextureRegion(&dl, (UINT)c.x, (UINT)c.y, 0, &s, &box);
             };
@@ -1528,6 +1603,8 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
             // 32x32 -- 4 KB, and only on frames the guide is actually drawn. The per-frame cost of
             // NOT doing this was an invisible feature, which is the more expensive of the two.
             if (guide_cell)  lay_back(g_cell[XRLAYER_SLOT_GUIDE]);
+            // The text panel, on the same terms: only while a notice is showing.
+            if (text_cell)   lay_back(g_cell[XRLAYER_SLOT_TEXT]);
         }
     }
 
@@ -2198,16 +2275,41 @@ void build_atlas_layout() {
              GUIDE_DIM, g_ret_dim, w);
     }
 
+    // THE TEXT PANEL'S ROW (slot 11), laid UNDER everything above -- so every existing cell keeps its
+    // exact rectangle -- and the one cell that is not square. Unlike the guide it cannot live in slack:
+    // readable lines of text need a wide cell, and the slack is 128px tall. It is the FIRST thing to go
+    // when the cap is tight, being the least essential thing on the layer: reticule, markers, pane,
+    // guide, then this. The size is read here, at bring-up, and only here -- the atlas is never
+    // resized under a live submit thread (see the header), so xrlayertextw/h apply at the next start.
+    {
+        int tw = g_cfg.xr_text_cell_w, th = g_cfg.xr_text_cell_h;
+        if (tw < 64 || tw > CAP) tw = 512;
+        if (th < 32 || th > CAP) th = 320;
+        const int nw = (tw > g_sc_w) ? tw : g_sc_w;
+        if (!g_cfg.xr_text) {
+            logf("text panel: off (xrtext=0) -- no cell reserved.");
+        } else if (g_sc_h + th > CAP || nw > CAP) {
+            logf("text panel: a %dx%d row would make the atlas %dx%d, over the %d cap -- no text "
+                 "panel this session (lower xrlayertextw/xrlayertexth).", tw, th, nw, g_sc_h + th, CAP);
+        } else {
+            g_cell[XRLAYER_SLOT_TEXT] = Cell{0, (int32_t)g_sc_h, (int32_t)tw, (int32_t)th};
+            g_sc_h += th;
+            g_sc_w = nw;
+        }
+    }
+
     // The guide is stated POSITIVELY here, not left to be inferred from the absence of the "no
     // slack" warning above. Inferring presence from a missing line is the weaker evidence, and it
     // reads identically to "that code never ran" -- which is exactly the ambiguity that cost a
     // round of guessing when the guide did not appear.
     const Cell& gc = g_cell[XRLAYER_SLOT_GUIDE];
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
     logf("atlas: %dx%d -- cell 0 reticule %dpx at (0,0), %d navpoint cells %dpx from y=%d, "
-         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s",
+         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s, text %dx%d at y=%d%s",
          g_sc_w, g_sc_h, g_ret_dim, XRLAYER_NAV_COUNT, nd, g_ret_dim,
          pane, g_ret_dim + rows * nd, pane > 0 ? "" : " (none)",
-         gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)");
+         gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)",
+         tc.dim, cell_h(tc), tc.y, tc.dim > 0 ? "" : " (none)");
 }
 
 // HOW MANY COMPOSITION LAYERS WILL THIS RUNTIME ACCEPT? Ask it. GAME THREAD, once.
@@ -2454,6 +2556,9 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
 
         if (s == XRLAYER_SLOT_RETICULE) {
             ret_stale = !fresh;
+        } else if (s == XRLAYER_SLOT_TEXT) {
+            // EXEMPT, like the guide below: generated art (XrText.cpp rasterises it), nothing to
+            // capture, so the beat never moves. The pose's liveness above is the real gate.
         } else if (s == XRLAYER_SLOT_GUIDE) {
             // EXEMPT, for the same reason slot 0 is: its art is GENERATED, not captured.
             //
@@ -2627,6 +2732,10 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
             for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
         }
     }
+    // The text panel: a new notice or the next step of its fade into the staging buffer (never waits).
+    if (text_upload_step(now)) {
+        for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
+    }
 
     // The generated atlas never changes, so while nothing has been captured each image is written
     // once and then reused -- acquire/wait/release and nothing else. Once real art is arriving the
@@ -2641,9 +2750,13 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     const bool guide_cell = from_atlas &&
                             g_tgt_live[XRLAYER_SLOT_GUIDE].load(std::memory_order_relaxed) &&
                             g_cell[XRLAYER_SLOT_GUIDE].dim > 0;
+    // The text panel's cell, on the guide's terms: re-laid over captured art while a notice shows.
+    const bool text_cell  = from_atlas &&
+                            g_tgt_live[XRLAYER_SLOT_TEXT].load(std::memory_order_relaxed) &&
+                            g_cell[XRLAYER_SLOT_TEXT].dim > 0;
     const bool need_copy  = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
     if (need_copy && idx < g_images.size()) {
-        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell) && idx < g_image_dirty.size()) {
+        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell, text_cell) && idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
     }
@@ -2698,7 +2811,7 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
         q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         q.subImage.swapchain        = g_swapchain;
         q.subImage.imageRect.offset = {c.x, c.y};
-        q.subImage.imageRect.extent = {c.dim, c.dim};
+        q.subImage.imageRect.extent = {c.dim, cell_h(c)};
         q.subImage.imageArrayIndex  = 0;
         q.pose = fr.slot[s].pose;
         // Non-square when the caller asked for it (the grab guide); square otherwise, which is
@@ -3144,6 +3257,32 @@ void xrlayer_notice_quad(int slot, const Vec3& world_pos, float world_cm, float 
     g_tgt_prio[slot].store(priority, std::memory_order_relaxed);
     g_tgt_live[slot].store(true, std::memory_order_relaxed);
     g_tgt_tick[slot].store(g_game_tick.load(std::memory_order_relaxed), std::memory_order_release);
+}
+
+void xrlayer_text_cell(int* w, int* h) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (w != nullptr) *w = (g_state.load(std::memory_order_relaxed) == State::Armed) ? tc.dim : 0;
+    if (h != nullptr) *h = (g_state.load(std::memory_order_relaxed) == State::Armed) ? cell_h(tc) : 0;
+}
+
+bool xrlayer_text_is_bgra() { return g_is_bgra; }
+
+bool xrlayer_text_set(const uint8_t* rgba, int w, int h, uint64_t t0_ms,
+                      uint32_t fade_in_ms, uint32_t hold_ms, uint32_t fade_out_ms) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (rgba == nullptr || tc.dim <= 0 || w != tc.dim || h != cell_h(tc)) return false;
+    {
+        // The submit thread only try-locks this, so holding it for one memcpy never stalls a frame.
+        std::lock_guard<std::mutex> lk(g_text_mx);
+        g_text_px.assign(rgba, rgba + (size_t)w * (size_t)h * 4);
+    }
+    g_text_in_ms.store(fade_in_ms, std::memory_order_relaxed);
+    g_text_hold_ms.store(hold_ms, std::memory_order_relaxed);
+    g_text_out_ms.store(fade_out_ms, std::memory_order_relaxed);
+    g_text_t0.store(t0_ms != 0 ? t0_ms : 1, std::memory_order_relaxed);
+    // RELEASE LAST: the submit thread reads the generation first, then the timing and the pixels.
+    g_text_gen.fetch_add(1, std::memory_order_release);
+    return true;
 }
 
 void xrlayer_retire_quad(int slot) {
