@@ -26,6 +26,7 @@ namespace {
 VehActiveCam     s_active[2];
 std::atomic<int> s_active_front{0};
 std::atomic<int> s_step{0};                  // left X / left Y, posted by the input hook
+std::atomic<int> s_ctrl_toggle{0};           // left stick click, posted by the input hook
 
 void publish(const VehActiveCam& a) {
     const int back = s_active_front.load(std::memory_order_relaxed) ^ 1;
@@ -44,6 +45,11 @@ int                s_vehicle = -1;                  // index into s_table.vehicl
 int                s_camera = 0;
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
 std::map<std::string, int> s_remembered;            // entry name -> the camera you last used, this session
+// Entry name -> the controls you picked with the left stick click, this session -- kept WITH the default
+// it was picked against, so a later edit of that default (the file's motionAim, or vehaim) wins over it:
+// the edit is the newer statement of what you want.
+struct CtrlChoice { bool motion; bool base; };
+std::map<std::string, CtrlChoice> s_ctrl;
 
 // ---- UEVR's decoupled pitch --------------------------------------------------------------------
 bool     s_dp_forced = false;                       // we turned VR_DecoupledPitch off
@@ -66,6 +72,26 @@ std::string narrow(const std::wstring& w) {
     return s;
 }
 
+// What this vehicle starts in: its motionAim in the file, else the vehaim key.
+bool base_motion(const vcp::Vehicle& v) { return v.motion_aim >= 0 ? v.motion_aim != 0 : g_cfg.veh_aim; }
+
+// The left-stick choice for this vehicle: -1 = none (or its default has changed under it since, which
+// drops it), else 0 = stick / 1 = motion.
+int ctrl_choice(const vcp::Vehicle& v) {
+    const auto it = s_ctrl.find(v.name);
+    if (it == s_ctrl.end()) return -1;
+    if (it->second.base != base_motion(v)) { s_ctrl.erase(it); return -1; }
+    return it->second.motion ? 1 : 0;
+}
+
+// Whether the controller aims under this published camera. Only under one of OUR chase cameras: the
+// pointing ray is built from the view our eye publishes, and a first-person entry hands the view to the
+// seat camera, which publishes none -- so there it is stick controls whatever was chosen.
+bool motion_on(const VehActiveCam& a) {
+    if (a.type != static_cast<uint8_t>(vcp::CamType::Chase)) return false;
+    return a.motion_aim >= 0 ? a.motion_aim != 0 : g_cfg.veh_aim;
+}
+
 VehActiveCam make_active(int vi, int ci) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const vcp::Camera& c = v.cameras[ci];
@@ -81,7 +107,8 @@ VehActiveCam make_active(int vi, int ci) {
     a.collide_margin = c.collide_margin;
     a.hide_body = c.hides_body();
     for (int k = 0; k < 3; ++k) a.offset[k] = c.offset[k];
-    a.motion_aim = v.motion_aim;
+    const int choice = ctrl_choice(v);                      // the left stick click beats the file
+    a.motion_aim = choice >= 0 ? choice : v.motion_aim;
     a.index = ci;
     a.count = static_cast<int>(v.cameras.size());
     return a;
@@ -112,10 +139,12 @@ void select(int vi, int ci, const char* why) {
     const vcp::Camera& c = v.cameras[ci];
     const std::string loc = vcp::location_tracking_text(c), rot = vcp::rotation_tracking_text(c);
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\" (%s): %s, origin %s, "
-                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s",
+                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, "
+                         "controls %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
-                         loc.c_str(), rot.c_str(), a.hide_body ? "hidden" : "shown");
+                         loc.c_str(), rot.c_str(), a.hide_body ? "hidden" : "shown",
+                         motion_on(a) ? "motion" : "stick");
 
     // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name
     // when it has one, and what it does. Placed and timed by the xrtext* defaults.
@@ -132,8 +161,41 @@ void select(int vi, int ci, const char* why) {
             md += "**Location Tracking:** " + loc + "\n";
             md += "**Rotation Tracking:** " + rot + "\n";
         }
+        md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
         xrtext_show(md);
     }
+}
+
+// LEFT STICK CLICK: flip this vehicle between motion controls and stick controls, and say which on the
+// text panel -- always, since it answers a press (vehcamreadout is for the camera readout). Remembered
+// for the entry, like the camera; a choice that lands back on the default simply forgets itself.
+void apply_ctrl_toggle() {
+    const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
+    const VehActiveCam cur = veh_active_cam();
+    const std::string which = "## " + v.name + "\n";          // the mode is the title; this is whose it is
+    if (cur.type != static_cast<uint8_t>(vcp::CamType::Chase)) {
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: this is the first-person seat "
+                             "camera, which has no motion aim -- stick controls stay", v.name.c_str());
+        xrtext_show("# Stick controls\n" + which +
+                    "Motion aim needs one of the chase cameras\n*Step to one with left X / Y*\n");
+        return;
+    }
+    const bool want = !motion_on(cur);
+    const bool base = base_motion(v);
+    if (want == base) s_ctrl.erase(v.name); else s_ctrl[v.name] = CtrlChoice{want, base};
+    if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: %s controls%s", v.name.c_str(),
+                         want ? "MOTION" : "STICK",
+                         want == base ? " (this vehicle's default)" : " (for this vehicle, this session)");
+    std::string md;
+    if (want) {
+        md = "# Motion controls\n" + which + "Aim with the controller\n";
+        md += (g_cfg.veh_stick_mode == 1) ? "Right stick turns your view\n" : "Right stick: the game's own\n";
+    } else {
+        md = "# Stick controls\n" + which + "Aim with the right stick\n";
+    }
+    md += "*Click the left stick to switch*\n";
+    xrtext_show(md);
 }
 
 // UEVR FLATTENS the view to its yaw right after our callback while VR_DecoupledPitch is on
@@ -214,6 +276,10 @@ void veh_cam_step(int dir) {
     s_step.fetch_add(dir > 0 ? 1 : -1, std::memory_order_relaxed);
 }
 
+void veh_ctrl_toggle() {
+    s_ctrl_toggle.fetch_add(1, std::memory_order_relaxed);
+}
+
 void vehcam_presets_init(const char* path) {
     if (path == nullptr || path[0] == 0) return;
     strcpy_s(s_path, sizeof(s_path), path);
@@ -280,6 +346,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         // pressed meanwhile does not carry into the next ride.
         if (!in_vehicle) { if (s_vehicle >= 0 || s_chassis != 0) clear_selection(); s_chassis = 0; }
         s_step.store(0, std::memory_order_relaxed);
+        s_ctrl_toggle.store(0, std::memory_order_relaxed);
         decoupled_pitch_update(false);
         return;
     }
@@ -310,6 +377,19 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     const int step = s_step.exchange(0, std::memory_order_relaxed);
     if (step != 0 && s_vehicle >= 0)
         select(s_vehicle, s_camera + step, step > 0 ? "left X: next" : "left Y: previous");
+
+    if (s_ctrl_toggle.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_ctrl_toggle();
+
+    // A left-stick choice whose default has since changed under it (vehaim edited live -- a file edit
+    // already re-selects above) gives way to the edit, and the aim follows at once.
+    if (!s_ctrl.empty() && s_vehicle >= 0) {
+        const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
+        if (s_ctrl.count(v.name) != 0 && ctrl_choice(v) < 0) {
+            if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- its default controls changed, so your left-stick "
+                                 "choice gives way to it (%s)", v.name.c_str(), base_motion(v) ? "motion" : "stick");
+        }
+    }
 
     const VehActiveCam a = veh_active_cam();
     decoupled_pitch_update(a.valid && g_veh_tp_active.load(std::memory_order_relaxed)

@@ -1256,6 +1256,15 @@
     // in, step with left X / Y, or the camera file is saved): the vehicle, the camera's number and name,
     // and its settings. Placed and timed by the xrtext* defaults below.
     bool  veh_cam_readout = true;
+    // vehctrlclick: the LEFT STICK CLICK in a vehicle (any seat our cameras run in, vehtp) flips that
+    // vehicle between motion controls (the controller aims; the right stick turns your view) and stick
+    // controls (the right stick aims, as on a gamepad), says which on the text panel, and remembers it
+    // for that vehicle for the session. A file edit of that vehicle's motionAim, or of vehaim, wins over
+    // a choice made against the old value. Acts on RELEASE and never when the right stick click joined
+    // it -- L3 + R3 is UEVR's menu, and UEVR reads the pad first. 1 = on, and the click is kept from the
+    // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
+    // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
+    int   veh_ctrl_click = 1;
     // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
     // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
     // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every

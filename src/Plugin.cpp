@@ -13696,6 +13696,25 @@ public:
             s_ly_was = ly_now;
         }
 
+        // ---- VEHICLE LEFT STICK CLICK -> MOTION / STICK CONTROLS (vehctrlclick). In any seat our vehicle
+        // cameras run in, flips that vehicle between aiming with the controller and aiming with the right
+        // stick; VehCamSelect.cpp applies it on the game tick and says which on the text panel. Fires on
+        // RELEASE, and not at all if the right stick click joined the press: L3 + R3 is UEVR's menu chord,
+        // and UEVR reads the pad before this hook, so opening the menu must not also switch controls.
+        // Edges off the physical snapshot (raw_btn). Kept from the game while seated (vehctrlclick=1):
+        // what L3 does in a seat is unmeasured, and a click that also did it would be two actions at once.
+        // On foot L3 is sprint and none of this runs; with vehtp off the click is the game's, as before.
+        {
+            static bool s_l3_was = false, s_l3_chord = false;
+            const bool seated = g_cfg.veh_ctrl_click != 0 && g_cfg.veh_tp && g_stick_mode.load() && !g_in_menu.load();
+            const bool l3_now = seated && (raw_btn & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+            if (l3_now && (raw_btn & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) s_l3_chord = true;
+            if (!l3_now && s_l3_was && !s_l3_chord && seated) veh_ctrl_toggle();
+            if (!l3_now) s_l3_chord = false;
+            s_l3_was = l3_now;
+            if (l3_now && g_cfg.veh_ctrl_click == 1) state->Gamepad.wButtons &= (WORD)~XINPUT_GAMEPAD_LEFT_THUMB;
+        }
+
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
         // keeps Blam's native zoom (viewmodel hide, zoomed look speed) from ever engaging under
         // the VR presentation. Menus and vehicle seats are excluded inside, so LT still means

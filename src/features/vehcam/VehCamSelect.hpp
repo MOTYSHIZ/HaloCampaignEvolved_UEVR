@@ -6,7 +6,8 @@
 //
 // THREADS. The table, the file and the selection live on the GAME thread. What the eye callback,
 // the view override and the sim-thread aim write need is a plain copy (VehActiveCam), double-buffered
-// and published whole, so no reader ever sees half a camera. The input hook only posts a step.
+// and published whole, so no reader ever sees half a camera. The input hook only posts a step or a
+// controls toggle.
 
 #include <cstdint>
 #include <string>
@@ -23,7 +24,7 @@ struct VehActiveCam {
     bool    hide_body = false;
     float   offset[3] = {-450.0f, 0.0f, 180.0f};
     float   collide_margin = 30.0f;
-    int     motion_aim = -1;                  // -1 = the vehaim key, else this vehicle's override
+    int     motion_aim = -1;                  // -1 = the vehaim key, else this vehicle's (file or left stick click)
     int     index = 0, count = 0;             // for the log line
 };
 
@@ -44,5 +45,10 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
 
 // Any thread (the input hook): +1 = next camera, -1 = previous.
 void veh_cam_step(int dir);
+
+// Any thread (the input hook, left stick click): flip THIS vehicle between motion controls (the
+// controller aims) and stick controls (the right stick aims, as on a gamepad). Applied on the game
+// tick, said on the text panel, and remembered per vehicle entry for the session -- like the camera.
+void veh_ctrl_toggle();
 
 } // namespace halo

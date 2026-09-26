@@ -1343,6 +1343,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
     if (_stricmp(key, "vehaimorigin")   == 0) { g_cfg.veh_aim_origin = (int)v; return true; }
     if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
+    if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
