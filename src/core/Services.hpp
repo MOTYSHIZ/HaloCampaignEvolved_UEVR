@@ -37,9 +37,27 @@ enum Service : uint32_t {
     SVC_RACK_AVAILABLE    = 1u << 14,  // the rack is available (slide node publish, capture pre-hook)
     SVC_MANUAL_RELOAD_AVAILABLE = 1u << 15,  // the manual magazine reload is available
     SVC_POSE_INTENTS      = 1u << 16,  // a consumer wants the pose latch's stamped hand intents (the stamped reticle)
+    // ALWAYS ON. Fixes to OUR OWN code paths, not to a feature's. See kAlwaysOnServices below.
+    SVC_HOST_FIXES        = 1u << 17,  // core/fixes/HostFixes: the unconditional robustness fixes
 };
 
-constexpr int kServiceCount = 17;
+constexpr int kServiceCount = 18;
+
+// SERVICES THAT ARE NOT OPT-IN (2026-09-20).
+//
+// These gate FIXES TO OUR OWN CODE -- a blocking disk load repeated until it stutters, a lookup that
+// is secretly a full object-array sweep, a rig pointer used after a fault. A fix to our code is not a
+// feature, and putting one behind an experimental master key means it is off for every player who
+// never opens that menu: the bug ships, and the fix rides along disabled.
+//
+// They arrived bundled under one `stabilityfixes` key. What stayed behind that key is what genuinely
+// IS optional -- tuning and diagnostics. What is here is what we would have had to fix anyway.
+//
+// Consequence worth knowing: features no longer need to DECLARE these to work. roomscale and
+// heightcal used to list SVC_LEASH_GATE (and roomscale SVC_RIG_GUARD) because they misbehave without
+// them; that reliance is gone, because the guards are now always present.
+constexpr uint32_t kAlwaysOnServices =
+    SVC_HOST_FIXES | SVC_RIG_GUARD | SVC_LEASH_GATE | SVC_RETICULE_FIXES;
 
 // True while at least one enabled feature declares the service.
 bool service_active(uint32_t service);

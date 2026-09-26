@@ -94,6 +94,37 @@
 // get_native_resource + GetDesc, exactly as before. Set xrlayersrccache=0 to force that full walk
 // EVERY tick (the pre-fix behaviour): the safe fallback and the A/B control for the measurement.
 
+// ============================================================================================
+// BUILD PORTABILITY (settled 2026-09-19) -- Steam Win64 vs WinGDK / Microsoft Store
+// ============================================================================================
+// A Game Pass player reported an "every other second" stutter and the generated ring instead of the
+// game's crosshair. The probe found nothing on that build, re-walked forever, and fell back.
+//
+// THE CAUSE WAS OURS, and it was not a layout difference. looks_like_object() rejected any candidate
+// unless the first SIXTEEN vtable slots were code in a mapped image. The game's FRHITexture class has
+// FOURTEEN virtual functions, so slots 14/15 are whatever read-only data the linker put after the
+// vtable -- on WinGDK, a `double` constant. The real texture was discarded before it could become a
+// candidate. STEAM PASSED THAT CHECK BY LUCK: the same 14-entry vtable survives there only because
+// the data after it happens to look like image addresses. A Steam relink would have broken Steam the
+// same silent way, so the rule was wrong on both platforms.
+//
+// Fixed by counting leading code slots instead of demanding 16, and requiring the full count ONLY
+// immediately before UEVR's get_native_resource(), which invokes slots 2..15 -- the hazard was always
+// the CALL, never the data walk. A class with a short vtable is read normally and resolved through
+// the call-free learned resource path.
+//
+// REFUTED, and do not re-derive it: "the WinGDK binary lays the FRHITexture descriptor out
+// differently, so desc_plausible() reads garbage there." Measured by reading WinGDK memory directly
+// -- the descriptor is at the same rhi+0x44 with the same layout on both store binaries (verified
+// against a render target whose true size UE reflection reported independently), and the
+// "implausible" matches at res+0x78 / res+0xC8 are the very same junk Steam rejects. The lax pass
+// and the FD3D12Texture scan built on that premise are GONE; the scan is also what froze Game Pass
+// at mission entry, by calling a real vtable slot on an object it had only guessed was a resource.
+//
+// Chain::by_path (formerly Chain::lax) survives with a different meaning: a chain found by the
+// STRUCTURAL search, which identifies the texture by following the learned resource path rather than
+// by matching two int32s, and so has no extent sub-offset to re-check.
+
 #pragma once
 
 #include <cstdint>

@@ -277,7 +277,11 @@ bool features_widget_alpha_hide_applies(uevr::API::UObject* comp) {
 }
 
 void features_reticule_widget_moved() {
-    if (service_active(SVC_STABILITY)) reticule_widget_moved();
+    // REDUNDANT, DELIBERATELY EMPTY (2026-09-20). The fork's late re-assert for xrlayerhidews 3/4
+    // duplicates work we already do: reticule_mode3_reassert() runs from FOUR hosts of ours, one of
+    // them at the end of reticule_widget_move -- the same point this hook fires. Ours also has the
+    // reflection-free _raw variant above the fault pause, which the fork's does not.
+    // Kept as a no-op rather than unhooked so the call site stays readable and the reason is here.
 }
 
 void features_game_tick_vehicle() {
@@ -430,7 +434,7 @@ bool features_reload_seat(bool have_left, const Vec3& hand_l, const Vec3* hand_r
 }
 void features_gesture_reset() {
     if (reload_engine_active()) reload_engine_gesture_reset();
-    if (service_active(SVC_STABILITY)) stability_gesture_reset_two_hand();
+    if (service_active(SVC_HOST_FIXES)) stability_gesture_reset_two_hand();
     for (const FeatureHooks* f : kFeatureList)
         if (f->gesture_reset != nullptr && f->enabled != nullptr && f->enabled()) f->gesture_reset();
 }
@@ -725,7 +729,7 @@ void features_render_callbacks_register() {
 }
 
 bool features_menu_command_file_absent(const char* path) {
-    return service_active(SVC_STABILITY) && stability_menu_command_file_absent(path);
+    return service_active(SVC_HOST_FIXES) && stability_menu_command_file_absent(path);
 }
 
 void features_holster_marker_spawned(uevr::API::UObject* marker) { stability_holster_marker_tint(marker); }
@@ -804,6 +808,10 @@ void log_state(const char* why) {
 }  // namespace
 
 bool service_active(uint32_t service) {
+    // Fixes to our own code are not opt-in -- see kAlwaysOnServices in core/Services.hpp. Checked
+    // first so no feature row has to declare them, and so removing every feature folder still leaves
+    // them on: they are ours, not a feature's.
+    if ((service & kAlwaysOnServices) != 0) return true;
     for (const FeatureHooks* f : kFeatureList)
         if ((f->services & service) != 0 && feature_on(f)) return true;
     return false;
@@ -816,6 +824,9 @@ const char* service_name(uint32_t service) {
 }
 
 std::string service_enablers(uint32_t service) {
+    // An always-on service has no enabler, and reporting "" would read as INACTIVE in the resolve
+    // log -- the opposite of the truth. Name it instead.
+    if ((service & kAlwaysOnServices) != 0) return "always";
     std::string out;
     for (const FeatureHooks* f : kFeatureList) {
         if ((f->services & service) == 0 || !feature_on(f)) continue;

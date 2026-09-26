@@ -1314,6 +1314,11 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayersrcxcheck") == 0) { g_cfg.xr_layer_src_xcheck = (v != 0.0); return true; }
     // Perf fix, ships ON. 0 forces per-tick get_native_resource()+GetDesc (pre-fix) for A/B measuring.
     if (_stricmp(key, "xrlayersrccache") == 0) { g_cfg.xr_layer_src_cache  = (v != 0.0); return true; }
+    if (_stricmp(key, "xrlayersrccal")    == 0) { g_cfg.xr_layer_src_cal    = (v != 0.0); return true; }
+    if (_stricmp(key, "xrlayersrcverify") == 0) { g_cfg.xr_layer_src_verify = (v != 0.0); return true; }
+    if (_stricmp(key, "xrlayerringradius")== 0) { g_cfg.xr_layer_ring_radius= (float)v;   return true; }
+    if (_stricmp(key, "xrlayerringthick") == 0) { g_cfg.xr_layer_ring_thick = (float)v;   return true; }
+    if (_stricmp(key, "xrlayerringdot")   == 0) { g_cfg.xr_layer_ring_dot   = (float)v;   return true; }
     if (_stricmp(key, "xrlayersrc")      == 0) { g_cfg.xr_layer_src       = (v != 0.0); return true; }
     // 0 is a real setting -- "revert to the ring the instant a capture is missed", i.e. the old
     // hardcoded behaviour with the window shut. The upper bound is a minute, well past any level
@@ -1449,6 +1454,9 @@ static bool parse_melee_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "pagrenadetrim") == 0) { g_cfg.pa_grenade_trim_s = (float)v; return true; }
     if (_stricmp(key, "pameleeanim")   == 0) { g_cfg.pa_melee_anim     = (int)v;   return true; }
     if (_stricmp(key, "pameleebtnanim") == 0) { g_cfg.pa_melee_btn_anim = (int)v;  return true; }
+    if (_stricmp(key, "pameleethrust")  == 0) { g_cfg.pa_melee_thrust_cm = (float)v; return true; }
+    if (_stricmp(key, "pajoinstretch")  == 0) { g_cfg.pa_join_stretch   = (int)v;   return true; }
+    if (_stricmp(key, "pabodyanchor")   == 0) { g_cfg.pa_body_anchor    = (int)v;   return true; }
     if (_stricmp(key, "pasprintanim")  == 0) { g_cfg.pa_sprint_anim    = (int)v;   return true; }
     if (_stricmp(key, "pasprintmask")  == 0) { g_cfg.pa_sprint_mask    = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "pastretch")     == 0) { g_cfg.pa_stretch        = (float)v; return true; }

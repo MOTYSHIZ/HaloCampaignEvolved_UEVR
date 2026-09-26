@@ -69,22 +69,44 @@ if (-not $vsPath) { throw 'No Visual Studio C++ toolchain found (install VS Buil
 $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
 
 # x64 toolchain: the DLL is loaded into an x64 game. /MT so no CRT redistributable is needed.
-# Flatten to a single string first: a nested array here would stringify as "System.Object[]".
-$srcArgs = ($srcFiles | ForEach-Object { "`"$($_.FullName)`"" }) -join ' '
-
-$clArgs = @(
+#
+# EVERY ARGUMENT GOES IN A RESPONSE FILE, NOT ON THE COMMAND LINE. Passing the sources inline is
+# what this script used to do, and it broke the moment the tree grew: `cmd /c` caps a command line
+# at 8191 characters, and with ~100 absolute source paths the build died with
+#
+#     The command line is too long.
+#     BUILD FAILED (cl exit 1)
+#
+# before compiling a single file. It failed on CI for three consecutive pushes to `development`
+# while still building locally, because the dev-loop script invokes cl differently -- so the only
+# people who saw it were contributors and CI, which is the worst possible audience for it. The file
+# count only ever grows, so an inline command line is a limit the tree walks into again later.
+#
+# UTF-16LE with a BOM is deliberate: cl reads a response file in the current ANSI codepage unless
+# it finds a Unicode BOM, so a contributor whose checkout path contains non-ASCII characters would
+# otherwise get mojibake'd paths and a "cannot open source file" that names the file correctly in
+# the error text. Set-Content -Encoding Unicode writes UTF-16LE with the BOM cl looks for.
+#
+# One argument per line: response files are whitespace-separated, and a line each keeps the file
+# readable when a build has to be diagnosed from CI output alone. It is left on disk next to the
+# objects on purpose, so a failed build can be reproduced exactly with `cl @build\halo_vr.cl.rsp`.
+$rsp = Join-Path $outDir 'halo_vr.cl.rsp'
+$rspLines = @(
     '/nologo', '/LD', '/MT', '/O2', '/EHsc', '/std:c++20',
     "/I`"$incDir`"",
-    "/I`"$srcDir`"",
-    $srcArgs,
+    "/I`"$srcDir`""
+)
+$rspLines += ($srcFiles | ForEach-Object { "`"$($_.FullName)`"" })
+$rspLines += @(
     "/Fe:`"$dll`"",
     "/Fo:`"$outDir/`"",
     '/link', 'user32.lib', 'gdi32.lib'
-) -join ' '
+)
+Set-Content -LiteralPath $rsp -Value $rspLines -Encoding Unicode
 
 Write-Host ("Compiling halo_vr ({0} source file{1})..." -f $srcFiles.Count, $(if($srcFiles.Count -eq 1){''}else{'s'})) -ForegroundColor Cyan
 $srcFiles | ForEach-Object { Write-Host "  $($_.FullName.Replace("$repo\",''))" -ForegroundColor DarkGray }
-$out = cmd /c "`"$vcvars`" >nul 2>&1 && cl $clArgs 2>&1"
+$out = cmd /c "`"$vcvars`" >nul 2>&1 && cl `"@$rsp`" 2>&1"
 $rc  = $LASTEXITCODE
 $out | Where-Object { $_ -match 'error|warning C|Plugin\.cpp' } | ForEach-Object { Write-Host "  $_" }
 

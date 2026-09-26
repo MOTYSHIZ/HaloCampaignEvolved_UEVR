@@ -28,6 +28,8 @@ namespace halo {
 namespace {
 
 bool stab_on()  { return service_active(SVC_STABILITY); }
+// The unconditional half: fixes to our own code, never behind a master key (kAlwaysOnServices).
+bool fix_on()   { return service_active(SVC_HOST_FIXES); }
 bool guard_on() { return service_active(SVC_RIG_GUARD); }
 
 volatile bool g_tick_fault_pending = false;
@@ -95,13 +97,13 @@ void stability_stale_rig_guard() {
 // ================================================================ SVC_STABILITY
 
 void stability_tick_stage(const char* stage) {
-    if (stab_on()) g_tick_stage = stage;
+    if (fix_on()) g_tick_stage = stage;
 }
 
 const char* stability_fault_stage_suffix() {
     // Exception filter context: a static buffer, no allocation.
     static char s_buf[96];
-    if (!stab_on()) return "";
+    if (!fix_on()) return "";
     const char* st = g_tick_stage;
     std::snprintf(s_buf, sizeof(s_buf), " stage '%s'", st != nullptr ? st : "");
     return s_buf;
@@ -158,13 +160,13 @@ void nav_world_tick_guarded(bool engaged, uint32_t tick) {
 }  // namespace
 
 bool stability_nav_world_guarded(bool engaged, uint32_t tick) {
-    if (!stab_on()) return false;
+    if (!fix_on()) return false;
     nav_world_tick_guarded(engaged, tick);
     return true;
 }
 
 bool stability_ui_manager_miss_throttled() {
-    if (!stab_on()) return false;
+    if (!fix_on()) return false;
     // A miss means a full object-array sweep; retried every 128th call, not three times a second.
     static uint32_t miss_calls = 0;
     return (miss_calls++ & 127) != 0;
@@ -174,7 +176,7 @@ bool stability_reticle_rescan_follow(bool hud_hide, int reticle_count) {
     // Moves/hides the flat reticle. HIDING needs the sweep only until the widget is found (and
     // again if it dies): the hide re-applies every tick on the handle it already holds. Following
     // still needs it throughout, as before.
-    if (!stab_on()) return true;
+    if (!fix_on()) return true;
     return (!hud_hide || reticle_count == 0);
 }
 
@@ -183,7 +185,7 @@ void stability_reticle_hide_begin() { s_hide_dead = false; }
 void stability_reticle_hide_dead()  { s_hide_dead = true; }
 bool stability_reticle_hide_end() {
     // HUD rebuilt the widget: the gated sweep finds the new one.
-    return stab_on() && s_hide_dead;
+    return fix_on() && s_hide_dead;
 }
 
 // THE COMPOSITOR RETICULE. The author's update() runs xrlayer_tick, the world-reticule latch,
@@ -196,7 +198,7 @@ bool stability_reticle_hide_end() {
 // layer is off; called right after the author's liveness test, so a layer still live on the first
 // off tick cannot set it again.
 bool stability_xrlayer_latch_released() {
-    return stab_on() && !g_cfg.xr_layer;
+    return fix_on() && !g_cfg.xr_layer;
 }
 
 // THE SOURCE WALK. With xrlayersrc=1 (the default) the author's xrsource_tick walks the hosted
@@ -206,7 +208,7 @@ bool stability_xrlayer_latch_released() {
 // step while the stick is held: an engine call per sample, found spamming a play session
 // (2026-09-02). Gated on the dev key moveprobe, as the fork gated it.
 bool stability_move_probe_allowed() {
-    return !stab_on() || g_cfg.move_probe;
+    return !fix_on() || g_cfg.move_probe;
 }
 
 // EXTRA STEAL BITS (stealextra). Pad bits stripped alongside the author's holster steal, for a
@@ -236,7 +238,7 @@ unsigned short stability_steal_dead_mask() {
 
 namespace { bool s_src_was_on = false; }
 bool stability_xrsource_wanted() {
-    if (!stab_on() || g_cfg.xr_layer) {
+    if (!fix_on() || g_cfg.xr_layer) {
         s_src_was_on = true;
         return true;
     }
@@ -250,7 +252,7 @@ bool stability_xrsource_wanted() {
 namespace { bool s_entered_dead = false; }
 
 void stability_stick_mode_want(bool want) {
-    if (!stab_on()) { s_entered_dead = false; return; }
+    if (!fix_on()) { s_entered_dead = false; return; }
             // WHY stick mode engaged decides what the EXIT does. A vehicle ride's net rotation
             // must FOLD into the turn offset (you exit facing where the ride faced). A DEATH is
             // different: the respawn camera jump is not a rotation the player performed, and
@@ -271,7 +273,7 @@ void stability_stick_mode_want(bool want) {
 }
 
 bool stability_stick_exit_after_death() {
-    if (!stab_on() || !s_entered_dead) return false;
+    if (!fix_on() || !s_entered_dead) return false;
     // Plugin.cpp's own state, through the bridge: the same objects under the same names.
     auto& g_lock_ever   = *host::g_plugin_state.lock_ever;
     auto& g_lock_primed = *host::g_plugin_state.lock_primed;
@@ -321,7 +323,7 @@ void stability_turn_snap_note(float step) {
 }
 
 void stability_teardown_early() {
-    if (!stab_on()) return;
+    if (!fix_on()) return;
         // 0. THE OPENXR LAYER BEFORE ANYTHING ELSE. It owns an XR swapchain and D3D12 resources
         //    parented to the session UEVR is about to destroy, and its end-frame path runs on the
         //    submit thread. Left up, the game hangs on exit inside UEVR's own teardown.
@@ -334,7 +336,7 @@ void stability_teardown_early() {
 void stability_teardown_restore() {
     // And the API layer's projection rewrite, in case the exit lands mid-cutscene: an atomic
     // store in the layer, harmless when the layer is absent or already gone.
-    if (stab_on()) halo::xrbridge_set_projection_mono(0);
+    if (fix_on()) halo::xrbridge_set_projection_mono(0);
 }
 
 void stability_holster_marker_tint(uevr::API::UObject* marker) {

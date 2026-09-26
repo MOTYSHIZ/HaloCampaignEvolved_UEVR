@@ -958,9 +958,16 @@ constexpr int RING_DIM = 128;
 void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
                      bool bgra) {
     const float c  = (float)dim * 0.5f - 0.5f;
-    const float R  = (float)dim * 0.40f;   // ring radius, px
-    const float T  = (float)dim * 0.055f;  // ring half-thickness, px
-    const float D  = (float)dim * 0.045f;  // centre dot radius, px
+    float rf = g_cfg.xr_layer_ring_radius; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
+    const float R  = (float)dim * rf;      // ring radius, px
+    // Thickness and dot are PLAYER-TUNABLE. This ring is the FALLBACK the player looks through
+    // whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of scene
+    // (reported 2026-09-19: "this ring blocks so much of the view"). Clamped so a bad value can
+    // neither erase the ring nor fill the cell.
+    float tf = g_cfg.xr_layer_ring_thick; if (tf < 0.004f) tf = 0.004f; if (tf > 0.200f) tf = 0.200f;
+    float df = g_cfg.xr_layer_ring_dot;   if (df < 0.000f) df = 0.000f; if (df > 0.200f) df = 0.200f;
+    const float T  = (float)dim * tf;      // ring half-thickness, px
+    const float D  = (float)dim * df;      // centre dot radius, px
     const float AA = 1.25f;                // edge softness, px
 
     for (int y = 0; y < dim; ++y) {
@@ -4130,6 +4137,26 @@ void xrlayer_tick() {
     // aimwidgettint failure over again.
     if (prev.cr != m.cr || prev.cg != m.cg || prev.cb != m.cb || prev.alpha != m.alpha) {
         g_regen.store(true, std::memory_order_relaxed);
+    }
+
+    // SAME ARGUMENT, FOR THE RING'S GEOMETRY. xrlayerringradius / xrlayerringthick / xrlayerringdot
+    // feed generate_bitmap exactly as the colour does, so they need exactly the same edge -- and
+    // they are documented to players in halo_vr_user_reference.txt as things to tune. Without this
+    // they read back correctly, log nothing, and change nothing until the next session: the
+    // aimwidgettint failure the comment above was written about, repeated one key later.
+    //
+    // Tracked here rather than in the snapshot struct because these are fallback-ring cosmetics,
+    // not part of the layer's per-frame state.
+    {
+        static float s_ring_r = -1.0f, s_ring_t = -1.0f, s_ring_d = -1.0f;
+        if (s_ring_r != g_cfg.xr_layer_ring_radius || s_ring_t != g_cfg.xr_layer_ring_thick ||
+            s_ring_d != g_cfg.xr_layer_ring_dot) {
+            const bool first = (s_ring_r < 0.0f);
+            s_ring_r = g_cfg.xr_layer_ring_radius;
+            s_ring_t = g_cfg.xr_layer_ring_thick;
+            s_ring_d = g_cfg.xr_layer_ring_dot;
+            if (!first) g_regen.store(true, std::memory_order_relaxed);   // not on the first poll
+        }
     }
 
     // SAME ARGUMENT, FOR THE GUIDE'S ART MODE. grabguidemode selects between the label and the beam

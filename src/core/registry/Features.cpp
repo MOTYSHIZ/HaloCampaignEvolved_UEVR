@@ -49,6 +49,7 @@ namespace {
 //   Beta          on, unless tierbeta=0.
 //   Preview       off, unless tierpreview=1.
 //   Experimental  off, unless tierexperimental=1.
+//   DevExperimental  off, unless tierdevexperimental=1. Shown under DEV SETTINGS, not Experimental.
 //
 // PRECEDENCE, strongest first
 //   1. The master key set in any cfg file. Between files the usual layer order applies
@@ -62,7 +63,11 @@ namespace {
 // never touches it.
 // =================================================================================================
 
-enum class Tier { Stable, Beta, Preview, Experimental };
+// DevExperimental is Experimental that the public should not trip over. Same off-by-default rule,
+// but the settings menu draws it under DEV SETTINGS instead of the Experimental panel, beside the
+// other knobs that carry a 'you can break things with this' warning. Use it for a row that is not
+// ready to be offered at all: unverified, or suspected redundant against something we ship.
+enum class Tier { Stable, Beta, Preview, Experimental, DevExperimental };
 
 struct FeatureRow {
     const char* key;
@@ -133,7 +138,7 @@ const FeatureRow kFeatures[] = {
 
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
-    { "palettewpn",   1, Tier::Experimental, "Weapon", "Weapon follows your hand",
+    { "palettewpn",   1, Tier::DevExperimental, "Weapon", "Weapon follows your hand",
       "The weapon you see is placed on your hand and the aim follows the drawn barrel. Replaces the standard weapon placement while on. After turning it on or off, exit to the main menu and load back in for the change to take effect.",
       "aimbore,palettebuildgate,palettecalibkey,palettecamlead,palettehidearms,palettemeshconst,"
       "palettepubframe,paletterolltrim,palettesocketfix,palettetwohandagreefull,palettetwohandagreemin,palettetwohandmarker,"
@@ -151,12 +156,12 @@ const FeatureRow kFeatures[] = {
       "posefilterbeta,posefilterdcut,posefiltermin,posefilterrbeta,posefreeze,revclamp,revclampdps,stomplog,"
       "termlog,tremor,tremorhz,tremorq,wpnerrlog",
       "", FEATURE_BOOL(palette_weapon) },
-    { "aimreticulestamp", 1, Tier::Experimental, "Weapon", "Reticule placed every frame",
+    { "aimreticulestamp", 1, Tier::DevExperimental, "Weapon", "Reticule placed every frame",
       "The headset-drawn reticule is placed each frame on exactly where your shots go.",
       "",
       "",
       "palettewpn,aimreticule,xrlayer", FEATURE_INT(aim_reticule_stamp) },
-    { "scopelens",    1, Tier::Experimental, "Weapon", "Scope lens on the weapon",
+    { "scopelens",    1, Tier::DevExperimental, "Weapon", "Scope lens on the weapon",
       "A magnifying lens in the scope housing of the scoped weapons. The standard scope stands down while on.",
       "scopeev,scopeeyedist,scopelenslumen,scopereticletint,scopertfmt,scopeseptrans,scopesfflags,scopeshowflags,"
       "scopesource,scopetint,scopetonecurve",
@@ -280,11 +285,11 @@ const char* const kCoreKeys =
     "slidenode,stealextra,wpnnodecopyscan,wpnnodedump,wpnnodepoke,wpnnodepokeamt";
 
 constexpr int kCount = (int)(sizeof(kFeatures) / sizeof(kFeatures[0]));
-constexpr int kTierCount = 4;
+constexpr int kTierCount = 5;
 
-const char* const kTierName[kTierCount]   = { "stable", "beta", "preview", "experimental" };
-const char* const kTierSwitch[kTierCount] = { nullptr, "tierbeta", "tierpreview", "tierexperimental" };
-constexpr bool    kTierDefaultOn[kTierCount] = { true, true, false, false };
+const char* const kTierName[kTierCount]   = { "stable", "beta", "preview", "experimental", "devexperimental" };
+const char* const kTierSwitch[kTierCount] = { nullptr, "tierbeta", "tierpreview", "tierexperimental", "tierdevexperimental" };
+constexpr bool    kTierDefaultOn[kTierCount] = { true, true, false, false, false };
 
 // The kConfigFiles index that last set each master key this load (-1 = no file set it).
 int  s_layer = 0;

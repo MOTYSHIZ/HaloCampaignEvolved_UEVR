@@ -489,7 +489,7 @@ constinit const FeatureHooks kRoomscaleHooks{
     .xinput_before_brake    = &roomscale_xinput_before_brake,
     .sim_unit_state_end     = &roomscale_sim_unit_state_end,
     .enabled                    = &roomscale_enabled,
-    .services                   = SVC_UNIT_STATE | SVC_LEASH_GATE | SVC_RIG_GUARD,
+    .services                   = SVC_UNIT_STATE,
 };
 
 } // namespace halo
