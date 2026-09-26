@@ -2,6 +2,7 @@
 
 #include "NodeMap.hpp"
 #include "../addrcascade/AddressCascade.hpp"
+#include "../features/hooks/PaletteArmHooks.hpp"
 
 #include "uevr/API.hpp"
 
@@ -269,8 +270,9 @@ void hooked_build(std::int32_t local_player, std::int32_t weapon_slot, bool capt
     PaletteDriveFn drive = s_drive;
     if (drive == nullptr) return;
 
+    const long long probe_t0 = ::halo::features_pose_hook_begin();
     PaletteAccess access{};
-    if (!derive_palette(local_player, weapon_slot, &access)) return;
+    if (!derive_palette(local_player, weapon_slot, &access)) { ::halo::features_pose_hook_end(probe_t0, 2); return; }
 
     // Structured exception handling, not a try/catch: this dereferences memory whose layout is a
     // measurement. If an offset has rotted, a crash here is a crash in the player's game -- and
@@ -287,6 +289,7 @@ void hooked_build(std::int32_t local_player, std::int32_t weapon_slot, bool capt
         API::get()->log_info("[Halo-CampE-UEVR] PALETTEARM: faulted inside the palette drive -- "
                              "disabled for this session. The offset chain has probably moved.");
     }
+    ::halo::features_pose_hook_end(probe_t0, 2);
 }
 
 } // namespace

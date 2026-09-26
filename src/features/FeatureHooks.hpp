@@ -15,6 +15,7 @@
 // so there is no static-initialisation order between features, the list and the dispatchers.
 
 #include "Math.hpp"       // Vec3
+#include "palettearm/PaletteMath.hpp"   // Mat3, Vec3: the palette build's weapon target and wrist slots
 #include "uevr/API.h"     // UEVR_Vector3f
 #include "uevr/API.hpp"   // uevr::API::UObject
 
@@ -255,6 +256,20 @@ struct FeatureHooks {
     void (*game_tick_after_rig_driver)(double aim_yaw, double aim_pitch, uint32_t tick);
     // features_stereo_post_eye_publish: the stereo post-callback, before the late instruments. While enabled.
     void (*stereo_post_eye_publish)(int index);
+
+    // ---- THE BASE MOD'S FIRST-PERSON POSE BUILD (the SIM THREAD, armdriver 2 only). Each slot's
+    // point, and why it sits where it does, is on its dispatcher in hooks/PaletteArmHooks.hpp.
+    // features_pa_anim_gates: right after his animation gates are folded. RAISE ONLY. While enabled.
+    void (*pa_anim_gates)(bool is_capture_bank, float& join_w, float& off_w, float& stock_w_all,
+                          float& hold_w);
+    // features_pa_rig_target: route (d), the rig weapon target as read, before anything consumes it. While enabled.
+    void (*pa_rig_target)(bool is_capture_bank, bool have_rt, palettearm::Mat3& basis,
+                          palettearm::Vec3& position);
+    // features_pa_aim_wrist_note / _keep: bracketing his "the aim hand rides the gun" block. While enabled.
+    void (*pa_aim_wrist_note)(bool is_aim, bool is_capture_bank, const palettearm::Vec3& wrist_target,
+                              const palettearm::Mat3& desired_wrist);
+    void (*pa_aim_wrist_keep)(bool is_aim, bool is_capture_bank, palettearm::Vec3& wrist_target,
+                              palettearm::Mat3& desired_wrist);
 
     // ---- RUNTIME STATE (every table fills these).
     // Whether the feature is enabled right now: its master key(s), read from g_cfg. Any thread.

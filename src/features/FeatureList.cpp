@@ -14,6 +14,7 @@
 #include "features/hooks/ScopeHooks.hpp"
 #include "features/hooks/TwoHandHooks.hpp"
 #include "features/hooks/UnitStateHooks.hpp"
+#include "features/hooks/PaletteArmHooks.hpp"
 
 #include "Config.hpp"
 #include "core/Services.hpp"
@@ -26,10 +27,12 @@
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
 #include "core/dev/CutsceneDump.hpp"
+#include "core/dev/DriverProbe.hpp"
 #include "core/PalettePose.hpp"
 #include "core/UnitState.hpp"
 #include "core/WeaponObject.hpp"
 #include "core/reload/ReloadEngine.hpp"
+#include "features/worldscalefollow/WorldScaleFollow.hpp"
 #include "core/fixes/HmdPoseGate.hpp"
 #include "core/fixes/MeleeInstruments.hpp"
 #include "core/fixes/ReticuleFixes.hpp"
@@ -57,6 +60,8 @@ extern const FeatureHooks kPaletteWpnHooks;
 extern const FeatureHooks kAimBoreHooks;
 extern const FeatureHooks kAimReticuleStampHooks;
 extern const FeatureHooks kStabilityFixesHooks;
+extern const FeatureHooks kWorldScaleFollowHooks;
+extern const FeatureHooks kGrenadeGunHoldHooks;
 
 namespace {
 
@@ -80,11 +85,26 @@ const FeatureHooks* const kFeatureListStorage[] = {
     &kAimBoreHooks,
     &kAimReticuleStampHooks,
     &kStabilityFixesHooks,
+    &kWorldScaleFollowHooks,
+    &kGrenadeGunHoldHooks,
     nullptr,   // end marker: keeps the array non-empty in a build with every feature folder removed
 };
 // The tables, without the end marker. A span, so a build with no feature at all still compiles and every
 // dispatcher simply finds nothing to run.
 const std::span<const FeatureHooks* const> kFeatureList{kFeatureListStorage, std::size(kFeatureListStorage) - 1};
+
+// The driver probe's slot timer (core/dev/DriverProbe): the time inside a feature's slot, charged to the lane the
+// dispatcher runs on, and also to the weapon placer when the slot belongs to the feature that provides the palette
+// pose. While the probe is off the clock reads 0 and nothing is recorded.
+struct SlotTimer {
+    const FeatureHooks* f;
+    int                 lane;
+    long long           t0;
+    SlotTimer(const FeatureHooks* f_, int lane_) : f(f_), lane(lane_), t0(driver_probe_clock()) {}
+    ~SlotTimer() { if (t0 != 0) driver_probe_slot_done(t0, f->palette_pose != nullptr, lane); }
+    SlotTimer(const SlotTimer&) = delete;
+    SlotTimer& operator=(const SlotTimer&) = delete;
+};
 
 } // namespace
 
@@ -99,6 +119,7 @@ bool features_parse_key(const char* key, const char* val, double v) {
 }
 
 void features_xinput_raw_pad(_XINPUT_STATE* state) {
+    driver_probe_note_pad(state);
     if (service_active(SVC_FIRE_INPUT)) fire_input_note_pad(state);
     for (const FeatureHooks* f : kFeatureList)
         if (f->xinput_raw_pad != nullptr) f->xinput_raw_pad(state);
@@ -111,17 +132,17 @@ void features_xinput_after_calib_trigger(_XINPUT_STATE* state) {
 
 void features_game_tick_late() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_late != nullptr) f->game_tick_late();
+        if (f->game_tick_late != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_late(); }
 }
 
 void features_game_tick_after_offsets(float dt) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_offsets != nullptr) f->game_tick_after_offsets(dt);
+        if (f->game_tick_after_offsets != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_offsets(dt); }
 }
 
 void features_rig_lost() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->rig_lost != nullptr) f->rig_lost();
+        if (f->rig_lost != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->rig_lost(); }
 }
 
 bool features_scope_trigger_stood_down(bool& s_down) {
@@ -138,22 +159,24 @@ bool features_scope_pane_stands_down() {
 
 void features_game_tick_after_leash() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_leash != nullptr) f->game_tick_after_leash();
+        if (f->game_tick_after_leash != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_leash(); }
 }
 
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    driver_probe_stereo_begin();
     if (service_active(SVC_EYE_TRACE)) eye_note_pre_view(index, position, is_double);
 }
 
 void features_render_frame() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->render_frame != nullptr) f->render_frame();
+        if (f->render_frame != nullptr) { SlotTimer st_(f, PROBE_LANE_RENDER); f->render_frame(); }
     if (reload_engine_active()) gesture_render_tick();
 }
 
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    driver_probe_stereo_begin();
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_post_eye_sample != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_sample(index);
+        if (f->stereo_post_eye_sample != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_post_eye_sample(index); }
     const HeadClamp* clamp = nullptr;
     for (const FeatureHooks* f : kFeatureList)
         if (f->head_clamp != nullptr && f->enabled != nullptr && f->enabled()) { clamp = f->head_clamp; break; }
@@ -163,7 +186,7 @@ void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double
 void features_game_tick_before_leash() {
     if (service_active(SVC_CAMERA_BOB)) camera_bob_tick();
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_before_leash != nullptr) f->game_tick_before_leash();
+        if (f->game_tick_before_leash != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_before_leash(); }
 }
 
 bool features_leash_block_wanted() {
@@ -207,7 +230,7 @@ void features_sim_record_ready(uintptr_t rec, bool off_thread) {
 
 void features_sim_record_written(float yaw, float pitch) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->sim_record_written != nullptr && f->enabled != nullptr && f->enabled()) f->sim_record_written(yaw, pitch);
+        if (f->sim_record_written != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_SIM); f->sim_record_written(yaw, pitch); }
 }
 
 void features_sim_orientation_returned() {
@@ -216,22 +239,22 @@ void features_sim_orientation_returned() {
 
 void features_sim_unit_state_grenades(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->sim_unit_state_grenades != nullptr) f->sim_unit_state_grenades(obj);
+        if (f->sim_unit_state_grenades != nullptr) { SlotTimer st_(f, PROBE_LANE_SIM); f->sim_unit_state_grenades(obj); }
 }
 
 void features_sim_unit_state_after_radar(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->sim_unit_state_after_radar != nullptr) f->sim_unit_state_after_radar(obj);
+        if (f->sim_unit_state_after_radar != nullptr) { SlotTimer st_(f, PROBE_LANE_SIM); f->sim_unit_state_after_radar(obj); }
 }
 
 void features_sim_unit_state_radar(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->sim_unit_state_radar != nullptr) f->sim_unit_state_radar(obj);
+        if (f->sim_unit_state_radar != nullptr) { SlotTimer st_(f, PROBE_LANE_SIM); f->sim_unit_state_radar(obj); }
 }
 
 void features_sim_unit_state_end(uintptr_t obj) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->sim_unit_state_end != nullptr) f->sim_unit_state_end(obj);
+        if (f->sim_unit_state_end != nullptr) { SlotTimer st_(f, PROBE_LANE_SIM); f->sim_unit_state_end(obj); }
 }
 
 bool features_menu_command(const std::string& line) {
@@ -286,12 +309,12 @@ void features_reticule_widget_moved() {
 
 void features_game_tick_vehicle() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_vehicle != nullptr) f->game_tick_vehicle();
+        if (f->game_tick_vehicle != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_vehicle(); }
 }
 
 void features_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_pre_eye_seat != nullptr) f->stereo_pre_eye_seat(index, position, rotation, is_double);
+        if (f->stereo_pre_eye_seat != nullptr) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_pre_eye_seat(index, position, rotation, is_double); }
 }
 
 bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
@@ -302,7 +325,7 @@ bool features_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
 
 void features_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_post_eye_rendered != nullptr) f->stereo_post_eye_rendered(index, ex, ey, ez);
+        if (f->stereo_post_eye_rendered != nullptr) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_post_eye_rendered(index, ex, ey, ez); }
 }
 
 void features_melee_hold_check() {
@@ -321,6 +344,10 @@ bool features_melee_fired(long long now, float speed, float reach) {
     return service_active(SVC_MELEE_INSTRUMENTS) && melee_fired(now, speed, reach);
 }
 
+void features_xinput_set_state(unsigned int user_index, void* vibration) {
+    if (reload_engine_active()) reload_rumble_set_state(user_index, vibration);
+}
+
 void features_xinput_note_buttons(unsigned short buttons) {
     for (const FeatureHooks* f : kFeatureList)
         if (f->xinput_note_buttons != nullptr) f->xinput_note_buttons(buttons);
@@ -328,7 +355,7 @@ void features_xinput_note_buttons(unsigned short buttons) {
 
 void features_game_tick_after_blam_aim() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_blam_aim != nullptr) f->game_tick_after_blam_aim();
+        if (f->game_tick_after_blam_aim != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_blam_aim(); }
 }
 
 void features_holster_reset() {
@@ -406,6 +433,7 @@ bool features_stick_exit_after_death() { return stability_stick_exit_after_death
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
 void features_turn_snap_note(float step) { stability_turn_snap_note(step); }
 void features_teardown_early() {
+    driver_probe_shutdown();   // core/dev: stop the writer thread and close the file before anything is torn down
     for (const FeatureHooks* f : kFeatureList)
         if (f->teardown != nullptr) f->teardown();
     stability_teardown_early();
@@ -436,7 +464,7 @@ void features_gesture_reset() {
     if (reload_engine_active()) reload_engine_gesture_reset();
     if (service_active(SVC_HOST_FIXES)) stability_gesture_reset_two_hand();
     for (const FeatureHooks* f : kFeatureList)
-        if (f->gesture_reset != nullptr && f->enabled != nullptr && f->enabled()) f->gesture_reset();
+        if (f->gesture_reset != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->gesture_reset(); }
 }
 void features_reload_ticks(bool poses_ok, const Vec3& hpos) { if (reload_engine_active()) reload_engine_ticks(poses_ok, hpos); }
 bool features_two_hand_support_blocked() {
@@ -498,15 +526,15 @@ bool features_arm_driver_key_changed() {
 }
 void features_arm_driver_steady(int active) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->arm_driver_steady != nullptr) f->arm_driver_steady(active);
+        if (f->arm_driver_steady != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->arm_driver_steady(active); }
 }
 void features_arm_driver_active(int mode, bool switched) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->arm_driver_active != nullptr) f->arm_driver_active(mode, switched);
+        if (f->arm_driver_active != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->arm_driver_active(mode, switched); }
 }
 void features_arm_driver_release_all(const char* why) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->arm_driver_release_all != nullptr) f->arm_driver_release_all(why);
+        if (f->arm_driver_release_all != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->arm_driver_release_all(why); }
 }
 bool features_arm_hide_component(uevr::API::UObject* comp, bool hide, int mode) {
     for (const FeatureHooks* f : kFeatureList)
@@ -567,11 +595,11 @@ void palette_pose_mark(int point, float yaw, float e0, float e1, float e2) {
 }
 void features_game_tick_after_rig_driver(double aim_yaw, double aim_pitch, uint32_t tick) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_rig_driver != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_rig_driver(aim_yaw, aim_pitch, tick);
+        if (f->game_tick_after_rig_driver != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_rig_driver(aim_yaw, aim_pitch, tick); }
 }
 void features_stereo_post_eye_publish(int index) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_post_eye_publish != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_publish(index);
+        if (f->stereo_post_eye_publish != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_post_eye_publish(index); }
 }
 bool palette_pose_weapon_quat(Quat* out) {
     const auto* p = palette_pose_provider();
@@ -654,31 +682,33 @@ bool features_pose_latched(UEVR_TrackedDeviceIndex idx, bool use_aim, uevr::API:
 void features_game_tick_after_blam_drive() {
     blam_capture_hook_tick();   // core: the object capture pre-hook follows rack availability every tick
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_blam_drive != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_blam_drive();
+        if (f->game_tick_after_blam_drive != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_blam_drive(); }
 }
 void features_game_tick_before_vehicle() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_before_vehicle != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_before_vehicle();
+        if (f->game_tick_before_vehicle != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_before_vehicle(); }
 }
 void features_game_tick_after_vehicle(uint32_t tick) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_vehicle != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_vehicle(tick);
+        if (f->game_tick_after_vehicle != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_vehicle(tick); }
 }
 void features_game_tick_after_gestures(float dt) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->game_tick_after_gestures != nullptr && f->enabled != nullptr && f->enabled()) f->game_tick_after_gestures(dt);
+        if (f->game_tick_after_gestures != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->game_tick_after_gestures(dt); }
 }
 void features_engine_tick_start() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->engine_tick_start != nullptr && f->enabled != nullptr && f->enabled()) f->engine_tick_start();
+        if (f->engine_tick_start != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_OUT); f->engine_tick_start(); }
 }
 void features_engine_tick_end() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->engine_tick_end != nullptr && f->enabled != nullptr && f->enabled()) f->engine_tick_end();
+        if (f->engine_tick_end != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_OUT); f->engine_tick_end(); }
+    driver_probe_engine_tick_end();   // core/dev: the driverprobe key's edge, and the author's buckets for this tick
 }
 void features_post_engine_tick() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->post_engine_tick != nullptr && f->enabled != nullptr && f->enabled()) f->post_engine_tick();
+        if (f->post_engine_tick != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_TICK_OUT); f->post_engine_tick(); }
+    driver_probe_post_engine_tick();  // core/dev: the T row, after every slot of this tick has run
 }
 bool features_fp_weapon_live() {
     for (const FeatureHooks* f : kFeatureList)
@@ -687,7 +717,7 @@ bool features_fp_weapon_live() {
 }
 void features_rig_parent_dropped() {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->rig_parent_dropped != nullptr) f->rig_parent_dropped();
+        if (f->rig_parent_dropped != nullptr) { SlotTimer st_(f, PROBE_LANE_TICK_IN); f->rig_parent_dropped(); }
 }
 bool features_rig_driver_stood_down() {
     for (const FeatureHooks* f : kFeatureList)
@@ -696,7 +726,53 @@ bool features_rig_driver_stood_down() {
 }
 void features_stereo_post_eye_late(int index) {
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_post_eye_late != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_post_eye_late(index);
+        if (f->stereo_post_eye_late != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_post_eye_late(index); }
+    // core/dev: close the callback's span first, so the R row's own cost is never inside it.
+    driver_probe_stereo_end();
+    driver_probe_render_sample(index);
+}
+void features_stereo_post_view(int index, float world_to_meters, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    driver_probe_post_view(index, world_to_meters, position, rotation, is_double);
+}
+void features_rig_weapon_target(bool valid, const Vec3& off_world_cm, const Quat& q_mesh) {
+    driver_probe_note_intent_parent(valid, off_world_cm, q_mesh);
+}
+long long features_pose_hook_begin() { return driver_probe_clock(); }
+void features_pose_hook_end(long long t0, int arm_driver_mode) { driver_probe_pose_hook_done(t0, arm_driver_mode); }
+// THE AUTHOR'S ANIMATION GATES, as folded. Every enabled slot may RAISE a weight, in list order;
+// raising is the only edit that composes (max), so two features never undo each other and neither
+// can pull one of his own gates back down.
+void features_pa_anim_gates(bool is_capture_bank, float& join_w, float& off_w, float& stock_w_all,
+                            float& hold_w) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->pa_anim_gates != nullptr && f->enabled != nullptr && f->enabled())
+            f->pa_anim_gates(is_capture_bank, join_w, off_w, stock_w_all, hold_w);
+}
+// THE RIG WEAPON TARGET route (d) is about to carry the gun onto. Each enabled slot sees the
+// previous one's answer, so a later slot shapes a target rather than fighting for it.
+void features_pa_rig_target(bool is_capture_bank, bool have_rt, palettearm::Mat3& basis,
+                            palettearm::Vec3& position) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->pa_rig_target != nullptr && f->enabled != nullptr && f->enabled())
+            f->pa_rig_target(is_capture_bank, have_rt, basis, position);
+}
+// THE AIM WRIST, before and after his hand-rides-the-gun block.
+void features_pa_aim_wrist_note(bool is_aim, bool is_capture_bank, const palettearm::Vec3& wrist_target,
+                                const palettearm::Mat3& desired_wrist) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->pa_aim_wrist_note != nullptr && f->enabled != nullptr && f->enabled())
+            f->pa_aim_wrist_note(is_aim, is_capture_bank, wrist_target, desired_wrist);
+}
+void features_pa_aim_wrist_keep(bool is_aim, bool is_capture_bank, palettearm::Vec3& wrist_target,
+                                palettearm::Mat3& desired_wrist) {
+    for (const FeatureHooks* f : kFeatureList)
+        if (f->pa_aim_wrist_keep != nullptr && f->enabled != nullptr && f->enabled())
+            f->pa_aim_wrist_keep(is_aim, is_capture_bank, wrist_target, desired_wrist);
+}
+void features_pa_drive_done(const PaDriveDone& done) { render_time_note_build(done); }
+void features_pa_bank_mirrored(palettearm::BlamMatrix4x3* bank, std::uint32_t node_count,
+                               std::int32_t model_tag, std::int32_t weapon_slot, std::uint8_t bank_index) {
+    render_time_note_bank(bank, node_count, model_tag, weapon_slot, bank_index);
 }
 void features_aim_law_sampling() {
     for (const FeatureHooks* f : kFeatureList)
@@ -710,7 +786,7 @@ void features_stereo_pre_eye_rendered(int index) {
     // The rendered camera position, for the marker layer's room->world (Markers.cpp).
     if (service_active(SVC_MARKER_ANCHOR)) marker_camera_publish();
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_pre_eye_instruments != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_pre_eye_instruments(index);
+        if (f->stereo_pre_eye_instruments != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_pre_eye_instruments(index); }
     // WRIST HUD PLACEMENT, here rather than on the tick: the camera above is the one this
     // frame is drawn from, so the forearm panels land against it instead of against a camera
     // several milliseconds stale. Once per frame, not per eye.
@@ -718,10 +794,11 @@ void features_stereo_pre_eye_rendered(int index) {
         features_render_frame();
         markers_render_place();
         for (const FeatureHooks* f : kFeatureList)
-            if (f->render_refresh != nullptr && f->enabled != nullptr && f->enabled()) f->render_refresh();
+            if (f->render_refresh != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RESTAMP); f->render_refresh(); }
     }
     for (const FeatureHooks* f : kFeatureList)
-        if (f->stereo_pre_eye_meters != nullptr && f->enabled != nullptr && f->enabled()) f->stereo_pre_eye_meters(index);
+        if (f->stereo_pre_eye_meters != nullptr && f->enabled != nullptr && f->enabled()) { SlotTimer st_(f, PROBE_LANE_RENDER); f->stereo_pre_eye_meters(index); }
+    driver_probe_stereo_end();
 }
 void features_render_callbacks_register() {
     // Dev-only eye dump (a no-op stub in player builds): a render callback, so registered here.
@@ -843,6 +920,7 @@ void features_log_runtime() {
 }
 
 void features_config_loaded() {
+    worldscalefollow_poll();   // every poll, before the feature-state early return: a reload resets rig_scale
     const uint32_t now = enabled_mask();
     if (now == s_logged_mask) return;
     const uint32_t went_off = (s_logged_mask == 0xFFFFFFFFu) ? 0u : (s_logged_mask & ~now);

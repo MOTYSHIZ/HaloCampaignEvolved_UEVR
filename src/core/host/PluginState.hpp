@@ -59,6 +59,12 @@ struct PluginState {
     // onfoot_reticule_tick(): the on-foot reticule (the author's block, wrapped so the palette weapon can run it
     // with the rig driver off; see the report)
     void (*onfoot_reticule_tick)(uevr::API::UObject* rig, const Vec3& comp_world, double aim_yaw, double aim_pitch, uint32_t tick);
+    // ---- the author's per-tick perf table (core/dev/DriverProbe reads it and never writes it). Filled only
+    // while his perflog key is on; each entry is this tick's milliseconds in one PerfScope site.
+    const double*       perf_now;           // g_perf_now[PERF_COUNT]
+    int                 perf_count;         // PERF_COUNT
+    int                 perf_tick;          // PERF_TICK, the whole tick
+    int                 perf_palarm;        // PERF_PALARM, the palette arm driver's tick half
 };
 
 extern const PluginState g_plugin_state;
@@ -100,4 +106,8 @@ extern const PluginState g_plugin_state;
         &g_have_view_pos,                                                  \
         &layer_anchor,                                                     \
         &onfoot_reticule_tick,                                             \
+        g_perf_now,                                                        \
+        PERF_COUNT,                                                        \
+        PERF_TICK,                                                         \
+        PERF_PALARM,                                                       \
     };

@@ -7,6 +7,7 @@
 #include "PaletteHook.hpp"
 #include "PaletteMath.hpp"
 #include "TwoHand.hpp"
+#include "features/hooks/PaletteArmHooks.hpp"
 
 #include "../addrcascade/AddressCascade.hpp"
 #include "../ArmDriver.hpp"
@@ -1044,6 +1045,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 const std::uint8_t i = s_mirror_idx[k];
                 if (i < access.node_count) access.palette[i] = s_mirror_rec[i];
             }
+            ::halo::features_pa_bank_mirrored(access.palette, access.node_count, access.model_tag, access.weapon_slot, access.bank_index);
             s_drive_ok.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
@@ -1437,6 +1439,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
             }
         }
     }
+    ::halo::features_pa_anim_gates(access.is_capture_bank, join_w, off_w, stock_w_all, hold_w);
     float    melee_gun_w  = 0.0f;                            // `hold`, once the rest pose is known
     float    melee_left_w = off_w;                           // `off`
     pa::Vec3 gun_eff_pos{};
@@ -1493,6 +1496,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 have_rt = (s_rigw_seq.load(std::memory_order_acquire) == s0);
             }
         }
+        ::halo::features_pa_rig_target(access.is_capture_bank, have_rt, rt.basis, rt.position);
         const pa::Mat3 stock_w = pa::orthonormal_basis(access.palette[map->weapon_marker]);
         if (have_rt && pa::valid_basis(rt.basis) && pa::valid_basis(stock_w)) {
             // Rig mode rotates the whole MESH by q_gun and lets the engine put the attach point's
@@ -2387,6 +2391,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
         // wrist" is the forestock, and carrying it put both hands 80 cm out pointing at the floor
         // (measured headless, aimhand=1). Until the authored pair is mirrored across the gun for
         // that case, a left-handed aim hand stays on its controller.
+        ::halo::features_pa_aim_wrist_note(plan.is_aim, access.is_capture_bank, wrist_target, desired_wrist);
         if (g_cfg.pa_hand_on_gun && aim_is_right && plan.is_aim && wpn_delta_valid) {
             const pa::Mat3 on_gun_basis = pa::multiply(wpn_delta_basis, gun_wrist_basis);
             if (pa::valid_basis(on_gun_basis)) {
@@ -2416,6 +2421,7 @@ bool drive_palette(const pa::PaletteAccess& access) {
                 }
             }
         }
+        ::halo::features_pa_aim_wrist_keep(plan.is_aim, access.is_capture_bank, wrist_target, desired_wrist);
         //
         // THE AUTHORED WRIST IS THE ONE READ BEFORE THIS ARM WAS TOUCHED (stock_wrist_*). This block
         // used to read the wrist node HERE, after the shoulder anchor and the rest lift had already
@@ -2889,6 +2895,13 @@ bool drive_palette(const pa::PaletteAccess& access) {
         s_mirror_valid = (s_mirror_n > 0);
     }
 
+    if (!access.is_capture_bank)
+        ::halo::features_pa_drive_done({access.palette, access.node_count, access.model_tag, access.weapon_slot,
+                                        aim_arm.wrist_subtree, aim_arm.wrist_count, support_arm.wrist_subtree, support_arm.wrist_count,
+                                        map->weapon_nodes, map->weapon_count, root_position, stage_basis, composition, wscale,
+                                        s_tracking.hmd_position, s_tracking.aim_grip_position, s_tracking.aim_grip_rotation,
+                                        tracking.hmd_position, tracking.support_grip_position, tracking.support_grip_rotation,
+                                        tracking.support_valid});
     s_drive_stage = "DRIVING";
     s_drive_ok.fetch_add(1, std::memory_order_relaxed);
     return true;
