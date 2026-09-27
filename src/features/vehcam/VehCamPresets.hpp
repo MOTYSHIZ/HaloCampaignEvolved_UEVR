@@ -12,8 +12,9 @@
 //       ...
 //       "default": { "cameras": [ ... ] } } }
 //
-// A vehicle is picked by the FIRST entry whose "match" strings (case-insensitive substrings; the
-// entry's own key when absent) occur in the vehicle actor's name; "default" catches the rest. A camera
+// A vehicle is picked by the entry with the LONGEST "match" string (case-insensitive substrings; the
+// entry's own key when absent) found in the vehicle actor's name, the earlier entry on a tie -- so a seat
+// with an actor of its own gets its own entry wherever it sits in the file; "default" catches the rest. A camera
 // field the file leaves out takes its built-in default. Keys starting with '_' are notes and ignored.
 // The first release of the file said "viewFollows" / "offsetRides"; both are still read.
 //
@@ -26,8 +27,11 @@
 namespace halo::vehcampresets {
 
 enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
-// Where the camera's offset is measured FROM: the vehicle's own origin, or the seat you sit in.
-enum class Origin : uint8_t { Vehicle = 0, Seat = 1 };
+// Where a camera's offset is measured FROM: the vehicle's own origin, the seat you sit in, or -- Head,
+// "playerhead" in the file -- the Chief's head (his body's head bone). A Head camera's tracking follows
+// the CHIEF rather than the vehicle's mesh: he turns with a turret whose mesh does not (the Shade), where
+// yaw tethering to the mesh does nothing.
+enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2 };
 
 struct Camera {
     std::string name;                         // optional; empty = unnamed (shown by its number)
@@ -45,7 +49,7 @@ struct Camera {
     bool    collide = true;
     float   collide_margin = 30.0f;           // cm short of whatever blocks the offset
     int     hide_body = -1;                   // -1 = auto (hide your body when the origin is your seat)
-    bool hides_body() const { return hide_body < 0 ? origin == Origin::Seat : hide_body != 0; }
+    bool hides_body() const { return hide_body < 0 ? origin != Origin::Vehicle : hide_body != 0; }
 };
 
 struct Vehicle {
@@ -81,8 +85,8 @@ ParseResult table_from_json(const char* text, std::size_t len, Table& out);
 // The table as the file format, with a short guide at the top. from_json(to_json(t)) == t.
 std::string table_to_json(const Table& t);
 
-// Index of the entry for this vehicle actor name (case-insensitive substring match, file order), else
-// the "default" entry, else -1.
+// Index of the entry for this vehicle actor name (case-insensitive substring match, the longest match,
+// then file order), else the "default" entry, else -1.
 int match_vehicle(const Table& t, const std::string& actor_name);
 
 const char* type_name(CamType t);

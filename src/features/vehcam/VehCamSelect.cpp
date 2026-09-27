@@ -126,8 +126,8 @@ void clear_selection() {
 }
 
 // recenter: this selection is a camera CHANGE the player made or got (getting in, left X / Y), so the view
-// turns onto the vehicle's forward (vehcamrecenter). A file reload keeps your view where it is: editing a
-// number should not spin you round.
+// turns until what aims the vehicle points where it aims (vehcamrecenter; the eye works it out). A file
+// reload keeps your view where it is: editing a number should not spin you round.
 void select(int vi, int ci, const char* why, bool recenter) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const int n = static_cast<int>(v.cameras.size());
@@ -161,7 +161,8 @@ void select(int vi, int ci, const char* why, bool recenter) {
         if (c.type == vcp::CamType::FirstPerson) {
             md += "**Type:** First-person seat camera\n";
         } else {
-            md += std::string("**Origin:** ") + (c.origin == vcp::Origin::Seat ? "Seat" : "Vehicle") + "\n";
+            md += std::string("**Origin:** ")
+                + (c.origin == vcp::Origin::Seat ? "Seat" : (c.origin == vcp::Origin::Head ? "Player's head" : "Vehicle")) + "\n";
             char off[96];
             std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", c.offset[0], c.offset[1], c.offset[2]);
             md += off;

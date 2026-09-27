@@ -114,10 +114,11 @@ struct Apply {
                 else if (ieq(x.s, "firstperson")) c.type = CamType::FirstPerson;
                 else return type_error(x, w, "\"chase\" or \"firstperson\"");
             } else if (key == "origin") {
-                if (!x.is_str()) return type_error(x, w, "\"vehicle\" or \"seat\"");
+                if (!x.is_str()) return type_error(x, w, "\"vehicle\", \"seat\" or \"playerhead\"");
                 if (ieq(x.s, "vehicle")) c.origin = Origin::Vehicle;
                 else if (ieq(x.s, "seat")) c.origin = Origin::Seat;
-                else return type_error(x, w, "\"vehicle\" or \"seat\"");
+                else if (ieq(x.s, "playerhead") || ieq(x.s, "head")) c.origin = Origin::Head;
+                else return type_error(x, w, "\"vehicle\", \"seat\" or \"playerhead\"");
             } else if (key == "offset") {
                 if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
@@ -241,7 +242,9 @@ std::string axes_text(bool yaw, bool pitch, bool roll) {
 } // namespace
 
 const char* type_name(CamType t)  { return t == CamType::FirstPerson ? "firstperson" : "chase"; }
-const char* origin_name(Origin o) { return o == Origin::Seat ? "seat" : "vehicle"; }
+const char* origin_name(Origin o) {
+    return o == Origin::Seat ? "seat" : (o == Origin::Head ? "playerhead" : "vehicle");
+}
 
 std::string rotation_tracking_text(const Camera& c) { return axes_text(c.rot_yaw, c.rot_pitch, c.rot_roll); }
 std::string location_tracking_text(const Camera& c) {
@@ -250,14 +253,16 @@ std::string location_tracking_text(const Camera& c) {
 
 Table default_table() {
     // Vehicle actor names from the game's own assets (BP_<name>VehicleActor). The turrets are
-    // separate vehicles (the Warthog's chaingun, the Scorpion's guns), so a gunner gets their own entry
-    // -- and "WarthogVehicleActor" is chosen over "Warthog" precisely so it does not match the chaingun.
+    // separate vehicles (the Warthog's chaingun, the Wraith's anti-infantry turret, the Scorpion's guns),
+    // so a gunner gets their own entry -- the most specific match wins (match_vehicle), and
+    // "WarthogVehicleActor" is chosen over "Warthog" so it does not match the chaingun at all.
     Table t;
     t.vehicles.push_back(vehicle("Banshee",        {"bansheevehicleactor"}));
     t.vehicles.push_back(vehicle("Ghost",          {"ghostvehicleactor"}));
     t.vehicles.push_back(vehicle("Warthog gunner", {"warthogchaingunvehicleactor"}));
     t.vehicles.push_back(vehicle("Warthog",        {"warthogvehicleactor"}));
     t.vehicles.push_back(vehicle("Scorpion",       {"scorpion"}));
+    t.vehicles.push_back(vehicle("Wraith turret",  {"wraithantiinfantry"}));
     t.vehicles.push_back(vehicle("Wraith",         {"wraith"}));
     t.vehicles.push_back(vehicle("Shade",          {"shade"}));
     Vehicle d = vehicle("default", {});
@@ -304,12 +309,15 @@ std::string table_to_json(const Table& t) {
     s += "{\n";
     s += "  \"_readme\": [\n";
     s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = previous camera.\",\n";
-    s += "    \"Each vehicle has its own list, used in order. The first entry whose 'match' text appears in the\",\n";
-    s += "    \"vehicle's name is used (case does not matter); 'default' covers any vehicle not listed.\",\n";
+    s += "    \"Each vehicle has its own list, used in order. The entry whose 'match' text appears in the vehicle's\",\n";
+    s += "    \"name is used -- the longest such text when several do, so a turret with its own entry beats its\",\n";
+    s += "    \"vehicle's (case does not matter); 'default' covers any vehicle not listed.\",\n";
     s += "    \"Camera fields -- all optional; anything left out takes its default:\",\n";
     s += "    \"  name              shown when you switch to it (left out = just its number)\",\n";
     s += "    \"  type              chase (this mod's camera) | firstperson (the older seat camera)\",\n";
-    s += "    \"  origin            seat | vehicle : where 'offset' is measured from (your seat, or the vehicle's centre)\",\n";
+    s += "    \"  origin            seat | vehicle | playerhead : where 'offset' is measured from (your seat, the\",\n";
+    s += "    \"                    vehicle's centre, or the Chief's head -- a playerhead camera's tracking follows\",\n";
+    s += "    \"                    the Chief, so it turns with a turret even where the turret's mesh does not)\",\n";
     s += "    \"  offset            [forward, right, up] in cm (negative forward = behind)\",\n";
     s += "    \"  locationTracking  which vehicle rotations carry the camera's position round: any of yaw, pitch,\",\n";
     s += "    \"                    roll ([] = a fixed world direction), or \\\"view\\\" to orbit with YOUR view\",\n";
@@ -317,10 +325,11 @@ std::string table_to_json(const Table& t) {
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
-    s += "    \"  hideBody          true | false: hide your character's body (left out = hidden for seat cameras);\",\n";
+    s += "    \"  hideBody          true | false: hide your character's body (left out = hidden unless the origin\",\n";
+    s += "    \"                    is the vehicle);\",\n";
     s += "    \"                    only while the vehcamhidebody setting is on, which it is not by default\",\n";
     s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim;\",\n";
-    s += "    \"  aimMarker = true | false: a ring where the VEHICLE points, beside the crosshair (left out = true).\",\n";
+    s += "    \"  aimMarker = true | false: a ring where the VEHICLE is aiming, beside the crosshair (left out = true).\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
     s += "  ],\n";
@@ -361,16 +370,22 @@ std::string table_to_json(const Table& t) {
     return s;
 }
 
+// THE MOST SPECIFIC MATCH WINS: the longest "match" text found in the name, then the earlier entry. So a
+// seat with an actor of its own gets its own entry wherever it sits in the file -- the Wraith's turret
+// ("wraithantiinfantry") beats the Wraith ("wraith"), which also appears in the turret's name.
 int match_vehicle(const Table& t, const std::string& actor_name) {
     const std::string n = lower(actor_name);
-    int def = -1;
+    int def = -1, best = -1;
+    std::size_t best_len = 0;
     for (std::size_t i = 0; i < t.vehicles.size(); ++i) {
         const Vehicle& v = t.vehicles[i];
         if (v.is_default) { if (def < 0) def = static_cast<int>(i); continue; }
-        for (const std::string& m : v.match)
-            if (!m.empty() && n.find(m) != std::string::npos) return static_cast<int>(i);
+        for (const std::string& m : v.match) {
+            if (m.empty() || m.size() <= best_len) continue;
+            if (n.find(m) != std::string::npos) { best = static_cast<int>(i); best_len = m.size(); }
+        }
     }
-    return def;
+    return best >= 0 ? best : def;
 }
 
 } // namespace halo::vehcampresets
