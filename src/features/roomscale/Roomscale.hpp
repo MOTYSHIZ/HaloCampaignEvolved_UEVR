@@ -1,7 +1,7 @@
 #pragma once
 
-// ROOMSCALE (roomscale, Experimental): walk around the play space and the game's own movement
-// moves the Spartan. The head offset from the standing origin is walked out through the game's
+// ROOMSCALE (roomscale, Stable since 2026-09-27: on by default, roomscale=0 turns it off). Walk
+// around the play space and the game's own movement moves the Spartan. The head offset from the standing origin is walked out through the game's
 // movement -- the left stick, or the unit object's own throttle vectors (roomscalethrottle 3) --
 // and the origin is credited only with the travel roomscale demonstrably caused. Also the camera
 // bob measurement (bobcancel / boblog), published through core/CameraBob.hpp.

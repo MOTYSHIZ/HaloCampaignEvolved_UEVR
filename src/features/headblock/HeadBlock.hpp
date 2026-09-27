@@ -21,7 +21,7 @@
 // The body eye, the head offset and the reflected traces are measured in core/EyeTrace.hpp, which
 // heightcal shares.
 //
-// FEATURE headblock (Experimental). Hook slots: parse_key (headblock*), game_tick_after_leash (the
+// FEATURE headblock (Stable since 2026-09-27: on by default). Hook slots: parse_key (headblock*), game_tick_after_leash (the
 // trace, with its stand-downs) and head_clamp (the per-eye pull-back). Table: kHeadBlockHooks.
 
 #pragma once

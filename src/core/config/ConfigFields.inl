@@ -34,10 +34,15 @@
     // cap, and the standing origin is then slid by however far the player's eye ACTUALLY moved,
     // so the offset shrinks by what was achieved and never double-counts. Only when the player's
     // own stick is idle (a pushed stick is locomotion, not roomscale), never in stick mode or
-    // menus. The lateral leash stands down inside roomscale_leash so there is an offset left to
-    // walk out; beyond it the origin is dragged as before, so the eye can never run away from
-    // the body.
-    bool  roomscale       = false;
+    // menus. With hmdleash on, the lateral leash stands down inside roomscale_leash so there is an
+    // offset left to walk out, and beyond it the origin is dragged as before, so the eye can never
+    // run away from the body. With hmdleash OFF -- the default since roomscale went Stable -- nothing
+    // drags the origin: roomscale carries the body to the head, and head block (also on by default)
+    // keeps the head out of the walls the body cannot follow it through.
+    //
+    // STABLE since 2026-09-27 (the user's call), with heightcal and headblock: the registry never
+    // writes a Stable master, so this initialiser IS the shipped value. roomscale=0 turns it off.
+    bool  roomscale       = true;
     // Default: the value roomscale is tuned with.
     float roomscale_gain  = 4.0f;    // per second: catch-up speed per metre of head offset, both in ROOM metres -- the same at any VR_WorldScale
     float roomscale_dead  = 0.03f;   // room metres, no command inside this
@@ -84,7 +89,8 @@
     // ---- AUTO HEIGHT (HeightCal.hpp). Writes the standing origin's Y so the rendered eye's height above
     // the GAME floor follows the head's height above the REAL floor. While it is on, the vertical
     // leash never acts. Head-side keys are CM (fields metres); game-side keys are UE cm.
-    int   height_cal      = 0;       // heightcal: 0 off, 1 on
+    // STABLE since 2026-09-27 (with roomscale): this initialiser IS the shipped value.
+    int   height_cal      = 1;       // heightcal: 0 off, 1 on
     int   height_mode     = 0;       // heightmode: absolute (0), seated (1), eyes (2, also the floor-unknown fallback)
     int   height_scale    = 0;       // heightscale: 0 = UEVR world scale (real m x 100 x VR_WorldScale), 1 = real cm
     int   height_src      = 0;       // heightsrc: 0 auto, 1 OpenXR STAGE, 2 OpenVR standing, 3 UEVR pose only
@@ -109,13 +115,15 @@
     int   height_log      = 0;       // heightlog: 0 silent, 1 events, 2+ events + a HEIGHT line once a second
     // PHYSICAL CROUCH (HeightCal.cpp): duck below a fraction of your standing head height and the
     // character crouches -- the crouch button is held for you, exactly as right-stick-down holds it.
-    // Absolute mode with a known floor only. Off by default: it changes what ducking DOES.
-    int   height_crouch      = 0;     // heightcrouch: 0 off, 1 on
+    // Absolute mode with a known floor only. ON by default since 2026-09-27, canonized from the
+    // author's headset settings with the Roomscale group's promotion.
+    int   height_crouch      = 1;     // heightcrouch: 0 off, 1 on
     // heightcrouchfrac: the crouch line as a fraction of your standing head height, or 0 = AUTO -- where
     // your view would reach the character's standing eye less heightleash, clamped to 0.5-0.85 of your
-    // height. AUTO since 2026-09-27: a fixed 0.5 was too deep, and a fixed fraction only felt smooth at
-    // the one value that happened to land near the leash (~0.8 in the first headset test).
-    float height_crouch_frac = 0.0f;
+    // height. 0.8 since 2026-09-27, canonized from the author's headset settings (AUTO was the default
+    // for a few hours before that; a fixed 0.5 was too deep). With heightleash 10 below, 0.8 is the
+    // value that felt smooth in the first headset test.
+    float height_crouch_frac = 0.8f;
     float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
     // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): from a stick crouch press until the character is
     // seen standing again, absolute mode lets the game camera's crouch through instead of pinning the
@@ -125,9 +133,12 @@
     int   height_stick_crouch = 1;    // heightstickcrouch: 1 on, 0 off
     // THE LEASH BELOW THE CHARACTER'S EYE (HeightCal.cpp): the most the view may drop below the game
     // camera -- the character's own eye -- so ducking cannot take it inside his body. Game side, so UE
-    // cm. It rides the camera: when the character crouches, the limit drops with him. Off by default.
-    float height_leash = -1.0f;       // heightleash (UE cm): -1 off, 0 never below the character's eye
-    int   head_block         = 0;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
+    // cm. It rides the camera: when the character crouches, the limit drops with him. 10 by default
+    // since 2026-09-27, canonized from the author's headset settings.
+    float height_leash = 10.0f;       // heightleash (UE cm): -1 off, 0 never below the character's eye
+    // HEAD BLOCK: STABLE since 2026-09-27 (with roomscale), and it matters more now that hmdleash is off
+    // by default -- it is what keeps your head out of a wall your body cannot follow it through.
+    int   head_block         = 1;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface
     float head_block_lean    = 25.0f;  // headblocklean: mode 3, max horizontal head offset from the body
     int   head_block_channel = 1;      // headblockchannel: ETraceTypeQuery index (0 Visibility, 1 Camera)

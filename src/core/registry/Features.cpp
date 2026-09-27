@@ -141,6 +141,29 @@ const FeatureRow kFeatures[] = {
       "handsmoothhands,handsmoothposmin,handsmoothposbeta,handsmoothrotmin,handsmoothrotbeta,handsmoothdcut,handsmoothmelee",
       "handsmoothlog",
       "", FEATURE_BOOL(hand_smooth) },
+    // The fork's Roomscale group, promoted 2026-09-27 (the user's call), with the author's crouch and
+    // leash settings canonized in ConfigFields.inl: roomscale on, auto height on with physical crouch
+    // at 0.8 of your height and heightleash 10, head block on -- and hmdleash off (Config.hpp), since
+    // roomscale now carries the Spartan to wherever you stand.
+    { "roomscale",    1, Tier::Stable, "", "Roomscale",
+      "Walk around your play space and your steps move the Spartan.",
+      "roomscaledz,roomscalegain,roomscalemin,roomscalethrottle,roomscalethrottleysign",
+      "roomscaledead,roomscaleff,roomscalelat,roomscaleleash,roomscalelog,roomscalemaxspeed,roomscalepulse,"
+      "roomscalespeed,roomscalestanddown,roomscalestick,roomscalethrottleoff,roomscalethrottleoff2,"
+      "roomscalethrprobe,roomscalethrspeed",
+      "blamangles", FEATURE_BOOL(roomscale) },
+    { "heightcal",    1, Tier::Stable, "", "Auto height",
+      "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it -- and, with Physical crouch on (the default), crouches your character too.",
+      "heightcrouch,heightcrouchfrac,heightkey,heightleash,heightmode,heightsample,heightsrc,heightstickcrouch,heighttrim",
+      "heightautoseat,heightband,heightbipedfeet,heightbipedscale,heightcrouchband,heightestep,heighteye,heightholdms,"
+      "heightlog,heightpawnfeet,heightscale,heightseatbelow,heightseatdwell,heightseattarget,heightslew,"
+      "heighttracechannel,heighttracemax,heightwindow",
+      "", FEATURE_INT(height_cal) },
+    { "headblock",    1, Tier::Stable, "", "Head block",
+      "Keeps your head out of walls when you lean into them.",
+      "headblockradius",
+      "headblockchannel,headblocklean,headblocklog,headblockrelease",
+      "", FEATURE_INT(head_block) },
 
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
@@ -245,25 +268,6 @@ const FeatureRow kFeatures[] = {
       "vehwheelsteersign",
       "vehwheelgrip,vehwheelhand,vehwheellock,vehwheelmarker,vehwheelpos,vehwheelrad,vehwheeltilt",
       "blamangles", FEATURE_INT(vehicle_wheel) },
-    { "roomscale",    1, Tier::Experimental, "Roomscale", "Roomscale",
-      "Walk around your play space and your steps move the Spartan.",
-      "roomscaledz,roomscalegain,roomscalemin,roomscalethrottle,roomscalethrottleysign",
-      "roomscaledead,roomscaleff,roomscalelat,roomscaleleash,roomscalelog,roomscalemaxspeed,roomscalepulse,"
-      "roomscalespeed,roomscalestanddown,roomscalestick,roomscalethrottleoff,roomscalethrottleoff2,"
-      "roomscalethrprobe,roomscalethrspeed",
-      "blamangles", FEATURE_BOOL(roomscale) },
-    { "heightcal",    1, Tier::Experimental, "Roomscale", "Auto height",
-      "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it -- and, with Physical crouch on, crouches your character too.",
-      "heightcrouch,heightcrouchfrac,heightkey,heightleash,heightmode,heightsample,heightsrc,heightstickcrouch,heighttrim",
-      "heightautoseat,heightband,heightbipedfeet,heightbipedscale,heightcrouchband,heightestep,heighteye,heightholdms,"
-      "heightlog,heightpawnfeet,heightscale,heightseatbelow,heightseatdwell,heightseattarget,heightslew,"
-      "heighttracechannel,heighttracemax,heightwindow",
-      "", FEATURE_INT(height_cal) },
-    { "headblock",    1, Tier::Experimental, "Roomscale", "Head block",
-      "Keeps your head out of walls when you lean into them.",
-      "headblockradius",
-      "headblockchannel,headblocklean,headblocklog,headblockrelease",
-      "", FEATURE_INT(head_block) },
     { "grenadegunhold", 1, Tier::Experimental, "Melee and grenades", "Hold the weapon through a throw",
       "Keeps the game's grenade throw animation off your weapon under the base mod's arms.",
       "grenadegunholdms",
