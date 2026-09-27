@@ -49,10 +49,15 @@ extern std::atomic<uint8_t>  g_scope_lt_max;
 // How many CaptureScene calls have been issued (manual mode) -- proves the call site runs.
 extern std::atomic<uint32_t> g_scope_captures;
 
-// XInput-hook side. Feed it the raw left trigger every poll; it handles the toggle edge and
-// answers whether LT must be eaten (zeroed) before the game reads the state. No engine calls, no
-// allocation -- same rule as everything else in that callback.
+// XInput-hook side. Feed it the raw left trigger every poll; it handles the hold (scopehold=1, the
+// default) or toggle edges and answers whether LT must be eaten (zeroed) before the game reads the
+// state. No engine calls, no allocation -- same rule as everything else in that callback.
 bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode);
+
+// Call on every poll where the left trigger does NOT reach scope_handle_lt (gripzoom with no grip
+// latched), with the raw trigger value. Keeps the edge detector following the physical trigger
+// across the gap so no press is swallowed and none is invented; see its definition.
+void scope_lt_unrouted(uint8_t lt_raw);
 
 // Same, for a button bound to the scope in the Controls panel (bindscope). Nothing to eat -- the
 // caller already consumes the mask -- so this returns nothing. Both paths stay live at once, so

@@ -3049,10 +3049,51 @@ void seed_weapon_watch(uint32_t tick) {
     s_scope_open_tick = tick;
 }
 
+// ---- HOLD-TO-ZOOM (scopehold) -----------------------------------------------------------------
+//
+// Which inputs are currently HOLDING the scope open. Two, because the trigger and a bound button
+// can both be live at once, and in hold mode the scope stays open while EITHER is held: letting go
+// of one while the other is still down must not close it. Both stay false in toggle mode, so every
+// release helper below is a no-op there and toggle behaves exactly as it always has.
+//
+// s_lt_down is the trigger's edge detector, lifted out of scope_handle_lt so scope_lt_unrouted()
+// can keep it following the trigger. With gripzoom the trigger only reaches the scope while the
+// support grip is latched; a release made while NOT gripping would otherwise never be seen, the
+// detector would stay "down", and the next press after re-gripping would be swallowed -- in either
+// mode, the zoom simply would not open.
+bool s_lt_down  = false;
+bool s_lt_held  = false;
+bool s_btn_held = false;
+
+// Let go of one input's hold. Closes the scope only if the OTHER input is not also holding it, and
+// only if this one actually was -- so it is safe to call on every refusal tick.
+void hold_release(bool& held, bool other_held) {
+    if (!held) return;
+    held = false;
+    if (!other_held) g_scope_active = false;
+}
+
+// A press, from either input. HOLD (default) opens the scope and records which input holds it;
+// TOGGLE flips it. One definition, so the trigger and a bound button cannot drift apart.
+void scope_input_pressed(bool& held) {
+    if (g_cfg.scope_hold) { held = true; g_scope_active = true; }
+    else                  { g_scope_active = !g_scope_active.load(); }
+}
+
+// The trigger's edge detector, with hysteresis: +1 on a press, -1 on a release, 0 otherwise.
+// Shared by scope_handle_lt and scope_lt_unrouted, so the detector follows the PHYSICAL trigger
+// with the same thresholds whether or not the scope is listening -- it can never go stale.
+int lt_edge(uint8_t lt_raw) {
+    const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
+    const uint8_t off_t = (uint8_t)(on_t / 2);   // hysteresis: no re-fire on an analog wobble
+    if (!s_lt_down && lt_raw >= on_t) { s_lt_down = true;  return +1; }
+    if (s_lt_down && lt_raw <= off_t) { s_lt_down = false; return -1; }
+    return 0;
+}
+
 } // namespace
 
 bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
-    static bool s_down = false;
     if (lt_raw > g_scope_lt_max.load(std::memory_order_relaxed))
         g_scope_lt_max.store(lt_raw, std::memory_order_relaxed);   // diagnostic; race harmless
     // scopedevray also lifts the stick-mode refusal: under SimVR the FP route never establishes
@@ -3060,20 +3101,45 @@ bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
     // be unreachable by the very automation the dev ray exists for. Release builds synthesize no
     // ray, so even a hand-set key there just toggles a state the frame end immediately drops.
     if (!g_cfg.scope_enabled || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
-        s_down = false;
+        s_lt_down = false;
+        // A HOLD cannot outlive the trigger being ours: the release that ends it may happen inside
+        // the menu or seat, where this function never sees it, and the scope would then stay open
+        // with nothing holding it. Idempotent, so running on every refusal tick is fine.
+        hold_release(s_lt_held, s_btn_held);
         return false;   // menus and seats keep the game's own trigger semantics
     }
-    if (features_scope_trigger_stood_down(s_down)) return false;
-    const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
-    const uint8_t off_t = (uint8_t)(on_t / 2);   // hysteresis: no re-fire on an analog wobble
-    if (!s_down && lt_raw >= on_t) {
-        s_down = true;
-        g_scope_active = !g_scope_active.load();
-        g_scope_lt_edges.fetch_add(1, std::memory_order_relaxed);
-    } else if (s_down && lt_raw <= off_t) {
-        s_down = false;
+    if (features_scope_trigger_stood_down(s_lt_down)) {
+        s_lt_held = false;   // the standing-down feature has already closed the scope
+        return false;
     }
-    return g_cfg.scope_eat_lt;
+    // HOLD (default): the scope is open exactly while the trigger is squeezed, as Halo's own zoom
+    // is. TOGGLE: each squeeze flips it, the behaviour before scopehold existed.
+    const int edge = lt_edge(lt_raw);
+    if (edge > 0) {
+        scope_input_pressed(s_lt_held);
+        g_scope_lt_edges.fetch_add(1, std::memory_order_relaxed);
+    } else if (edge < 0) {
+        hold_release(s_lt_held, s_btn_held);   // no-op in toggle mode: s_lt_held stays false
+    }
+    // scopeeat=0 passes LT to the game only under HOLD. The game's own zoom is hold-to-zoom, so it
+    // tracks ours only when ours is hold too; under toggle, every release would unzoom the game
+    // (viewmodel back, look speed restored) while the toggled pane stayed up.
+    return g_cfg.scope_eat_lt || !g_cfg.scope_hold;
+}
+
+// The trigger is NOT reaching the scope this poll (gripzoom, no support grip latched). Keep the
+// edge detector following the PHYSICAL trigger anyway, and act on none of its edges.
+//
+// Both halves of the review finding this answers come from the detector going stale while
+// unrouted: a release made without the grip was never seen, so after re-gripping, toggle mode
+// SWALLOWED the next press. Forcing "released" instead (the first version, hold-only) cured that
+// but made a trigger still held from a grenade throw read as a fresh press on re-grip -- a zoom
+// nobody asked for. Tracking the real level does neither: no stale state, no phantom edge, and a
+// zoom always needs a genuine squeeze after gripping. The grip release has already closed the
+// scope, so the only hold state left to clear is the trigger's own.
+void scope_lt_unrouted(uint8_t lt_raw) {
+    (void)lt_edge(lt_raw);
+    s_lt_held = false;
 }
 
 // Scope toggle from a BOUND BUTTON (bindscope) instead of the left trigger.
@@ -3089,14 +3155,16 @@ void scope_handle_button(bool down, bool in_menu, bool stick_mode) {
     static bool s_down = false;
     if (!g_cfg.scope_enabled || features_scope_pane_stands_down() || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
         s_down = false;
+        hold_release(s_btn_held, s_lt_held);   // same reason as the trigger's refusal path
         return;
     }
     if (down && !s_down) {
         s_down = true;
-        g_scope_active = !g_scope_active.load();
+        scope_input_pressed(s_btn_held);
         g_scope_lt_edges.fetch_add(1, std::memory_order_relaxed);
-    } else if (!down) {
+    } else if (!down && s_down) {
         s_down = false;
+        hold_release(s_btn_held, s_lt_held);   // no-op in toggle mode
     }
 }
 
@@ -3170,14 +3238,24 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig,
     const bool calib_wants_pane = s_calib_held || calib_key_down ||
                                   scope_offset_armed() || scope_base_armed();
 
+    // Was the scope displaying last tick? Tracks the CLOSE EDGE for the compositor quad below.
+    static bool s_scope_was_open = false;
     if (!g_scope_active.load() && !g_cfg.scope_force && !calib_wants_pane) {
         hide_pane_if_shown();
         // Stop the second scene render while the scope is closed. This is the disarm that pairs
         // with the mode-1 arm in the cadence block; without it a single scope-in leaves a full
         // per-frame scene capture running for the rest of the mission (the 0.4 fps regression).
         set_capture_every_frame(false);
+        // ...and take the compositor quad down WITH it, on the close edge. Left alone it lingered,
+        // frozen, until its pose went stale (~200 ms measured) -- after every release under
+        // hold-to-zoom.
+        if (s_scope_was_open) {
+            s_scope_was_open = false;
+            scopelayer_scope_closed();
+        }
         return;
     }
+    s_scope_was_open = true;
     // Apply IMMEDIATELY, on the same tick the ray was produced: the consume-on-the-next-tick
     // shape this replaced put a whole ~32 Hz tick between hand and pane, which the first
     // headset pass reported as visible smoothing lag.

@@ -3136,7 +3136,18 @@ struct Config {
     // from post-processed capture sources is a temporal-upscaler interaction; a non-temporal
     // method is the probe. Applied on change, alongside the capture source.
     int   scope_aa = -1;
-    float scope_thresh  = 0.55f;   // LT deflection that fires the toggle (release at half)
+    float scope_thresh  = 0.55f;   // LT deflection that opens the scope (release at half)
+    // HOLD TO ZOOM (default, canonized 2026-09-27 at the user's call): the scope is open exactly
+    // while the left trigger -- or a bindscope button -- is held, which is how Halo's own zoom
+    // behaves. 0 = TOGGLE, each squeeze flips it, the only behaviour before this key existed.
+    //
+    // A CHANGED DEFAULT for players: anyone used to tapping the trigger to open and again to close
+    // will find the scope closing the moment they let go. It must be called out in the release
+    // notes with scopehold=0 as the one-line way back.
+    //
+    // With gripzoom the trigger reaches the scope only while the support grip is latched, so hold
+    // means "grip AND squeeze"; letting go of either closes it (the grip half was already true).
+    bool  scope_hold    = true;
 
     // Research knobs (catalogued in halo_vr_dev.cfg, not shipped in halo_vr.cfg):
     float scope_base_fov    = 70.0f; // pane lens at 1x, deg horizontal
@@ -3144,7 +3155,13 @@ struct Config {
                                      // exposure-free -- pairs with the HDR RT + emissive lens;
                                      // 2 = FinalColorLDR was measured orders-of-magnitude dark
                                      // here, the capture's own eye adaptation never converging)
-    bool  scope_eat_lt      = true;  // 0 = pass LT through to Blam as well (native-zoom research)
+    // 0 = pass LT through to Blam while SCOPING, so the game's native zoom engages underneath (its
+    // per-weapon zoom sound -- and, per the dev catalog, its viewmodel hide, HUD mask and halved
+    // look speed). Scope path only: the gripzoom grenade path eats LT regardless, because a throw
+    // is not a zoom. HOLD MODE ONLY: under scopehold=0 LT is eaten whatever this says, because the
+    // game's zoom is hold-to-zoom and would drop on every release while a toggled pane stayed up.
+    // Under trial 2026-09-27, not canonized.
+    bool  scope_eat_lt      = true;
     // Where the CAPTURE CAMERA gets its motion from, once attached to the rig:
     //   0 = re-anchor to the live aim ray every tick (default). The image looks exactly down the
     //       shot line, so the in-pane reticle stays truthful; any residual aim-signal jitter is

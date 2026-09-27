@@ -128,6 +128,7 @@ static bool parse_scope_key(const char* key, double v) {
         g_cfg.scope_mask_feather = clampf((float)v, 0.0f, 1.0f);
     else if (_stricmp(key, "scopeaa")     == 0) g_cfg.scope_aa       = (int)clampf((float)v, -1.0f, 4.0f);
     else if (_stricmp(key, "scopethresh") == 0) g_cfg.scope_thresh   = clampf((float)v, 0.10f, 0.95f);
+    else if (_stricmp(key, "scopehold")   == 0) g_cfg.scope_hold     = (v != 0.0);
     else if (_stricmp(key, "scopebase")   == 0) g_cfg.scope_base_fov = clampf((float)v, 5.0f, 120.0f);
     else if (_stricmp(key, "scopesrc")    == 0) g_cfg.scope_capture_src = (int)clampf((float)v, 0.0f, 9.0f);
     else if (_stricmp(key, "scopeeat")    == 0) g_cfg.scope_eat_lt   = (v != 0.0);
