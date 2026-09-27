@@ -1667,6 +1667,7 @@ std::atomic<uint32_t>  g_veh_turn_reset_seq{0}, g_veh_turn_reset_ack{0};
 // Left Y in a vehicle: the next camera; left X: the current camera's next tethering mode. Called from the
 // input hook (any thread); the game tick applies them (VehCamSelect.cpp).
 void veh_cam_next_prev(int dir) { veh_cam_step(dir); }
+bool veh_uevr_override_active() { return host::g_plugin_state.cut2d_engaged->load(std::memory_order_relaxed); }
 void veh_cam_mode_next() { veh_cam_mode_step(+1); }
 
 // vehaim: the Blam aim write (BlamDrive.cpp) consults this to lift its stick-mode hold-off in a

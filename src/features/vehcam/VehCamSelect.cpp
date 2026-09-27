@@ -2,7 +2,7 @@
 
 #include "Config.hpp"
 #include "XrText.hpp"                           // the camera readout on the text panel
-#include "features/vehcam/VehCam.hpp"          // g_veh_tp_active
+#include "features/vehcam/VehCam.hpp"          // g_veh_tp_active, veh_uevr_override_active
 #include "features/vehcam/VehCamPresets.hpp"
 #include "uevr/API.hpp"
 
@@ -83,6 +83,7 @@ char s_mem_path[MAX_PATH]{};
 // ---- UEVR's decoupled pitch --------------------------------------------------------------------
 bool     s_dp_forced = false;                       // we turned VR_DecoupledPitch off
 bool     s_dp_want = false;                         // last request, so only CHANGES are acted on
+bool     s_dp_save_pending = false;                 // put back in memory; UEVR's config.txt not saved yet
 char     s_dp_saved[16]{};
 char     s_dp_marker[MAX_PATH]{};
 uint32_t s_ticks = 0;
@@ -449,6 +450,24 @@ bool read_decoupled_pitch(char* out, size_t n) {
     return out[0] != 0;
 }
 
+// A RESTORE IN MEMORY IS NOT A RESTORE. set_mod_value changes only UEVR's live value, while UEVR writes
+// config.txt whenever its overlay opens or closes (Framework::set_draw_ui) -- and never at exit. So a
+// player who opened the overlay during a tilting ride (it hosts the in-game settings menu) got "false"
+// SAVED, our in-memory restore afterwards never reached the file, and with the marker already deleted the
+// next session started with the game's aim pitch in the headset and nothing left to repair it. So the
+// restore asks UEVR to save, and the marker stays until it has.
+//
+// Only while the plugin holds no OTHER temporary value in UEVR's config: a save writes every live value,
+// and the cutscene flatten parks VR_2DScreenMode / VR_WorldScale (the 0.01 mono collapse) for the scene --
+// exactly when a ride ends at a cutscene. Pending saves wait for it to let go.
+void request_config_save() {
+    if (auto* p = API::get()->param(); p != nullptr && p->vr != nullptr && p->vr->save_config != nullptr)
+        p->vr->save_config();   // deferred by UEVR to its own frame worker
+}
+bool config_save_safe() {
+    return !veh_uevr_override_active();
+}
+
 void decoupled_pitch_update(bool want_off) {
     if (want_off != s_dp_want) {
         s_dp_want = want_off;
@@ -462,13 +481,14 @@ void decoupled_pitch_update(bool want_off) {
                 }
                 set_decoupled_pitch("false");
                 s_dp_forced = true;
+                s_dp_save_pending = false;   // the marker is live again: it guards this ride now
                 API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: VR_DecoupledPitch -> false while this camera "
                                      "tilts with the vehicle (restored when it stops)");
             }
         } else if (!want_off && s_dp_forced) {
             set_decoupled_pitch(s_dp_saved[0] != 0 ? s_dp_saved : "true");
-            if (s_dp_marker[0] != 0) DeleteFileA(s_dp_marker);
             s_dp_forced = false;
+            s_dp_save_pending = true;    // the marker goes once UEVR has saved it (below)
             API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: VR_DecoupledPitch -> %s (restored)",
                                  s_dp_saved[0] != 0 ? s_dp_saved : "true");
         }
@@ -478,6 +498,14 @@ void decoupled_pitch_update(bool want_off) {
     if (s_dp_forced && (s_ticks % 300u) == 0u) {
         char cur[16]{};
         if (read_decoupled_pitch(cur, sizeof(cur)) && std::strcmp(cur, "false") != 0) set_decoupled_pitch("false");
+    }
+    // The restore reaches config.txt. UEVR runs the save on its next frame; if the game dies before that,
+    // the marker is still there and the next start repairs it again.
+    if (s_dp_save_pending && !s_dp_forced && config_save_safe()) {
+        request_config_save();
+        if (s_dp_marker[0] != 0) DeleteFileA(s_dp_marker);
+        s_dp_save_pending = false;
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: VR_DecoupledPitch restore saved to UEVR's config");
     }
 }
 
@@ -493,8 +521,18 @@ void decoupled_pitch_startup_check() {
         fclose(f);
     }
     const char* v = (std::strcmp(saved, "true") == 0 || std::strcmp(saved, "false") == 0) ? saved : "true";
+    if (s_dp_want) {
+        // A tilting camera is already up (the session began in one): take the marker as this ride's own --
+        // the player's value to restore on the way out -- and keep the hold it needs.
+        strcpy_s(s_dp_saved, sizeof(s_dp_saved), v);
+        set_decoupled_pitch("false");
+        s_dp_forced = true;
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: a previous session left VR_DecoupledPitch off; this ride "
+                             "keeps it off and restores %s when it stops", v);
+        return;
+    }
     set_decoupled_pitch(v);
-    DeleteFileA(s_dp_marker);
+    s_dp_save_pending = true;   // saved, and the marker deleted, by decoupled_pitch_update this same tick
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: restored VR_DecoupledPitch=%s -- a previous session turned it "
                          "off for a tilting vehicle camera and ended before putting it back", v);
 }

@@ -99,6 +99,10 @@ bool veh_tp_anchor_active();
 // RUNTIME third-person-camera state: true while a chase camera from halo_vr_vehcams.json is selected
 // for the vehicle you are in (VehCamSelect.cpp). The TP gates read this.
 extern std::atomic<bool> g_veh_tp_active;
+// Any thread: the plugin holds a TEMPORARY value in UEVR's config right now -- the cutscene flatten's
+// VR_2DScreenMode or 0.01 mono-collapse world scale -- so asking UEVR to save its config would persist it.
+// The decoupled-pitch restore's save (VehCamSelect.cpp) waits for this to clear.
+bool veh_uevr_override_active();
 // Left Y in a vehicle: +1 = next camera, -1 = previous. Called from the input hook.
 void veh_cam_next_prev(int dir);
 // Left X in a vehicle: the current camera's next tethering mode. Called from the input hook.
