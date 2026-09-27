@@ -1495,14 +1495,18 @@ uevr.sdk.callbacks.on_draw_ui(function()
         -- should meet the settled panels first.
         if imgui.collapsing_header("Halo VR Experimental") then
             imgui.indent(4)
-            -- The panel's own warning, before any tier. Colour rather than weight: this imgui
-            -- binding exposes no bold font, and push_style_color(0) is ImGuiCol_Text, so the
-            -- amber the calibration rows already use for "pay attention" carries it. Through
-            -- print_text_block so it wraps to the panel like every other paragraph here.
-            imgui.push_style_color(0, 0xFF2288DD)
-            print_text_block("These features are WIP, and they very likely will break things or " ..
-                             "feel incomplete. Mainly here if anyone wants to have a preview.")
-            imgui.pop_style_color(1)
+            -- The panel's own warning, before any tier. Colour rather than weight: no bold font is
+            -- exposed by this binding.
+            --
+            -- text_colored, NOT push_style_color around print_text_block. This draw runs inside a
+            -- pcall (bottom of the file): a throw between a push and its pop is CAUGHT, but the
+            -- ImGui style stack is NOT unwound, so one unbalanced push leaks EVERY FRAME and takes
+            -- the rest of the overlay with it -- Script UI and UEVR's own sections vanish. Reported
+            -- from a headset 2026-09-20. text_colored owns no stack, so it cannot do that. Short
+            -- lines because it does not wrap.
+            imgui.text_colored("These features are WIP, and they very likely will break", 0xFF2288DD)
+            imgui.text_colored("things or feel incomplete. Mainly here if anyone wants", 0xFF2288DD)
+            imgui.text_colored("to have a preview.", 0xFF2288DD)
             imgui.spacing()
             draw_tier_sections(TIER_ORDER)
             imgui.unindent(4)
