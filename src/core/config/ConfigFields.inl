@@ -1284,6 +1284,26 @@
     int   grenade_gun_hold_ms = 1800;
     int   grenade_gun_hold_log = 0;
     int   grenade_code = 0x2000;
+    // handsmooth: a 1 Euro filter on the tracked controllers, applied inside get_pose() so aim, the
+    // arms, two-hand, gestures and holsters all read the same steadied hands. The filter and its keys
+    // live in core/HandSmooth (service SVC_HAND_SMOOTH); the master key only switches the service on.
+    //   hands:  0 = both, 1 = the aim hand only, 2 = the support hand only
+    //   *min:   the cutoff in Hz while the hand is still (lower = steadier, more lag on slow moves);
+    //           0 = that channel is not smoothed at all
+    //   *beta:  how fast the cutoff opens with speed -- position per m/s, rotation per rad/s
+    //   dcut:   the cutoff in Hz of the speed estimate itself
+    // Defaults are VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff 10,
+    // CutoffSlope 10) converted to this filter's units: its slope acted on cm/s per axis, i.e. 1000
+    // per m/s, and on quaternion components per second, about half of rad/s, i.e. ~5 per rad/s.
+    // The conversion is approximate (VRE's cutoff is per axis, this one is on the speed magnitude).
+    bool  hand_smooth = false;
+    int   hand_smooth_hands = 0;
+    float hand_smooth_pos_min = 0.1f;
+    float hand_smooth_pos_beta = 1000.0f;
+    float hand_smooth_rot_min = 0.1f;
+    float hand_smooth_rot_beta = 5.0f;
+    float hand_smooth_dcut = 10.0f;
+    bool  hand_smooth_log = false;
 
     // ---- (after the author's Config.hpp line 4529)
     // ---- HANDS ON THE WHEEL (Vehicle.hpp). The record's movement pair steers the vehicle while

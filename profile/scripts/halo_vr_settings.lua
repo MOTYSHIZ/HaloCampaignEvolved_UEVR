@@ -180,7 +180,14 @@ local HINTS = {
     heighttrim     = { t = "drag", min = -50, max = 50 },
     heightkey      = { t = "key" },
     headblockradius = { t = "drag", min = 1, max = 50 },
-    aimbore        = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
+    handsmoothhands   = { t = "enum", items = { "both hands", "the aim hand only", "the other hand only" }, values = { 0, 1, 2 } },
+    handsmoothposmin  = { t = "drag", min = 0, max = 30 },
+    handsmoothposbeta = { t = "drag", min = 0, max = 5000 },
+    handsmoothrotmin  = { t = "drag", min = 0, max = 30 },
+    handsmoothrotbeta = { t = "drag", min = 0, max = 100 },
+    handsmoothdcut    = { t = "drag", min = 0.1, max = 100 },
+    handsmoothlog     = { t = "bool" },
+    aimbore       = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
     reloadseat     = { t = "drag", min = 0.05, max = 1 },
     reloadholdfire = { t = "bool" },
     reloadvrlog    = { t = "bool" },
@@ -291,6 +298,9 @@ local LABELS = {
     roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",
     heightsample = "When your height is measured", heighttrim = "Height nudge",
     heightkey = "Height keyboard key", headblockradius = "Head clearance",
+    handsmoothhands = "Hands to steady", handsmoothposmin = "Still-hand position steadiness",
+    handsmoothposbeta = "Position follow speed", handsmoothrotmin = "Still-hand angle steadiness",
+    handsmoothrotbeta = "Angle follow speed", handsmoothdcut = "Speed estimate smoothing",
 }
 -- Prerequisites that are not player features.
 local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }
