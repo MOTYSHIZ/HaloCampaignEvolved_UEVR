@@ -111,8 +111,16 @@
     // character crouches -- the crouch button is held for you, exactly as right-stick-down holds it.
     // Absolute mode with a known floor only. Off by default: it changes what ducking DOES.
     int   height_crouch      = 0;     // heightcrouch: 0 off, 1 on
-    float height_crouch_frac = 0.5f;  // heightcrouchfrac: the crouch line as a fraction of your standing head height
+    // heightcrouchfrac: the crouch line as a fraction of your standing head height, or 0 = AUTO -- where
+    // your view would reach the character's standing eye less heightleash, clamped to 0.5-0.85 of your
+    // height. AUTO since 2026-09-27: a fixed 0.5 was too deep, and a fixed fraction only felt smooth at
+    // the one value that happened to land near the leash (~0.8 in the first headset test).
+    float height_crouch_frac = 0.0f;
     float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
+    // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): while the stick holds a crouch, absolute mode lets
+    // the game camera's crouch through instead of pinning the view to your real head -- it popped back
+    // up ~0.4 s after every stick crouch. A player-facing fix, so ON; 0 restores the old behaviour.
+    int   height_stick_crouch = 1;    // heightstickcrouch: 1 on, 0 off
     // THE LEASH BELOW THE CHARACTER'S EYE (HeightCal.cpp): the most the view may drop below the game
     // camera -- the character's own eye -- so ducking cannot take it inside his body. Game side, so UE
     // cm. It rides the camera: when the character crouches, the limit drops with him. Off by default.
