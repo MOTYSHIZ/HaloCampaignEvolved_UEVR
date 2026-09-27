@@ -53,7 +53,15 @@ foreach ($f in $files) {
     for ($i = 0; $i -lt $lines.Length; $i++) {
         $line = $lines[$i]
         if ($line.IndexOf('"VR_WorldScale"') -lt 0) { continue }
-        if ($line.TrimStart().StartsWith('//')) { continue }   # a comment quoting the name is not a read
+        # A comment that quotes the name is not a use -- a gate that fails on documentation is the
+        # kind people switch off. Skip block-comment lines, and cut a trailing // comment before
+        # matching. (Naive about a // inside a string on the same line; not worth a lexer.)
+        $code = $line
+        $cut = $code.IndexOf('//')
+        if ($cut -ge 0) { $code = $code.Substring(0, $cut) }
+        $lead = $code.TrimStart()
+        if ($lead.StartsWith('*') -or $lead.StartsWith('/*')) { continue }
+        if ($code.IndexOf('"VR_WorldScale"') -lt 0) { continue }
         $lo = [Math]::Max(0, $i - 6); $hi = [Math]::Min($lines.Length - 1, $i + 6)
         $marked = $false
         for ($k = $lo; $k -le $hi; $k++) { if ($lines[$k].IndexOf('WORLDSCALE-RAW:') -ge 0) { $marked = $true; break } }

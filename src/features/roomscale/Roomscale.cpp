@@ -154,10 +154,11 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             // Never while MOUNTED, whatever stick mode says: with stickmode=0 a seat is not stick
             // mode, and roomscale would drive the rider's unit from the headset.
             // Never during a flat cutscene either (heightcal and headblock already stand down on the
-            // same flag). The body cannot walk in one, so the head offset only piles up to be
-            // walked off in a lurch when it ends -- and in the mono-collapse mode (cutscene2d=2)
-            // the plugin has rewritten VR_WorldScale to 0.01, so no room<->world conversion below
-            // means anything until it is put back.
+            // same flag). What this stops is COMMANDS: no stick or throttle is written into a scene
+            // the player is not playing, and in the mono-collapse mode (cutscene2d=2) the plugin has
+            // rewritten VR_WorldScale to 0.01, so the eye deltas below mean nothing until it is put
+            // back. What it does NOT stop: the leash still absorbs only beyond roomscale_leash, so a
+            // head moved during the scene is walked back to afterwards, as it always was.
             const bool rs_ok = g_cfg.roomscale && !g_stick_mode.load() && !g_in_menu.load()
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && !g_cut2d_engaged.load()

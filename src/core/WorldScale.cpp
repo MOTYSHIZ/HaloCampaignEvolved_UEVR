@@ -58,25 +58,29 @@ bool uevr_world_scale_known() {
 void world_scale_resolve_config() {
     // Called every config poll, so this is also what keeps the _cached form fresh for the other
     // threads, whether or not any scale-dependent feature is on.
-    if (!uevr_world_scale_known()) return;   // keep the compiled default (or the explicit value)
+    if (!uevr_world_scale_known()) return;   // keep the carried-over value (or the explicit one)
     const float cm = uevr_cm_per_metre();
-    static float s_logged = -1.0f;
+    // What was last REPORTED, value and mode together, so an unchanged state stays quiet across
+    // polls while any change of either is logged. Mode alone matters too: pinning rigscale=131.2 at a
+    // 1.312 world scale changes nothing visible today and everything the day the player moves UEVR's
+    // slider, so the log has to be able to say which one is in force.
+    static float s_logged      = -1.0f;
+    static int   s_logged_mode = -1;     // 0 following UEVR, 1 pinned by rigscale
     if (g_cfg.rig_scale_explicit && g_cfg.world_scale_follow == 0) {
-        // An explicit rigscale is a deliberate override: leave it. Say so once per value, because a
-        // pinned rig at a different world scale is a mismatch someone should be able to find.
-        if (std::fabs(g_cfg.rig_scale - s_logged) > 0.05f) {
+        // An explicit rigscale is a deliberate override: leave it, and say so.
+        if (s_logged_mode != 1 || std::fabs(g_cfg.rig_scale - s_logged) > 0.05f) {
             uevr::API::get()->log_info("[Halo-CampE-UEVR] WORLDSCALE: rigscale=%.1f is set explicitly, so the arms do "
                                        "not follow UEVR's world scale (%.1f cm per metre)", g_cfg.rig_scale, cm);
             s_logged = g_cfg.rig_scale;
+            s_logged_mode = 1;
         }
         return;
     }
-    // Logged against the last RESOLVED value, not g_cfg's -- every reload resets g_cfg to the
-    // compiled default first, so comparing against that would log every poll.
-    if (std::fabs(cm - s_logged) > 0.05f) {
-        uevr::API::get()->log_info("[Halo-CampE-UEVR] WORLDSCALE: rig_scale %.1f (100 x UEVR VR_WorldScale %.3f)",
+    if (s_logged_mode != 0 || std::fabs(cm - s_logged) > 0.05f) {
+        uevr::API::get()->log_info("[Halo-CampE-UEVR] WORLDSCALE: rig_scale %.1f, following UEVR (VR_WorldScale %.3f)",
                                    cm, cm * 0.01f);
         s_logged = cm;
+        s_logged_mode = 0;
     }
     g_cfg.rig_scale = cm;
 }

@@ -44,12 +44,16 @@ inline float uevr_cm_per_metre_cached() { return 100.0f * uevr_world_scale_cache
 // fallback.
 bool uevr_world_scale_known();
 
-// GAME THREAD, called by the registry's features_apply() as the last write of every config reload,
-// BEFORE hook threads go back to reading g_cfg. Resolves rig_scale: it follows UEVR's world scale
-// unless rigscale was set explicitly (worldscalefollow=1 makes the world scale win even then).
-// Resolving INSIDE the reload is the point: set afterwards, a sim-thread reader could catch the
-// compiled default between the reset and the fix-up -- a one-frame arm jump every poll at any
-// scale but the profile's.
+// GAME THREAD, called by the registry's features_apply() as the last write of every config reload.
+// Resolves rig_scale: it follows UEVR's world scale unless rigscale was set explicitly
+// (worldscalefollow=1 makes the world scale win even then).
+//
+// NO READER MAY SEE THE COMPILED 131.2 IN BETWEEN, and resolving at the end of the reload is only
+// half of that. Hook threads read g_cfg LIVE during a reload unless stabilityfixes brackets it
+// (cfg_reload_begin is a no-op without SVC_STABILITY), so load_config() also builds the reset struct
+// with the last resolved rig_scale already in it. Together: the field holds the old resolved value
+// through the parse and the new one after -- never the default. Drop either half and the 60 Hz
+// palette arm solve catches 131.2 for a frame, every poll, at any scale but the profile's.
 void world_scale_resolve_config();
 
 } // namespace halo

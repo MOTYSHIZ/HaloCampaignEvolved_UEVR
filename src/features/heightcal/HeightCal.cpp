@@ -312,9 +312,8 @@ void update_source(float hmd_y, float dt) {
     }
 }
 
-// ---- world scale: UE cm per VR metre, re-read with the config poll ----------------------------
-float g_S = 100.0f;
-float g_scale_timer = 0.0f;
+// ---- world scale: UE cm per VR metre, from the shared reader -----------------------------------
+float g_S = 100.0f;   // the last value seen, kept only to log a change
 
 // Through the shared reader (core/WorldScale). This used to read VR_WorldScale itself and fall back
 // to 1.0 on anything at or under 0.01 -- which is exactly what the cutscene mono collapse writes,
@@ -595,12 +594,14 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
 
     update_source(hmd.y, dt);
 
-    g_scale_timer -= dt;
-    if (g_scale_timer <= 0.0f) {
-        g_scale_timer = 2.0f;
+    // Every tick: the shared reader caches for 2 s on its own, so the 2 s timer that used to sit here
+    // only stacked a second delay on a scale change. One atomic load and a time check.
+    {
         const float s = resolve_S();
-        if (std::fabs(s - g_S) > 0.01f) hlog("HEIGHT: world scale %.1f UE cm per VR metre (100 x VR_WorldScale)", s);
-        g_S = s;
+        if (std::fabs(s - g_S) > 0.01f) {
+            hlog("HEIGHT: world scale %.1f UE cm per VR metre (100 x VR_WorldScale)", s);
+            g_S = s;
+        }
     }
     const float S = g_S;
     const float K = (g_cfg.height_scale == 1) ? 100.0f : S;

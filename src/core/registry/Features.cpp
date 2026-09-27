@@ -551,9 +551,10 @@ void features_apply() {
     }
 
     // rig_scale follows UEVR's world scale unless rigscale was set (core/WorldScale). HERE, after the
-    // tier defaults have given worldscalefollow its value and before hook threads read g_cfg again:
-    // resolved any later, the sim thread could read the compiled default between the reset and the
-    // fix-up. Also the call that keeps the world-scale cache fresh for every other thread.
+    // tier defaults have given worldscalefollow its value, as the reload's last write. load_config
+    // carries the previous resolved value across the struct reset, so no hook thread reads the
+    // compiled default in between even when the reload is not bracketed (see WorldScale.hpp). Also
+    // the call that keeps the world-scale cache fresh for every other thread.
     world_scale_resolve_config();
 
     // The reload's last write: hook threads read g_cfg again.
