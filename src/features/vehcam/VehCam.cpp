@@ -18,6 +18,7 @@
 #include "UeObject.hpp"
 #include "core/MarkerFaces.hpp"
 #include "core/UnitState.hpp"
+#include "core/WorldScale.hpp"         // UE cm per real metre at the player's scale, any thread
 #include "core/fixes/TickStage.hpp"
 #include "core/host/ArmsState.hpp"
 #include "core/host/PluginState.hpp"
@@ -1747,37 +1748,12 @@ bool veh_aim_ray_angles(float* yaw, float* pitch) {
 }
 
 // UE cm per REAL metre, as UEVR is rendering it right now: 100 x VR_WorldScale (the direction is
-// measured, not assumed -- HeightCal fitted 112.7 cm/m against 100 x 1.126 = 112.6). Read LIVE rather
-// than taken from rig_scale: rig_scale is a fixed number that matches the shipped profile's 1.312,
-// and players set their own world scale -- a mismatch puts the controller ray and the head anchor off
-// by the ratio. Polled on the game tick every ~2 s while our camera is up (a mod-value read is a string
-// search, not a render-thread job); the render side reads the atomic. 0 = not read yet.
-std::atomic<float> g_veh_cm_per_m{0.0f};
-
+// measured, not assumed -- HeightCal fitted 112.7 cm/m against 100 x 1.126 = 112.6). The player sets
+// their own world scale, so a fixed number puts the controller ray and the head anchor off by the
+// ratio. Read through the one shared reader (core/WorldScale.hpp): refreshed on every config poll,
+// kept through the cutscene mono collapse, and the cached form is a single atomic load on any thread.
 namespace {
-float veh_cm_per_m() {
-    const float v = g_veh_cm_per_m.load(std::memory_order_relaxed);
-    if (v > 1.0f) return v;
-    return (g_cfg.rig_scale > 1.0f) ? g_cfg.rig_scale : 100.0f;   // before the first read
-}
-
-// GAME THREAD. Raw C accessor, as XrLayer/ScopeLayer/HeightCal read it: the header's float path runs
-// std::stof on an empty buffer when the key is absent. An absent or implausible value keeps the last
-// good one -- the mono-collapse view parks VR_WorldScale at its 0.01 floor, which is not a preference.
-void veh_poll_world_scale() {
-    char buf[64]{};
-    auto* p = API::get()->param();
-    if (p == nullptr || p->vr == nullptr || p->vr->get_mod_value == nullptr) return;
-    p->vr->get_mod_value("VR_WorldScale", buf, sizeof(buf));
-    if (buf[0] == 0) return;
-    const float ws = (float)std::atof(buf);
-    if (!(ws > 0.05f && ws < 100.0f)) return;
-    const float cmpm = 100.0f * ws;
-    const float prev = g_veh_cm_per_m.exchange(cmpm, std::memory_order_relaxed);
-    if (std::fabs(prev - cmpm) > 0.05f)
-        API::get()->log_info("[Halo-CampE-UEVR] VEHTP: world scale %.3f -> %.1f UE cm per real metre "
-                             "(vehicle controller ray + head anchor)", ws, cmpm);
-}
+float veh_cm_per_m() { return halo::uevr_cm_per_metre_cached(); }
 
 // The range the reticule and the aim use: the held measurement, or the far end of the ray before this
 // ride has measured anything. ONE rule for the tick and the per-frame stamp, so they cannot disagree.
@@ -1793,13 +1769,11 @@ float veh_aim_range_eff() {
 // FULL view rotation: a camera that tilts with the vehicle tilts the whole tracking space, hands included,
 // and UEVR composes it as UE's own rotator (yaw, then pitch, then roll -- FFakeStereoRenderingHook.cpp's
 // yawPitchRoll(-yaw, pitch, -roll) is that rotator expressed in the VR axes).
-// room_to_world() is the wrong tool here, twice: it scales by 100 cm/m where UEVR renders at
-// 100 x VR_WorldScale (131.2 on the shipped profile, whatever the player chose on theirs), and without
-// room_anchor it hangs the offset off the HMD at g_cam, which in this camera is the VIEW BASE rather
-// than the head. Either one shifts the whole ray sideways -- centimetres to tens of centimetres -- so
-// the aim point and the crosshair sat off the line the hand actually points along. Direction is
-// scale-free. Any thread: pure maths, the cached world scale, and UEVR's standing origin (which the
-// eye callback already reads).
+// room_to_world() is the wrong tool here: without room_anchor it hangs the offset off the HMD at g_cam,
+// which in this camera is the VIEW BASE rather than the head. That shifts the whole ray sideways --
+// centimetres to tens of centimetres -- so the aim point and the crosshair sat off the line the hand
+// actually points along. Direction is scale-free. Any thread: pure maths, the cached world scale, and
+// UEVR's standing origin (which the eye callback already reads).
 void veh_room_ray(const Vec3& cpos, const Vec3& fwd, const double base[3],
                   float view_pitch, float view_yaw, float view_roll, Vec3* o, Vec3* d) {
     const auto so = API::VR::get_standing_origin();
@@ -2612,10 +2586,6 @@ void vehcam_game_tick_vehicle() {
         static uint32_t s_far_ticks = 0, s_far_repicks = 0;   // the hull check, below
         const bool ride = veh_ride_update(stick_now);
         const bool sys = ride && g_cfg.veh_tp;
-        // The live world scale: read at the ride's start (before the eye's first head capture uses it)
-        // and re-read every ~2 s during it, so a world-scale change lands mid-ride. Never on foot.
-        static uint32_t s_ws_tick = 0;
-        if (sys && (!s_sys_was || (++s_ws_tick % 64u) == 0u)) veh_poll_world_scale();
         bool resolved_now = false;
         if (sys && !s_sys_was) {
             g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
