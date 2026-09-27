@@ -55,8 +55,9 @@ extern std::atomic<uint32_t> g_scope_captures;
 bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode);
 
 // Call on every poll where the left trigger does NOT reach scope_handle_lt (gripzoom with no grip
-// latched). Keeps the hold state honest across the gap; see its definition.
-void scope_lt_unrouted();
+// latched), with the raw trigger value. Keeps the edge detector following the physical trigger
+// across the gap so no press is swallowed and none is invented; see its definition.
+void scope_lt_unrouted(uint8_t lt_raw);
 
 // Same, for a button bound to the scope in the Controls panel (bindscope). Nothing to eat -- the
 // caller already consumes the mask -- so this returns nothing. Both paths stay live at once, so

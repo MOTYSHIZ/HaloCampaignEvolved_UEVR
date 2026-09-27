@@ -197,4 +197,10 @@ void scopelayer_tick(uint32_t tick);
 // player looking at nothing at all.
 bool scopelayer_presenting();
 
+// GAME THREAD. The scope has just CLOSED (released or toggled off): stop drawing the quad now
+// instead of letting its last pose linger until it goes stale. Pose only -- the art and the source
+// stay bound so a reopen is instant; the ray-feed grace still does the full retire later.
+// Idempotent, and a no-op when nothing is published. See the definition for the measured why.
+void scopelayer_scope_closed();
+
 } // namespace halo

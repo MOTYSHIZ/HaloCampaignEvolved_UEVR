@@ -3150,7 +3150,9 @@ struct Config {
     // 0 = pass LT through to Blam while SCOPING, so the game's native zoom engages underneath (its
     // per-weapon zoom sound -- and, per the dev catalog, its viewmodel hide, HUD mask and halved
     // look speed). Scope path only: the gripzoom grenade path eats LT regardless, because a throw
-    // is not a zoom. Under trial 2026-09-27, not canonized.
+    // is not a zoom. HOLD MODE ONLY: under scopehold=0 LT is eaten whatever this says, because the
+    // game's zoom is hold-to-zoom and would drop on every release while a toggled pane stayed up.
+    // Under trial 2026-09-27, not canonized.
     bool  scope_eat_lt      = true;
     // Where the CAPTURE CAMERA gets its motion from, once attached to the rig:
     //   0 = re-anchor to the live aim ray every tick (default). The image looks exactly down the

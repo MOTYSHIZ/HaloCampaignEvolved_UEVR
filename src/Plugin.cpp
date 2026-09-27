@@ -13686,9 +13686,10 @@ public:
                     state->Gamepad.bLeftTrigger = 0;
                 }
             } else {
-                // The trigger is not reaching the scope this poll; keep its hold state honest so a
-                // squeeze after re-gripping reads as a press (scopehold). No-op in toggle mode.
-                scope_lt_unrouted();
+                // The trigger is not reaching the scope this poll; keep the scope's edge detector
+                // following it anyway, so a press after re-gripping is neither swallowed nor
+                // invented. Passed BEFORE the grenade path below zeroes the trigger.
+                scope_lt_unrouted(state->Gamepad.bLeftTrigger);
                 // GRENADE on the press edge. Own hysteresis, matching the scope's, because this is
                 // an analog axis and a wobble at the threshold must not double-throw. The mask is
                 // injected rather than passed through: LT is not a button the game reads as throw,
