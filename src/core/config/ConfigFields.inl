@@ -1330,7 +1330,8 @@
     bool  veh_probe = false;
     // ROUTE A P0: owned vehicle cameras -- a sibling OPTION to bc24's first-person veh_cam (never
     // modifies it), for players who get motion sick in first person. 1 = on: in a vehicle, the
-    // cameras listed for it in halo_vr_vehcams.json, stepped with left Y (next) / left X (previous).
+    // cameras listed for it in halo_vr_vehcams.json, stepped with left Y; left X steps the camera's
+    // tethering modes (what turns your view, what carries the camera, where it sits).
     // EVERY per-camera setting lives in that file -- offset, origin (vehicle or seat), what carries the
     // offset, which vehicle motions the view follows, collision, body hiding -- so each vehicle and
     // each camera can differ. (The vehtpboom / vehtpyaw / vehtpanchor / vehtpattitude / vehtpcollide*
@@ -1368,8 +1369,8 @@
     // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
     float veh_aim_far = 10000.0f;
     // vehcamreadout: 1 = a short readout on the text panel whenever the vehicle camera changes (you get
-    // in, step with left X / Y, or the camera file is saved): the vehicle, the camera's number and name,
-    // and its settings. Placed and timed by the xrtext* defaults below.
+    // in, step with left Y / X, or the camera file is saved): the vehicle, the camera's number and name,
+    // its tethering mode, and its settings -- the rotation tracking in yellow. Placed and timed by the xrtext* defaults below.
     bool  veh_cam_readout = true;
     // vehctrlclick: the LEFT STICK CLICK in a vehicle (any seat our cameras run in, vehtp) flips that
     // vehicle between motion controls (the controller aims; the right stick turns your view) and stick
@@ -1380,7 +1381,7 @@
     // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
     // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
     int   veh_ctrl_click = 1;
-    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left X / left Y -- turn the view so what
+    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X -- turn the view so what
     // aims the vehicle points where the vehicle is aiming (yaw only, about your head, through the same turn
     // the right stick uses). What aims it: your aim hand while your hand aims this vehicle, else your head.
     // Where it is aiming: in a camera that turns with the vehicle, the vehicle's own heading -- the only

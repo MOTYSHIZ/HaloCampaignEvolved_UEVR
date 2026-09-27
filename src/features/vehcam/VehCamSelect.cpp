@@ -27,7 +27,8 @@ namespace {
 // ---- what the other threads read ---------------------------------------------------------------
 VehActiveCam     s_active[2];
 std::atomic<int> s_active_front{0};
-std::atomic<int> s_step{0};                  // left X / left Y, posted by the input hook
+std::atomic<int> s_step{0};                  // left Y: cameras, posted by the input hook
+std::atomic<int> s_mode_step{0};             // left X: the camera's tethering modes, posted by the input hook
 std::atomic<int> s_ctrl_toggle{0};           // left stick click, posted by the input hook
 
 void publish(const VehActiveCam& a) {
@@ -47,19 +48,22 @@ int                s_seat = 0;                      // ...and the seat (vcp::sea
 std::string        s_vehicle_actor;                 // ...and the name it was matched against
 int                s_vehicle = -1;                  // index into s_table.vehicles; -1 = none
 int                s_camera = 0;
+int                s_mode = 0;                      // the camera's tethering mode
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
 uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen: bumped by select(..., recenter)
 
-// ---- YOUR LAST CAMERA AND CONTROLS IN EACH SEAT, kept across sessions ------------------------------
+// ---- YOUR LAST CAMERA, ITS MODE AND YOUR CONTROLS IN EACH SEAT, kept across sessions ----------------
 // Keyed by the entry AND the seat the game names (a Scorpion's driver and a rider on it can share one
-// entry). The camera is kept by NAME as well as number, so reordering the file's cameras does not move
-// you. The controls are kept WITH the default they were chosen against, so a later edit of that default
-// (the file's motionAim, or vehaim) wins over the choice: the edit is the newer statement of what you
-// want, and a choice that lands back on the default simply forgets itself. Written beside the camera
-// file (halo_vr_vehcams_last.txt: user-owned, never shipped), at most every ~2 s, replaced whole.
+// entry). The camera and its tethering mode are kept by NAME as well as number, so reordering the file
+// does not move you. The controls are kept WITH the default they were chosen against, so a later edit of
+// that default (the file's motionAim, or vehaim) wins over the choice: the edit is the newer statement of
+// what you want, and a choice that lands back on the default simply forgets itself. Written beside the
+// camera file (halo_vr_vehcams_last.txt: user-owned, never shipped), at most every ~2 s, replaced whole.
 struct SeatMemory {
     int         camera = -1;          // the camera's index; -1 = none kept
     std::string camera_name;
+    int         mode = -1;            // its tethering mode's index; -1 = none kept (a line from before modes)
+    std::string mode_name;
     int         ctrl = -1;            // the left stick click's choice: -1 none, 0 stick, 1 motion
     int         ctrl_base = -1;       // ...and the default it was chosen against (0 stick, 1 motion)
 };
@@ -126,6 +130,18 @@ int remembered_camera(const vcp::Vehicle& v) {
     return it->second.camera < n ? it->second.camera : -1;
 }
 
+// ...and the tethering mode it was left in, when that camera is camera `ci`: by name, else by number while
+// in range; -1 = none (the memory names another camera, or predates modes).
+int remembered_mode(const vcp::Vehicle& v, int ci) {
+    const auto it = s_memory.find(mem_key(v));
+    if (it == s_memory.end() || it->second.mode < 0 || remembered_camera(v) != ci) return -1;
+    const vcp::Camera& c = v.cameras[static_cast<size_t>(ci)];
+    const int n = c.mode_count();
+    if (!it->second.mode_name.empty())
+        for (int i = 0; i < n; ++i) if (c.mode(i).name == it->second.mode_name) return i;
+    return it->second.mode < n ? it->second.mode : -1;
+}
+
 // ---- the memory file: tab-separated, one seat a line --------------------------------------------
 void memory_load() {
     if (s_mem_path[0] == 0) return;
@@ -135,25 +151,33 @@ void memory_load() {
     int n = 0;
     while (fgets(line, sizeof(line), f) != nullptr) {
         if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
-        std::string fld[6];
+        std::string fld[8];
         int k = 0;
         for (const char* p = line; *p != 0 && *p != '\r' && *p != '\n'; ++p) {
-            if (*p == '\t') { if (++k >= 6) break; continue; }
+            if (*p == '\t') { if (++k >= 8) break; continue; }
             fld[k].push_back(*p);
         }
-        if (k != 5 || fld[0].empty() || fld[1].empty()) continue;   // not a line of ours
+        // 8 fields; 6 = a line written before tethering modes (no mode columns), read as "no mode kept".
+        if ((k != 7 && k != 5) || fld[0].empty() || fld[1].empty()) continue;   // not a line of ours
+        const std::string& ctrl = (k == 7) ? fld[6] : fld[4];
+        const std::string& base = (k == 7) ? fld[7] : fld[5];
         SeatMemory m;
         const int num = std::atoi(fld[2].c_str());
         m.camera = num > 0 ? num - 1 : -1;
         m.camera_name = fld[3];
-        m.ctrl = fld[4] == "motion" ? 1 : (fld[4] == "stick" ? 0 : -1);
-        m.ctrl_base = fld[5] == "motion" ? 1 : (fld[5] == "stick" ? 0 : -1);
+        if (k == 7) {
+            const int mnum = std::atoi(fld[4].c_str());
+            m.mode = mnum > 0 ? mnum - 1 : -1;
+            m.mode_name = fld[5];
+        }
+        m.ctrl = ctrl == "motion" ? 1 : (ctrl == "stick" ? 0 : -1);
+        m.ctrl_base = base == "motion" ? 1 : (base == "stick" ? 0 : -1);
         if (m.ctrl < 0 || m.ctrl_base < 0) { m.ctrl = -1; m.ctrl_base = -1; }
         s_memory[fld[0] + "|" + fld[1]] = m;
         ++n;
     }
     fclose(f);
-    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: your last camera and controls kept for %d seat(s) (%s)", n, s_mem_path);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: your last camera, mode and controls kept for %d seat(s) (%s)", n, s_mem_path);
 }
 
 void memory_save() {
@@ -164,16 +188,17 @@ void memory_save() {
     strcat_s(tmp, sizeof(tmp), ".tmp");
     FILE* f = nullptr;
     if (fopen_s(&f, tmp, "wb") != 0 || f == nullptr) { s_memory_dirty = true; return; }   // try again next poll
-    fputs("# Your last camera and controls in each vehicle seat -- written by the mod, read when it starts.\r\n"
-          "# Delete this file to start every seat in its defaultCamera and default controls again.\r\n"
-          "# entry\tseat\tcamera number\tcamera name\tcontrols you chose\tthe default you chose them against\r\n", f);
+    fputs("# Your last camera, tethering mode and controls in each vehicle seat -- written by the mod, read when it starts.\r\n"
+          "# Delete this file to start every seat in its defaultCamera / defaultMode and default controls again.\r\n"
+          "# entry\tseat\tcamera number\tcamera name\tmode number\tmode name\tcontrols you chose\tthe default you chose them against\r\n", f);
     for (const auto& kv : s_memory) {
         const size_t bar = kv.first.rfind('|');
         if (bar == std::string::npos) continue;
         const SeatMemory& m = kv.second;
         if (m.camera < 0 && m.ctrl < 0) continue;
-        std::fprintf(f, "%s\t%s\t%d\t%s\t%s\t%s\r\n", kv.first.substr(0, bar).c_str(), kv.first.substr(bar + 1).c_str(),
-                     m.camera + 1, m.camera_name.c_str(), m.ctrl == 1 ? "motion" : (m.ctrl == 0 ? "stick" : "-"),
+        std::fprintf(f, "%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\r\n", kv.first.substr(0, bar).c_str(), kv.first.substr(bar + 1).c_str(),
+                     m.camera + 1, m.camera_name.c_str(), m.mode + 1, m.mode_name.c_str(),
+                     m.ctrl == 1 ? "motion" : (m.ctrl == 0 ? "stick" : "-"),
                      m.ctrl_base == 1 ? "motion" : (m.ctrl_base == 0 ? "stick" : "-"));
     }
     fclose(f);
@@ -191,28 +216,41 @@ bool motion_on(const VehActiveCam& a) {
     return a.motion_aim >= 0 ? a.motion_aim != 0 : g_cfg.veh_aim;
 }
 
-VehActiveCam make_active(int vi, int ci) {
+// Camera `ci` of entry `vi`, in its tethering mode `mi` (wrapped into range): the mode's tracking, offset
+// and aim ring, the camera's everything else.
+VehActiveCam make_active(int vi, int ci, int mi) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const vcp::Camera& c = v.cameras[ci];
+    const int nm = c.mode_count();
+    mi = ((mi % nm) + nm) % nm;
+    const vcp::Tether m = c.mode(mi);
     VehActiveCam a;
     a.valid = true;
     a.type = static_cast<uint8_t>(c.type);
     a.origin = static_cast<uint8_t>(c.origin);
-    a.loc_yaw = c.loc_yaw; a.loc_pitch = c.loc_pitch; a.loc_roll = c.loc_roll; a.loc_view = c.loc_view;
+    a.loc_yaw = m.loc_yaw; a.loc_pitch = m.loc_pitch; a.loc_roll = m.loc_roll; a.loc_view = m.loc_view;
     // Independent: pitch and roll without yaw tilt the view with the vehicle's deck while it keeps its
     // own heading (vehcammath::tracked_frame says exactly what that means).
-    a.rot_yaw = c.rot_yaw; a.rot_pitch = c.rot_pitch; a.rot_roll = c.rot_roll;
+    a.rot_yaw = m.rot_yaw; a.rot_pitch = m.rot_pitch; a.rot_roll = m.rot_roll;
     a.collide = c.collide;
     a.collide_margin = c.collide_margin;
     a.hide_body = c.hides_body();
-    for (int k = 0; k < 3; ++k) a.offset[k] = c.offset[k];
+    a.hide_head = vcp::effective_hide_head(v, ci);
+    for (int k = 0; k < 3; ++k) a.offset[k] = m.offset[k];
     const int choice = ctrl_choice(v);                      // the left stick click beats the file
     a.motion_aim = choice >= 0 ? choice : v.motion_aim;
-    a.aim_marker = v.aim_marker;
+    a.aim_marker = vcp::effective_aim_marker(v, ci, mi);    // the mode's, else the camera's, else the entry's
     a.index = ci;
     a.count = static_cast<int>(v.cameras.size());
+    a.mode = mi;
+    a.mode_count = nm;
     a.recenter_gen = s_recenter_gen;
     return a;
+}
+
+// A mode's name for the readout and the log: its own, else its number.
+std::string mode_label(const vcp::Tether& m, int mi) {
+    return m.name.empty() ? "Mode " + std::to_string(mi + 1) : m.name;
 }
 
 void clear_selection() {
@@ -223,57 +261,71 @@ void clear_selection() {
     g_veh_tp_active.store(false, std::memory_order_relaxed);
 }
 
-// recenter: this selection is a camera CHANGE the player made or got (getting in, left X / Y), so the view
+// recenter: this selection is a camera CHANGE the player made or got (getting in, left Y / X), so the view
 // turns until what aims the vehicle points where it aims (vehcamrecenter; the eye works it out). A file
 // reload keeps your view where it is: editing a number should not spin you round.
-void select(int vi, int ci, const char* why, bool recenter) {
+void select(int vi, int ci, int mi, const char* why, bool recenter) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const int n = static_cast<int>(v.cameras.size());
     if (n <= 0) { clear_selection(); return; }
     ci = ((ci % n) + n) % n;
+    const vcp::Camera& c = v.cameras[ci];
+    const int nm = c.mode_count();
+    mi = ((mi % nm) + nm) % nm;
+    const vcp::Tether mode = c.mode(mi);
     s_vehicle = vi;
     s_vehicle_name = v.name;
     s_camera = ci;
+    s_mode = mi;
     {
         SeatMemory& m = s_memory[mem_key(v)];
-        if (m.camera != ci || m.camera_name != v.cameras[ci].name) {
+        if (m.camera != ci || m.camera_name != c.name || m.mode != mi || m.mode_name != mode.name) {
             m.camera = ci;
-            m.camera_name = v.cameras[ci].name;
+            m.camera_name = c.name;
+            m.mode = mi;
+            m.mode_name = mode.name;
             s_memory_dirty = true;
         }
     }
     if (recenter && g_cfg.veh_cam_recenter) ++s_recenter_gen;
-    const VehActiveCam a = make_active(vi, ci);
+    const VehActiveCam a = make_active(vi, ci, mi);
     publish(a);
     // Our camera draws only for a chase camera; a first-person entry hands the view to the seat camera.
     g_veh_tp_active.store(g_cfg.veh_tp && a.type == static_cast<uint8_t>(vcp::CamType::Chase),
                           std::memory_order_relaxed);
-    const vcp::Camera& c = v.cameras[ci];
-    const std::string loc = vcp::location_tracking_text(c), rot = vcp::rotation_tracking_text(c);
-    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\" (%s): %s, origin %s, "
-                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, "
-                         "controls %s, seat %s",
-                         v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
-                         vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
+    const std::string loc = vcp::location_tracking_text(mode), rot = vcp::rotation_tracking_text(mode);
+    const std::string mlabel = mode_label(mode, mi);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\", mode %d/%d \"%s\" (%s): %s, origin %s, "
+                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, head %s, "
+                         "aim ring %s, controls %s, seat %s",
+                         v.name.c_str(), ci + 1, n, c.name.c_str(), mi + 1, nm, mlabel.c_str(), why, vcp::type_name(c.type),
+                         vcp::origin_name(c.origin), a.offset[0], a.offset[1], a.offset[2],
                          loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
+                         a.hide_head ? "hidden" : "shown", a.aim_marker ? "on" : "off",
                          motion_on(a) ? "motion" : "stick",
                          s_seat != 0 ? vcp::seat_text(static_cast<uint8_t>(s_seat)).c_str() : "unknown");
 
-    // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name
-    // when it has one, and what it does. Placed and timed by the xrtext* defaults.
+    // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name and
+    // its tethering mode's, and what it does. ROTATION TRACKING IS YELLOW: in VR the view turning when you
+    // did not turn is what carries the most motion-sickness risk, so the axes that do it stand out.
+    // Placed and timed by the xrtext* defaults.
     if (g_cfg.veh_cam_readout) {
         std::string md = "# " + v.name + " \xC2\xB7 Camera " + std::to_string(ci + 1) + " of " + std::to_string(n) + "\n";
-        if (!c.name.empty()) md += "## " + c.name + "\n";
-        if (c.type == vcp::CamType::FirstPerson) {
+        const bool first_person = c.type == vcp::CamType::FirstPerson;
+        const bool modes = nm > 1 && !first_person;
+        if (modes) md += "## " + (c.name.empty() ? mlabel : c.name + " \xC2\xB7 " + mlabel) + "\n";
+        else if (!c.name.empty()) md += "## " + c.name + "\n";
+        if (first_person) {
             md += "**Type:** First-person seat camera\n";
         } else {
+            if (modes) md += "**Tethering:** " + std::to_string(mi + 1) + " of " + std::to_string(nm) + " *(left X)*\n";
             md += std::string("**Origin:** ")
                 + (c.origin == vcp::Origin::Seat ? "Seat" : (c.origin == vcp::Origin::Head ? "Player's head" : "Vehicle")) + "\n";
             char off[96];
-            std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", c.offset[0], c.offset[1], c.offset[2]);
+            std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
             md += off;
             md += "**Location Tracking:** " + loc + "\n";
-            md += "**Rotation Tracking:** " + rot + "\n";
+            md += "**Rotation Tracking:** " + ((mode.rot_yaw || mode.rot_pitch || mode.rot_roll) ? "==" + rot + "==" : rot) + "\n";
         }
         md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
         // The seat as the GAME reports it -- what an entry's "seat" is matched against.
@@ -295,7 +347,7 @@ void apply_ctrl_toggle() {
         API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: this is the first-person seat "
                              "camera, which has no motion aim -- stick controls stay", v.name.c_str());
         xrtext_show("# Stick controls\n" + which +
-                    "Motion aim needs one of the chase cameras\n*Step to one with left X / Y*\n");
+                    "Motion aim needs one of the chase cameras\n*Step to one with left Y*\n");
         return;
     }
     const bool want = !motion_on(cur);
@@ -306,7 +358,7 @@ void apply_ctrl_toggle() {
         else              { m.ctrl = want ? 1 : 0; m.ctrl_base = base ? 1 : 0; }
         s_memory_dirty = true;
     }
-    if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+    if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera, s_mode));
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: %s controls%s", v.name.c_str(),
                          want ? "MOTION" : "STICK",
                          want == base ? " (this vehicle's default)" : " (kept for this seat)");
@@ -320,6 +372,26 @@ void apply_ctrl_toggle() {
     }
     md += "*Click the left stick to switch*\n";
     xrtext_show(md);
+}
+
+// LEFT X: the current camera's next tethering mode (what turns your view, what carries the camera round,
+// and where it sits), recentred like a camera change. A camera with one mode says so instead -- the press
+// is answered either way, so it shows whatever vehcamreadout says.
+void apply_mode_step(int dir) {
+    const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
+    if (s_camera < 0 || s_camera >= static_cast<int>(v.cameras.size())) return;
+    const vcp::Camera& c = v.cameras[s_camera];
+    if (c.type == vcp::CamType::FirstPerson || c.mode_count() <= 1) {
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left X: camera \"%s\" has %s", v.name.c_str(), c.name.c_str(),
+                             c.type == vcp::CamType::FirstPerson ? "no tethering modes (the first-person seat camera)"
+                                                                 : "one tethering mode");
+        xrtext_show("# " + (c.name.empty() ? std::string("This camera") : c.name) + "\n## " + v.name + "\n"
+                    + (c.type == vcp::CamType::FirstPerson ? "The first-person seat camera has no tethering modes\n"
+                                                           : "This camera has one tethering mode\n")
+                    + "*Left Y: next camera*\n");
+        return;
+    }
+    select(s_vehicle, s_camera, s_mode + dir, dir > 0 ? "left X: next mode" : "left X: previous mode", /*recenter=*/true);
 }
 
 // UEVR FLATTENS the view to its yaw right after our callback while VR_DecoupledPitch is on
@@ -398,6 +470,10 @@ VehActiveCam veh_active_cam() {
 
 void veh_cam_step(int dir) {
     s_step.fetch_add(dir > 0 ? 1 : -1, std::memory_order_relaxed);
+}
+
+void veh_cam_mode_step(int dir) {
+    s_mode_step.fetch_add(dir > 0 ? 1 : -1, std::memory_order_relaxed);
 }
 
 void veh_ctrl_toggle() {
@@ -486,6 +562,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
             s_chassis = 0; s_seat = 0; s_vehicle_actor.clear();
         }
         s_step.store(0, std::memory_order_relaxed);
+        s_mode_step.store(0, std::memory_order_relaxed);
         s_ctrl_toggle.store(0, std::memory_order_relaxed);
         decoupled_pitch_update(false);
         return;
@@ -517,19 +594,39 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
                 // but take this seat's kept controls.
                 API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game names your seat: %s", s_vehicle_name.c_str(),
                                      seat_said.c_str());
-                if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+                if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size()))
+                    publish(make_active(s_vehicle, s_camera, s_mode));
             } else {
-                int ci = v.default_camera;
-                if (reload && prev == v.name) ci = s_camera;   // an edit keeps you in the camera you are in
-                else if (kept >= 0) ci = kept;                 // this seat's last camera
-                select(vi, ci, reload ? "file reloaded" : (seat_only ? "seat named" : "entered"), /*recenter=*/!reload);
+                // This seat's last camera, in its last mode -- by NAME, so a file edit that reorders the
+                // cameras keeps you in the one you are in (select() keeps the memory current).
+                int ci = v.default_camera, mi = v.default_mode;
+                if (kept >= 0) {
+                    ci = kept;
+                    const int km = remembered_mode(v, kept);
+                    mi = km >= 0 ? km : (kept == v.default_camera ? v.default_mode : 0);
+                } else if (reload && prev == v.name) {
+                    ci = s_camera; mi = s_mode;
+                }
+                select(vi, ci, mi, reload ? "file reloaded" : (seat_only ? "seat named" : "entered"), /*recenter=*/!reload);
             }
         }
     }
 
+    // LEFT Y: the next camera, in the mode that keeps your tethering choice (vcp::carry_mode).
     const int step = s_step.exchange(0, std::memory_order_relaxed);
-    if (step != 0 && s_vehicle >= 0)
-        select(s_vehicle, s_camera + step, step > 0 ? "left Y: next" : "left X: previous", /*recenter=*/true);
+    if (step != 0 && s_vehicle >= 0) {
+        const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
+        const int n = static_cast<int>(v.cameras.size());
+        if (n > 0 && s_camera >= 0 && s_camera < n) {
+            const int to = (((s_camera + step) % n) + n) % n;
+            const int mi = vcp::carry_mode(v.cameras[to], v.cameras[s_camera].mode(s_mode));
+            select(s_vehicle, to, mi, step > 0 ? "left Y: next camera" : "previous camera", /*recenter=*/true);
+        }
+    }
+
+    // LEFT X: the current camera's next tethering mode.
+    const int mstep = s_mode_step.exchange(0, std::memory_order_relaxed);
+    if (mstep != 0 && s_vehicle >= 0) apply_mode_step(mstep);
 
     if (s_ctrl_toggle.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_ctrl_toggle();
 
@@ -540,7 +637,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
         const auto it = s_memory.find(mem_key(v));
         if (it != s_memory.end() && it->second.ctrl >= 0 && ctrl_choice(v) < 0) {
-            if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+            if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera, s_mode));
             API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- its default controls changed, so your left-stick "
                                  "choice gives way to it (%s)", v.name.c_str(), base_motion(v) ? "motion" : "stick");
         }

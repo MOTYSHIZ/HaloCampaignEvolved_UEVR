@@ -1057,6 +1057,9 @@ int s_seat_other_n = 0;
 // Ask the vehicles within 15 m, nearest first, which one lists YOU in a seat. me = the actors that are
 // you (the pawn, and the Spartan biped the body hider picks). Nearest wins if more than one does.
 bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* out) {
+#if HALO_VR_DEV
+    const SeatFix prev = s_seat;   // for the seat table's log-on-change; taken before `out` (maybe s_seat) is cleared
+#endif
     *out = SeatFix{};
     s_seat_other_n = 0;
     if (!seat_refl_ready()) return false;
@@ -1103,16 +1106,158 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
         out->by_path = via_path;
         s_seats_proven = true;
 #if HALO_VR_DEV
-        for (int i = 0; i < n && i < 16; ++i)
-            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls path=%ls%s", i,
-                                 rows[i].driver ? "driver " : "", rows[i].gunner ? "gunner " : "",
-                                 rows[i].occupied ? "occupied" : "empty",
-                                 rows[i].occupant != nullptr ? rows[i].occupant->get_full_name().c_str() : L"none",
-                                 rows[i].path.empty() ? L"-" : rows[i].path.c_str(),
-                                 i == mine ? "  <-- YOU" : "");
+        // The seat table, when the answer is new: the ~2 s re-check asks again all ride long, and a table
+        // repeated every time it agrees says nothing (it filled the log at four lines every 2 s).
+        if (!prev.valid || prev.actor != out->actor || prev.seat != out->seat || prev.bits != out->bits)
+            for (int i = 0; i < n && i < 16; ++i)
+                API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls path=%ls%s", i,
+                                     rows[i].driver ? "driver " : "", rows[i].gunner ? "gunner " : "",
+                                     rows[i].occupied ? "occupied" : "empty",
+                                     rows[i].occupant != nullptr ? rows[i].occupant->get_full_name().c_str() : L"none",
+                                     rows[i].path.empty() ? L"-" : rows[i].path.c_str(),
+                                     i == mine ? "  <-- YOU" : "");
 #endif
     }
     return out->valid;
+}
+
+// ---------------------------------------------------------------- THE PLAYER'S HEAD, HIDDEN ("hideHead")
+//
+// True first person from a camera at the Chief's head -- a turret's head camera -- where his own helmet
+// otherwise fills the view. The camera file's "hideHead", per seat or per camera; off by default, since the
+// Chief in his seat is part of the picture everywhere else (the user, 2026-09-26).
+//
+// UE's own USkinnedMeshComponent.HideBoneByName on his head bone: that bone and every bone below it draw at
+// zero scale. Only the SKINNING changes -- his bones' positions do not, so the playerhead origin still reads
+// the head -- and PBO_None leaves his physics alone. Called on EVERY mesh part of his biped: the part that
+// owns the pose takes it, and parts that follow its pose (a modular character's armour pieces) take it from
+// there -- the engine ignores the call on those, as on a part without that bone. The parameter blocks come
+// from the functions' own reflection, by name, so a build that reshapes them is refused, not written into.
+// UNDONE on the way out -- a camera without it, the seat left, a cutscene: the Chief appears in cutscenes.
+struct HeadHide {
+    int state = -1;                              // -1 not tried; 0 unusable (fail closed); 1 ready
+    API::UClass* skinned = nullptr;              // USkinnedMeshComponent: the parts the call is for
+    int32_t hide_name = -1, hide_op = -1, unhide_name = -1, is_name = -1, is_ret = -1;
+    TrackedObject parts[kMaxDriverParts];
+    int n = 0;
+    uintptr_t body = 0;                          // the Body the parts were collected for
+    std::wstring bone;
+    bool on = false;
+    uint32_t reassert = 0;
+};
+HeadHide s_hh;
+
+int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
+    for (auto* f = fn->get_child_properties(); f != nullptr; f = f->get_next())
+        if (ffield_name(f) == name) return reinterpret_cast<API::FProperty*>(f)->get_offset();
+    return -1;
+}
+
+bool head_hide_ready() {
+    if (s_hh.state >= 0) return s_hh.state == 1;
+    s_hh.state = 0;
+    s_hh.skinned = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.SkinnedMeshComponent");
+    auto* hide = s_hh.skinned != nullptr ? s_hh.skinned->find_function(L"HideBoneByName") : nullptr;
+    auto* unhide = s_hh.skinned != nullptr ? s_hh.skinned->find_function(L"UnHideBoneByName") : nullptr;
+    auto* is = s_hh.skinned != nullptr ? s_hh.skinned->find_function(L"IsBoneHiddenByName") : nullptr;
+    if (hide != nullptr && unhide != nullptr
+        && hide->get_properties_size() <= (int32_t)RIG_PARAM_BUF && unhide->get_properties_size() <= (int32_t)RIG_PARAM_BUF) {
+        s_hh.hide_name = fn_param(hide, L"BoneName");
+        s_hh.hide_op = fn_param(hide, L"PhysBodyOption");
+        s_hh.unhide_name = fn_param(unhide, L"BoneName");
+        if (is != nullptr && is->get_properties_size() <= (int32_t)RIG_PARAM_BUF) {   // the readback: optional
+            s_hh.is_name = fn_param(is, L"BoneName");
+            s_hh.is_ret = fn_param(is, L"ReturnValue");
+        }
+        if (s_hh.hide_name >= 0 && s_hh.hide_op >= 0 && s_hh.unhide_name >= 0) s_hh.state = 1;
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: hiding the player's head %s (SkinnedMeshComponent %s, "
+                         "HideBoneByName %s, UnHideBoneByName %s)",
+                         s_hh.state == 1 ? "is available" : "is NOT available on this build -- hideHead does nothing",
+                         s_hh.skinned != nullptr ? "found" : "NOT found", hide != nullptr ? "found" : "NOT found",
+                         unhide != nullptr ? "found" : "NOT found");
+    return s_hh.state == 1;
+}
+
+void head_hide_call(API::UObject* part, bool hide) {
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    const API::FName name = make_fname(s_hh.bone.c_str());   // make_fname: API::FName resolves to None here
+    if (hide) {
+        std::memcpy(p + s_hh.hide_name, &name, sizeof(int32_t) * 2);
+        p[s_hh.hide_op] = 0;                                  // PBO_None: his physics stays as it is
+        part->call_function(L"HideBoneByName", p);
+    } else {
+        std::memcpy(p + s_hh.unhide_name, &name, sizeof(int32_t) * 2);
+        part->call_function(L"UnHideBoneByName", p);
+    }
+}
+
+// -1 = no readback on this build; else whether the part says the bone is hidden.
+int head_hidden_readback(API::UObject* part) {
+    if (s_hh.is_name < 0 || s_hh.is_ret < 0) return -1;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    const API::FName name = make_fname(s_hh.bone.c_str());
+    std::memcpy(p + s_hh.is_name, &name, sizeof(int32_t) * 2);
+    part->call_function(L"IsBoneHiddenByName", p);
+    return p[s_hh.is_ret] != 0 ? 1 : 0;
+}
+
+void head_hide_restore(const char* why) {
+    if (!s_hh.on) return;
+    int n = 0;
+    for (int i = 0; i < s_hh.n; ++i)
+        if (auto* c = s_hh.parts[i].get()) { head_hide_call(c, false); ++n; }
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head shown again (%s; %d part(s))", why, n);
+    s_hh.on = false;
+}
+
+// Game thread, every tick. want = the selected camera asks for it; body = the Chief's Body (nullptr = not
+// resolved yet) at object-array slot body_idx; bone = his head bone (empty = none found). Applied on a
+// change and re-asserted once a second -- a hidden bone state is component state, and nothing is known to
+// reset it, but a ride is long.
+void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std::wstring& bone) {
+    if (!want || body == nullptr || bone.empty() || !g_cfg.enabled) {
+        head_hide_restore(!want ? "this camera does not hide it" : "the player's body or head bone is not resolved");
+        return;
+    }
+    if (s_hh.on && ((uintptr_t)body != s_hh.body || bone != s_hh.bone)) head_hide_restore("a new body");
+    if (!head_hide_ready()) return;
+    if (!s_hh.on) {
+        s_hh.body = (uintptr_t)body;
+        s_hh.bone = bone;
+        s_hh.n = 0;
+        auto* owner = body->get_outer();
+        for (const ScanHit& h : s_res_parts) {
+            if (s_hh.n >= kMaxDriverParts) break;
+            if (h.owner != owner || !scan_hit_live(h) || !h.o->is_a(s_hh.skinned)) continue;
+            s_hh.parts[s_hh.n++].set_at(h.o, h.i);
+        }
+        if (s_hh.n == 0) { s_hh.parts[0].set_at(body, body_idx); s_hh.n = 1; }   // not in the walk: the Body itself
+        int hidden = 0, readable = 0;
+        for (int i = 0; i < s_hh.n; ++i) {
+            auto* c = s_hh.parts[i].get();
+            if (c == nullptr) continue;
+            head_hide_call(c, true);
+            const int r = head_hidden_readback(c);
+            if (r >= 0) { ++readable; hidden += r; }
+        }
+        s_hh.on = true;
+        s_hh.reassert = 0;
+        // The readback says the call LANDED on the part that owns the pose (the followers report their own,
+        // untouched state) -- not that the head stopped drawing: only the headset says that.
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- bone \"%ls\" on %d part(s); "
+                             "the readback says hidden on %d of %d", s_hh.bone.c_str(), s_hh.n, hidden, readable);
+#if HALO_VR_DEV
+        for (int i = 0; i < s_hh.n; ++i)
+            if (auto* c = s_hh.parts[i].get())
+                API::get()->log_info("[Halo-CampE-UEVR] VEHCAM   head-hide part %ls (hidden=%d)", c->get_full_name().c_str(),
+                                     head_hidden_readback(c));
+#endif
+        return;
+    }
+    if ((++s_hh.reassert % 32u) == 0u)
+        for (int i = 0; i < s_hh.n; ++i)
+            if (auto* c = s_hh.parts[i].get()) head_hide_call(c, true);
 }
 
 } // namespace
@@ -1342,9 +1487,10 @@ std::atomic<float>     g_veh_turn_yaw{0.0f};
 std::atomic<float>     g_veh_turn_reset_val{0.0f};
 std::atomic<uint32_t>  g_veh_turn_reset_seq{0}, g_veh_turn_reset_ack{0};
 
-// Left Y / left X in a vehicle: next / previous camera. Called from the input hook (any thread); the
-// game tick applies it (VehCamSelect.cpp).
+// Left Y in a vehicle: the next camera; left X: the current camera's next tethering mode. Called from the
+// input hook (any thread); the game tick applies them (VehCamSelect.cpp).
 void veh_cam_next_prev(int dir) { veh_cam_step(dir); }
+void veh_cam_mode_next() { veh_cam_mode_step(+1); }
 
 // vehaim: the Blam aim write (BlamDrive.cpp) consults this to lift its stick-mode hold-off in a
 // vehicle. True only when the owned TP camera is ACTIVE AND motion aim is on for this vehicle (its
@@ -2153,8 +2299,8 @@ void vehcam_game_tick_vehicle() {
     //
     // Resolved whenever the camera system runs in a vehicle (vehtp), WHICHEVER camera is selected: the
     // chassis is how the vehicle is identified, and a first-person entry still needs it to step back.
-    // Then the camera file picks the vehicle's cameras and applies left X / left Y (VehCamSelect.cpp),
-    // which is what sets g_veh_tp_active.
+    // Then the camera file picks the vehicle's cameras and applies left Y (camera) / left X (tethering
+    // mode) (VehCamSelect.cpp), which is what sets g_veh_tp_active.
     {
         static bool s_sys_was = false;
         static bool s_tp_was = false;
@@ -2278,7 +2424,8 @@ void vehcam_game_tick_vehicle() {
         // from the ride scan's finished walk (the body hider's rule: nearest the rider); his head bone's
         // name is found once by listing the skeleton's bones. Each tick: the head's world position, turned
         // into his ACTOR's frame, so the eye can rebuild it against that frame live -- a turret turns the
-        // Chief even where it does not turn its own mesh.
+        // Chief even where it does not turn its own mesh. The same Body and bone serve "hideHead"
+        // (head_hide_update, below), whatever the camera's origin.
         {
             static TrackedObject s_rider;
             static uint32_t      s_rider_wait = 0;
@@ -2287,12 +2434,16 @@ void vehcam_game_tick_vehicle() {
             const VehActiveCam hc = veh_active_cam();
             const bool want_head = sys && cp != 0 && hc.valid
                                 && hc.origin == static_cast<uint8_t>(vehcampresets::Origin::Head);
+            // Only while OUR camera draws: a first-person entry hides the whole body its own way.
+            const bool want_hide = sys && cp != 0 && hc.valid && hc.hide_head
+                                && g_veh_tp_active.load(std::memory_order_relaxed);
+            API::UObject* hide_body = nullptr;
             if (!sys) {
                 s_rider.reset(); s_rider_wait = 0;
                 g_tp_rider_ptr.store(0, std::memory_order_relaxed);
                 g_tp_rider_idx.store(-1, std::memory_order_relaxed);
                 g_tp_head_valid.store(false, std::memory_order_relaxed);
-            } else if (want_head) {
+            } else if (want_head || want_hide) {
                 auto* body = s_rider.get_checked(L"SkeletalMeshComponent");
                 if (body == nullptr) {
                     if (s_rider_wait == 0) s_rider_wait = ride_scan_request(/*force_new=*/false);
@@ -2309,6 +2460,7 @@ void vehcam_game_tick_vehicle() {
                 }
                 bool ok = false;
                 if (body != nullptr) {
+                    hide_body = body;
                     if (!s_head_tried) {
                         s_head_tried = true;
                         int32_t nb = 0;
@@ -2322,7 +2474,7 @@ void vehcam_game_tick_vehicle() {
                     }
                     auto* actor = body->get_outer();
                     Vec3 hw{}, bl{}, al{}, ar{};
-                    if (!s_head_bone.empty() && actor != nullptr && call_socket_location(body, s_head_bone.c_str(), &hw)
+                    if (want_head && !s_head_bone.empty() && actor != nullptr && call_socket_location(body, s_head_bone.c_str(), &hw)
                         && call_ret_vec3(body, L"K2_GetComponentLocation", &bl)
                         && call_ret_vec3(actor, L"K2_GetActorLocation", &al)
                         && call_ret_vec3(actor, L"K2_GetActorRotation", &ar)) {
@@ -2348,7 +2500,7 @@ void vehcam_game_tick_vehicle() {
                     // camera follows his actor's frame on the belief that it does. Every ~2 s while a
                     // playerhead camera is up: his actor's rotation beside his Body's and the chassis', the
                     // head offset, and whether his actor is the local pawn (the "seat" origin reads the pawn).
-                    if (g_cfg.veh_probe) {
+                    if (g_cfg.veh_probe && want_head) {
                         static uint32_t s_hdlog = 0;
                         if ((s_hdlog++ % 64u) == 0u) {
                             static TrackedObject s_hd_ch;
@@ -2378,6 +2530,7 @@ void vehcam_game_tick_vehicle() {
             } else {
                 g_tp_head_valid.store(false, std::memory_order_relaxed);
             }
+            head_hide_update(want_hide, hide_body, s_rider.index, s_head_bone);
         }
 
         const bool tp_on = sys && cp != 0 && g_veh_tp_active.load(std::memory_order_relaxed);
@@ -2883,7 +3036,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             }
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
             if (ac.rot_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
-            // RECENTER ON A CAMERA CHANGE (vehcamrecenter): getting in, or left X / left Y, turns the view so
+            // RECENTER ON A CAMERA CHANGE (vehcamrecenter): getting in, left Y or left X, turns the view so
             // WHAT AIMS THE VEHICLE points where the VEHICLE IS AIMING. The source: the aim hand while your hand
             // aims this vehicle (veh_aim_hand_index), else your head. The target:
             //  - a camera that TURNS WITH the vehicle (rotationTracking yaw): the frame it turns with (VF: the

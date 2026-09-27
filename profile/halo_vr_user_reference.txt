@@ -565,11 +565,13 @@
 
 # ------------------------------------------------------------------------- VEHICLE CAMERAS (vehtp)
 # Camera readout. A short note in front of you whenever the vehicle camera changes: the vehicle, the
-# camera's number and name, what it does, and which controls it uses.
+# camera's number and name, its tethering mode, what it does (anything that turns your view is in
+# yellow), and which controls it uses.
 #vehcamreadout=1
-# Line up with the vehicle on a camera change. Getting in, or stepping cameras with left X or left Y,
-# turns your view so your aiming hand points where the vehicle is aiming (your head, when you aim with
-# the stick). A camera that turns with the vehicle then holds still until you move your hand.
+# Line up with the vehicle on a camera change. Getting in, stepping cameras with left Y, or stepping
+# tethering modes with left X turns your view so your aiming hand points where the vehicle is aiming
+# (your head, when you aim with the stick). A camera that turns with the vehicle then holds still until
+# you move your hand.
 #vehcamrecenter=1
 # Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
 # that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also

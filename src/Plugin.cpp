@@ -130,7 +130,7 @@
 
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
-#include "features/vehcam/VehCam.hpp"   // veh_cam_next_prev(): left X / left Y step the vehicle camera
+#include "features/vehcam/VehCam.hpp"   // veh_cam_next_prev() / veh_cam_mode_next(): left Y / left X in a vehicle
 #include "features/vehcam/VehCamSelect.hpp"   // vehcam_presets_init/poll: halo_vr_vehcams.json
 #include "AimTrace.hpp"
 #include "MemScan.hpp"
@@ -13702,8 +13702,9 @@ public:
         const WORD seat_btn_down = (WORD)(raw_btn & ~s_seat_prev_btn);
         s_seat_prev_btn = raw_btn;
 
-        // ---- VEHICLE LEFT X / LEFT Y -> PREVIOUS / NEXT CAMERA. Each vehicle has its own list of
-        // cameras in halo_vr_vehcams.json (VehCamSelect.cpp applies the step on the game tick).
+        // ---- VEHICLE LEFT Y -> NEXT CAMERA, LEFT X -> THE CAMERA'S NEXT TETHERING MODE. Each vehicle has
+        // its own list of cameras in halo_vr_vehcams.json, each with its tethering modes (what turns your
+        // view, what carries the camera round, where it sits); VehCamSelect.cpp applies both on the game tick.
         //
         // READ BY UEVR ACTION, NOT BY PAD MASK. The masks do not follow the controller's labels here
         // (Config.hpp, measured: left X arrives as 0x2000, which XInput calls B, and the right
@@ -13725,7 +13726,7 @@ public:
                     s_tried = true;
                     s_ax = API::VR::get_action_handle("/actions/default/in/AButtonLeft");
                     s_ay = API::VR::get_action_handle("/actions/default/in/BButtonLeft");
-                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: left X / Y camera steps read by action: "
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: left Y (camera) / left X (tethering mode) read by action: "
                                          "AButtonLeft %s, BButtonLeft %s",
                                          s_ax ? "resolved" : "NOT found", s_ay ? "resolved" : "NOT found");
                 }
@@ -13736,7 +13737,7 @@ public:
                     const bool x = s_ax != nullptr && API::VR::is_action_active(s_ax, left);
                     const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
                     if (s_primed) {
-                        if (x && !s_x) veh_cam_next_prev(-1);   // X: previous camera
+                        if (x && !s_x) veh_cam_mode_next();     // X: the camera's next tethering mode
                         if (y && !s_y) veh_cam_next_prev(+1);   // Y: next camera
                     }
                     s_x = x; s_y = y; s_primed = true;

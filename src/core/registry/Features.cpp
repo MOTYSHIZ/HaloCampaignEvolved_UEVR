@@ -242,7 +242,7 @@ const FeatureRow kFeatures[] = {
     // ---- The author's own vehicle cameras (branch feature/vehicle-aim-camera-decouple). The text panel's
     // keys sit under the cameras because the camera readout is, for now, the panel's only user.
     { "vehtp",        1, Tier::Experimental, "Vehicles", "Vehicle cameras",
-      "Your own cameras in vehicles, listed per vehicle in halo_vr_vehcams.json: at your seat or behind the vehicle, level or turning and tilting with it. Left Y steps to the next camera, left X to the previous one, and a short note in front of you says which.",
+      "Your own cameras in vehicles, listed per vehicle in halo_vr_vehcams.json: at your seat or behind the vehicle, level or turning and tilting with it. Left Y steps to the next camera, left X through its tethering modes (held still, or turning with the vehicle), and a short note in front of you says which.",
       "vehcamhidebody,vehcamreadout,vehcamrecenter,vehctrlclick,vehmarker,vehmarkeralpha,vehmarkercb,vehmarkercg,"
       "vehmarkercr,vehmarkerdot,vehmarkerradius,vehmarkersize,vehmarkerthick,"
       "xrtext,xrtextbg,xrtextdist,xrtextfadein,xrtextfadeout,"
