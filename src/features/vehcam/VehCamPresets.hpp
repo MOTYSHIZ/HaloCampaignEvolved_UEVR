@@ -39,15 +39,18 @@ enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2 };
 
 // ONE TETHERING MODE of a camera. Left Y steps cameras; left X steps the current camera's modes. A mode
 // sets what carries the camera's position round (locationTracking), what turns your view
-// (rotationTracking) and where it sits (offset -- a tethered view often wants a slightly different spot),
-// and may turn the vehicle aim ring on or off; anything it leaves out is the camera's own. So one camera
-// can be "Cockpit" held still AND tethered, switched with one button while filming.
+// (rotationTracking), where it sits (offset -- a tethered view often wants a slightly different spot) and
+// what that is measured from (origin), and may turn the vehicle aim ring on or off; anything it leaves out
+// is the camera's own. So one camera can be "Cockpit" held still AND tethered, switched with one button
+// while filming -- and a turret's tethered mode can ride the Chief ("playerhead", who turns with the gun)
+// while its untethered mode stays on the seat.
 struct Tether {
     std::string name;
     float offset[3] = {0.0f, 0.0f, 0.0f};     // cm: forward, right, up (the camera's, unless the mode says)
     bool loc_yaw = true, loc_pitch = true, loc_roll = true, loc_view = false;
     bool rot_yaw = false, rot_pitch = false, rot_roll = false;
     int  aim_marker = -1;                     // -1 = the camera's, else the vehicle entry's; 0 / 1 = off / on
+    int  origin = -1;                         // -1 = the camera's; else an Origin
 };
 
 struct Camera {
@@ -71,10 +74,14 @@ struct Camera {
     int     aim_marker = -1;                  // "aimMarker": -1 = the vehicle entry's; 0 / 1
     // "tethering": the modes left X steps through. Empty = one mode, the camera's own tracking above.
     std::vector<Tether> tethering;
-    bool hides_body() const {
+    bool hides_body() const { return hides_body(origin); }
+    // ...from origin `o` -- a tethering mode may measure from somewhere else than its camera.
+    bool hides_body(Origin o) const {
         if (hide_body >= 0) return hide_body != 0;
-        return type == CamType::FirstPerson || origin != Origin::Vehicle;
+        return type == CamType::FirstPerson || o != Origin::Vehicle;
     }
+    // Mode `m`'s origin: its own, else this camera's.
+    Origin origin_of(const Tether& m) const { return m.origin >= 0 ? static_cast<Origin>(m.origin) : origin; }
     int mode_count() const { return tethering.empty() ? 1 : static_cast<int>(tethering.size()); }
     // Mode i (wrapped into range): the camera's own tracking when it lists no tethering.
     Tether mode(int i) const {

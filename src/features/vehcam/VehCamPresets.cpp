@@ -156,11 +156,25 @@ struct Apply {
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", rt.t.offset[i]);
             } else if (key == "aimMarker") {
                 ok = tri(x, w, rt.t.aim_marker, "true, false or null (null = the camera's)");
+            } else if (key == "origin") {
+                Origin o = Origin::Vehicle;
+                if (x.is_null()) { rt.t.origin = -1; continue; }
+                if (!origin_value(x, w, o, "\"vehicle\", \"seat\", \"playerhead\" or null (null = the camera's)")) return false;
+                rt.t.origin = static_cast<int>(o);
             } else {
                 r.ignored.push_back(w);
             }
             if (!ok) return false;
         }
+        return true;
+    }
+    // "vehicle" | "seat" | "playerhead" ("head" too).
+    bool origin_value(const Value& x, const std::string& w, Origin& o, const char* want) {
+        if (!x.is_str()) return type_error(x, w, want);
+        if (ieq(x.s, "vehicle")) o = Origin::Vehicle;
+        else if (ieq(x.s, "seat")) o = Origin::Seat;
+        else if (ieq(x.s, "playerhead") || ieq(x.s, "head")) o = Origin::Head;
+        else return type_error(x, w, want);
         return true;
     }
     bool camera(const Value& v, const std::string& where, Camera& c) {
@@ -182,11 +196,7 @@ struct Apply {
                 else if (ieq(x.s, "firstperson")) c.type = CamType::FirstPerson;
                 else return type_error(x, w, "\"chase\" or \"firstperson\"");
             } else if (key == "origin") {
-                if (!x.is_str()) return type_error(x, w, "\"vehicle\", \"seat\" or \"playerhead\"");
-                if (ieq(x.s, "vehicle")) c.origin = Origin::Vehicle;
-                else if (ieq(x.s, "seat")) c.origin = Origin::Seat;
-                else if (ieq(x.s, "playerhead") || ieq(x.s, "head")) c.origin = Origin::Head;
-                else return type_error(x, w, "\"vehicle\", \"seat\" or \"playerhead\"");
+                if (!origin_value(x, w, c.origin, "\"vehicle\", \"seat\" or \"playerhead\"")) return false;
             } else if (key == "offset") {
                 if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
@@ -495,9 +505,10 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  rotationTracking  which vehicle rotations turn your VIEW: any of yaw, pitch, roll ([] = the world\",\n";
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
-    s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, offset,\",\n";
+    s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, origin, offset,\",\n";
     s += "    \"                    locationTracking, rotationTracking, aimMarker }, each taking the camera's own for\",\n";
-    s += "    \"                    what it leaves out -- e.g. the same cockpit held still and tethered to the vehicle\",\n";
+    s += "    \"                    what it leaves out -- e.g. the same cockpit held still and tethered to the vehicle,\",\n";
+    s += "    \"                    or a turret held still at the seat and tethered to the Chief (origin playerhead)\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
     s += "    \"  hideBody          true | false: hide your character's body (left out = hidden unless the origin\",\n";
     s += "    \"                    is the vehicle);\",\n";
@@ -567,6 +578,8 @@ std::string table_to_json(const Table& t, bool guide) {
                     std::string f;
                     auto add = [&f](const std::string& kv) { f += (f.empty() ? "" : ", ") + kv; };
                     if (!m.name.empty()) add("\"name\": " + quoted(m.name));
+                    if (m.origin >= 0 && m.origin != static_cast<int>(c.origin))
+                        add(std::string("\"origin\": \"") + origin_name(static_cast<Origin>(m.origin)) + "\"");
                     if (m.offset[0] != c.offset[0] || m.offset[1] != c.offset[1] || m.offset[2] != c.offset[2])
                         add("\"offset\": [" + fmt_num(m.offset[0]) + ", " + fmt_num(m.offset[1]) + ", " + fmt_num(m.offset[2]) + "]");
                     if (m.loc_view != c.loc_view || m.loc_yaw != c.loc_yaw || m.loc_pitch != c.loc_pitch || m.loc_roll != c.loc_roll)
