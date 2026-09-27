@@ -123,24 +123,43 @@ struct Apply {
         view = false;
         return axes(x, w, yaw, pitch, roll);
     }
-    // "leashMin" / "leashMax": [forward, right, up] in cm, each a number or null (no limit that way); null
-    // for the whole key = no limits, which is how a mode drops its camera's. A min is 0 or less and a max
-    // 0 or more: the camera's point stays inside the box, so a leash only ever stops you, never moves you.
-    bool leash(const Value& x, const std::string& w, float dst[3], bool is_min) {
+    // "leashMin" / "leashMax" as the file wrote them: per axis [forward, right, up] a limit in cm, null (no
+    // limit that way) or "inherit" (the level above's value on that axis -- the seat's for a camera, the
+    // camera's for a mode). The whole key may be null (no limits: how a camera or mode drops the leash above
+    // it) or "inherit" (the same as leaving it out); a shorter list = no limit on the axes it leaves out.
+    // Kept as written until the level above is known, then resolve()d -- a mode's list may come before its
+    // camera's own leash in the file. A min is 0 or less and a max 0 or more: the camera's point stays
+    // inside the box, so a leash only ever stops you, never moves you.
+    struct LeashSide { float v[3]; bool inherit[3]; };
+    static LeashSide leash_inherited() { return LeashSide{{0.0f, 0.0f, 0.0f}, {true, true, true}}; }
+    static void resolve(const LeashSide& s, const float parent[3], float dst[3]) {
+        for (int k = 0; k < 3; ++k) dst[k] = s.inherit[k] ? parent[k] : s.v[k];
+    }
+    bool leash(const Value& x, const std::string& w, bool is_min, LeashSide& out) {
         const float none = is_min ? -kUnleashed : kUnleashed;
-        dst[0] = dst[1] = dst[2] = none;
+        for (int k = 0; k < 3; ++k) { out.v[k] = none; out.inherit[k] = false; }
+        const char* want = is_min ? "[forward, right, up] in cm, each 0 or less, null (no limit) or \"inherit\""
+                                  : "[forward, right, up] in cm, each 0 or more, null (no limit) or \"inherit\"";
         if (x.is_null()) return true;
-        const char* want = is_min ? "[forward, right, up] in cm, each 0 or less, or null (no limit that way)"
-                                  : "[forward, right, up] in cm, each 0 or more, or null (no limit that way)";
+        if (x.is_str()) {
+            if (!ieq(x.s, "inherit")) return type_error(x, w, want);
+            for (int k = 0; k < 3; ++k) out.inherit[k] = true;
+            return true;
+        }
         if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, want);
         for (std::size_t i = 0; i < x.items.size(); ++i) {
             const Value& e = x.items[i];
             const std::string we = w + "[" + std::to_string(i) + "]";
             if (e.is_null()) continue;
+            if (e.is_str()) {
+                if (!ieq(e.s, "inherit")) return type_error(e, we, want);
+                out.inherit[i] = true;
+                continue;
+            }
             float f = none;
             if (!num(e, we, f)) return false;
             if (is_min ? f > 0.0f : f < 0.0f) return type_error(e, we, want);
-            dst[i] = f;
+            out.v[i] = f;
         }
         return true;
     }
@@ -153,7 +172,11 @@ struct Apply {
     }
     // One tethering mode, with what it named -- the rest is the camera's, filled in once the whole camera
     // is read (the file may list "tethering" before the camera's own tracking).
-    struct RawTether { Tether t; bool has_loc = false, has_rot = false, has_off = false, has_lmin = false, has_lmax = false; };
+    struct RawTether {
+        Tether t;
+        bool has_loc = false, has_rot = false, has_off = false;
+        LeashSide lmin = leash_inherited(), lmax = leash_inherited();   // left out = the camera's
+    };
     bool tether(const Value& e, const std::string& we, RawTether& rt) {
         if (!e.is_obj()) return type_error(e, we, "an object { \"name\": ..., \"rotationTracking\": [...] }");
         for (std::size_t k = 0; k < e.keys.size(); ++k) {
@@ -178,11 +201,9 @@ struct Apply {
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", rt.t.offset[i]);
             } else if (key == "leashMin") {
-                rt.has_lmin = true;
-                ok = leash(x, w, rt.t.leash_min, /*is_min=*/true);
+                ok = leash(x, w, /*is_min=*/true, rt.lmin);
             } else if (key == "leashMax") {
-                rt.has_lmax = true;
-                ok = leash(x, w, rt.t.leash_max, /*is_min=*/false);
+                ok = leash(x, w, /*is_min=*/false, rt.lmax);
             } else if (key == "aimMarker") {
                 ok = tri(x, w, rt.t.aim_marker, "true, false or null (null = the camera's)");
             } else if (key == "origin") {
@@ -211,6 +232,9 @@ struct Apply {
     }
     bool camera(const Value& v, const std::string& where, Camera& c) {
         if (!v.is_obj()) return type_error(v, where, "an object { \"name\": ..., \"offset\": [...] }");
+        // The caller starts every camera from its seat's leash: that is what "inherit" takes here.
+        const float seat_min[3] = { c.leash_min[0], c.leash_min[1], c.leash_min[2] };
+        const float seat_max[3] = { c.leash_max[0], c.leash_max[1], c.leash_max[2] };
         std::vector<RawTether> raw;
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
             const std::string& key = v.keys[k];
@@ -236,9 +260,13 @@ struct Apply {
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", c.offset[i]);
             } else if (key == "leashMin") {
-                ok = leash(x, w, c.leash_min, /*is_min=*/true);
+                LeashSide s;
+                ok = leash(x, w, /*is_min=*/true, s);
+                if (ok) resolve(s, seat_min, c.leash_min);
             } else if (key == "leashMax") {
-                ok = leash(x, w, c.leash_max, /*is_min=*/false);
+                LeashSide s;
+                ok = leash(x, w, /*is_min=*/false, s);
+                if (ok) resolve(s, seat_max, c.leash_max);
             } else if (key == "locationTracking") {
                 ok = loc_tracking(x, w, c.loc_view, c.loc_yaw, c.loc_pitch, c.loc_roll);
             } else if (key == "rotationTracking" || key == "viewFollows") {   // viewFollows: the first file
@@ -281,10 +309,8 @@ struct Apply {
             if (!rt.has_loc) { rt.t.loc_view = c.loc_view; rt.t.loc_yaw = c.loc_yaw; rt.t.loc_pitch = c.loc_pitch; rt.t.loc_roll = c.loc_roll; }
             if (!rt.has_rot) { rt.t.rot_yaw = c.rot_yaw; rt.t.rot_pitch = c.rot_pitch; rt.t.rot_roll = c.rot_roll; }
             if (!rt.has_off) { rt.t.offset[0] = c.offset[0]; rt.t.offset[1] = c.offset[1]; rt.t.offset[2] = c.offset[2]; }
-            for (int k = 0; k < 3; ++k) {
-                if (!rt.has_lmin) rt.t.leash_min[k] = c.leash_min[k];
-                if (!rt.has_lmax) rt.t.leash_max[k] = c.leash_max[k];
-            }
+            resolve(rt.lmin, c.leash_min, rt.t.leash_min);   // left out, or "inherit": the camera's
+            resolve(rt.lmax, c.leash_max, rt.t.leash_max);
             c.tethering.push_back(rt.t);
         }
         return true;
@@ -297,10 +323,16 @@ struct Apply {
         bool have_match = false, have_cams = false;
         // The seat's leash FIRST, wherever the file puts it: every camera starts from it (a camera, and then a
         // tethering mode, may override it), and "cameras" may well come before it in the file.
+        // Nothing sits above a seat, so "inherit" here is no limit.
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
             const std::string& fk = v.keys[k];
-            if (fk == "leashMin" && !leash(v.items[k], where + "." + fk, out.leash_min, /*is_min=*/true)) return false;
-            if (fk == "leashMax" && !leash(v.items[k], where + "." + fk, out.leash_max, /*is_min=*/false)) return false;
+            if (fk != "leashMin" && fk != "leashMax") continue;
+            const bool is_min = fk == "leashMin";
+            const float none[3] = { is_min ? -kUnleashed : kUnleashed, is_min ? -kUnleashed : kUnleashed,
+                                    is_min ? -kUnleashed : kUnleashed };
+            LeashSide s;
+            if (!leash(v.items[k], where + "." + fk, is_min, s)) return false;
+            resolve(s, none, is_min ? out.leash_min : out.leash_max);
         }
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
             const std::string& fk = v.keys[k];
@@ -598,14 +630,17 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"                    in a tight seat cannot take you through the canopy or into the gun. Both are\",\n";
     s += "    \"                    [forward, right, up] in cm, on the offset's directions. leashMin = how far you may\",\n";
     s += "    \"                    move back, left and down (each 0 or negative); leashMax = how far forward, right\",\n";
-    s += "    \"                    and up (each 0 or positive). null on an axis, or a shorter list, = no limit that\",\n";
-    s += "    \"                    way. Past a limit the view stops following your head that way (the world moves\",\n";
-    s += "    \"                    with you); coming back is free. Measured from where your head was put at the last\",\n";
-    s += "    \"                    camera change or reset.\",\n";
+    s += "    \"                    and up (each 0 or positive). Past a limit the view stops following your head that\",\n";
+    s += "    \"                    way (the world moves with you); coming back is free. Measured from where your head\",\n";
+    s += "    \"                    was put at the last camera change or reset.\",\n";
     s += "    \"                    e.g. \\\"leashMin\\\": [-10, -15, -20], \\\"leashMax\\\": [15, 15, 5]\",\n";
     s += "    \"                         = at most 10 back, 15 left, 20 down, 15 forward, 15 right and 5 up.\",\n";
     s += "    \"                    Set it for a whole seat (in the vehicle entry), for a camera, or for a tethering\",\n";
-    s += "    \"                    mode: each overrides the one above it, and null there = no leash at that level.\",\n";
+    s += "    \"                    mode; each overrides the one above it. Per axis: a number = that limit, null = no\",\n";
+    s += "    \"                    limit that way, \\\"inherit\\\" = the level above's limit on that axis; a shorter list =\",\n";
+    s += "    \"                    no limit on the axes it leaves out. The whole key: null = no leash on that side,\",\n";
+    s += "    \"                    \\\"inherit\\\" (or leaving it out) = the level above's. e.g. under a seat's\",\n";
+    s += "    \"                    \\\"leashMax\\\": [8, 12, 4], a camera's [\\\"inherit\\\", \\\"inherit\\\", 2] = 8, 12 and 2.\",\n";
     s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, origin, offset,\",\n";
     s += "    \"                    leashMin, leashMax, locationTracking, rotationTracking, aimMarker }, each taking\",\n";
     s += "    \"                    the camera's own for what it leaves out -- e.g. the same cockpit held still and\",\n";
