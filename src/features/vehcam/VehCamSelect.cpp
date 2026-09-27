@@ -31,11 +31,13 @@ std::atomic<int> s_step{0};                  // left Y: cameras, posted by the i
 std::atomic<int> s_mode_step{0};             // left X: the camera's tethering modes, posted by the input hook
 std::atomic<int> s_view_reset{0};            // left X or Y held a second, posted by the input hook
 std::atomic<int> s_ctrl_toggle{0};           // left stick click, posted by the input hook
+std::atomic<bool> s_selected{false};         // veh_cam_selected(): the published camera's `valid`
 
 void publish(const VehActiveCam& a) {
     const int back = s_active_front.load(std::memory_order_relaxed) ^ 1;
     s_active[back] = a;
     s_active_front.store(back, std::memory_order_release);
+    s_selected.store(a.valid, std::memory_order_relaxed);
 }
 
 // ---- the table and the selection: GAME THREAD only ---------------------------------------------
@@ -541,6 +543,10 @@ void decoupled_pitch_startup_check() {
 
 VehActiveCam veh_active_cam() {
     return s_active[s_active_front.load(std::memory_order_acquire)];
+}
+
+bool veh_cam_selected() {
+    return s_selected.load(std::memory_order_relaxed);
 }
 
 void veh_cam_step(int dir) {

@@ -46,6 +46,11 @@ struct VehActiveCam {
 // Any thread: the selected camera as last published.
 VehActiveCam veh_active_cam();
 
+// Any thread, one atomic load: a camera from the file is selected for the vehicle you are in (chase or
+// first-person) -- i.e. our vehicle controls are live. For the input hook, which runs far too often to copy
+// the whole VehActiveCam per call.
+bool veh_cam_selected();
+
 // GAME thread, once at startup: remember the path, write the built-in cameras there if the player
 // has no file (never overwrites one), and load it.
 void vehcam_presets_init(const char* path);

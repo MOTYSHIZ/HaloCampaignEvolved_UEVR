@@ -546,6 +546,36 @@ std::atomic<bool> g_brake_pad{false};
 // consistency with its neighbours.
 std::atomic<bool> g_cut2d_engaged{false};
 
+// UEVR's own overlay is up. It zeroes the PAD while it is (VR.cpp update_imgui_state_from_xinput_state)
+// but not the ACTIONS, and g_in_menu covers only the game's menus -- so a lane that reads actions, or ORs a
+// button back into the pad, acts behind the overlay unless it asks this. Any thread: a flag read.
+bool uevr_overlay_open() {
+    auto* p = API::get()->param();
+    return p != nullptr && p->functions != nullptr && p->functions->is_drawing_ui != nullptr
+        && p->functions->is_drawing_ui();
+}
+
+// OUR VEHICLE CONTROLS ARE LIVE: a camera from the camera file is selected for the vehicle you are in,
+// and no menu -- the game's or UEVR's -- is up. The seated input lanes (seat grip, left X / Y, the left
+// stick click, the brake's grip split) key on THIS, not on stick mode: stick mode is also every cutscene,
+// death and post-load window, and a seat before its vehicle is identified, where the pad must stay the
+// game's (left X crouches on foot; L3 sprints). Any thread.
+bool veh_controls_live(bool in_menu) {
+    return !in_menu && veh_cam_selected() && !uevr_overlay_open();
+}
+
+// The grip that switches seats right now (vehseatgrip: 1 left, 2 right), or 0 while that lane is off. ONE
+// predicate for the lane that sends it and the brake that must leave that grip alone. Off on a grip the
+// vehicle wheel holds (vehiclewheel with vehwheelgrip; vehwheelhand 0 left, 1 right, 2 both): there every
+// grab of the wheel would also switch seats. Any thread.
+int veh_seat_grip_now(bool in_menu) {
+    if (g_cfg.veh_seat_grip == 0 || g_cfg.veh_seat_mask == 0 || !g_cfg.veh_tp) return 0;
+    const int wheel_side = (g_cfg.veh_seat_grip == 2) ? 1 : 0;
+    if (g_cfg.vehicle_wheel != 0 && g_cfg.veh_wheel_grip != 0
+        && (g_cfg.veh_wheel_hand == 2 || g_cfg.veh_wheel_hand == wheel_side)) return 0;
+    return veh_controls_live(in_menu) ? g_cfg.veh_seat_grip : 0;
+}
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -7536,9 +7566,9 @@ void update() {
                     grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
                 }
                 if (grip_action != nullptr) {
-                    // Not the grip that switches seats (vehseatgrip, the XInput hook): one grip, one job.
-                    const int seat_grip = (g_cfg.veh_seat_grip != 0 && g_cfg.veh_seat_mask != 0 && g_cfg.veh_tp)
-                                        ? g_cfg.veh_seat_grip : 0;
+                    // Not the grip that switches seats (vehseatgrip, the XInput hook): one grip, one job --
+                    // and the same predicate as that lane, so outside our cameras both grips brake again.
+                    const int seat_grip = veh_seat_grip_now(g_in_menu.load());
                     if (seat_grip == 1)
                         want_brake = API::VR::is_action_active(grip_action, API::VR::get_right_joystick_source());
                     else if (seat_grip == 2)
@@ -13698,8 +13728,9 @@ public:
         //
         // Gated on raw_btn (the physical snapshot), NOT live state: the grip brake injects
         // brake_mask=A on its own further down, so reading live state would make every grip-brake
-        // also fire the trick. Same raw_btn discipline as the grenade remap. !g_in_menu is belt-
-        // and-braces -- pausing drops stick mode -- and costs nothing.
+        // also fire the trick. Same raw_btn discipline as the grenade remap. !g_in_menu matters: stick
+        // mode holds through a pause (its detector has no menu term; logs show IN_MENU flip inside one
+        // stick window).
         if (g_cfg.veh_a_mask != 0 && g_stick_mode.load() && !g_in_menu.load()
             && (raw_btn & XINPUT_GAMEPAD_A) != 0) {
             state->Gamepad.wButtons |= (WORD)g_cfg.veh_a_mask;
@@ -13713,18 +13744,19 @@ public:
         // the chosen grip sends it instead; the brake above then leaves that grip alone. The grip is read by
         // UEVR ACTION on its own hand, like left X / Y below, and must be let go once after you sit down
         // before it counts: a grip held while boarding must not switch you straight out of the seat.
+        // Only while our controls are live (veh_seat_grip_now: a camera selected, no menu, no UEVR
+        // overlay, not a grip the vehicle wheel holds).
         {
             static UEVR_ActionHandle s_seat_grip_action = nullptr;
             static bool s_seat_grip_armed = false;
-            const bool on = g_cfg.veh_seat_grip != 0 && g_cfg.veh_seat_mask != 0 && g_cfg.veh_tp
-                         && g_stick_mode.load() && !g_in_menu.load();
-            if (!on) {
+            const int seat_grip = veh_seat_grip_now(g_in_menu.load());
+            if (seat_grip == 0) {
                 s_seat_grip_armed = false;
             } else {
                 if (s_seat_grip_action == nullptr)
                     s_seat_grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
-                const auto src = (g_cfg.veh_seat_grip == 2) ? API::VR::get_right_joystick_source()
-                                                            : API::VR::get_left_joystick_source();
+                const auto src = (seat_grip == 2) ? API::VR::get_right_joystick_source()
+                                                  : API::VR::get_left_joystick_source();
                 const bool grip = s_seat_grip_action != nullptr && API::VR::is_action_active(s_seat_grip_action, src);
                 if (!grip) s_seat_grip_armed = true;
                 const WORD m = (WORD)g_cfg.veh_seat_mask;
@@ -13770,7 +13802,8 @@ public:
             static ULONGLONG s_at = 0;
             static ULONGLONG s_x_down = 0, s_y_down = 0;   // when a press that started seated began; 0 = none
             static bool s_x_held = false, s_y_held = false; // that press already reset the view
-            const bool seated = g_stick_mode.load() && !g_in_menu.load();
+            // Our controls, not stick mode: and not behind UEVR's overlay, where left X is its own "back".
+            const bool seated = veh_controls_live(g_in_menu.load());
             if (!seated) {
                 s_primed = false;
                 s_x_down = s_y_down = 0;
@@ -13818,7 +13851,7 @@ public:
         // runs; with vehtp off the click is the game's, as before.
         {
             static bool s_l3_armed = false, s_l3_chord = false;
-            const bool seated = g_cfg.veh_ctrl_click != 0 && g_cfg.veh_tp && g_stick_mode.load() && !g_in_menu.load();
+            const bool seated = g_cfg.veh_ctrl_click != 0 && veh_controls_live(g_in_menu.load());
             const bool l3 = (raw_btn & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
             if (seated && (seat_btn_down & XINPUT_GAMEPAD_LEFT_THUMB) != 0) { s_l3_armed = true; s_l3_chord = false; }
             if (s_l3_armed && (raw_btn & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) s_l3_chord = true;
