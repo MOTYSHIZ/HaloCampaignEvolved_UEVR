@@ -1394,7 +1394,8 @@
     // vehcamrecenterpos: 1 = on the same camera changes, put your HEAD back on the camera's point -- wherever
     // you had leaned or walked to in the room. Matters most with hmdleash off, where nothing else brings you
     // back (the user, 2026-09-27); with the leash on it clears whatever lean the leash radius allowed.
-    // 0 = your head keeps its offset from the camera's point from one camera to the next.
+    // 0 = your head keeps its offset from the camera's point from one camera to the next. Holding left X or
+    // left Y for a second resets both whatever these two say (Plugin.cpp's seated X / Y block).
     bool  veh_cam_recenter_pos = true;
     // vehcamhidebody: your character's body in the vehicle cameras. 0 = never hidden (default -- you see
     // the Chief in the seat, the user's call 2026-09-26); 1 = hidden in the cameras whose "hideBody" says

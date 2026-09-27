@@ -568,6 +568,9 @@ int      s_scan_ticks = 0;
 double   s_scan_ms = 0.0, s_scan_max_ms = 0.0;
 std::vector<ScanHit> s_walk_chassis, s_walk_bodies, s_walk_parts, s_walk_units;   // being filled
 std::vector<ScanHit> s_res_chassis, s_res_bodies, s_res_parts, s_res_units;      // the last finished walk
+// Meshes one level further down: owned by a COMPONENT of a Spartan (his BlamMeshSynchronization makes the
+// visible armour), recorded with the actor as their owner. Only the head hide reads these.
+std::vector<ScanHit> s_walk_subparts, s_res_subparts;
 
 uint8_t scan_class_kind(API::UClass* cls) {
     uint8_t k = 0;
@@ -614,6 +617,7 @@ uint32_t ride_scan_request(bool force_new) {
     s_scan_walk_gen = s_scan_gen;
     s_scan_ticks = 0; s_scan_ms = 0.0; s_scan_max_ms = 0.0;
     s_walk_chassis.clear(); s_walk_bodies.clear(); s_walk_parts.clear(); s_walk_units.clear();
+    s_walk_subparts.clear();
     s_scan_classes.clear(); s_scan_owners.clear();
     return s_scan_serial;
 }
@@ -661,6 +665,8 @@ void ride_scan_step() {
                 auto* f = o->get_fname();
                 if (f != nullptr && f->to_string() == L"Body") s_walk_bodies.push_back({o, i, owner});
             }
+        } else if (auto* oo = owner->get_outer(); oo != nullptr && (scan_owner_kind(oo) & kScanSpartan) != 0) {
+            s_walk_subparts.push_back({o, i, oo});   // made by one of his components: the actor is its owner
         }
     }
     QueryPerformanceCounter(&t1);
@@ -675,6 +681,7 @@ void ride_scan_step() {
     s_res_bodies.swap(s_walk_bodies);
     s_res_parts.swap(s_walk_parts);
     s_res_units.swap(s_walk_units);
+    s_res_subparts.swap(s_walk_subparts);
     s_scan_done = s_scan_serial;
     s_scan_result_gen = s_scan_walk_gen;
     API::get()->log_info("[Halo-CampE-UEVR] VEHSCAN: %d objects in %d tick(s), %.1f ms of work (%.1f ms at most in one "
@@ -1139,10 +1146,12 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
 // Body ("readback says hidden on 1 of 1") and the head still drew. The Spartan is modular -- the pak lists
 // SK_Spartans_<armour> plus STATIC meshes per piece (SM_Spartans_Helmet_M_<armour>, ..._Chest_..., ...),
 // hung from its skeleton -- and a hidden bone scales only the skinning, never what hangs from its socket.
-// The whole-body hide had removed the helmet with the rest (the user). So the helmet pieces are found among
-// his mesh parts by the mesh they draw, the socket they hang from or their name, and hidden AND shrunk the
-// way the body hider does it (hiding alone did not take on this character); each keeps its own scale for
-// the restore. The bone hide stays, for whatever of the head the skeleton itself draws under the helmet.
+// The whole-body hide had removed the helmet with the rest (the user) -- by shrinking his
+// BlamMeshSynchronization component, which the armour hangs under (the second test: his actor owns only
+// Collider, Body and that component). So the helmet pieces are found in his attachment tree (rider_tree) by
+// the mesh they draw, the socket they hang from or their name, and hidden AND shrunk the way the body hider
+// does it (hiding alone did not take on this character); each keeps its own scale for the restore. The
+// bone hide stays, on every skinned mesh of his, for whatever of the head the skeleton draws under it.
 constexpr int kMaxHeadItems = 8;
 struct HeadHide {
     int state = -1;                              // -1 not tried; 0 unusable (fail closed); 1 ready
@@ -1196,6 +1205,37 @@ bool is_head_item(API::UObject* c, const std::wstring& head_bone, std::wstring* 
         return true;
     }
     return false;
+}
+
+// HIS WHOLE MESH TREE. The biped actor itself owns three parts -- Collider, Body and a
+// BlamMeshSynchronizationComponent (measured 2026-09-27, the head-hide scan) -- and the visible armour, the
+// helmet among it, is made BY that synchronization component, owned through it rather than the actor. So
+// the ride scan's owner test never sees a helmet. They all hang in the actor's attachment tree, though, so
+// the tree is walked from those parts and the actor's root, down every AttachChildren, breadth first.
+// Things hung on him that are not his (his weapon's own actor) come along too; only a mesh named for the
+// helmet or hung from the head is ever hidden, so they are left as they are. GAME THREAD; once per apply.
+struct RawObjArray { API::UObject** data; int32_t num; int32_t max; };
+int rider_tree(API::UObject* actor, API::UObject** out, int max) {
+    int n = 0;
+    auto push = [&](API::UObject* c) {
+        if (c == nullptr || n >= max || !uobject_slot_valid(c)) return;
+        for (int i = 0; i < n; ++i) if (out[i] == c) return;
+        out[n++] = c;
+    };
+    for (const ScanHit& h : s_res_parts)
+        if (h.owner == actor && scan_hit_live(h)) push(h.o);
+    for (const ScanHit& h : s_res_subparts)   // made by his components, whether attached in the tree or not
+        if (h.owner == actor && scan_hit_live(h)) push(h.o);
+    if (auto* rp = actor->get_property_data<API::UObject*>(L"RootComponent"); rp != nullptr && !IsBadReadPtr(rp, sizeof(void*)))
+        push(*rp);
+    for (int i = 0; i < n; ++i) {   // n grows as children are found
+        auto* kids = out[i]->get_property_data<RawObjArray>(L"AttachChildren");
+        if (kids == nullptr || IsBadReadPtr(kids, sizeof(RawObjArray))) continue;
+        if (kids->num <= 0 || kids->num > 256 || kids->data == nullptr
+            || IsBadReadPtr(kids->data, sizeof(void*) * static_cast<size_t>(kids->num))) continue;
+        for (int k = 0; k < kids->num; ++k) push(kids->data[k]);
+    }
+    return n;
 }
 
 void head_item_hide(API::UObject* c) {
@@ -1300,23 +1340,30 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
         s_hh.ni = 0;
         auto* owner = body->get_outer();
         std::wstring item_names;
-        for (const ScanHit& h : s_res_parts) {
-            if (h.owner != owner || !scan_hit_live(h)) continue;
+        constexpr int kTree = 128;
+        API::UObject* tree[kTree];
+        const int nt = (owner != nullptr) ? rider_tree(owner, tree, kTree) : 0;
+        for (int t = 0; t < nt; ++t) {
+            API::UObject* c = tree[t];
+            const int32_t idx = uobject_slot_index(c);
+            if (idx < 0) continue;
             std::wstring why;
-            if (h.o != body && s_hh.ni < kMaxHeadItems && is_head_item(h.o, bone, &why)) {
+            // Only a MESH is ever hidden here -- never a camera, a light or a scene node hung from the head.
+            const bool mesh = class_name_of(c).find(L"Mesh") != std::wstring::npos;
+            if (c != body && mesh && s_hh.ni < kMaxHeadItems && is_head_item(c, bone, &why)) {
                 // Its own relative scale, for the restore (1 is only the usual answer).
                 double sc[3] = {1.0, 1.0, 1.0};
-                if (auto* ps = h.o->get_property_data<double>(L"RelativeScale3D"); ps != nullptr && !IsBadReadPtr(ps, 24)
+                if (auto* ps = c->get_property_data<double>(L"RelativeScale3D"); ps != nullptr && !IsBadReadPtr(ps, 24)
                     && std::isfinite(ps[0]) && std::isfinite(ps[1]) && std::isfinite(ps[2]) && ps[0] > 0.01 && ps[1] > 0.01 && ps[2] > 0.01) {
                     sc[0] = ps[0]; sc[1] = ps[1]; sc[2] = ps[2];
                 }
-                s_hh.items[s_hh.ni].set_at(h.o, h.i);
+                s_hh.items[s_hh.ni].set_at(c, idx);
                 for (int k = 0; k < 3; ++k) s_hh.item_scale[s_hh.ni][k] = sc[k];
                 ++s_hh.ni;
                 item_names += (item_names.empty() ? L"" : L", ") + why;
                 continue;
             }
-            if (bones && s_hh.n < kMaxDriverParts && h.o->is_a(s_hh.skinned)) s_hh.parts[s_hh.n++].set_at(h.o, h.i);
+            if (bones && s_hh.n < kMaxDriverParts && c->is_a(s_hh.skinned)) s_hh.parts[s_hh.n++].set_at(c, idx);
         }
         if (bones && s_hh.n == 0) { s_hh.parts[0].set_at(body, body_idx); s_hh.n = 1; }   // not in the walk: the Body itself
         for (int i = 0; i < s_hh.ni; ++i)
@@ -1333,19 +1380,24 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
         s_hh.reassert = 0;
         // The readback says the bone call LANDED, not that the head stopped drawing: only the headset says that.
         API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- %d helmet piece(s) hidden and shrunk "
-                             "(%ls); bone \"%ls\" on %d part(s), the readback says hidden on %d of %d", s_hh.ni,
-                             item_names.empty() ? L"NONE FOUND" : item_names.c_str(), s_hh.bone.c_str(), s_hh.n, hidden, readable);
+                             "(%ls) of %d component(s) on him; bone \"%ls\" on %d part(s), the readback says hidden on %d of %d",
+                             s_hh.ni, item_names.empty() ? L"NONE FOUND" : item_names.c_str(), nt, s_hh.bone.c_str(), s_hh.n,
+                             hidden, readable);
 #if HALO_VR_DEV
-        // Every mesh part of him, so a helmet this test missed is named in the log.
-        for (const ScanHit& h : s_res_parts) {
-            if (h.owner != owner || !scan_hit_live(h)) continue;
+        // His whole tree, so a helmet this test missed is named in the log: class, mesh, socket.
+        for (int t = 0; t < nt; ++t) {
+            API::UObject* c = tree[t];
+            if (!uobject_slot_valid(c)) continue;
             std::wstring why, mesh, sock;
-            const bool item = is_head_item(h.o, bone, &why);
-            if (auto* pm = h.o->get_property_data<API::UObject*>(L"StaticMesh"); pm != nullptr && !IsBadReadPtr(pm, sizeof(void*)) && *pm != nullptr)
-                if (auto* fn = (*pm)->get_fname()) mesh = fn->to_string();
-            if (auto* ps = h.o->get_property_data<API::FName>(L"AttachSocketName"); ps != nullptr && !IsBadReadPtr(ps, sizeof(API::FName)))
+            const bool item = c != body && class_name_of(c).find(L"Mesh") != std::wstring::npos && is_head_item(c, bone, &why);
+            for (const wchar_t* prop : { L"StaticMesh", L"SkinnedAsset", L"SkeletalMesh" }) {
+                if (!mesh.empty()) break;
+                if (auto* pm = c->get_property_data<API::UObject*>(prop); pm != nullptr && !IsBadReadPtr(pm, sizeof(void*)) && *pm != nullptr)
+                    if (auto* fn = (*pm)->get_fname()) mesh = fn->to_string();
+            }
+            if (auto* ps = c->get_property_data<API::FName>(L"AttachSocketName"); ps != nullptr && !IsBadReadPtr(ps, sizeof(API::FName)))
                 sock = ps->to_string();
-            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM   head-hide scan: %ls mesh=%ls socket=%ls%s", h.o->get_full_name().c_str(),
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM   head-hide tree: %ls mesh=%ls socket=%ls%s", c->get_full_name().c_str(),
                                  mesh.empty() ? L"-" : mesh.c_str(), sock.empty() ? L"-" : sock.c_str(),
                                  item ? "  <-- HELMET" : "");
         }

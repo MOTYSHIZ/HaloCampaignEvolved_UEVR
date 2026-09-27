@@ -67,6 +67,9 @@ std::vector<std::string> vehcam_chassis_hint(const std::wstring& vehicle_name, i
 void veh_cam_step(int dir);
 // Any thread (the input hook, left X): +1 = the current camera's next tethering mode, -1 = previous.
 void veh_cam_mode_step(int dir);
+// Any thread (the input hook, left X or Y held a second): reset the view in the camera and mode you are in
+// -- lined up with the vehicle's aim, your head back on the camera's point.
+void veh_cam_view_reset();
 
 // Any thread (the input hook, left stick click): flip THIS vehicle between motion controls (the
 // controller aims) and stick controls (the right stick aims, as on a gamepad). Applied on the game

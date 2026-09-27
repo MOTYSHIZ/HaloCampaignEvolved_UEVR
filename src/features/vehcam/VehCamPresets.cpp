@@ -489,7 +489,8 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "{\n";
     if (guide) {
     s += "  \"_readme\": [\n";
-    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = that camera's next tethering mode.\",\n";
+    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = that camera's next tethering mode;\",\n";
+    s += "    \"hold either for a second to reset the view (lined up with the vehicle, your head back in place).\",\n";
     s += "    \"Each vehicle has its own list, used in order. The entry whose 'match' text appears in the vehicle's\",\n";
     s += "    \"name is used -- the longest such text when several do, so a turret with its own entry beats its\",\n";
     s += "    \"vehicle's (case does not matter); 'default' covers any vehicle not listed.\",\n";

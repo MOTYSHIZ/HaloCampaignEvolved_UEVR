@@ -13714,13 +13714,21 @@ public:
         // Polled at most every 4 ms, and only while seated; the first poll of a seat only records the
         // state, so a button held while boarding never fires. Additive: both still reach the game as
         // whatever the pad calls them.
+        //
+        // HOLD EITHER FOR A SECOND -> RESET THE VIEW (the user, 2026-09-27): lined up with the vehicle's aim
+        // and your head back on the camera's point, in the camera and mode you are in. So a press acts on
+        // RELEASE -- a tap steps, a hold resets and steps nothing -- and the reset fires the moment the hold
+        // reaches a second, not on release, so you know when to let go.
         {
             static decltype(API::VR::get_action_handle("")) s_ax = nullptr, s_ay = nullptr;
             static bool s_tried = false, s_primed = false, s_x = false, s_y = false;
             static ULONGLONG s_at = 0;
+            static ULONGLONG s_x_down = 0, s_y_down = 0;   // when a press that started seated began; 0 = none
+            static bool s_x_held = false, s_y_held = false; // that press already reset the view
             const bool seated = g_stick_mode.load() && !g_in_menu.load();
             if (!seated) {
                 s_primed = false;
+                s_x_down = s_y_down = 0;
             } else {
                 if (!s_tried) {
                     s_tried = true;
@@ -13737,8 +13745,17 @@ public:
                     const bool x = s_ax != nullptr && API::VR::is_action_active(s_ax, left);
                     const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
                     if (s_primed) {
-                        if (x && !s_x) veh_cam_mode_next();     // X: the camera's next tethering mode
-                        if (y && !s_y) veh_cam_next_prev(+1);   // Y: next camera
+                        // One button: a press that started seated; a hold of a second resets; a tap acts on release.
+                        auto button = [t](bool now, bool was, ULONGLONG& down, bool& held, void (*tap)()) {
+                            if (now && !was) { down = t; held = false; }
+                            if (now && down != 0 && !held && t - down >= 1000) { held = true; veh_cam_view_reset(); }
+                            if (!now && was) {
+                                if (down != 0 && !held) tap();
+                                down = 0;
+                            }
+                        };
+                        button(x, s_x, s_x_down, s_x_held, [] { veh_cam_mode_next(); });        // X: the camera's next tethering mode
+                        button(y, s_y, s_y_down, s_y_held, [] { veh_cam_next_prev(+1); });     // Y: next camera
                     }
                     s_x = x; s_y = y; s_primed = true;
                 }

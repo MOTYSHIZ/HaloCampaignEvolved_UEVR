@@ -29,6 +29,7 @@ VehActiveCam     s_active[2];
 std::atomic<int> s_active_front{0};
 std::atomic<int> s_step{0};                  // left Y: cameras, posted by the input hook
 std::atomic<int> s_mode_step{0};             // left X: the camera's tethering modes, posted by the input hook
+std::atomic<int> s_view_reset{0};            // left X or Y held a second, posted by the input hook
 std::atomic<int> s_ctrl_toggle{0};           // left stick click, posted by the input hook
 
 void publish(const VehActiveCam& a) {
@@ -390,6 +391,24 @@ void apply_ctrl_toggle() {
     xrtext_show(md);
 }
 
+// LEFT X OR Y HELD FOR A SECOND: reset the view -- turned to line up with the vehicle's aim and your head
+// back on the camera's point -- in the camera and mode you are in (the user, 2026-09-27). Whatever the
+// vehcamrecenter / vehcamrecenterpos settings say: those govern what a camera CHANGE does, and this is you
+// asking. Said on the text panel, since it answers a press.
+void apply_view_reset() {
+    const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
+    if (s_camera < 0 || s_camera >= static_cast<int>(v.cameras.size())) return;
+    ++s_recenter_gen;
+    ++s_place_gen;
+    publish(make_active(s_vehicle, s_camera, s_mode));
+    const vcp::Camera& c = v.cameras[s_camera];
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- view reset (left X / Y held): camera \"%s\", mode %d",
+                         v.name.c_str(), c.name.c_str(), s_mode + 1);
+    const std::string cam = c.name.empty() ? "Camera " + std::to_string(s_camera + 1) : c.name;
+    const std::string mode = c.mode_count() > 1 ? " \xC2\xB7 " + mode_label(c.mode(s_mode), s_mode) : std::string();
+    xrtext_show("# View reset\n## " + v.name + " \xC2\xB7 " + cam + mode + "\n*Hold left X or Y for a second to reset*\n");
+}
+
 // LEFT X: the current camera's next tethering mode (what turns your view, what carries the camera round,
 // and where it sits), recentred like a camera change. A camera with one mode says so instead -- the press
 // is answered either way, so it shows whatever vehcamreadout says.
@@ -492,6 +511,10 @@ void veh_cam_mode_step(int dir) {
     s_mode_step.fetch_add(dir > 0 ? 1 : -1, std::memory_order_relaxed);
 }
 
+void veh_cam_view_reset() {
+    s_view_reset.store(1, std::memory_order_relaxed);
+}
+
 void veh_ctrl_toggle() {
     s_ctrl_toggle.fetch_add(1, std::memory_order_relaxed);
 }
@@ -579,6 +602,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         }
         s_step.store(0, std::memory_order_relaxed);
         s_mode_step.store(0, std::memory_order_relaxed);
+        s_view_reset.store(0, std::memory_order_relaxed);
         s_ctrl_toggle.store(0, std::memory_order_relaxed);
         decoupled_pitch_update(false);
         return;
@@ -647,6 +671,9 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     // LEFT X: the current camera's next tethering mode.
     const int mstep = s_mode_step.exchange(0, std::memory_order_relaxed);
     if (mstep != 0 && s_vehicle >= 0) apply_mode_step(mstep);
+
+    // LEFT X OR Y HELD: reset the view in place.
+    if (s_view_reset.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_view_reset();
 
     if (s_ctrl_toggle.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_ctrl_toggle();
 

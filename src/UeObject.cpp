@@ -41,6 +41,11 @@ bool uobject_slot_valid(const API::UObject* p) {
     return arr->get_object(idx) == p;
 }
 
+int32_t uobject_slot_index(const API::UObject* p) {
+    if (!uobject_slot_valid(p)) return -1;
+    return *reinterpret_cast<const int32_t*>(reinterpret_cast<const uint8_t*>(p) + UOBJ_INTERNAL_INDEX_OFF);
+}
+
 bool uobject_live(API::UObject* p, int32_t* cached_index) {
     if (p == nullptr || cached_index == nullptr) return false;
     auto* arr = API::get()->get_uobject_array();
