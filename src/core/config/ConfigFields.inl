@@ -113,7 +113,10 @@
     int   height_crouch      = 0;     // heightcrouch: 0 off, 1 on
     float height_crouch_frac = 0.5f;  // heightcrouchfrac: the crouch line as a fraction of your standing head height
     float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
-    // ---- HEAD BLOCK (HeadBlock.hpp). Keeps the rendered head out of geometry. UE cm.
+    // THE LEASH BELOW THE CHARACTER'S EYE (HeightCal.cpp): the most the view may drop below the game
+    // camera -- the character's own eye -- so ducking cannot take it inside his body. Game side, so UE
+    // cm. It rides the camera: when the character crouches, the limit drops with him. Off by default.
+    float height_leash = -1.0f;       // heightleash (UE cm): -1 off, 0 never below the character's eye
     int   head_block         = 0;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface
     float head_block_lean    = 25.0f;  // headblocklean: mode 3, max horizontal head offset from the body

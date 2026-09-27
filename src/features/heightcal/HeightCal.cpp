@@ -24,6 +24,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>                     // strlen: the status line's appended suffixes
 #include <deque>
 #include <vector>
 
@@ -566,6 +567,7 @@ float g_out = 0.0f;
 float g_log_t = 0.0f;
 std::string g_status;
 std::chrono::steady_clock::time_point g_last_call{};
+bool  g_leash_seen = false;   // heightleash held the view at least once since the last status line
 
 // ---- PHYSICAL CROUCH (heightcrouch) -- see the block in height_tick. Game thread, except the two
 // atomics, which the XInput hook reads.
@@ -884,6 +886,27 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             g_out = tgt;
             g_slew = false;
         }
+        // ---- THE LEASH BELOW THE CHARACTER'S EYE (heightleash) ------------------------------------
+        //
+        // Absolute mode puts your view at your real height, all the way down: duck below the
+        // character's eye and the view goes inside his body -- his chest, then his legs. With auto
+        // height on, the HMD leash's vertical radius never acts (see heightcal_leash_vertical), so
+        // nothing else stops it. This is that leash, downward only, held against the GAME CAMERA.
+        //
+        // No E_game needed, and the same in every mode. The model this file already runs on draws
+        // the eye at camera + S x (hmd.y - origin.y), so "at most heightleash below the camera" is
+        // exactly origin.y <= hmd.y + heightleash / S. And because it is measured from the camera,
+        // it rides the character: when he crouches his eye drops and so does the limit -- with
+        // heightcrouch that is the whole pairing, the view held at his eye until you cross the
+        // crouch line, then following him down.
+        //
+        // Applied to the OUTPUT, after the slew, so it also holds while a mode switch or a new
+        // calibration is being walked in. Set on the tick, so a fast duck can overshoot it by one
+        // tick of head travel at render time -- ~2 cm at 1 m/s and 70 Hz; not worth a render hook.
+        if (g_cfg.height_leash >= 0.0f && S > 0.0f) {
+            const float lim = hmd.y + g_cfg.height_leash / S;
+            if (g_out > lim) { g_out = lim; g_leash_seen = true; }
+        }
         own = true;
     } else if (g_have_out && eff != -1) {
         own = true;   // hold the last origin Y (menu, vehicle, cutscene, E_game not yet measured)
@@ -926,6 +949,13 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
                               g_cfg.height_crouch_frac * g_pc_ref, g_pc_on ? " -- CROUCHED" : "");
             }
         }
+        // Said when the leash actually held in the last second, so tuning heightleash is a matter of
+        // ducking and reading this line rather than guessing whether it engaged.
+        if (g_leash_seen) {
+            const std::size_t u = std::strlen(st);
+            if (u + 1 < sizeof(st)) std::snprintf(st + u, sizeof(st) - u, " | held by heightleash");
+        }
+        g_leash_seen = false;
         g_status = st;
 
         if (g_cfg.height_log >= 2) {
@@ -980,6 +1010,8 @@ bool heightcal_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "heightcrouch")     == 0) { g_cfg.height_crouch      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "heightcrouchfrac") == 0) { g_cfg.height_crouch_frac = clampf((float)v, 0.2f, 0.9f); return true; }
     if (_stricmp(key, "heightcrouchband") == 0) { g_cfg.height_crouch_band = clampf((float)v, 1.0f, 30.0f) * 0.01f; return true; }
+    // UE cm below the character's eye; any negative value switches it off.
+    if (_stricmp(key, "heightleash")      == 0) { g_cfg.height_leash = (v < 0.0) ? -1.0f : clampf((float)v, 0.0f, 200.0f); return true; }
     if (_stricmp(key, "heightkey")        == 0) {
         const int k = (int)strtol(val, nullptr, 0);
         g_cfg.height_key = (k == 0x2D) ? 0 : k;   // Insert opens UEVR's menu: never a height key
