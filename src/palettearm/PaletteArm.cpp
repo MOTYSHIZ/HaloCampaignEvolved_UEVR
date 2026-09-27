@@ -363,13 +363,121 @@ const pa::NodeMap* s_map_cached    = nullptr;
 // live solve is captured here and the DRIVEN records are copied into each bank verbatim -- the
 // same idea as pancreations' stereo cache: pose once, view twice. Stock nodes in the banks are left
 // to interpolate as before. Invalidated at every live entry so a bank can never take a stale pose.
-bool           s_bank_mirror_on  = true;
+//
+// ---- AND THAT IS WHY THE ARMS STEP (2026-09-20). ------------------------------------------------
+//
+// Writing ONE pose into BOTH interpolation endpoints makes the interpolator return a constant. It
+// removed the blend's lag, and with it the blend itself: our nodes stopped moving at render rate
+// and started moving at the builder's rate, which is a FIXED 60 Hz.
+//
+//   measured across four sessions, from the palettearm status line against PERF's tick figure:
+//     engine tick 71.4 / 39.6 / 39.0 / 24.0 Hz   ->   builder 60.0 / 60.0 / 60.0 / 60.0 Hz
+//
+// So the builder is a Blam animation clock, not the frame. At a 90 Hz headset that is a 2:3 beat:
+// the arm pose is new on two frames in three and the lag cycles 0 -> 8.3 -> 16.7 ms at 30 Hz. A
+// steady lag reads as lag; a cycling one reads as JITTER, which is what the user reported while
+// moving in 6DOF -- the eye carries their room displacement every frame, the arms carry it 60 times
+// a second. Nothing corrects it in between: the render-rate host in Plugin.cpp's
+// on_pre_calculate_stereo_view_offset explicitly no-ops while palettearm_weapon_owns().
+//
+// The fix is to give the blend two endpoints that differ, so it has something real to interpolate.
+// pabankmirror selects how they are filled -- see bank_endpoint_for() for the modes. The elbow
+// wobble above is NOT reintroduced by this: both endpoints still come from the LIVE solve, so
+// neither reads a bank's own stock pose. Only WHICH live solve differs.
+int            s_bank_mirror     = 1;      // 0 off, 1 both banks = now, 2-5 two endpoints
 bool           s_mirror_valid    = false;
 std::int32_t   s_mirror_tag      = 0;
 std::uint32_t  s_mirror_count    = 0;
 std::uint32_t  s_mirror_n        = 0;
 std::uint8_t   s_mirror_idx[pa::kMaxPaletteNodes];
 pa::BlamMatrix4x3 s_mirror_rec[pa::kMaxPaletteNodes];
+
+// THE PREVIOUS TICK'S SOLVE, the older of the two endpoints. Rolled down from s_mirror_rec at the
+// top of every live entry, so a live call that BAILS leaves no previous record and the next frame
+// falls back to mode 1 rather than interpolating across a gap of unknown length.
+bool           s_mirror_prev_valid = false;
+std::int32_t   s_mirror_prev_tag   = 0;
+std::uint32_t  s_mirror_prev_count = 0;
+bool           s_mirror_prev_has[pa::kMaxPaletteNodes] = {};
+pa::BlamMatrix4x3 s_mirror_prev_rec[pa::kMaxPaletteNodes];
+
+// A step bigger than either of these is not motion, it is a discontinuity -- a weapon swap, a
+// respawn, a hitch, a bailed frame. 0.05 Blam units is ~15 cm in one 60 Hz tick (~9 m/s) and 25 deg
+// is 1500 deg/s, both comfortably past a fast hand and well short of a teleport. Over the clamp the
+// node keeps its un-extrapolated pose: one frame of ordinary lag, never a frame of arm across the
+// room. A prediction is only ever as good as the step it copies.
+constexpr float kExtrapMaxStepBlam = 0.05f;
+constexpr float kExtrapMinCosAngle = 0.9063f;   // cos(25 deg)
+
+// Extrapolate one node forward by one builder tick -- apply the step it just took, once more.
+//
+// This is what turns two endpoints from an INTERPOLATION into a late-latch. Interpolating (prev,
+// now) is smooth but sits up to a tick behind the hand, which is precisely the lag the two-bank
+// write was added to remove; extrapolating (now, now+step) means the blend at alpha lands on
+// now + alpha*step, i.e. the pose at the moment the frame is actually drawn. Same cost, no lag.
+pa::BlamMatrix4x3 extrapolate_node(const pa::BlamMatrix4x3& prev, const pa::BlamMatrix4x3& cur) {
+    const pa::Vec3 step{cur.position.x - prev.position.x,
+                        cur.position.y - prev.position.y,
+                        cur.position.z - prev.position.z};
+    const float step2 = step.x * step.x + step.y * step.y + step.z * step.z;
+    if (!std::isfinite(step2) || step2 > kExtrapMaxStepBlam * kExtrapMaxStepBlam) return cur;
+
+    pa::BlamMatrix4x3 out = cur;
+    out.position = cur.position + step;
+
+    const pa::Mat3 bp = pa::orthonormal_basis(prev), bc = pa::orthonormal_basis(cur);
+    if (!pa::valid_basis(bp) || !pa::valid_basis(bc)) return out;   // position half still stands
+
+    // The delta in the node's OWN frame, applied again on top of `cur`. Mat3 holds the basis as
+    // columns, so transpose() is the inverse of an orthonormal one and multiply() is a*b.
+    const pa::Mat3 d = pa::multiply(pa::transpose(bp), bc);
+    const float cos_angle = (d.forward.x + d.left.y + d.up.z - 1.0f) * 0.5f;
+    if (!std::isfinite(cos_angle) || cos_angle < kExtrapMinCosAngle) return out;
+
+    const pa::Mat3 b = pa::multiply(bc, d);
+    if (!pa::valid_basis(b)) return out;
+    out.forward = b.forward; out.left = b.left; out.up = b.up;
+    return out;
+}
+
+// WHICH ENDPOINT THIS BANK GETS. Returns the record to write; `older` says whether this bank is the
+// blend's older end, which is decided by the mode and by the context's live-bank byte.
+//
+// Modes, and why every one of them has a twin: nobody has yet watched context[0] alternate (the
+// dev bank census this change adds is what will say). If it turns out to name the OTHER end, the
+// even mode is wrong by exactly one frame and the odd mode is right -- the same coin-flip the
+// patorsoframe 3/4 pair exists for, settled the same way, and the loser deleted afterwards.
+//
+//   0  no mirror at all: each bank re-solves itself. Known to wobble the elbow +/-2 cm (see above).
+//   1  both banks = now. No blend lag, arms step at 60 Hz. The behaviour through v0.5.1.
+//   2  interpolate: live bank = now, other = last tick. Smooth, up to one tick behind.
+//   3  ...the same with the banks swapped.
+//   4  extrapolate: live bank = now + step, other = now. Smooth AND no added lag. The intended end.
+//   5  ...the same with the banks swapped.
+//
+// Anything that cannot be satisfied falls back to `now` in BOTH banks, i.e. mode 1: an unproven
+// bank index, a missing previous record, a weapon change since it was taken. Falling back to the
+// shipped behaviour is always safe; guessing an endpoint is not.
+const pa::BlamMatrix4x3& bank_endpoint_for(const pa::PaletteAccess& access, std::uint8_t node,
+                                           pa::BlamMatrix4x3* scratch) {
+    const pa::BlamMatrix4x3& now = s_mirror_rec[node];
+    if (s_bank_mirror < 2 || s_bank_mirror > 5 || !access.live_bank_valid) return now;
+    if (!s_mirror_prev_valid || !s_mirror_prev_has[node]
+        || s_mirror_prev_tag != access.model_tag
+        || s_mirror_prev_count != access.node_count) {
+        return now;
+    }
+    // Even modes put the NEWER endpoint on the bank the context named; odd modes swap them.
+    const bool on_named = (access.bank_index == access.live_bank);
+    const bool newer    = ((s_bank_mirror & 1) == 0) ? on_named : !on_named;
+
+    if (s_bank_mirror <= 3) {                       // interpolate between last tick and now
+        return newer ? now : s_mirror_prev_rec[node];
+    }
+    if (!newer) return now;                         // extrapolate: the older end IS now
+    *scratch = extrapolate_node(s_mirror_prev_rec[node], now);
+    return *scratch;
+}
 std::int32_t       s_map_key_tag   = -1;
 std::uint32_t      s_map_key_nodes = 0;
 
@@ -724,7 +832,10 @@ bool s_fresh_poses  = true;
 bool s_target_head  = false;
 bool s_support_aim  = true;
 
-char s_status[256] = "palettearm: off";
+// 448, not 256: the dev build appends two censuses (capdecline, then the live-bank census) to a
+// line that was already ~200 characters, and snprintf truncates in silence -- losing exactly the
+// field somebody added the census to read.
+char s_status[448] = "palettearm: off";
 // 512, not 256: this line has grown field by field and snprintf TRUNCATES SILENTLY -- a sweep
 // once read "sh=" with the numbers cut off and reported nothing wrong.
 char s_status_geom[1024] = "palettearm geom: (none)";
@@ -1037,13 +1148,16 @@ bool drive_palette(const pa::PaletteAccess& access) {
             map->right.wrist, map->left.wrist, (unsigned)s_node_map.unattributed());
     }
 
-    // ---- ONE SOLVE, BOTH BANKS -- see s_bank_mirror_on. A bank drive copies the live solve.
+    // ---- ONE SOLVE, BOTH BANKS -- see s_bank_mirror. A bank drive copies the live solve; which
+    // OF the live solves depends on the mode (bank_endpoint_for).
     if (access.is_capture_bank) {
-        if (s_bank_mirror_on && s_mirror_valid && s_mirror_tag == access.model_tag &&
+        if (s_bank_mirror != 0 && s_mirror_valid && s_mirror_tag == access.model_tag &&
             s_mirror_count == access.node_count) {
             for (std::uint32_t k = 0; k < s_mirror_n; ++k) {
                 const std::uint8_t i = s_mirror_idx[k];
-                if (i < access.node_count) access.palette[i] = s_mirror_rec[i];
+                if (i >= access.node_count) continue;
+                pa::BlamMatrix4x3 scratch{};
+                access.palette[i] = bank_endpoint_for(access, i, &scratch);
             }
             ::halo::features_pa_bank_mirrored(access.palette, access.node_count, access.model_tag, access.weapon_slot, access.bank_index);
             s_drive_ok.fetch_add(1, std::memory_order_relaxed);
@@ -1051,6 +1165,24 @@ bool drive_palette(const pa::PaletteAccess& access) {
         }
         // No live solve to mirror this call (it bailed): fall through to the per-bank solve.
     } else {
+        // ROLL DOWN before the new solve overwrites it: this tick's record becomes the OLDER
+        // endpoint. A live call that bailed left s_mirror_valid false, and that gap must not be
+        // interpolated across -- the two endpoints would then be an unknown number of ticks apart
+        // and the extrapolated one would overshoot by the same factor. Dropping the previous record
+        // costs one frame of mode-1 behaviour, which is what shipped anyway.
+        if (s_mirror_valid) {
+            std::memset(s_mirror_prev_has, 0, sizeof(s_mirror_prev_has));
+            for (std::uint32_t k = 0; k < s_mirror_n; ++k) {
+                const std::uint8_t i = s_mirror_idx[k];
+                s_mirror_prev_rec[i] = s_mirror_rec[i];
+                s_mirror_prev_has[i] = true;
+            }
+            s_mirror_prev_tag   = s_mirror_tag;
+            s_mirror_prev_count = s_mirror_count;
+            s_mirror_prev_valid = true;
+        } else {
+            s_mirror_prev_valid = false;
+        }
         s_mirror_valid = false;                                  // the live solve decides below
     }
 
@@ -2869,10 +3001,10 @@ bool drive_palette(const pa::PaletteAccess& access) {
         }
     }
 
-    // ---- Capture the live solve for the banks (see s_bank_mirror_on): the driven nodes only --
+    // ---- Capture the live solve for the banks (see s_bank_mirror): the driven nodes only --
     // both arms' subtrees, the chest node when that route is on, and everything but the root when
     // hands-only has scaled the rest. Fingers sit inside the wrist subtrees already.
-    if (!access.is_capture_bank && s_bank_mirror_on) {
+    if (!access.is_capture_bank && s_bank_mirror != 0) {
         s_mirror_n = 0;
         auto add = [&](std::uint8_t i) {
             if (i == 0 || i >= access.node_count || s_mirror_n >= pa::kMaxPaletteNodes) return;
@@ -3469,7 +3601,7 @@ std::atomic<uint32_t> g_pa_torso_seq{0};
 bool palettearm_parse_key(const char* key, double v) {
     if      (_stricmp(key, "pashoulderback")  == 0) s_arm_tuning.shoulder_back_m      = (float)v;
     else if (_stricmp(key, "pachest")         == 0) s_pa_chest_node                   = (int)v;
-    else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror_on                  = (v != 0.0);
+    else if (_stricmp(key, "pabankmirror")    == 0) s_bank_mirror                     = (int)v;
     else if (_stricmp(key, "paaimlead")       == 0) s_aim_lead                        = (v != 0.0);
     else if (_stricmp(key, "paworldscale")    == 0) s_pa_world_scale                  = (float)v;
     else if (_stricmp(key, "pafreshpose")     == 0) s_fresh_poses                     = (v != 0.0);
@@ -3855,6 +3987,27 @@ void palettearm_update(float delta_seconds) {
                           (unsigned long long)cap_no_tls, (unsigned long long)cap_no_ctx,
                           (unsigned long long)cap_gate,   (unsigned long long)cap_miss);
         });
+
+    // THE BANK CENSUS. Read `flips` first: it is the whole licence for pabankmirror 2-5. Zero
+    // flips with bank0/bank1 climbing means the context byte never changes and is NOT a current-
+    // bank index, so the two-endpoint modes are writing into arbitrary buffers and the right
+    // answer is a render-rate host instead. A roughly even split that flips every call is the
+    // result those modes assume.
+    //
+    // #if, not HALO_VR_DEV_ONLY(): the declaration below has commas at brace level and a
+    // function-like macro splits its argument on those. Same trap the dump above is marked with,
+    // and it still cost a build.
+#if HALO_VR_DEV
+    {
+        std::uint64_t b0 = 0, b1 = 0, flips = 0;
+        pa::palettehook_bank_census(&b0, &b1, &flips);
+        const std::size_t u = std::strlen(s_status);
+        std::snprintf(s_status + u, sizeof(s_status) - u,
+                      " | bankmirror=%d livebank bank0=%llu bank1=%llu flips=%llu",
+                      s_bank_mirror, (unsigned long long)b0, (unsigned long long)b1,
+                      (unsigned long long)flips);
+    }
+#endif
 
     // A second line rather than a longer one: the geometry is what a human reads when the pose is
     // wrong, and burying it at the end of an already-long status line makes it easy to miss.
