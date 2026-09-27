@@ -1561,11 +1561,17 @@ uevr.sdk.callbacks.on_draw_ui(function()
             -- exposed by this binding.
             --
             -- text_colored, NOT push_style_color around print_text_block. This draw runs inside a
-            -- pcall (bottom of the file): a throw between a push and its pop is CAUGHT, but the
-            -- ImGui style stack is NOT unwound, so one unbalanced push leaks EVERY FRAME and takes
-            -- the rest of the overlay with it -- Script UI and UEVR's own sections vanish. Reported
-            -- from a headset 2026-09-20. text_colored owns no stack, so it cannot do that. Short
-            -- lines because it does not wrap.
+            -- pcall (bottom of the file), and a throw between a push and its pop would be CAUGHT
+            -- while the ImGui style stack stayed wound -- one leaked push per frame, which takes
+            -- the rest of the overlay with it. text_colored owns no stack, so the hazard cannot
+            -- exist. Short lines because it does not wrap.
+            --
+            -- LATENT, NOT OBSERVED. print_text_block has no throw path anyone has found:
+            -- avail_cols() pcalls both its imgui calls and floors at 24 columns, and the wrap loop
+            -- forces cut = cols when no space is found, so it always consumes and always
+            -- terminates. This was briefly blamed for a 2026-09-20 report of Script UI and UEVR's
+            -- own sections missing from the menu; that profile was down to FOUR files and a full
+            -- reinstall is what fixed it. Do not re-cite this as a fix for that bug.
             imgui.text_colored("These features are WIP, and they very likely will break", 0xFF2288DD)
             imgui.text_colored("things or feel incomplete. Mainly here if anyone wants", 0xFF2288DD)
             imgui.text_colored("to have a preview.", 0xFF2288DD)
