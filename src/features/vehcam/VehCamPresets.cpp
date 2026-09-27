@@ -34,28 +34,25 @@ Camera cam(const char* name, Origin origin, float f, float r, float u, Axes loc,
 
 // The starter set every vehicle gets until the player tunes it, named the way players have named theirs:
 // a view and its "Tethered" twin, which turns with the vehicle. Cockpit sits at your seat; Third Person
-// behind the vehicle. The names say WHERE; the readout says what each tracks. No "firstperson" entry:
-// that hands the view to the older seat camera, which stays available by adding one to the file.
-//
-// ON THE GROUND the tethered cockpit turns with the vehicle's heading only and stays level -- bc24's
-// seated view, inside our pipeline -- and a ground vehicle STARTS in it: after a U-turn you still face its
-// front, whatever controls you use (with stick controls nothing else turns our view). In the air and on
-// turrets the tethered cockpit tilts with the vehicle too, and they start in the plain cockpit.
-std::vector<Camera> starter_cameras(bool ground) {
+// behind the vehicle. The names say WHERE; the readout says what each tracks. Every vehicle STARTS in the
+// plain Cockpit, where the world holds still: the generally comfortable first view. (A ground vehicle
+// starting in a level tethered cockpit was tried the same day and rejected in-headset by the user as the
+// less comfortable initial setting.) No "firstperson" entry: that hands the view to the older seat
+// camera, which stays available by adding one to the file.
+std::vector<Camera> starter_cameras() {
     return {
         cam("Cockpit",               Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kNone),
-        cam("Tethered Cockpit",      Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, ground ? kYaw : kAll),
+        cam("Tethered Cockpit",      Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kAll),
         cam("Third Person",          Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kNone),
         cam("Tethered Third Person", Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kYaw),
     };
 }
 
-Vehicle vehicle(const char* name, std::vector<std::string> match, bool ground = false) {
+Vehicle vehicle(const char* name, std::vector<std::string> match) {
     Vehicle v;
     v.name = name;
     v.match = std::move(match);
-    v.cameras = starter_cameras(ground);
-    v.default_camera = ground ? 1 : 0;
+    v.cameras = starter_cameras();
     return v;
 }
 
@@ -312,16 +309,16 @@ Table default_table() {
     // Warthog's passenger rides the Warthog actor itself, so that entry is told apart by its seat.
     Table t;
     t.vehicles.push_back(vehicle("Banshee",           {"bansheevehicleactor"}));
-    t.vehicles.push_back(vehicle("Ghost",             {"ghostvehicleactor"}, /*ground=*/true));
+    t.vehicles.push_back(vehicle("Ghost",             {"ghostvehicleactor"}));
     t.vehicles.push_back(vehicle("Warthog gunner",    {"warthogchaingunvehicleactor"}));
-    t.vehicles.push_back(vehicle("Warthog",           {"warthogvehicleactor"}, /*ground=*/true));
-    Vehicle wp = vehicle("Warthog passenger", {"warthogvehicleactor"}, /*ground=*/true);
+    t.vehicles.push_back(vehicle("Warthog",           {"warthogvehicleactor"}));
+    Vehicle wp = vehicle("Warthog passenger", {"warthogvehicleactor"});
     wp.seats = kSeatPassenger;
     t.vehicles.push_back(wp);
     t.vehicles.push_back(vehicle("Scorpion gunner",   {"scorpionantiinfantry"}));
-    t.vehicles.push_back(vehicle("Scorpion",          {"scorpion"}, /*ground=*/true));
+    t.vehicles.push_back(vehicle("Scorpion",          {"scorpion"}));
     t.vehicles.push_back(vehicle("Wraith turret",     {"wraithantiinfantry"}));
-    t.vehicles.push_back(vehicle("Wraith",            {"wraith"}, /*ground=*/true));
+    t.vehicles.push_back(vehicle("Wraith",            {"wraith"}));
     t.vehicles.push_back(vehicle("Shade",             {"shade"}));
     Vehicle d = vehicle("default", {});
     d.is_default = true;
