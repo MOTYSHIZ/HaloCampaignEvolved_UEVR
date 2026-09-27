@@ -1811,10 +1811,14 @@ int32_t veh_aim_hand_index() {
 // callback, every frame, on the live pointing ray (see the stamp in vehcam_stereo_pre_eye_seat). The
 // tick path in Plugin.cpp stands its compositor publish down on this -- the layer's snapshot takes one
 // writer at a time -- and keeps placing the world-space widget/mesh reticules. Any thread.
+// NOT IN A MENU. Stick mode holds through a pause, and a stamp taken every frame never goes stale, so
+// without this the crosshair floated over the pause menu. The tick path it hands back to is menu-gated
+// itself, so the slot simply ages out.
 bool veh_tp_reticle_stamp_owns() {
     return g_cfg.xr_layer && g_cfg.aim_reticule
         && veh_tp_motion_aim_active() && g_cfg.veh_aim_ray
         && halo::g_stick_mode_active.load(std::memory_order_relaxed)
+        && !host::g_plugin_state.in_menu->load(std::memory_order_relaxed)
         && g_tp_chassis_yaw_valid.load(std::memory_order_relaxed)
         && g_veh_aim_valid.load(std::memory_order_relaxed);
 }
@@ -3687,7 +3691,10 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 double gp = 0.0;
                 const bool have_rot = rotation != nullptr;
                 if (have_rot) gp = is_double ? reinterpret_cast<UEVR_Rotatord*>(rotation)->pitch : rotation->pitch;
-                if (g_cfg.xr_layer && g_cfg.veh_marker && ac.aim_marker && have_rot) {
+                // Not over a menu: posed every frame, the ring never goes stale on its own (the crosshair's
+                // rule, veh_tp_reticle_stamp_owns); a menu retires it below and the next frame out re-poses it.
+                const bool in_menu = host::g_plugin_state.in_menu->load(std::memory_order_relaxed);
+                if (g_cfg.xr_layer && g_cfg.veh_marker && ac.aim_marker && have_rot && !in_menu) {
                     const double o[3] = { ogx, ogy, ogz };
                     const double cpp = std::cos(gp * D2R), hr = heading * D2R;
                     const double MF[3] = { cpp * std::cos(hr), cpp * std::sin(hr), std::sin(gp * D2R) };
