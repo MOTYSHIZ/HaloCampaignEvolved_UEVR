@@ -737,6 +737,64 @@ int ride_scan_take_driver_parts() {
     return s_driver_part_count;
 }
 
+// The driver's Body from the last finished ride scan, on the same rule (nearest the Blam rider position,
+// else the pawn) and without the census log -- for the playerhead origin. nullptr = none.
+const ScanHit* ride_scan_pick_driver_body() {
+    const double S = 304.8;
+    double bx =  (double)g_unit_px.load(std::memory_order_relaxed) * S;
+    double by = -(double)g_unit_py.load(std::memory_order_relaxed) * S;
+    double bz =  (double)g_unit_pz.load(std::memory_order_relaxed) * S;
+    if (!g_unit_pvalid.load(std::memory_order_relaxed)) {
+        Vec3 pl{};
+        if (auto* pawn = API::get()->get_local_pawn(0); pawn != nullptr && call_ret_vec3(pawn, L"K2_GetActorLocation", &pl)) {
+            bx = pl.x; by = pl.y; bz = pl.z;
+        }
+    }
+    const ScanHit* best = nullptr; double bestd = 1e18;
+    for (const ScanHit& h : s_res_bodies) {
+        if (!scan_hit_live(h)) continue;
+        Vec3 w{};
+        if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
+        const double d = std::sqrt(((double)w.x - bx) * ((double)w.x - bx) + ((double)w.y - by) * ((double)w.y - by)
+                                 + ((double)w.z - bz) * ((double)w.z - bz));
+        if (d < bestd) { bestd = d; best = &h; }
+    }
+    return best;
+}
+
+// The Chief's HEAD BONE, by name: his skeleton's bone names are not written down anywhere here, so they
+// are listed once and the best match taken -- exactly "b_head", then "head", then a name ending in "head",
+// then one containing it (not an "end"/"nub"/"tip" helper). GetNumBones / GetBoneName are the calls
+// Arms.cpp already relies on (int32 in at 0, FName out at 4). Empty = none, and the playerhead origin
+// then falls back to the seat. GAME THREAD.
+std::wstring find_head_bone(API::UObject* body, int32_t* nbones) {
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    body->call_function(L"GetNumBones", p);
+    const int32_t nb = *reinterpret_cast<int32_t*>(p);
+    if (nbones != nullptr) *nbones = nb;
+    if (nb <= 0 || nb > 2048) return L"";
+    std::wstring best;
+    int best_rank = 99;
+    for (int32_t b = 0; b < nb; ++b) {
+        std::memset(p, 0, 16);
+        *reinterpret_cast<int32_t*>(p) = b;
+        body->call_function(L"GetBoneName", p);
+        const std::wstring n = reinterpret_cast<API::FName*>(p + 4)->to_string();
+        std::wstring l = n;
+        for (auto& ch : l) ch = (wchar_t)towlower(ch);
+        const size_t k = l.find(L"head");
+        if (k == std::wstring::npos) continue;
+        int rank = 3;
+        if (l == L"b_head") rank = 0;
+        else if (l == L"head") rank = 1;
+        else if (k + 4 == l.size()) rank = 2;
+        else if (l.find(L"end") != std::wstring::npos || l.find(L"nub") != std::wstring::npos
+                 || l.find(L"tip") != std::wstring::npos) continue;
+        if (rank < best_rank) { best_rank = rank; best = n; }
+    }
+    return best;
+}
+
 } // namespace
 
 // Reconciled EVERY TICK while mounted, not once on the transition: a component whose whole job
@@ -897,6 +955,14 @@ std::atomic<float>     g_tp_origin_ox{0.0f}, g_tp_origin_oy{0.0f}, g_tp_origin_o
 // enter animation carries the pawn into the seat over a second or so.
 std::atomic<float>     g_tp_seat_x{0.0f}, g_tp_seat_y{0.0f}, g_tp_seat_z{0.0f};
 std::atomic<bool>      g_tp_seat_valid{false};
+// THE PLAYER'S HEAD (origin "playerhead"): the Chief's head bone, measured on the tick in the CHIEF's own
+// frame -- his actor's -- which turns with a turret whose mesh does not. The eye rebuilds it every frame
+// against his actor's live transform (read through his Body component, published here), and uses that
+// frame for the camera's tracking too.
+std::atomic<uintptr_t> g_tp_rider_ptr{0};
+std::atomic<int32_t>   g_tp_rider_idx{-1};
+std::atomic<float>     g_tp_head_x{0.0f}, g_tp_head_y{0.0f}, g_tp_head_z{0.0f};
+std::atomic<bool>      g_tp_head_valid{false};
 // The VIEW BASE the eye handed UEVR last frame, as an offset from the chassis: the anchor, the spring
 // arm and the head-offset subtraction all included. The ray aim rebuilds the controller's world ray on
 // the tick from it plus the tick's own chassis read -- the same two-clocks split as the boom offset.
@@ -925,9 +991,10 @@ std::atomic<bool>      g_veh_tp_active{false};
 // swing round with it -- that camera is an orbit by choice). Accumulated on the game tick, read by the
 // eye; zeroed on every new ride, held otherwise (vehorbitreturn=0).
 std::atomic<float>     g_veh_turn_yaw{0.0f};
-// THE RECENTER ON A CAMERA CHANGE (vehcamrecenter). The eye works out the turn that puts where you are
-// looking onto the vehicle's forward, publishes it here and uses it at once; the tick adopts it into
-// g_veh_turn_yaw, the turn it owns, and acknowledges. Until then the eye keeps using the published value.
+// THE RECENTER ON A CAMERA CHANGE (vehcamrecenter). The eye works out the turn that points what aims the
+// vehicle (the aim hand, else your head) where the vehicle is aiming, publishes it here and uses it at
+// once; the tick adopts it into g_veh_turn_yaw, the turn it owns, and acknowledges. Until then the eye
+// keeps using the published value.
 std::atomic<float>     g_veh_turn_reset_val{0.0f};
 std::atomic<uint32_t>  g_veh_turn_reset_seq{0}, g_veh_turn_reset_ack{0};
 
@@ -983,13 +1050,14 @@ std::atomic<float> g_veh_aim_range{0.0f};
 // Consumed on the same tick by the world-space reticules; the compositor copy is re-stamped per frame.
 std::atomic<float> g_veh_aim_tx{0.0f}, g_veh_aim_ty{0.0f}, g_veh_aim_tz{0.0f};
 
-// THE VEHICLE-FACING MARKER (the camera file's "aimMarker", XRLAYER_SLOT_VEHAIM): the generated ring
-// where the VEHICLE points, beside the crosshair that shows where you point -- with a camera that turns
-// with the vehicle, the view settles only once the two meet, and this is how you see where that is. The
-// eye publishes the ray it is drawn along (its origin as an offset from the chassis, and the vehicle's
-// forward); the tick traces that ray for its depth -- the reticule's rule: on what it hits, the last range
-// held on a miss, the far end before any hit -- and publishes the range; the eye rebuilds the point each
-// frame on the live chassis and forward. A range crosses the clock boundary, never a point.
+// THE VEHICLE AIM MARKER (the camera file's "aimMarker", XRLAYER_SLOT_VEHAIM): the generated ring where
+// the VEHICLE aims, beside the crosshair that shows where you point -- with a camera that turns with the
+// vehicle, the view settles only once the two meet, and this is how you see where that is. The eye
+// publishes the ray it is drawn along (its origin as an offset from the chassis, and its direction: the
+// vehicle's heading at the game's aim pitch); the tick traces that ray for its depth -- the reticule's
+// rule: on what it hits, the last range held on a miss, the far end before any hit -- and publishes the
+// range; the eye rebuilds the point each frame on the live chassis and direction. A range crosses the
+// clock boundary, never a point.
 std::atomic<float> g_vmk_ox{0.0f}, g_vmk_oy{0.0f}, g_vmk_oz{0.0f};
 std::atomic<float> g_vmk_fx{1.0f}, g_vmk_fy{0.0f}, g_vmk_fz{0.0f};
 std::atomic<bool>  g_vmk_ray_valid{false};
@@ -1077,6 +1145,14 @@ void veh_room_ray(const Vec3& cpos, const Vec3& fwd, const double base[3],
     const double dl = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (dl > 1e-9) { dx /= dl; dy /= dl; dz /= dl; }
     *d = Vec3{ (float)dx, (float)dy, (float)dz };
+}
+
+// THE CONTROLLER THAT AIMS A VEHICLE: the aim hand (right unless aimhand says left). ONE place for the
+// ray aim, its per-frame reticule and the recenter, so the three can never read different hands -- and
+// the one place a head-aimed or other-hand vehicle lane would change. -1 = no such controller.
+int32_t veh_aim_hand_index() {
+    return g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
+                               : API::VR::get_right_controller_index();
 }
 
 } // namespace
@@ -1556,6 +1632,15 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
     if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamhidebody") == 0) { g_cfg.veh_cam_hide_body = (int)v; return true; }
+    if (_stricmp(key, "vehmarker")      == 0) { g_cfg.veh_marker = (v != 0.0); return true; }
+    if (_stricmp(key, "vehmarkerradius") == 0) { g_cfg.veh_marker_radius = (float)v; return true; }
+    if (_stricmp(key, "vehmarkerthick") == 0) { g_cfg.veh_marker_thick = (float)v; return true; }
+    if (_stricmp(key, "vehmarkerdot")   == 0) { g_cfg.veh_marker_dot = (float)v; return true; }
+    if (_stricmp(key, "vehmarkersize")  == 0) { g_cfg.veh_marker_size = (float)v; return true; }
+    if (_stricmp(key, "vehmarkercr")    == 0) { g_cfg.veh_marker_cr = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "vehmarkercg")    == 0) { g_cfg.veh_marker_cg = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "vehmarkercb")    == 0) { g_cfg.veh_marker_cb = clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "vehmarkeralpha") == 0) { g_cfg.veh_marker_alpha = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
@@ -1711,6 +1796,112 @@ void vehcam_game_tick_vehicle() {
             }
         }
 
+        // THE PLAYER'S HEAD (origin "playerhead"), only while such a camera is up. The Chief's Body comes
+        // from the ride scan's finished walk (the body hider's rule: nearest the rider); his head bone's
+        // name is found once by listing the skeleton's bones. Each tick: the head's world position, turned
+        // into his ACTOR's frame, so the eye can rebuild it against that frame live -- a turret turns the
+        // Chief even where it does not turn its own mesh.
+        {
+            static TrackedObject s_rider;
+            static uint32_t      s_rider_wait = 0;
+            static std::wstring  s_head_bone;
+            static bool          s_head_tried = false;
+            const VehActiveCam hc = veh_active_cam();
+            const bool want_head = sys && cp != 0 && hc.valid
+                                && hc.origin == static_cast<uint8_t>(vehcampresets::Origin::Head);
+            if (!sys) {
+                s_rider.reset(); s_rider_wait = 0;
+                g_tp_rider_ptr.store(0, std::memory_order_relaxed);
+                g_tp_rider_idx.store(-1, std::memory_order_relaxed);
+                g_tp_head_valid.store(false, std::memory_order_relaxed);
+            } else if (want_head) {
+                auto* body = s_rider.get_checked(L"SkeletalMeshComponent");
+                if (body == nullptr) {
+                    if (s_rider_wait == 0) s_rider_wait = ride_scan_request(/*force_new=*/false);
+                    if (ride_scan_done() >= s_rider_wait) {
+                        s_rider_wait = 0;
+                        if (const ScanHit* h = ride_scan_pick_driver_body()) {
+                            s_rider.set_at(h->o, h->i);
+                            body = h->o;
+                            g_tp_rider_ptr.store((uintptr_t)h->o, std::memory_order_relaxed);
+                            g_tp_rider_idx.store(h->i, std::memory_order_relaxed);
+                            if (s_head_bone.empty()) s_head_tried = false;   // a new body: look again
+                        }
+                    }
+                }
+                bool ok = false;
+                if (body != nullptr) {
+                    if (!s_head_tried) {
+                        s_head_tried = true;
+                        int32_t nb = 0;
+                        s_head_bone = find_head_bone(body, &nb);
+                        if (s_head_bone.empty())
+                            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: no head bone among the Chief's %d bones -- "
+                                                 "playerhead cameras use the seat instead", nb);
+                        else
+                            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head is bone \"%ls\" (of %d)",
+                                                 s_head_bone.c_str(), nb);
+                    }
+                    auto* actor = body->get_outer();
+                    Vec3 hw{}, bl{}, al{}, ar{};
+                    if (!s_head_bone.empty() && actor != nullptr && call_socket_location(body, s_head_bone.c_str(), &hw)
+                        && call_ret_vec3(body, L"K2_GetComponentLocation", &bl)
+                        && call_ret_vec3(actor, L"K2_GetActorLocation", &al)
+                        && call_ret_vec3(actor, L"K2_GetActorRotation", &ar)) {
+                        double AX[3], AY[3], AZ[3];
+                        rot_axes(ar.x, ar.y, ar.z, AX, AY, AZ);
+                        const double d[3] = { (double)hw.x - al.x, (double)hw.y - al.y, (double)hw.z - al.z };
+                        const double hx = AX[0] * d[0] + AX[1] * d[1] + AX[2] * d[2];
+                        const double hy = AY[0] * d[0] + AY[1] * d[1] + AY[2] * d[2];
+                        const double hz = AZ[0] * d[0] + AZ[1] * d[1] + AZ[2] * d[2];
+                        // A bone name the mesh does not have returns the component's OWN origin (Rig.cpp's
+                        // trap), so a "head" sitting on the body's origin is a failed lookup; and a head 4 m
+                        // from the actor is not a head either.
+                        const double sx = (double)hw.x - bl.x, sy = (double)hw.y - bl.y, sz = (double)hw.z - bl.z;
+                        if (sx * sx + sy * sy + sz * sz > 1.0 && hx * hx + hy * hy + hz * hz < 400.0 * 400.0) {
+                            g_tp_head_x.store((float)hx, std::memory_order_relaxed);
+                            g_tp_head_y.store((float)hy, std::memory_order_relaxed);
+                            g_tp_head_z.store((float)hz, std::memory_order_relaxed);
+                            ok = true;
+                        }
+                    }
+#if HALO_VR_DEV
+                    // UNMEASURED: whether the Chief's ACTOR turns with a turret whose own mesh does not. The
+                    // camera follows his actor's frame on the belief that it does. Every ~2 s while a
+                    // playerhead camera is up: his actor's rotation beside his Body's and the chassis', the
+                    // head offset, and whether his actor is the local pawn (the "seat" origin reads the pawn).
+                    if (g_cfg.veh_probe) {
+                        static uint32_t s_hdlog = 0;
+                        if ((s_hdlog++ % 64u) == 0u) {
+                            static TrackedObject s_hd_ch;
+                            static uintptr_t s_hd_ch_raw = 0;
+                            if (cp != s_hd_ch_raw) {
+                                s_hd_ch_raw = cp;
+                                s_hd_ch.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+                            }
+                            auto* chm = s_hd_ch.get_checked(L"SkeletalMeshComponent");
+                            Vec3 br{}, cr2{};
+                            const bool b_ok = call_ret_vec3(body, L"K2_GetComponentRotation", &br);
+                            const bool c_ok = chm != nullptr && call_ret_vec3(chm, L"K2_GetComponentRotation", &cr2);
+                            API::get()->log_info(
+                                "[Halo-CampE-UEVR] VEHHEAD: bone=\"%ls\" ok=%d actor(p=%.1f y=%.1f r=%.1f) body(y=%.1f)%s "
+                                "chassis(y=%.1f)%s head=(%.0f %.0f %.0f) pawn=%d",
+                                s_head_bone.c_str(), (int)ok, (double)ar.x, (double)ar.y, (double)ar.z,
+                                (double)br.y, b_ok ? "" : "?", (double)cr2.y, c_ok ? "" : "?",
+                                (double)g_tp_head_x.load(std::memory_order_relaxed),
+                                (double)g_tp_head_y.load(std::memory_order_relaxed),
+                                (double)g_tp_head_z.load(std::memory_order_relaxed),
+                                (int)(actor != nullptr && actor == API::get()->get_local_pawn(0)));
+                        }
+                    }
+#endif
+                }
+                g_tp_head_valid.store(ok, std::memory_order_relaxed);
+            } else {
+                g_tp_head_valid.store(false, std::memory_order_relaxed);
+            }
+        }
+
         const bool tp_on = sys && cp != 0 && g_veh_tp_active.load(std::memory_order_relaxed);
         if (tp_on && !s_tp_was) g_tp_mount_gen.fetch_add(1, std::memory_order_relaxed);   // the eye re-arms
         if (!tp_on && s_tp_was) {
@@ -1801,8 +1992,7 @@ void vehcam_game_tick_vehicle() {
         bool ok = false;
         const bool want = veh_tp_motion_aim_active() && g_cfg.veh_aim_ray;
         if (want) {
-            const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
-                                                     : API::VR::get_right_controller_index();
+            const int32_t ridx = veh_aim_hand_index();
             Vec3 cpos{}; Quat cq{};
             auto* pawn = API::get()->get_local_pawn(0);
             Vec3 c{};
@@ -2127,24 +2317,90 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // THE VEHICLE'S FRAME NOW: R_mesh . C -- its forward, right and up as world directions.
             double VF[3], VR[3], VU[3];
             vehicle_axes(s_C, MX, MY, MZ, VF, VR, VU);
+            // A PLAYERHEAD CAMERA RIDES THE CHIEF. His actor's frame, read now like the chassis, replaces the
+            // vehicle's for everything this camera tracks -- so a turret that turns him but not its own mesh
+            // turns this view -- and its origin is his head, rebuilt from the offset the tick measured in
+            // that same frame (two clocks: an offset crosses the boundary, never a position). Eye 0 reads it
+            // and eye 1 reuses it, so both eyes see one Chief. Until the head is known, the seat stands in.
+            bool   head_ok = false;
+            double head_w[3] = { 0.0, 0.0, 0.0 };
+            {
+                static bool   s_hd_use = false;
+                static double s_hd_w[3] = {0, 0, 0}, s_hd_x[3] = {1, 0, 0}, s_hd_y[3] = {0, 1, 0}, s_hd_z[3] = {0, 0, 1};
+                if (index == 0) {
+                    s_hd_use = false;
+                    if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Head)
+                        && halo::g_tp_head_valid.load(std::memory_order_relaxed)) {
+                        static TrackedObject s_rb;
+                        static uintptr_t s_rb_raw = 0;
+                        const uintptr_t rp = halo::g_tp_rider_ptr.load(std::memory_order_relaxed);
+                        if (rp != s_rb_raw) {
+                            s_rb_raw = rp;
+                            s_rb.set_at(reinterpret_cast<API::UObject*>(rp), halo::g_tp_rider_idx.load(std::memory_order_relaxed));
+                        }
+                        auto* rb = (rp != 0) ? s_rb.get_checked(L"SkeletalMeshComponent") : nullptr;
+                        auto* ra = (rb != nullptr) ? rb->get_outer() : nullptr;
+                        Vec3 al{}, ar{};
+                        if (ra != nullptr && call_ret_vec3(ra, L"K2_GetActorLocation", &al)
+                            && call_ret_vec3(ra, L"K2_GetActorRotation", &ar)) {
+                            rot_axes(ar.x, ar.y, ar.z, s_hd_x, s_hd_y, s_hd_z);
+                            const double hx = halo::g_tp_head_x.load(std::memory_order_relaxed);
+                            const double hy = halo::g_tp_head_y.load(std::memory_order_relaxed);
+                            const double hz = halo::g_tp_head_z.load(std::memory_order_relaxed);
+                            const double a[3] = { (double)al.x, (double)al.y, (double)al.z };
+                            for (int k = 0; k < 3; ++k) s_hd_w[k] = a[k] + hx * s_hd_x[k] + hy * s_hd_y[k] + hz * s_hd_z[k];
+                            s_hd_use = true;
+                        }
+                    }
+                }
+                if (s_hd_use) {   // eye 1 takes eye 0's decision and values, whatever it would read now
+                    head_ok = true;
+                    for (int k = 0; k < 3; ++k) {
+                        head_w[k] = s_hd_w[k];
+                        VF[k] = s_hd_x[k]; VR[k] = s_hd_y[k]; VU[k] = s_hd_z[k];
+                    }
+                }
+            }
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
             if (ac.rot_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
             // RECENTER ON A CAMERA CHANGE (vehcamrecenter): getting in, or left X / left Y, turns the view so
-            // the way you are looking becomes the vehicle's forward -- your body then faces the way the
-            // vehicle points, which is what a camera that turns with it and a hand that aims it want. Worked
-            // out here, where the view's own frame is, on the new camera's first frame (eye 0), with this
-            // camera's frame before any turn; the tick adopts it into the turn it owns. Yaw only, about your
-            // head, through the right stick's own turn.
+            // WHAT AIMS THE VEHICLE points where the VEHICLE IS AIMING. The source: the aim hand while your hand
+            // aims this vehicle (veh_aim_hand_index), else your head. The target:
+            //  - a camera that TURNS WITH the vehicle (rotationTracking yaw): the frame it turns with (VF: the
+            //    chassis, or the Chief for playerhead). Nowhere else does it rest. The hand is read in a view
+            //    that turns with the vehicle, so any gap between them is a standing offset the vehicle chases
+            //    forever, the view turning along with it. Recentring the HEAD left the hand off by however it
+            //    happened to be held, and the vehicle kept turning that way (the user, 2026-09-26);
+            //  - a camera that holds its heading: where the vehicle is already aimed (the ray aim's direction),
+            //    so stepping cameras swings nothing -- a turret stays where it points;
+            //  - before this ride has aimed at all (getting in): the vehicle's forward.
+            // Worked out here, where the view's own frame is, on the new camera's first frame (eye 0), with
+            // this camera's frame before any turn; the tick adopts it into the turn it owns. Yaw only, about
+            // your head, through the right stick's own turn.
             static uint32_t s_recenter_seen = 0;
             if (index == 0 && ac.recenter_gen != s_recenter_seen) {
                 s_recenter_seen = ac.recenter_gen;
                 double F0[3], R0[3], U0[3];
                 tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, 0.0, F0, R0, U0);
-                Vec3 hp{}; Quat hq{};
-                const auto hi = API::VR::get_hmd_index();
-                if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
-                    const double head = vehcammath::head_yaw_deg(hq.x, hq.y, hq.z, hq.w);
-                    halo::g_veh_turn_reset_val.store((float)vehcammath::recenter_turn_deg(VF, F0, R0, head),
+                const bool hand_aims = halo::veh_tp_motion_aim_active();
+                double tgt[3] = { VF[0], VF[1], VF[2] };
+                if (!ac.rot_yaw && hand_aims && halo::g_veh_aim_valid.load(std::memory_order_relaxed)) {
+                    const double ay = (double)halo::g_veh_aim_yaw.load(std::memory_order_relaxed) * D2R;
+                    const double ap = (double)halo::g_veh_aim_pitch.load(std::memory_order_relaxed) * D2R;
+                    tgt[0] = std::cos(ap) * std::cos(ay);
+                    tgt[1] = std::cos(ap) * std::sin(ay);
+                    tgt[2] = std::sin(ap);
+                }
+                Vec3 sp{}; Quat sq{};
+                const int32_t hand = hand_aims ? veh_aim_hand_index() : -1;
+                bool have = hand >= 0 && get_pose(hand, &sp, &sq, /*use_aim=*/true);
+                if (!have) {
+                    const auto hi = API::VR::get_hmd_index();
+                    have = hi >= 0 && get_pose(hi, &sp, &sq, /*use_aim=*/false);
+                }
+                if (have) {
+                    const double src = vehcammath::pose_yaw_deg(sq.x, sq.y, sq.z, sq.w);
+                    halo::g_veh_turn_reset_val.store((float)vehcammath::recenter_turn_deg(tgt, F0, R0, src),
                                                      std::memory_order_relaxed);
                     halo::g_veh_turn_reset_seq.fetch_add(1, std::memory_order_release);
                 }
@@ -2174,8 +2430,14 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // the tick measured in the mesh's frame, rebuilt against its rotation now, so it rides the
             // vehicle rigidly at render rate. Until the tick has measured it, the vehicle's origin.
             double org[3] = { 0.0, 0.0, 0.0 };
-            if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Seat)
-                && halo::g_tp_seat_valid.load(std::memory_order_relaxed)) {
+            if (head_ok) {
+                // THE PLAYER'S HEAD (above), as an offset from the chassis like every origin here.
+                org[0] = head_w[0] - (double)cloc.x;
+                org[1] = head_w[1] - (double)cloc.y;
+                org[2] = head_w[2] - (double)cloc.z;
+            } else if ((ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Seat)
+                        || ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Head))
+                       && halo::g_tp_seat_valid.load(std::memory_order_relaxed)) {
                 const double sx = halo::g_tp_seat_x.load(std::memory_order_relaxed);
                 const double sy = halo::g_tp_seat_y.load(std::memory_order_relaxed);
                 const double sz = halo::g_tp_seat_z.load(std::memory_order_relaxed);
@@ -2246,8 +2508,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // RANGE crosses the clock boundary, never a position. Eye 0 only (one mono publish; the
             // layer re-anchors it for both eyes against this same view base).
             if (index == 0 && halo::veh_tp_reticle_stamp_owns()) {
-                const int32_t ridx = g_cfg.aim_left_hand ? API::VR::get_left_controller_index()
-                                                         : API::VR::get_right_controller_index();
+                const int32_t ridx = veh_aim_hand_index();
                 Vec3 cpos{}; Quat cq{};
                 if (ridx >= 0 && get_pose(ridx, &cpos, &cq, /*use_aim=*/true)) {
                     const double base[3] = { ecx, ecy, ecz };
@@ -2263,43 +2524,46 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 }
             }
 
-            // THE VEHICLE-FACING MARKER (aimMarker): the generated ring where the VEHICLE points -- on the
-            // ray from the aim's origin (the game's camera, where the vehicle's aim is taken from with
-            // vehaimorigin=1; else the seat) along the vehicle's forward, THIS frame's, at the range the tick
-            // traced. Placed and sized on the vehicle reticule's rules: pulled back off the surface it lands
-            // on, and held at its apparent size. Aiming a vehicle whose camera turns with it, the view settles
-            // once your crosshair meets this ring. Eye 0 only; the layer re-anchors it for both eyes.
+            // THE VEHICLE AIM MARKER (vehmarker + the camera file's "aimMarker"): a ring where the VEHICLE IS
+            // AIMING. Its heading is the vehicle's own -- the frame a turning camera follows (VF: the chassis,
+            // or the Chief for playerhead) -- at the pitch the game aims at, from the game's own chase camera,
+            // the line the vehicle's guns converge on (vehaimorigin's finding). Once the vehicle has turned to
+            // where your hand points it sits around the crosshair; while it is still turning, the gap is how
+            // far behind it is. It is also exactly where a camera that turns with the vehicle comes to rest,
+            // which is what the recenter lines your hand up with. The game camera's own line of sight was
+            // tried first and showed no lag at all: it follows the aim we write to within a degree or two
+            // (gcam against aimw in the vehprobe line), while the chassis trailed it by 10-25 deg through
+            // turns (gcam against the mesh yaw; 2,242 samples, 2026-09-26). Placed and sized on the vehicle
+            // reticule's rules (pulled back off the surface, apparent size held) times vehmarkersize, at the
+            // range the tick traced along this same ray. Eye 0 only; the layer re-anchors it for both eyes.
             if (index == 0) {
                 static bool s_mk_was = false;
-                if (g_cfg.xr_layer && ac.aim_marker) {
-                    double o[3] = { ogx, ogy, ogz };
-                    if (g_cfg.veh_aim_origin != 1) {
-                        o[0] = (double)cloc.x; o[1] = (double)cloc.y; o[2] = (double)cloc.z;
-                        if (halo::g_tp_seat_valid.load(std::memory_order_relaxed)) {
-                            const double sx = halo::g_tp_seat_x.load(std::memory_order_relaxed);
-                            const double sy = halo::g_tp_seat_y.load(std::memory_order_relaxed);
-                            const double sz = halo::g_tp_seat_z.load(std::memory_order_relaxed);
-                            for (int k = 0; k < 3; ++k) o[k] += sx * MX[k] + sy * MY[k] + sz * MZ[k];
-                        }
-                    }
+                double gp = 0.0;
+                const bool have_rot = rotation != nullptr;
+                if (have_rot) gp = is_double ? reinterpret_cast<UEVR_Rotatord*>(rotation)->pitch : rotation->pitch;
+                if (g_cfg.xr_layer && g_cfg.veh_marker && ac.aim_marker && have_rot) {
+                    const double o[3] = { ogx, ogy, ogz };
+                    const double cpp = std::cos(gp * D2R), hr = heading * D2R;
+                    const double MF[3] = { cpp * std::cos(hr), cpp * std::sin(hr), std::sin(gp * D2R) };
                     halo::g_vmk_ox.store((float)(o[0] - (double)cloc.x), std::memory_order_relaxed);
                     halo::g_vmk_oy.store((float)(o[1] - (double)cloc.y), std::memory_order_relaxed);
                     halo::g_vmk_oz.store((float)(o[2] - (double)cloc.z), std::memory_order_relaxed);
-                    halo::g_vmk_fx.store((float)VF[0], std::memory_order_relaxed);
-                    halo::g_vmk_fy.store((float)VF[1], std::memory_order_relaxed);
-                    halo::g_vmk_fz.store((float)VF[2], std::memory_order_relaxed);
+                    halo::g_vmk_fx.store((float)MF[0], std::memory_order_relaxed);
+                    halo::g_vmk_fy.store((float)MF[1], std::memory_order_relaxed);
+                    halo::g_vmk_fz.store((float)MF[2], std::memory_order_relaxed);
                     halo::g_vmk_ray_valid.store(true, std::memory_order_relaxed);
                     float range = halo::g_vmk_range.load(std::memory_order_relaxed);
                     if (!(range > 1.0f)) range = (g_cfg.veh_aim_far > 1.0f) ? g_cfg.veh_aim_far : 10000.0f;
                     const float r = range - std::fmin(g_cfg.aim_reticule_surface_off, range * 0.5f);
-                    const Vec3 t{ (float)(o[0] + VF[0] * r), (float)(o[1] + VF[1] * r), (float)(o[2] + VF[2] * r) };
+                    const Vec3 t{ (float)(o[0] + MF[0] * r), (float)(o[1] + MF[1] * r), (float)(o[2] + MF[2] * r) };
                     // Apparent size: the vehicle reticule's (distance from the eye / aimreticuledist, times
-                    // aimreticulescaleveh), through the reticule's own world-size formula.
+                    // aimreticulescaleveh), through the reticule's own world-size formula, times its own size.
                     const double dx = (double)t.x - ecx, dy = (double)t.y - ecy, dz = (double)t.z - ecz;
                     const float d = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
                     const float ref = (g_cfg.aim_reticule_dist > 1.0f) ? g_cfg.aim_reticule_dist : 500.0f;
                     const float cm = g_cfg.aim_widget_draw * g_cfg.aim_widget_scale * (d / ref)
-                                   * g_cfg.aim_reticule_scale_veh * g_cfg.xr_layer_size;
+                                   * g_cfg.aim_reticule_scale_veh * g_cfg.xr_layer_size
+                                   * (g_cfg.veh_marker_size > 0.05f ? g_cfg.veh_marker_size : 0.05f);
                     const auto mk_anchor = host::g_plugin_state.layer_anchor;
                     halo::xrlayer_notice_quad(halo::XRLAYER_SLOT_VEHAIM, mk_anchor(halo::XRLAYER_SLOT_VEHAIM, t), cm,
                                               /*hold_cm=*/0.0f, /*priority=*/1);

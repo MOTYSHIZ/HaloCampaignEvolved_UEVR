@@ -154,19 +154,23 @@ inline double head_yaw_deg(double qx, double qy, double qz, double qw) {
     return y;
 }
 
-// THE TURN THAT PUTS WHERE YOU ARE LOOKING ON THE VEHICLE'S FORWARD (vehcamrecenter). F0/R0 are the view's
-// forward and right before any turn (tracked_frame with no turn), VF the vehicle's forward, head_yaw your
-// head's yaw in the room (head_yaw_deg). The stick turn rotates the view about its own up, and UEVR adds
-// your head's yaw about that same axis, so after this turn your gaze's heading IS the vehicle's -- in a
-// camera that tilts with the vehicle too, since both angles are measured in the tilted frame. With the
-// vehicle's forward nearly along the view's up (it cannot be seen as a heading) only your head is undone.
-// Degrees, in (-180, 180].
-inline double recenter_turn_deg(const double VF[3], const double F0[3], const double R0[3], double head_yaw) {
+// The same for ANY tracked pose's forward (its -Z): a controller's aim pose as much as the head. Pointed
+// nearly straight up or down, the right vector gives the heading, as it does for the head.
+inline double pose_yaw_deg(double qx, double qy, double qz, double qw) { return head_yaw_deg(qx, qy, qz, qw); }
+
+// THE TURN THAT PUTS A POSE'S HEADING ON A WORLD DIRECTION (vehcamrecenter). F0/R0 are the view's forward
+// and right before any turn (tracked_frame with no turn), `target` the direction to line up with (the
+// vehicle's aim), src_yaw the pose's yaw in the room (pose_yaw_deg: the aim hand, or the head). The stick
+// turn rotates the view about its own up, and UEVR adds the pose's yaw about that same axis, so after
+// this turn the pose's heading IS the target's -- in a camera that tilts with the vehicle too, since both
+// angles are measured in the tilted frame. With the target nearly along the view's up (it cannot be seen
+// as a heading) only the pose's own yaw is undone. Degrees, in (-180, 180].
+inline double recenter_turn_deg(const double target[3], const double F0[3], const double R0[3], double src_yaw) {
     const double R2D = 57.29577951;
-    const double f = VF[0] * F0[0] + VF[1] * F0[1] + VF[2] * F0[2];
-    const double r = VF[0] * R0[0] + VF[1] * R0[1] + VF[2] * R0[2];
+    const double f = target[0] * F0[0] + target[1] * F0[1] + target[2] * F0[2];
+    const double r = target[0] * R0[0] + target[1] * R0[1] + target[2] * R0[2];
     const double veh = (f * f + r * r > 0.01) ? std::atan2(r, f) * R2D : 0.0;
-    double t = veh - head_yaw;
+    double t = veh - src_yaw;
     while (t > 180.0) t -= 360.0;
     while (t <= -180.0) t += 360.0;
     return t;

@@ -1380,11 +1380,14 @@
     // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
     // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
     int   veh_ctrl_click = 1;
-    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left X / left Y -- turn the view so the way
-    // you are looking becomes the vehicle's forward (yaw only, about your head, through the same turn the
-    // right stick uses). Your body then faces the way the vehicle points, which is what a camera that
-    // turns with the vehicle and a controller that aims it want. Not on a camera-file reload (editing a
-    // number must not spin you round) and not on the controls toggle. 0 = the view keeps its turn.
+    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left X / left Y -- turn the view so what
+    // aims the vehicle points where the vehicle is aiming (yaw only, about your head, through the same turn
+    // the right stick uses). What aims it: your aim hand while your hand aims this vehicle, else your head.
+    // Where it is aiming: in a camera that turns with the vehicle, the vehicle's own heading -- the only
+    // place such a camera rests, so it does not start the vehicle turning; in one that holds its heading,
+    // where the vehicle is already aimed, so nothing swings; on getting in, its forward. Not on a
+    // camera-file reload (editing a number must not spin you round) and not on the controls toggle.
+    // 0 = the view keeps its turn.
     bool  veh_cam_recenter = true;
     // vehcamhidebody: your character's body in the vehicle cameras. 0 = never hidden (default -- you see
     // the Chief in the seat, the user's call 2026-09-26); 1 = hidden in the cameras whose "hideBody" says
@@ -1393,6 +1396,19 @@
     // that hid armour pieces and left the body drawn, so the seated body there is some other mesh.
     // (bc24's seat camera has its own switch, vehhidebody.)
     int   veh_cam_hide_body = 0;
+    // ---- THE VEHICLE AIM MARKER (and the camera file's per-vehicle "aimMarker"): a ring where the
+    // VEHICLE is aiming -- its own heading (the Chief's, for a playerhead camera) at the game's aim pitch,
+    // along the line the vehicle's guns converge on -- beside the crosshair where YOU point. Once the
+    // vehicle has caught up with your hand the ring sits around the crosshair; the gap while it has not is
+    // how far the vehicle's aim is behind. Its OWN picture, apart from the reticule's fallback ring
+    // (xrlayerring*), so the two are tuned apart. All live.
+    bool  veh_marker = true;            // vehmarker: 0 = never shown, whatever the camera file says
+    float veh_marker_radius = 0.40f;    // vehmarkerradius: ring radius, a fraction of its picture (0.02-0.48)
+    float veh_marker_thick = 0.008f;    // vehmarkerthick: ring half-thickness, a fraction of its picture
+    float veh_marker_dot = 0.0f;        // vehmarkerdot: centre dot radius; 0 = none -- it frames the crosshair
+    float veh_marker_size = 1.0f;       // vehmarkersize: its size against the vehicle reticule's
+    float veh_marker_cr = 1.0f, veh_marker_cg = 0.75f, veh_marker_cb = 0.25f;   // vehmarkercr/cg/cb: amber
+    float veh_marker_alpha = 0.9f;      // vehmarkeralpha
     // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
     // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
     // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every

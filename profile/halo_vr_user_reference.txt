@@ -567,8 +567,9 @@
 # Camera readout. A short note in front of you whenever the vehicle camera changes: the vehicle, the
 # camera's number and name, what it does, and which controls it uses.
 #vehcamreadout=1
-# Face the vehicle on a camera change. Getting in, or stepping cameras with left X or left Y, turns
-# your view so the way you are looking becomes the vehicle's forward.
+# Line up with the vehicle on a camera change. Getting in, or stepping cameras with left X or left Y,
+# turns your view so your aiming hand points where the vehicle is aiming (your head, when you aim with
+# the stick). A camera that turns with the vehicle then holds still until you move your hand.
 #vehcamrecenter=1
 # Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
 # that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
@@ -579,6 +580,26 @@
 # the stick, says which, and keeps the click from the game while seated; 2 does the same and the game
 # gets the click too; 0 leaves the click to the game.
 #vehctrlclick=1
+# Vehicle aim ring. A ring where the vehicle itself is aiming, beside your crosshair; once the vehicle
+# has caught up with your hand it sits around the crosshair. 0 hides it everywhere (each vehicle can
+# also turn it off with "aimMarker" in halo_vr_vehcams.json).
+#vehmarker=1
+# Vehicle aim ring size. Its size against the crosshair's.
+#vehmarkersize=1.0
+# Vehicle aim ring radius. The ring's radius within its picture, from 0.02 to 0.48.
+#vehmarkerradius=0.40
+# Vehicle aim ring thickness. Half the ring's thickness, as a fraction of its picture.
+#vehmarkerthick=0.008
+# Vehicle aim ring dot. A dot in the ring's centre, as a fraction of its picture; 0 draws none.
+#vehmarkerdot=0
+# Vehicle aim ring red. Red, from 0 to 1.
+#vehmarkercr=1.0
+# Vehicle aim ring green. Green, from 0 to 1.
+#vehmarkercg=0.75
+# Vehicle aim ring blue. Blue, from 0 to 1.
+#vehmarkercb=0.25
+# Vehicle aim ring opacity. From 0 (invisible) to 1.
+#vehmarkeralpha=0.9
 # Text notices. Short notes in front of you, such as the camera readout; 0 turns them all off.
 #xrtext=1
 # Notice distance. How far in front of your eyes a notice appears, in centimetres.

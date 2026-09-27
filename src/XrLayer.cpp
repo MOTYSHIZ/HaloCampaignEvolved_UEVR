@@ -955,17 +955,18 @@ constexpr int RING_DIM = 128;
 // `stride` is the destination's row pitch in BYTES and `out` already points at the cell's top-left
 // pixel, so the same generator serves a whole-image bitmap (stride = dim*4) and cell 0 of an atlas
 // (stride = atlas_w*4) with no second code path. Everything else is unchanged.
-void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
-                     bool bgra) {
+// THE RING, with its geometry passed in (fractions of the cell): the reticule's fallback ring and the
+// vehicle aim marker are the same drawing with different numbers, tuned apart. dot_frac <= 0 draws no
+// centre dot at all (a zero-radius dot still feathers into a faint speck at the centre pixel).
+void generate_ring(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a, bool bgra,
+                   float radius_frac, float thick_frac, float dot_frac) {
     const float c  = (float)dim * 0.5f - 0.5f;
-    float rf = g_cfg.xr_layer_ring_radius; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
+    float rf = radius_frac; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
     const float R  = (float)dim * rf;      // ring radius, px
-    // Thickness and dot are PLAYER-TUNABLE. This ring is the FALLBACK the player looks through
-    // whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of scene
-    // (reported 2026-09-19: "this ring blocks so much of the view"). Clamped so a bad value can
-    // neither erase the ring nor fill the cell.
-    float tf = g_cfg.xr_layer_ring_thick; if (tf < 0.004f) tf = 0.004f; if (tf > 0.200f) tf = 0.200f;
-    float df = g_cfg.xr_layer_ring_dot;   if (df < 0.000f) df = 0.000f; if (df > 0.200f) df = 0.200f;
+    // Clamped so a bad value can neither erase the ring nor fill the cell.
+    float tf = thick_frac; if (tf < 0.004f) tf = 0.004f; if (tf > 0.200f) tf = 0.200f;
+    const bool  no_dot = !(dot_frac > 0.0f);
+    float df = dot_frac;  if (df < 0.000f) df = 0.000f; if (df > 0.200f) df = 0.200f;
     const float T  = (float)dim * tf;      // ring half-thickness, px
     const float D  = (float)dim * df;      // centre dot radius, px
     const float AA = 1.25f;                // edge softness, px
@@ -980,7 +981,7 @@ void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, flo
             if (ring > 1.0f) ring = 1.0f;
             if (ring < 0.0f) ring = 0.0f;
 
-            float dot = 1.0f - (d - D) / AA;
+            float dot = no_dot ? 0.0f : 1.0f - (d - D) / AA;
             if (dot > 1.0f) dot = 1.0f;
             if (dot < 0.0f) dot = 0.0f;
 
@@ -998,6 +999,17 @@ void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, flo
             p[3] = (uint8_t)(cov * 255.0f + 0.5f);
         }
     }
+}
+
+// The reticule's FALLBACK ring: thickness and dot are PLAYER-TUNABLE. This ring is what the player
+// looks through whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of
+// scene (reported 2026-09-19: "this ring blocks so much of the view"). A dot of 0 still draws the faint
+// centre speck it always has -- only the vehicle aim marker asks for no dot at all.
+void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
+                     bool bgra) {
+    const float df = g_cfg.xr_layer_ring_dot;
+    generate_ring(out, dim, stride, r, g, b, a, bgra, g_cfg.xr_layer_ring_radius, g_cfg.xr_layer_ring_thick,
+                  df > 0.0f ? df : 1e-6f);
 }
 
 // THE GRAB GUIDE'S ART: a feathered capsule, generated once.
@@ -1239,13 +1251,15 @@ bool fill_upload(float r, float g, float b, float a) {
         generate_bitmap(tex.data() + ((size_t)c0.y * g_sc_w + c0.x) * 4, c0.dim,
                         (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
     }
-    // The vehicle-facing marker: the same ring, colour and shape, in its own cell -- so it is the ring
-    // even while cell 0 shows the game's captured crosshair. Regenerated with cell 0 on a colour or
-    // ring-shape change (g_regen), which is what keeps the two alike.
+    // The vehicle aim marker: a ring of its OWN -- its own radius, thickness, dot and colour (vehmarker*),
+    // so it can frame the crosshair without touching the on-foot fallback ring. Its own cell, so it is
+    // the ring even while cell 0 shows the game's captured crosshair. Regenerated on any change to its
+    // settings (g_regen, see the config poll).
     const Cell& cv = g_cell[XRLAYER_SLOT_VEHAIM];
     if (cv.dim > 0) {
-        generate_bitmap(tex.data() + ((size_t)cv.y * g_sc_w + cv.x) * 4, cv.dim,
-                        (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
+        generate_ring(tex.data() + ((size_t)cv.y * g_sc_w + cv.x) * 4, cv.dim, (size_t)g_sc_w * 4,
+                      g_cfg.veh_marker_cr, g_cfg.veh_marker_cg, g_cfg.veh_marker_cb, g_cfg.veh_marker_alpha,
+                      g_is_bgra, g_cfg.veh_marker_radius, g_cfg.veh_marker_thick, g_cfg.veh_marker_dot);
     }
     // THE GUIDE'S CELL, filled from the same staging pass. It is a generated shape like the
     // fallback ring, not captured art, so it belongs here rather than anywhere near XrSource --
@@ -4189,6 +4203,19 @@ void xrlayer_tick() {
             s_ring_t = g_cfg.xr_layer_ring_thick;
             s_ring_d = g_cfg.xr_layer_ring_dot;
             if (!first) g_regen.store(true, std::memory_order_relaxed);   // not on the first poll
+        }
+    }
+    // ...AND FOR THE VEHICLE AIM MARKER'S RING (vehmarker*): its own picture in its own cell, generated
+    // by the same pass, so a live edit of its shape or colour has to re-run that pass too.
+    {
+        static float s_mk[7] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+        const float now_mk[7] = { g_cfg.veh_marker_radius, g_cfg.veh_marker_thick, g_cfg.veh_marker_dot,
+                                  g_cfg.veh_marker_cr, g_cfg.veh_marker_cg, g_cfg.veh_marker_cb,
+                                  g_cfg.veh_marker_alpha };
+        if (std::memcmp(s_mk, now_mk, sizeof(now_mk)) != 0) {
+            const bool first = (s_mk[0] < 0.0f);
+            std::memcpy(s_mk, now_mk, sizeof(now_mk));
+            if (!first) g_regen.store(true, std::memory_order_relaxed);
         }
     }
 
