@@ -620,6 +620,12 @@
 #headblockradius=12
 
 # ------------------------------------------------------------------- HAND SMOOTHING (handsmooth)
+# Steadies your tracked hands before anything reads them, so aim, the arms, two-handed holds and
+# reload all see the same steadied hands. A still hand is held steady; a fast move passes through
+# with little lag. Your headset is never smoothed.
+#
+# 1 = hand smoothing on, 0 = your hands exactly as the headset tracks them.
+#handsmooth=1
 # Hand smoothing: which hands are steadied (0 both, 1 only the hand you aim with, 2 only your other
 # hand). 2 steadies two-handed holds and the arms without adding any lag to your aim.
 #handsmoothhands=0

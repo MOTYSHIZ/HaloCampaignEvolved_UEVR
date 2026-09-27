@@ -136,6 +136,11 @@ const FeatureRow kFeatures[] = {
       "",
       "",
       "", FEATURE_BOOL(arm_hide) },
+    { "handsmooth", 1, Tier::Stable, "", "Hand smoothing",
+      "Steadies your tracked hands before anything reads them, so aim, the arms, two-handed holds and reload all see the same steadied hands. A still hand is held steady; a fast move passes through with little lag.",
+      "handsmoothhands,handsmoothposmin,handsmoothposbeta,handsmoothrotmin,handsmoothrotbeta,handsmoothdcut,handsmoothmelee",
+      "handsmoothlog",
+      "", FEATURE_BOOL(hand_smooth) },
 
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
@@ -269,11 +274,6 @@ const FeatureRow kFeatures[] = {
       "",
       "",
       "", FEATURE_INT(world_scale_follow) },
-    { "handsmooth", 1, Tier::Experimental, "Arms", "Hand smoothing",
-      "Steadies your tracked hands before anything reads them, so aim, the arms, two-handed holds and gestures all see the same steadied hands. A still hand is held steady; a fast move passes through with little lag.",
-      "handsmoothhands,handsmoothposmin,handsmoothposbeta,handsmoothrotmin,handsmoothrotbeta,handsmoothdcut,handsmoothmelee",
-      "handsmoothlog",
-      "", FEATURE_BOOL(hand_smooth) },
     { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
       "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate and holster marker tint.",
       "",
@@ -609,6 +609,7 @@ static const EffectiveKey kEffectiveKeys[] = {
     { "stabilityfixes",   [] { return (double)g_cfg.stability_fixes; } },
     { "worldscalefollow", [] { return (double)g_cfg.world_scale_follow; } },
     { "grenadegunhold",   [] { return (double)g_cfg.grenade_gun_hold; } },
+    { "handsmooth",       [] { return (double)g_cfg.hand_smooth; } },
 };
 
 static void effective_mirror_path(char* out, size_t cap) {

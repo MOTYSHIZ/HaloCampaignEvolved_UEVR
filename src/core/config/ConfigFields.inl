@@ -1319,7 +1319,9 @@
     //   rotmin 0.1 -> 1.0: rotation drives the AIM ray, and at 0.1 Hz a slow 3 deg/s track trailed
     //     the hand by ~1.3 deg (tau ~0.45 s); at 1.0 Hz it is ~0.4 deg (review, 2026-09-27).
     //   posmin 0.1 -> 1.0, posbeta 1000 -> 500: tuned in headset by the user, canonized 2026-09-27.
-    bool  hand_smooth = false;
+    // STABLE since 2026-09-27 (the user's call): the registry never writes a Stable master, so this
+    // initialiser IS the shipped value. handsmooth=0 turns it off.
+    bool  hand_smooth = true;
     int   hand_smooth_hands = 0;
     float hand_smooth_pos_min = 1.0f;
     float hand_smooth_pos_beta = 500.0f;
