@@ -563,6 +563,48 @@
 # Steering direction. -1 or 1; flip it if the vehicle steers the wrong way.
 #vehwheelsteersign=-1
 
+# ------------------------------------------------------------------------- VEHICLE CAMERAS (vehtp)
+# Camera readout. A short note in front of you whenever the vehicle camera changes: the vehicle, the
+# camera's number and name, what it does, and which controls it uses.
+#vehcamreadout=1
+# Face the vehicle on a camera change. Getting in, or stepping cameras with left X or left Y, turns
+# your view so the way you are looking becomes the vehicle's forward.
+#vehcamrecenter=1
+# Left stick click in a vehicle. 1 switches that vehicle between aiming with your hand and aiming with
+# the stick, says which, and keeps the click from the game while seated; 2 does the same and the game
+# gets the click too; 0 leaves the click to the game.
+#vehctrlclick=1
+# Text notices. Short notes in front of you, such as the camera readout; 0 turns them all off.
+#xrtext=1
+# Notice distance. How far in front of your eyes a notice appears, in centimetres.
+#xrtextdist=130
+# Notice height. How far above (+) or below (-) your eye line a notice appears, in centimetres.
+#xrtextup=-20
+# Notice sideways. How far right (+) or left (-) of where you look a notice appears, in centimetres.
+#xrtextright=0
+# Notice width. How wide a notice is, in centimetres; its height follows its shape.
+#xrtextwidth=48
+# Notice fade in. How long a notice takes to appear, in milliseconds.
+#xrtextfadein=150
+# Notice hold. How long a notice stays fully visible, in milliseconds.
+#xrtexthold=1500
+# Notice fade out. How long a notice takes to fade away, in milliseconds.
+#xrtextfadeout=1500
+# Notice backing. How solid the dark panel behind the writing is, from 0 (none) to 1.
+#xrtextbg=0.55
+# Notice text size. The size of the writing within the panel; long notes shrink to fit.
+#xrtextscale=1.0
+
+# ------------------------------------------------------------ AIM VEHICLES WITH YOUR HAND (vehaim)
+# Right stick in a vehicle. 1 turns your view, since your hand does the aiming; 2 leaves the stick to
+# the game.
+#vehstick=1
+# View turn speed. How fast the right stick turns your view in a vehicle, in degrees a second.
+#vehorbitrate=120
+# View turn return. How fast your view eases back to the vehicle's front once you let go of the
+# stick, in degrees a second; 0 leaves it where you turned it.
+#vehorbitreturn=0
+
 # --------------------------------------------------------------------------- ROOMSCALE (roomscale)
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
