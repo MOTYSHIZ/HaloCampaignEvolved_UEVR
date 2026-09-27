@@ -123,6 +123,27 @@ struct Apply {
         view = false;
         return axes(x, w, yaw, pitch, roll);
     }
+    // "leashMin" / "leashMax": [forward, right, up] in cm, each a number or null (no limit that way); null
+    // for the whole key = no limits, which is how a mode drops its camera's. A min is 0 or less and a max
+    // 0 or more: the camera's point stays inside the box, so a leash only ever stops you, never moves you.
+    bool leash(const Value& x, const std::string& w, float dst[3], bool is_min) {
+        const float none = is_min ? -kUnleashed : kUnleashed;
+        dst[0] = dst[1] = dst[2] = none;
+        if (x.is_null()) return true;
+        const char* want = is_min ? "[forward, right, up] in cm, each 0 or less, or null (no limit that way)"
+                                  : "[forward, right, up] in cm, each 0 or more, or null (no limit that way)";
+        if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, want);
+        for (std::size_t i = 0; i < x.items.size(); ++i) {
+            const Value& e = x.items[i];
+            const std::string we = w + "[" + std::to_string(i) + "]";
+            if (e.is_null()) continue;
+            float f = none;
+            if (!num(e, we, f)) return false;
+            if (is_min ? f > 0.0f : f < 0.0f) return type_error(e, we, want);
+            dst[i] = f;
+        }
+        return true;
+    }
     // true / false, or null = inherit (-1).
     bool tri(const Value& x, const std::string& w, int& dst, const char* what) {
         if (x.is_null()) { dst = -1; return true; }
@@ -132,7 +153,7 @@ struct Apply {
     }
     // One tethering mode, with what it named -- the rest is the camera's, filled in once the whole camera
     // is read (the file may list "tethering" before the camera's own tracking).
-    struct RawTether { Tether t; bool has_loc = false, has_rot = false, has_off = false; };
+    struct RawTether { Tether t; bool has_loc = false, has_rot = false, has_off = false, has_lmin = false, has_lmax = false; };
     bool tether(const Value& e, const std::string& we, RawTether& rt) {
         if (!e.is_obj()) return type_error(e, we, "an object { \"name\": ..., \"rotationTracking\": [...] }");
         for (std::size_t k = 0; k < e.keys.size(); ++k) {
@@ -156,6 +177,12 @@ struct Apply {
                 rt.has_off = true;
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", rt.t.offset[i]);
+            } else if (key == "leashMin") {
+                rt.has_lmin = true;
+                ok = leash(x, w, rt.t.leash_min, /*is_min=*/true);
+            } else if (key == "leashMax") {
+                rt.has_lmax = true;
+                ok = leash(x, w, rt.t.leash_max, /*is_min=*/false);
             } else if (key == "aimMarker") {
                 ok = tri(x, w, rt.t.aim_marker, "true, false or null (null = the camera's)");
             } else if (key == "origin") {
@@ -208,6 +235,10 @@ struct Apply {
                 if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", c.offset[i]);
+            } else if (key == "leashMin") {
+                ok = leash(x, w, c.leash_min, /*is_min=*/true);
+            } else if (key == "leashMax") {
+                ok = leash(x, w, c.leash_max, /*is_min=*/false);
             } else if (key == "locationTracking") {
                 ok = loc_tracking(x, w, c.loc_view, c.loc_yaw, c.loc_pitch, c.loc_roll);
             } else if (key == "rotationTracking" || key == "viewFollows") {   // viewFollows: the first file
@@ -250,6 +281,10 @@ struct Apply {
             if (!rt.has_loc) { rt.t.loc_view = c.loc_view; rt.t.loc_yaw = c.loc_yaw; rt.t.loc_pitch = c.loc_pitch; rt.t.loc_roll = c.loc_roll; }
             if (!rt.has_rot) { rt.t.rot_yaw = c.rot_yaw; rt.t.rot_pitch = c.rot_pitch; rt.t.rot_roll = c.rot_roll; }
             if (!rt.has_off) { rt.t.offset[0] = c.offset[0]; rt.t.offset[1] = c.offset[1]; rt.t.offset[2] = c.offset[2]; }
+            for (int k = 0; k < 3; ++k) {
+                if (!rt.has_lmin) rt.t.leash_min[k] = c.leash_min[k];
+                if (!rt.has_lmax) rt.t.leash_max[k] = c.leash_max[k];
+            }
             c.tethering.push_back(rt.t);
         }
         return true;
@@ -374,6 +409,18 @@ std::string axes_json(bool yaw, bool pitch, bool roll) {
     return s + "]";
 }
 
+// "leashMin" / "leashMax" as the file writes them: [forward, right, up], null on an axis with no limit;
+// "null" when no axis has one.
+std::string leash_json(const float v[3]) {
+    if (!leash_set(v)) return "null";
+    std::string s = "[";
+    for (int k = 0; k < 3; ++k)
+        s += std::string(k ? ", " : "") + ((v[k] > -kUnleashed && v[k] < kUnleashed) ? fmt_num(v[k]) : std::string("null"));
+    return s + "]";
+}
+
+bool same3(const float a[3], const float b[3]) { return a[0] == b[0] && a[1] == b[1] && a[2] == b[2]; }
+
 std::string axes_text(bool yaw, bool pitch, bool roll) {
     std::string s;
     if (yaw)   s += "Yaw";
@@ -414,6 +461,16 @@ std::string location_tracking_text(const Camera& c) {
 std::string rotation_tracking_text(const Tether& t) { return axes_text(t.rot_yaw, t.rot_pitch, t.rot_roll); }
 std::string location_tracking_text(const Tether& t) {
     return t.loc_view ? std::string("Your view (orbit)") : axes_text(t.loc_yaw, t.loc_pitch, t.loc_roll);
+}
+std::string leash_text(const float leash_min[3], const float leash_max[3]) {
+    static const char* const kPos[3] = {"forward", "right", "up"};
+    static const char* const kNeg[3] = {"back", "left", "down"};
+    std::string s;
+    for (int k = 0; k < 3; ++k) {
+        if (leash_max[k] < kUnleashed)  s += std::string(s.empty() ? "" : ", ") + kPos[k] + " " + fmt_num(leash_max[k]);
+        if (leash_min[k] > -kUnleashed) s += std::string(s.empty() ? "" : ", ") + kNeg[k] + " " + fmt_num(-leash_min[k]);
+    }
+    return s.empty() ? std::string("None") : s + " cm";
 }
 
 int carry_mode(const Camera& to, const Tether& from) {
@@ -519,13 +576,19 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"                    e.g. \\\"MainTurret_M\\\", the Scorpion cannon's turret. \\\"Part/Name\\\" picks the part\",\n";
     s += "    \"                    (\\\"ScorpionCannon/AimYaw\\\"); not found = the vehicle's centre (the log says why)\",\n";
     s += "    \"  offset            [forward, right, up] in cm (negative forward = behind)\",\n";
+    s += "    \"  leashMin, leashMax  [forward, right, up] in cm, on the offset's own axes: how far your HEAD may move\",\n";
+    s += "    \"                    from the camera's point before the view stops following it -- for tight seats,\",\n";
+    s += "    \"                    so leaning cannot take you through the canopy or into the gun. Each min 0 or\",\n";
+    s += "    \"                    less, each max 0 or more; null on an axis (or left out) = no limit that way.\",\n";
+    s += "    \"                    e.g. \\\"leashMin\\\": [-10, -15, -20], \\\"leashMax\\\": [15, 15, 5]\",\n";
     s += "    \"  locationTracking  which vehicle rotations carry the camera's position round: any of yaw, pitch,\",\n";
     s += "    \"                    roll ([] = a fixed world direction), or \\\"view\\\" to orbit with YOUR view\",\n";
     s += "    \"  rotationTracking  which vehicle rotations turn your VIEW: any of yaw, pitch, roll ([] = the world\",\n";
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
     s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, origin, offset,\",\n";
-    s += "    \"                    locationTracking, rotationTracking, aimMarker }, each taking the camera's own for\",\n";
+    s += "    \"                    leashMin, leashMax, locationTracking, rotationTracking, aimMarker }, each taking\",\n";
+    s += "    \"                    the camera's own for\",\n";
     s += "    \"                    what it leaves out -- e.g. the same cockpit held still and tethered to the vehicle,\",\n";
     s += "    \"                    or a turret held still at the seat and tethered to the Chief (origin playerhead)\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
@@ -581,6 +644,8 @@ std::string table_to_json(const Table& t, bool guide) {
             s += std::string("\"type\": \"") + type_name(c.type) + "\""
                + ", \"origin\": " + quoted(origin_text(c.origin, c.origin_socket))
                + ", \"offset\": [" + fmt_num(c.offset[0]) + ", " + fmt_num(c.offset[1]) + ", " + fmt_num(c.offset[2]) + "]"
+               + (leash_set(c.leash_min) ? ", \"leashMin\": " + leash_json(c.leash_min) : std::string())
+               + (leash_set(c.leash_max) ? ", \"leashMax\": " + leash_json(c.leash_max) : std::string())
                + ", \"locationTracking\": " + (c.loc_view ? std::string("\"view\"") : axes_json(c.loc_yaw, c.loc_pitch, c.loc_roll))
                + ", \"rotationTracking\": " + axes_json(c.rot_yaw, c.rot_pitch, c.rot_roll)
                + ", \"collide\": " + (c.collide ? "true" : "false")
@@ -602,6 +667,8 @@ std::string table_to_json(const Table& t, bool guide) {
                         add("\"origin\": " + quoted(origin_text(static_cast<Origin>(m.origin), m.origin_socket)));
                     if (m.offset[0] != c.offset[0] || m.offset[1] != c.offset[1] || m.offset[2] != c.offset[2])
                         add("\"offset\": [" + fmt_num(m.offset[0]) + ", " + fmt_num(m.offset[1]) + ", " + fmt_num(m.offset[2]) + "]");
+                    if (!same3(m.leash_min, c.leash_min)) add("\"leashMin\": " + leash_json(m.leash_min));
+                    if (!same3(m.leash_max, c.leash_max)) add("\"leashMax\": " + leash_json(m.leash_max));
                     if (m.loc_view != c.loc_view || m.loc_yaw != c.loc_yaw || m.loc_pitch != c.loc_pitch || m.loc_roll != c.loc_roll)
                         add("\"locationTracking\": " + (m.loc_view ? std::string("\"view\"") : axes_json(m.loc_yaw, m.loc_pitch, m.loc_roll)));
                     if (m.rot_yaw != c.rot_yaw || m.rot_pitch != c.rot_pitch || m.rot_roll != c.rot_roll)

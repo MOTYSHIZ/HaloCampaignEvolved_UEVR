@@ -250,7 +250,8 @@ VehActiveCam make_active(int vi, int ci, int mi) {
     a.collide_margin = c.collide_margin;
     a.hide_body = c.hides_body(origin);
     a.hide_head = vcp::effective_hide_head(v, ci);
-    for (int k = 0; k < 3; ++k) a.offset[k] = m.offset[k];
+    for (int k = 0; k < 3; ++k) { a.offset[k] = m.offset[k]; a.leash_min[k] = m.leash_min[k]; a.leash_max[k] = m.leash_max[k]; }
+    a.leashed = vcp::leash_set(m.leash_min) || vcp::leash_set(m.leash_max);
     const int choice = ctrl_choice(v);                      // the left stick click beats the file
     a.motion_aim = choice >= 0 ? choice : v.motion_aim;
     a.aim_marker = vcp::effective_aim_marker(v, ci, mi);    // the mode's, else the camera's, else the entry's
@@ -311,12 +312,13 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
                           std::memory_order_relaxed);
     const std::string loc = vcp::location_tracking_text(mode), rot = vcp::rotation_tracking_text(mode);
     const std::string mlabel = mode_label(mode, mi);
+    const std::string leash = vcp::leash_text(a.leash_min, a.leash_max);
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\", mode %d/%d \"%s\" (%s): %s, origin %s, "
-                         "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, head %s, "
+                         "offset (%.0f %.0f %.0f), leash %s, location tracking %s, rotation tracking %s, body %s, head %s, "
                          "aim ring %s, controls %s, seat %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), mi + 1, nm, mlabel.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_text(static_cast<vcp::Origin>(a.origin), a.socket).c_str(), a.offset[0], a.offset[1], a.offset[2],
-                         loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
+                         leash.c_str(), loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
                          a.hide_head ? "hidden" : "shown", a.aim_marker ? "on" : "off",
                          motion_on(a) ? "motion" : "stick",
                          s_seat != 0 ? vcp::seat_text(static_cast<uint8_t>(s_seat)).c_str() : "unknown");
@@ -342,6 +344,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
             char off[96];
             std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
             md += off;
+            if (a.leashed) md += "**Leash:** " + leash + "\n";
             md += "**Location Tracking:** " + loc + "\n";
             md += "**Rotation Tracking:** " + ((mode.rot_yaw || mode.rot_pitch || mode.rot_roll) ? "==" + rot + "==" : rot) + "\n";
         }

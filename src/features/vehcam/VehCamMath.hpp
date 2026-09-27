@@ -124,6 +124,22 @@ inline void tracked_frame(const double VF[3], const double VR[3], const double V
     }
 }
 
+// THE CAMERA'S LEASH (the camera file's "leashMin" / "leashMax"): how far to move the view base so a head
+// displaced `hd` (world, cm) from the camera's point stays within [lo, hi] on each of the axes F / R / U
+// (orthonormal: the frame the camera's offset is in). Written to `out` as the shift to SUBTRACT from the
+// view base -- zero inside the box, and on each axis exactly the overshoot, so past a limit the view stops
+// following the head that way and the other axes are untouched.
+inline void leash_shift(const double hd[3], const double F[3], const double R[3], const double U[3],
+                        const float lo[3], const float hi[3], double out[3]) {
+    const double* const L[3] = { F, R, U };
+    out[0] = out[1] = out[2] = 0.0;
+    for (int a = 0; a < 3; ++a) {
+        const double c = hd[0] * L[a][0] + hd[1] * L[a][1] + hd[2] * L[a][2];
+        const double over = c - (c < lo[a] ? (double)lo[a] : (c > hi[a] ? (double)hi[a] : c));
+        for (int k = 0; k < 3; ++k) out[k] += over * L[a][k];
+    }
+}
+
 // The vehicle's forward / right / up in the world this frame, from the mesh's axes and the captured C.
 inline void vehicle_axes(const double C[9], const double MX[3], const double MY[3], const double MZ[3],
                          double F[3], double R[3], double U[3]) {

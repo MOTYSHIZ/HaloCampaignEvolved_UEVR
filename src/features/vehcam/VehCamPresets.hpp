@@ -40,16 +40,31 @@ enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
 // bone, so a camera can ride a gun that turns on its own. Not found: the vehicle's origin stands in.
 enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2, Socket = 3 };
 
+// THE CAMERA'S LEASH ("leashMin" / "leashMax"): how far YOUR HEAD may move from the camera's point, per axis
+// of the frame "offset" is in -- [forward, right, up], cm, so the two are tuned together. For seats tuned to
+// tight tolerances: past a limit the view stops following your head that way, so leaning cannot put your
+// eyes through the canopy or into the gun. A min is 0 or less and a max 0 or more (the camera's point is
+// always inside the box: a leash only ever stops you, never moves you). kUnleashed on an axis = no limit
+// that way (null in the file, or left out).
+constexpr float kUnleashed = 1.0e9f;
+// Any axis of this side limited.
+inline bool leash_set(const float v[3]) {
+    for (int k = 0; k < 3; ++k) if (v[k] > -kUnleashed && v[k] < kUnleashed) return true;
+    return false;
+}
+
 // ONE TETHERING MODE of a camera. Left Y steps cameras; left X steps the current camera's modes. A mode
 // sets what carries the camera's position round (locationTracking), what turns your view
-// (rotationTracking), where it sits (offset -- a tethered view often wants a slightly different spot) and
-// what that is measured from (origin), and may turn the vehicle aim ring on or off; anything it leaves out
-// is the camera's own. So one camera can be "Cockpit" held still AND tethered, switched with one button
+// (rotationTracking), where it sits (offset -- a tethered view often wants a slightly different spot),
+// what that is measured from (origin) and how far your head may lean from it (leashMin / leashMax), and
+// may turn the vehicle aim ring on or off; anything it leaves out is the camera's own. So one camera can be "Cockpit" held still AND tethered, switched with one button
 // while filming -- and a turret's tethered mode can ride the Chief ("playerhead", who turns with the gun)
 // while its untethered mode stays on the seat.
 struct Tether {
     std::string name;
     float offset[3] = {0.0f, 0.0f, 0.0f};     // cm: forward, right, up (the camera's, unless the mode says)
+    float leash_min[3] = {-kUnleashed, -kUnleashed, -kUnleashed};   // "leashMin" (the camera's, unless the mode says)
+    float leash_max[3] = { kUnleashed,  kUnleashed,  kUnleashed};   // "leashMax"
     bool loc_yaw = true, loc_pitch = true, loc_roll = true, loc_view = false;
     bool rot_yaw = false, rot_pitch = false, rot_roll = false;
     int  aim_marker = -1;                     // -1 = the camera's, else the vehicle entry's; 0 / 1 = off / on
@@ -63,6 +78,8 @@ struct Camera {
     Origin  origin = Origin::Vehicle;
     std::string origin_socket;                // origin Socket: the bone / socket name ("Part/Name" allowed)
     float   offset[3] = {0.0f, 0.0f, 0.0f};   // cm: forward, right, up
+    float   leash_min[3] = {-kUnleashed, -kUnleashed, -kUnleashed};   // "leashMin": see kUnleashed
+    float   leash_max[3] = { kUnleashed,  kUnleashed,  kUnleashed};   // "leashMax"
     // LOCATION TRACKING: which of the vehicle's rotations carry the offset round. All three = rigid to
     // the vehicle; yaw only = a level offset that turns with it; none = a fixed world direction.
     // loc_view instead makes it ride YOUR VIEW -- an orbiting camera that swings round as you turn.
@@ -95,6 +112,7 @@ struct Camera {
         if (tethering.empty()) {
             Tether t;
             t.offset[0] = offset[0]; t.offset[1] = offset[1]; t.offset[2] = offset[2];
+            for (int k = 0; k < 3; ++k) { t.leash_min[k] = leash_min[k]; t.leash_max[k] = leash_max[k]; }
             t.loc_yaw = loc_yaw; t.loc_pitch = loc_pitch; t.loc_roll = loc_roll; t.loc_view = loc_view;
             t.rot_yaw = rot_yaw; t.rot_pitch = rot_pitch; t.rot_roll = rot_roll;
             return t;
@@ -206,6 +224,8 @@ std::string rotation_tracking_text(const Camera& c);
 std::string location_tracking_text(const Camera& c);
 std::string rotation_tracking_text(const Tether& t);
 std::string location_tracking_text(const Tether& t);
+// For readouts and logs: the limits in plain directions -- "forward 20, back 10, up 5 cm"; "None".
+std::string leash_text(const float leash_min[3], const float leash_max[3]);
 
 // Left Y onto camera `to` from a view in mode `from`: the mode that keeps what you chose -- one of the same
 // name ("Tethered" stays tethered), else one turning your view on the same axes (an untethered choice stays

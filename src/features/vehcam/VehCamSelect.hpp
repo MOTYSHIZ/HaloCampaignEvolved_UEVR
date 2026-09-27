@@ -29,6 +29,12 @@ struct VehActiveCam {
     bool    hide_body = false;
     bool    hide_head = false;                // "hideHead": the Chief's head hidden (true first person)
     float   offset[3] = {-450.0f, 0.0f, 180.0f};
+    // "leashMin" / "leashMax" (the mode's, else the camera's): how far your head may move from the camera's
+    // point, cm, on the offset's axes; +-1e9 (vehcampresets::kUnleashed) = no limit that way. `leashed` =
+    // any limit at all, so the eye skips the whole clamp for the usual unleashed camera.
+    float   leash_min[3] = {-1.0e9f, -1.0e9f, -1.0e9f};
+    float   leash_max[3] = { 1.0e9f,  1.0e9f,  1.0e9f};
+    bool    leashed = false;
     float   collide_margin = 30.0f;
     int     motion_aim = -1;                  // -1 = the vehaim key, else this vehicle's (file or left stick click)
     bool    aim_marker = true;                // "aimMarker": the ring where the vehicle aims (the eye poses it)

@@ -3642,6 +3642,31 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 ecx -= s_c0[0] * X[0] + s_c0[1] * Y[0] + s_c0[2] * Z[0];
                 ecy -= s_c0[0] * X[1] + s_c0[1] * Y[1] + s_c0[2] * Z[1];
                 ecz -= s_c0[0] * X[2] + s_c0[1] * Y[2] + s_c0[2] * Z[2];
+                // THE CAMERA'S LEASH ("leashMin" / "leashMax"): how far your HEAD may move from the camera's
+                // point, on the offset's own axes (LF / LR / LU), in cm -- for seats tuned to tight
+                // tolerances, where a 6DoF lean would put your eyes through the canopy or into the gun. Past a
+                // limit the view stops following your head that way (the world moves with you), so you
+                // cannot clip into what surrounds the seat. The head's displacement from the point is exactly
+                // what UEVR adds to this base: R(view) . (swizzle(ro . (hmd - so)) x scale - c0), c0 being
+                // where it stood at the last camera change (0 with the head leash on, which keeps the head
+                // on the standing origin). Clamped HERE, before the base is written or published, so the
+                // hands, the aim ray and the reticle stamp all stand on the same base as the view.
+                if (ac.leashed) {
+                    Vec3 lp{}; Quat lq{};
+                    const auto li = API::VR::get_hmd_index();
+                    if (li >= 0 && get_pose(li, &lp, &lq, /*use_aim=*/false)) {
+                        const auto so = API::VR::get_standing_origin();
+                        const double rs = (double)halo::veh_cm_per_m();
+                        const Vec3 rel = quat_rotate(veh_rotation_offset(), Vec3{lp.x - so.x, lp.y - so.y, lp.z - so.z});
+                        // room -> UE (X = -z, Y = x, Z = y), less where the head was captured.
+                        const double u[3] = { -(double)rel.z * rs - s_c0[0], (double)rel.x * rs - s_c0[1],
+                                              (double)rel.y * rs - s_c0[2] };
+                        double hd[3], sh[3];
+                        for (int k = 0; k < 3; ++k) hd[k] = u[0] * X[k] + u[1] * Y[k] + u[2] * Z[k];
+                        vehcammath::leash_shift(hd, LF, LR, LU, ac.leash_min, ac.leash_max, sh);
+                        ecx -= sh[0]; ecy -= sh[1]; ecz -= sh[2];
+                    }
+                }
             }
             if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); p->x = ecx; p->y = ecy; p->z = ecz; }
             else { position->x = (float)ecx; position->y = (float)ecy; position->z = (float)ecz; }
