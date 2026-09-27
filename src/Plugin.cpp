@@ -13922,6 +13922,10 @@ public:
                     state->Gamepad.bLeftTrigger = 0;
                 }
             } else {
+                // The trigger is not reaching the scope this poll; keep the scope's edge detector
+                // following it anyway, so a press after re-gripping is neither swallowed nor
+                // invented. Passed BEFORE the grenade path below zeroes the trigger.
+                scope_lt_unrouted(state->Gamepad.bLeftTrigger);
                 // GRENADE on the press edge. Own hysteresis, matching the scope's, because this is
                 // an analog axis and a wobble at the threshold must not double-throw. The mask is
                 // injected rather than passed through: LT is not a button the game reads as throw,
@@ -13937,10 +13941,12 @@ public:
                 } else if (s_lt_down && lt <= off_t) {
                     s_lt_down = false;
                 }
-                // Eaten either way, so Blam's native zoom never engages under the VR presentation
-                // -- the same reason the scope path eats it. Menus and seats keep the game's own
-                // meaning, which is why `blocked` gates the throw but not this.
-                if (!blocked && g_cfg.scope_eat_lt) state->Gamepad.bLeftTrigger = 0;
+                // Eaten either way, so Blam's native zoom never engages under the VR presentation.
+                // NOT gated on scopeeat (changed 2026-09-27): that key now means "let the game zoom
+                // WHILE SCOPING" -- for its per-weapon zoom sound -- and a grenade throw is not a
+                // zoom. Gated on it, scopeeat=0 made every throw also fire the game's zoom, with its
+                // viewmodel hide and halved look speed. Menus and seats keep the game's own meaning.
+                if (!blocked) state->Gamepad.bLeftTrigger = 0;
             }
         }
         // ---- HOLSTERS: TAKE THE BUTTONS WE SYNTHESISE, BEFORE WE SYNTHESISE THEM.

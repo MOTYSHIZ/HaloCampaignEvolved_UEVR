@@ -448,6 +448,15 @@ void layer_clear_orientation(int slot) {
     xrlayer_clear_quad_orientation(slot);
 }
 
+// Stop DRAWING, keep everything else: the pose goes (and with it the orientation override), the art
+// and the source binding stay, so the next open presents without re-resolving anything. For a
+// close that may be followed by a reopen within the grace; layer_retire() is the full teardown.
+void layer_hide(int slot) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    bind_proof(BIND_RETIRE);
+    xrlayer_retire_quad(slot);
+}
+
 // Stop presenting. xrlayer_retire_quad() also clears the orientation override, so a slot reused for
 // something else cannot inherit a stale weapon rotation.
 void layer_retire(int slot) {
@@ -1179,6 +1188,23 @@ void scopelayer_tick(uint32_t tick) {
         retire_now("the scope stopped feeding rays (closed, in a menu, in a seat, or dead)");
         forget_reason();
     }
+}
+
+// THE SCOPE WAS CLOSED: take the quad off the layer NOW, but only its POSE.
+//
+// Left alone, the submit thread kept drawing the last pose until it aged past its 8-tick staleness
+// gate -- MEASURED 2026-09-27 at 178-212 ms after every close (8 of 8), showing a frozen image. A
+// deliberate toggle-off made that rare; hold-to-zoom (scopehold) makes it every trigger release.
+//
+// DELIBERATELY NOT retire_now(). A full retire also discards the art and DROPS THE SOURCE, and a
+// dropped source costs the next open a re-resolve: XrSource walks the whole ~296k UObject array to
+// re-adopt the render target, then waited 16 ticks before its first capture (measured the same
+// day: every post-retire open blanked ~350 ms, then flashed the in-world pane for a tick). Doing
+// that on EVERY close would put both on every scope-in. The ray-feed grace in scopelayer_tick()
+// still performs the full retire once the scope has stayed shut for ~1.5 s, exactly as before.
+void scopelayer_scope_closed() {
+    if (!s_published) return;
+    scopelayer_adapter::layer_hide(s_slot_out);
 }
 
 bool scopelayer_presenting() {

@@ -97,7 +97,8 @@
 #bindmelee=0x0000
 # Reload. 0 = the magazine gesture only.
 #bindreload=0x0000
-# Scope toggle. 0 = left trigger. Binding a button KEEPS the trigger working as well.
+# Scope. 0 = left trigger. Binding a button KEEPS the trigger working as well. The button follows
+# scopehold just as the trigger does: hold to zoom by default, or a toggle with scopehold=0.
 #bindscope=0x0000
 # Equipment (overshield / active camo) -- the ONE bind here that is not 0 by default, because
 # equipment has no built-in gesture for a bind to duplicate. 0x0004 is d-pad LEFT, giving it a
@@ -277,8 +278,11 @@
 #scopecamroll=-90
 # 1 = the image tilts with your gun, like a real optic. 0 = it stays level with the world.
 #scopecamlock=0
-# How far the trigger must be squeezed to toggle the scope.
+# How far the trigger must be squeezed to open the scope.
 #scopethresh=0.55
+# 1 = HOLD to zoom: the scope is up only while you hold the trigger, like Halo's own zoom.
+# 0 = TOGGLE: squeeze once to open it, squeeze again to close it.
+#scopehold=1
 
 # ===================================== FEATURE SETTINGS =========================================
 # Settings of the switchable features, grouped by the feature that owns them. The menu shows each
@@ -699,6 +703,12 @@
 #headblockradius=12
 
 # ------------------------------------------------------------------- HAND SMOOTHING (handsmooth)
+# Steadies your tracked hands before anything reads them, so aim, the arms, two-handed holds and
+# reload all see the same steadied hands. A still hand is held steady; a fast move passes through
+# with little lag. Your headset is never smoothed.
+#
+# 1 = hand smoothing on, 0 = your hands exactly as the headset tracks them.
+#handsmooth=1
 # Hand smoothing: which hands are steadied (0 both, 1 only the hand you aim with, 2 only your other
 # hand). 2 steadies two-handed holds and the arms without adding any lag to your aim.
 #handsmoothhands=0
