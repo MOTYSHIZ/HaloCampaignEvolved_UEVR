@@ -179,8 +179,18 @@ local HINTS = {
     heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 } },
     heighttrim     = { t = "drag", min = -50, max = 50 },
     heightkey      = { t = "key" },
+    heightcrouch     = { t = "bool" },
+    heightcrouchfrac = { t = "slider", min = 0.2, max = 0.9 },
     headblockradius = { t = "drag", min = 1, max = 50 },
-    aimbore        = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
+    handsmoothhands   = { t = "enum", items = { "both hands", "the aim hand only", "the other hand only" }, values = { 0, 1, 2 } },
+    handsmoothposmin  = { t = "drag", min = 0, max = 30 },
+    handsmoothposbeta = { t = "drag", min = 0, max = 5000 },
+    handsmoothrotmin  = { t = "drag", min = 0, max = 30 },
+    handsmoothrotbeta = { t = "drag", min = 0, max = 100 },
+    handsmoothdcut    = { t = "drag", min = 0.1, max = 100 },
+    handsmoothmelee   = { t = "bool" },
+    handsmoothlog     = { t = "bool" },
+    aimbore       = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
     reloadseat     = { t = "drag", min = 0.05, max = 1 },
     reloadholdfire = { t = "bool" },
     reloadvrlog    = { t = "bool" },
@@ -333,6 +343,11 @@ local LABELS = {
     roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",
     heightsample = "When your height is measured", heighttrim = "Height nudge",
     heightkey = "Height keyboard key", headblockradius = "Head clearance",
+    heightcrouch = "Crouch when you duck", heightcrouchfrac = "Crouch line (share of your height)",
+    handsmoothhands = "Hands to steady", handsmoothposmin = "Still-hand position steadiness",
+    handsmoothposbeta = "Position follow speed", handsmoothrotmin = "Still-hand angle steadiness",
+    handsmoothrotbeta = "Angle follow speed", handsmoothdcut = "Speed estimate smoothing",
+    handsmoothmelee = "Melee uses the steadied hands",
 }
 -- Prerequisites that are not player features.
 local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }
@@ -1599,14 +1614,24 @@ uevr.sdk.callbacks.on_draw_ui(function()
         -- should meet the settled panels first.
         if imgui.collapsing_header("Halo VR Experimental") then
             imgui.indent(4)
-            -- The panel's own warning, before any tier. Colour rather than weight: this imgui
-            -- binding exposes no bold font, and push_style_color(0) is ImGuiCol_Text, so the
-            -- amber the calibration rows already use for "pay attention" carries it. Through
-            -- print_text_block so it wraps to the panel like every other paragraph here.
-            imgui.push_style_color(0, 0xFF2288DD)
-            print_text_block("These features are WIP, and they very likely will break things or " ..
-                             "feel incomplete. Mainly here if anyone wants to have a preview.")
-            imgui.pop_style_color(1)
+            -- The panel's own warning, before any tier. Colour rather than weight: no bold font is
+            -- exposed by this binding.
+            --
+            -- text_colored, NOT push_style_color around print_text_block. This draw runs inside a
+            -- pcall (bottom of the file), and a throw between a push and its pop would be CAUGHT
+            -- while the ImGui style stack stayed wound -- one leaked push per frame, which takes
+            -- the rest of the overlay with it. text_colored owns no stack, so the hazard cannot
+            -- exist. Short lines because it does not wrap.
+            --
+            -- LATENT, NOT OBSERVED. print_text_block has no throw path anyone has found:
+            -- avail_cols() pcalls both its imgui calls and floors at 24 columns, and the wrap loop
+            -- forces cut = cols when no space is found, so it always consumes and always
+            -- terminates. This was briefly blamed for a 2026-09-20 report of Script UI and UEVR's
+            -- own sections missing from the menu; that profile was down to FOUR files and a full
+            -- reinstall is what fixed it. Do not re-cite this as a fix for that bug.
+            imgui.text_colored("These features are WIP, and they very likely will break", 0xFF2288DD)
+            imgui.text_colored("things or feel incomplete. Mainly here if anyone wants", 0xFF2288DD)
+            imgui.text_colored("to have a preview.", 0xFF2288DD)
             imgui.spacing()
             draw_tier_sections(TIER_ORDER)
             imgui.unindent(4)

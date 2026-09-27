@@ -23,6 +23,7 @@
 #include "core/CoreKeys.hpp"
 #include "core/config/KeyAlias.hpp"
 #include "core/EyeTrace.hpp"
+#include "core/HandSmooth.hpp"
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
@@ -62,6 +63,7 @@ extern const FeatureHooks kAimReticuleStampHooks;
 extern const FeatureHooks kStabilityFixesHooks;
 extern const FeatureHooks kWorldScaleFollowHooks;
 extern const FeatureHooks kGrenadeGunHoldHooks;
+extern const FeatureHooks kHandSmoothHooks;
 
 namespace {
 
@@ -87,6 +89,8 @@ const FeatureHooks* const kFeatureListStorage[] = {
     &kStabilityFixesHooks,
     &kWorldScaleFollowHooks,
     &kGrenadeGunHoldHooks,
+    // handsmooth after palettewpn: its pose_latched slot must answer only when the latch did not.
+    &kHandSmoothHooks,
     nullptr,   // end marker: keeps the array non-empty in a build with every feature folder removed
 };
 // The tables, without the end marker. A span, so a build with no feature at all still compiles and every
@@ -163,6 +167,9 @@ void features_game_tick_after_leash() {
 }
 
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    // HANDSMOOTH: the filter's one step per rendered frame, first, so every hand read in this frame
+    // (render-rate re-apply included) gets this frame's smoothed pair. A no-op while the service is off.
+    hand_smooth_frame();
     driver_probe_stereo_begin();
     if (service_active(SVC_EYE_TRACE)) eye_note_pre_view(index, position, is_double);
 }
@@ -844,6 +851,7 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
     { SVC_RACK_AVAILABLE,    "rackavailable" },
     { SVC_MANUAL_RELOAD_AVAILABLE, "manualreloadavailable" },
     { SVC_POSE_INTENTS,      "poseintents" },
+    { SVC_HAND_SMOOTH,       "handsmooth" },
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed
@@ -920,7 +928,8 @@ void features_log_runtime() {
 }
 
 void features_config_loaded() {
-    worldscalefollow_poll();   // every poll, before the feature-state early return: a reload resets rig_scale
+    // rig_scale is no longer re-set here (worldscalefollow_poll): core/WorldScale resolves it inside
+    // the reload, in features_apply, so hook threads never read the compiled default in between.
     const uint32_t now = enabled_mask();
     if (now == s_logged_mask) return;
     const uint32_t went_off = (s_logged_mask == 0xFFFFFFFFu) ? 0u : (s_logged_mask & ~now);

@@ -13,6 +13,7 @@
 #include "Math.hpp"
 #include "MotionAimControl.hpp"        // read_control_rotation, g_stick_mode_active
 #include "Rig.hpp"                     // g_rig_parent, call_ret_vec3
+#include "core/WorldScale.hpp"         // room metres <-> world cm, at the player's own scale
 #include "core/host/PluginState.hpp"
 #include "uevr/API.hpp"
 
@@ -117,8 +118,9 @@ bool roomscale_leash_block_wanted() {
 // radius replaces the author's lateral leash only while roomscale is on.
 bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bool& moved) {
     // Plugin.cpp's own state, through the bridge: the same objects under the same names.
-    const auto& g_in_menu    = *host::g_plugin_state.in_menu;
-    const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
+    const auto& g_in_menu       = *host::g_plugin_state.in_menu;
+    const auto& g_stick_mode    = *host::g_plugin_state.stick_mode;
+    const auto& g_cut2d_engaged = *host::g_plugin_state.cut2d_engaged;
 
             // ---- ROOMSCALE: walk the player out of the head offset before the leash absorbs it.
             //
@@ -151,8 +153,15 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             };
             // Never while MOUNTED, whatever stick mode says: with stickmode=0 a seat is not stick
             // mode, and roomscale would drive the rider's unit from the headset.
+            // Never during a flat cutscene either (heightcal and headblock already stand down on the
+            // same flag). What this stops is COMMANDS: no stick or throttle is written into a scene
+            // the player is not playing, and in the mono-collapse mode (cutscene2d=2) the plugin has
+            // rewritten VR_WorldScale to 0.01, so the eye deltas below mean nothing until it is put
+            // back. What it does NOT stop: the leash still absorbs only beyond roomscale_leash, so a
+            // head moved during the scene is walked back to afterwards, as it always was.
             const bool rs_ok = g_cfg.roomscale && !g_stick_mode.load() && !g_in_menu.load()
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
+                            && !g_cut2d_engaged.load()
                             && g_rig_parent != nullptr;
             static Vec3 s_rs_prev_eye{}; static bool s_rs_have_prev = false;
             static std::chrono::steady_clock::time_point s_rs_prev_t{}; static bool s_rs_have_t = false;
@@ -168,6 +177,22 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             s_rs_prev_t = now_t; s_rs_have_t = true;
             const float now_s = std::chrono::duration<float>(now_t.time_since_epoch()).count();
 
+            // ROOM METRES ARE NOT WORLD METRES. hp, the origin (nx/nz), the head offset, the
+            // deadband and the leash are real metres of the play area; the eye is UE cm in the
+            // world. UEVR draws a real metre as 100 x VR_WorldScale cm, so THAT converts between
+            // them -- not 100. This used a bare x0.01, which is right only at 1.0: at the profile's
+            // 1.312 every credited step moved the origin 31% further than the body went (the view
+            // slid back by the difference as roomscale caught up), the in-flight ring booked 31% too
+            // much travel, and the command asked for 1/1.312 of the speed it meant.
+            //
+            // The speeds (roomscale_speed, thr_speed, max_speed, the 0.7 credit floor) are MEASURED
+            // eye speeds in the world, so they stay world m/s and are converted only where they
+            // meet a room quantity. The loop then has the same time constant at every world scale
+            // (gain is per second either way), and at VR_WorldScale 1.0 all of this is exactly the
+            // old arithmetic -- tuning done at 1.0 carries over unchanged.
+            const float ws = uevr_world_scale();        // world metres per room metre
+            const float cm_to_room = 0.01f / ws;        // UE cm -> room metres
+
             Vec3 eye{};
             const bool have_eye = rs_ok && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &eye);
             static uint32_t s_rs_inj_prev = 0;
@@ -177,6 +202,8 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             s_rs_inj_prev = inj_now;
             float credit = 0.0f, eye_room_x = 0.0f, eye_room_z = 0.0f, expected = 0.0f;
             float log_ewx = 0.0f, log_ewy = 0.0f;
+            // WORLD metres, deliberately -- NOT cm_to_room. This feeds the stand-down below, which
+            // compares how fast the body moves through the WORLD with a world-speed threshold.
             if (have_eye && s_rs_have_prev) { log_ewx = (eye.x - s_rs_prev_eye.x) * 0.01f; log_ewy = (eye.y - s_rs_prev_eye.y) * 0.01f; }
             // ---- INVOLUNTARY-MOTION STAND-DOWN (roomscalemaxspeed / roomscalestanddown).
             //
@@ -202,7 +229,8 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             }
             const bool rs_thrown = (s_rs_standdown > 0.0f);
             if (have_eye && s_rs_have_prev && rs_drove && s_rs_cmd_mag > 0.0f && dt > 0.0f) {
-                const float ex = (eye.x - s_rs_prev_eye.x) * 0.01f, ey = (eye.y - s_rs_prev_eye.y) * 0.01f;   // UE cm -> m
+                // UE cm -> ROOM metres: this delta is credited to the origin, which lives in the room.
+                const float ex = (eye.x - s_rs_prev_eye.x) * cm_to_room, ey = (eye.y - s_rs_prev_eye.y) * cm_to_room;
                 // World -> room: undo the view-lock yaw, then UE (x fwd, y right) -> VR (x right, z back).
                 const float vy = halo::g_view_base_yaw.load() * DEG2RAD;
                 const float rx =  ex * std::cos(vy) + ey * std::sin(vy);
@@ -219,7 +247,9 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
                 // catch-up and the last ~1 cm went uncredited -- the view drifted after every
                 // stop. 0.7 m/s covers any roomscale catch-up (0.2-0.5 m/s) and still rejects
                 // teleports and stick-run momentum, which are metres per second.
-                expected = (std::max)(s_rs_vavg, 0.7f) * dt;
+                // Both terms are world m/s (a commanded eye speed, a world-speed floor); the cap is
+                // compared with a ROOM-metre delta, so it is converted here.
+                expected = (std::max)(s_rs_vavg, 0.7f) / ws * dt;
                 // FULL 2D DELTA, magnitude-capped -- not its projection onto the command. The
                 // biped's real travel is ~6 deg off the command (the aim-frame wart), and a
                 // projection discarded the perpendicular part of every catch-up: the body went
@@ -276,7 +306,9 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
                     // Command direction in ROOM space (unit) and magnitude from the desired velocity.
                     const float ux_r = cvx / cvm, uz_r = cvz / cvm;
                     float ux_r_f = ux_r, uz_r_f = uz_r;
-                    const float v_want = cvm;
+                    // cvm is a ROOM speed (room-metre offset x gain, plus the head's room velocity);
+                    // the stick/throttle map takes the WORLD eye speed it produces.
+                    const float v_want = cvm * ws;
                     float mag = rs_stick_for(v_want);
                     if (mag > 1.0f) mag = 1.0f;
                     // DUTY-CYCLE BELOW THE GAME'S MINIMUM SPEED. The stick has no slow walk:
@@ -335,9 +367,10 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
                         g_rs_ly.store(cmd_ly, std::memory_order_relaxed);
                     }
                     s_rs_cmd_dir_x = ux_r_f; s_rs_cmd_dir_z = uz_r_f; s_rs_cmd_mag = mag;
-                    // Book the travel this tick's command will produce (lands after roomscale_lat).
+                    // Book the travel this tick's command will produce (lands after roomscale_lat),
+                    // in ROOM metres: it is subtracted from the room-metre head offset (pdx/pdz).
                     if (dt > 0.0f && s_rs_ring_n < kRsRing) {
-                        const float tr = rs_speed_of(mag) * dt;
+                        const float tr = rs_speed_of(mag) / ws * dt;
                         s_rs_ring_x[s_rs_ring_n] = ux_r_f * tr; s_rs_ring_z[s_rs_ring_n] = uz_r_f * tr; s_rs_ring_t[s_rs_ring_n] = now_s; ++s_rs_ring_n;
                     }
                     rs_cmd = true;

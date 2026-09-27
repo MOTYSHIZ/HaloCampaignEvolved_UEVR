@@ -39,14 +39,14 @@
     // the body.
     bool  roomscale       = false;
     // Default: the value roomscale is tuned with.
-    float roomscale_gain  = 4.0f;    // desired eye speed (m/s) per metre of head offset
-    float roomscale_dead  = 0.03f;   // metres, no command inside this
-    float roomscale_leash = 1.0f;    // metres, lateral leash radius while roomscale is on
+    float roomscale_gain  = 4.0f;    // per second: catch-up speed per metre of head offset, both in ROOM metres -- the same at any VR_WorldScale
+    float roomscale_dead  = 0.03f;   // room metres, no command inside this
+    float roomscale_leash = 1.0f;    // room metres, lateral leash radius while roomscale is on
     float roomscale_stick = 0.15f;   // player stick magnitude above which roomscale yields
     bool  roomscale_log   = false;   // ROOMSCALE line ~8x/s: offset, command, eye delta, slide
     // Default: the value roomscale is tuned with.
     float roomscale_min   = 0.36f;   // stick magnitude floor while a command stands (clears the game deadzone)
-    float roomscale_speed = 3.3f;    // metres/s of eye travel at full stick (measured 3.0-4.7)
+    float roomscale_speed = 3.3f;    // WORLD metres/s of eye travel at full stick (measured 3.0-4.7)
     float roomscale_lat   = 0.06f;   // seconds from command to visible eye motion (measured 20-57 ms)
     // Default: the value roomscale is tuned with.
     float roomscale_dz    = 0.30f;   // the game's own stick deadzone (measured: 0.30 -> 0.22 m/s)
@@ -107,6 +107,12 @@
     float height_band     = 0.10f;   // heightband (eyes, cm): continuous mode, drops larger than this are crouches
     float height_slew     = 0.5f;    // heightslew (cm/s): how fast a mode switch or new calibration is walked in (0 = snap)
     int   height_log      = 0;       // heightlog: 0 silent, 1 events, 2+ events + a HEIGHT line once a second
+    // PHYSICAL CROUCH (HeightCal.cpp): duck below a fraction of your standing head height and the
+    // character crouches -- the crouch button is held for you, exactly as right-stick-down holds it.
+    // Absolute mode with a known floor only. Off by default: it changes what ducking DOES.
+    int   height_crouch      = 0;     // heightcrouch: 0 off, 1 on
+    float height_crouch_frac = 0.5f;  // heightcrouchfrac: the crouch line as a fraction of your standing head height
+    float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
     // ---- HEAD BLOCK (HeadBlock.hpp). Keeps the rendered head out of geometry. UE cm.
     int   head_block         = 0;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface
@@ -1284,6 +1290,31 @@
     int   grenade_gun_hold_ms = 1800;
     int   grenade_gun_hold_log = 0;
     int   grenade_code = 0x2000;
+    // handsmooth: a 1 Euro filter on the tracked controllers, applied inside get_pose() so aim, the
+    // arms, two-hand, gestures and holsters all read the same steadied hands. The filter and its keys
+    // live in core/HandSmooth (service SVC_HAND_SMOOTH); the master key only switches the service on.
+    //   hands:  0 = both, 1 = the aim hand only, 2 = the support hand only
+    //   *min:   the cutoff in Hz while the hand is still (lower = steadier, more lag on slow moves);
+    //           0 = that channel is not smoothed at all
+    //   *beta:  how fast the cutoff opens with speed -- position per m/s, rotation per rad/s
+    //   dcut:   the cutoff in Hz of the speed estimate itself
+    //   melee:  0 = the swing detector reads the RAW hand (get_pose_raw), 1 = the smoothed one
+    // Position defaults are VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff
+    // 10, CutoffSlope 10) converted to this filter's units: its slope acted on cm/s per axis, i.e.
+    // 1000 per m/s. Its rotation slope acted on quaternion components per second, about half of
+    // rad/s, i.e. ~5 per rad/s, and that is kept -- but rotmin is 1.0, not VRE's 0.1: rotation here
+    // drives the AIM ray, and at 0.1 Hz a slow 3 deg/s track trails the hand by ~1.3 deg (tau
+    // ~0.45 s); at 1.0 Hz it is ~0.4 deg while a still hand is still settled with tau ~0.16 s.
+    // The conversion is approximate (VRE's cutoff is per axis, this one is on the speed magnitude).
+    bool  hand_smooth = false;
+    int   hand_smooth_hands = 0;
+    float hand_smooth_pos_min = 0.1f;
+    float hand_smooth_pos_beta = 1000.0f;
+    float hand_smooth_rot_min = 1.0f;
+    float hand_smooth_rot_beta = 5.0f;
+    float hand_smooth_dcut = 10.0f;
+    bool  hand_smooth_melee = false;
+    bool  hand_smooth_log = false;   // dev builds only (HALO_VR_DEV)
 
     // ---- (after the author's Config.hpp line 4529)
     // ---- HANDS ON THE WHEEL (Vehicle.hpp). The record's movement pair steers the vehicle while

@@ -1866,7 +1866,12 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "rig")       == 0) g_cfg.rig_enabled = (v != 0.0);
         else if (_stricmp(key, "rigloc")    == 0) g_cfg.rig_loc     = (v != 0.0);
         else if (_stricmp(key, "grip")      == 0) g_cfg.grip_deg    = clampf((float)v, -180.0f, 180.0f);
-        else if (_stricmp(key, "rigscale")  == 0) g_cfg.rig_scale   = clampf((float)v, 0.0f, 500.0f);
+        // 0 = follow UEVR's world scale (the default, resolved in core/WorldScale); a positive value is
+        // a deliberate override that pins it. 0 used to mean a rig that did not move at all.
+        else if (_stricmp(key, "rigscale")  == 0) {
+            const float rs = clampf((float)v, 0.0f, 500.0f);
+            if (rs > 0.0f) { g_cfg.rig_scale = rs; g_cfg.rig_scale_explicit = true; }
+        }
         else if (_stricmp(key, "rigclamp")  == 0) g_cfg.rig_clamp   = clampf((float)v, 0.0f, 200.0f);
         else if (_stricmp(key, "rigtest")   == 0) g_cfg.rig_test_cm = clampf((float)v, -200.0f, 200.0f);
         else if (_stricmp(key, "gripyaw")   == 0) g_cfg.grip_yaw    = (float)v;
@@ -2110,8 +2115,22 @@ void load_config() {
     // Costs users nothing: `yield` is a `constexpr false` in release builds, so this is dev-only.
     const int keep_blam_aim = g_cfg.blam_aim;
 
+    // RIG_SCALE KEEPS ITS RESOLVED VALUE THROUGH THE REBUILD. core/WorldScale sets it to the player's
+    // world scale at the end of every reload (features_apply). A plain reset would put the compiled
+    // 131.2 back for the whole parse, and unless stabilityfixes brackets the reload, hook threads read
+    // g_cfg live throughout it -- the 60 Hz palette arm solve would catch 131.2 and jump the arms by
+    // the scale ratio for a frame, every poll, for every player not at the profile's 1.312. So the
+    // fresh struct is built aside WITH the last resolved value and assigned once: the field never
+    // holds the unresolved default. A rigscale= line still overrides it during the parse, and the
+    // resolve at the end still decides; this only removes the window in between.
+    const float keep_rig_scale = g_cfg.rig_scale;
+
     features_config_reload_begin();   // FEATURE REGISTRY hook: hook threads read a copy while g_cfg is rebuilt
-    g_cfg = Config{};
+    {
+        Config fresh{};
+        fresh.rig_scale = keep_rig_scale;
+        g_cfg = fresh;
+    }
     seed_builtin_weapon_anims();
     g_cfg.blam_aim = keep_blam_aim;
     // The two-handed hold keeps its tuning outside g_cfg (TwoHandAim.cpp), so it needs its own reset

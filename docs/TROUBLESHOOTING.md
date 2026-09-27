@@ -23,6 +23,19 @@ mod never ran, whatever else the log says.
 Do **not** read anything into `[PluginLoader] Created directory for plugins` — UEVR logs that line on
 every launch, including ones where the plugin loads perfectly. It is not evidence of a missing folder.
 
+**I'm installing a new release over an older one.**
+
+Don't — delete `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` first, then install the new release as if
+it were your first time. Installing over the top only adds and overwrites files, so anything an
+earlier version left behind stays and keeps applying, and that mixed folder is not what any release
+was tested as. If the mod behaves oddly right after an update, this is the first thing to rule out.
+
+You can copy `halo_vr_user.cfg` (your settings) and your calibration files — `halo_vr_calib.cfg`,
+`halo_vr_calib_left.cfg`, `halo_vr_weapons.cfg`, `halo_vr_palette_calib.cfg`,
+`halo_vr_handposes.json` — out first and put them back afterwards, but that is a convenience and not
+a guarantee: settings change between releases, and an old value can behave differently on a new
+build. If anything feels wrong after restoring them, delete them and use the shipped defaults.
+
 **I have the Game Pass / Microsoft Store version.**
 
 No renaming is needed. UEVR names the profile folder after the executable with its extension stripped,

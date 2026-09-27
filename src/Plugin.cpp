@@ -7833,6 +7833,7 @@ void update() {
                     } else {
                         // MONO COLLAPSE. The saved value is the restore target, so an unreadable
                         // or already-collapsed scale means do nothing rather than engage blind.
+                        // WORLDSCALE-RAW: saves the player's exact string to restore after the collapse
                         char cur[32]{};
                         API::get()->param()->vr->get_mod_value("VR_WorldScale", cur, sizeof(cur));
                         if (atof(cur) > 0.02) {
@@ -7878,6 +7879,8 @@ void update() {
                         // visible, so "if nothing shows" would be nonsense there.
                         cutscene_hint_show();
                     } else {
+                        // WORLDSCALE-RAW: THE collapse -- the one place the plugin writes the scale.
+                        // core/WorldScale ignores this 0.01 and keeps the player's value throughout.
                         API::get()->param()->vr->set_mod_value("VR_WorldScale", "0.01");
                         API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT ENGAGE (%s) -- "
                                              "VR_WorldScale %s -> 0.01 (mono collapse)",
@@ -7889,6 +7892,7 @@ void update() {
                         API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT RELEASE (%s) -- "
                                              "VR_2DScreenMode -> false", why != nullptr ? why : "?");
                     } else if (engaged_mode == 2 && saved_scale[0] != '\0') {
+                        // WORLDSCALE-RAW: puts the player's own value back after the collapse
                         API::get()->param()->vr->set_mod_value("VR_WorldScale", saved_scale);
                         API::get()->log_info("[Halo-CampE-UEVR] CUTSCENE FLAT RELEASE (%s) -- "
                                              "VR_WorldScale -> %s", why != nullptr ? why : "?",
@@ -7915,6 +7919,8 @@ void update() {
                                          "-> false (cutscene2d owns this switch; set cutscene2d=0 "
                                          "to run the flat screen permanently)");
                 }
+                // WORLDSCALE-RAW: looks for a collapse value left behind by a crash -- the one value
+                // core/WorldScale deliberately refuses to see, so it has to be read raw here.
                 API::get()->param()->vr->get_mod_value("VR_WorldScale", cur, sizeof(cur));
                 const double ws = atof(cur);
                 if (ws > 0.0 && ws <= 0.011) {

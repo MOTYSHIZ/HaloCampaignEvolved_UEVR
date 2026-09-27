@@ -300,7 +300,11 @@ bool read_control_rotation(double* out_pitch, double* out_yaw, void** out_pc);
 bool read_control_rotation_hook(double* out_pitch, double* out_yaw);
 
 // A tracked device pose, rejecting the identity placeholder UEVR returns before tracking is live.
+// Read THROUGH the pose layers (hand smoothing, the pose latch) -- what every consumer should use.
 bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
+// The same read UNDER every layer: UEVR live, same placeholder rejection. For a consumer tuned on
+// the raw hand; everything else keeps get_pose so the whole mod sees one hand.
+bool get_pose_raw(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim);
 
 // The aim sightline's body reference, honouring aimorigin AND the leash state. Both sightline
 // sites call this; see the definition for why an unleashed head cannot use the standing origin.

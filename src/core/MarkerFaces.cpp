@@ -8,6 +8,7 @@
 #include "Rig.hpp"                // RIG_PARAM_BUF
 #include "UeObject.hpp"
 #include "core/Services.hpp"
+#include "core/WorldScale.hpp"         // room metres <-> world cm at the player's scale, any thread
 #include "core/host/MarkersState.hpp"
 #include "core/host/PluginState.hpp"   // the view position
 
@@ -24,16 +25,31 @@ namespace halo {
 
 namespace {
 
+// ONE ANCHOR RULE FOR BOTH DIRECTIONS. The standing origin (what the head's rendered offset is
+// measured from) only while a marker-anchoring feature holds the service AND room_anchor asks for it
+// -- the same gate room_to_world_anchored() puts on the forward map; the HMD otherwise (the old
+// behaviour). The inverse used to test room_anchor alone, and room_anchor defaults to 1, so with the
+// service off -- the wrist HUD on its own -- Markers.cpp mapped room->world from the HMD while this
+// file mapped world->room from the standing origin: a round trip off by (standing origin - HMD),
+// which with hmdleash=0 is as far as the player has walked. See Config.hpp room_anchor.
+Vec3 marker_anchor(const Vec3& hmd_room) {
+    if (g_cfg.room_anchor == 1 && service_active(SVC_MARKER_ANCHOR)) {
+        const auto so = API::VR::get_standing_origin();
+        return Vec3{so.x, so.y, so.z};
+    }
+    return hmd_room;
+}
+
 // Room point (UEVR tracking space, metres) -> UE world cm, via the palette's transform. The
 // swizzle (-z, x, y) is the room->UE axis map Plugin.cpp uses for head_ue/hand_ue.
 Vec3 room_to_world_at(const Vec3& room, const Vec3& hmd_room, const Vec3& cam) {
-    // The anchor: the standing origin (what the head's rendered offset is measured from), or
-    // the HMD for the old behaviour. See Config.hpp room_anchor.
-    Vec3 anchor = hmd_room;
-    if (g_cfg.room_anchor == 1) { const auto so = API::VR::get_standing_origin(); anchor = Vec3{so.x, so.y, so.z}; }
-    const Vec3 rel_ue{-(room.z - anchor.z) * 100.0f,
-                       (room.x - anchor.x) * 100.0f,
-                       (room.y - anchor.y) * 100.0f};
+    const Vec3 anchor = marker_anchor(hmd_room);
+    // 100 x VR_WorldScale cm per real metre, not a bare 100 -- see Markers.cpp's room_to_world, which
+    // had the same fault. _cached: markers_render_place() calls this off the game thread.
+    const float cm = uevr_cm_per_metre_cached();
+    const Vec3 rel_ue{-(room.z - anchor.z) * cm,
+                       (room.x - anchor.x) * cm,
+                       (room.y - anchor.y) * cm};
     const Quat yawq = rotator_to_quat(0.0f, g_view_base_yaw.load(std::memory_order_relaxed), 0.0f);
     const Vec3 w = quat_rotate(yawq, rel_ue);
     return Vec3{cam.x + w.x, cam.y + w.y, cam.z + w.z};
@@ -81,13 +97,15 @@ unsigned marker_sweep_period() { return (s_mk_fails < 5) ? 120u : 1200u; }
 void marker_sweep_result(const void* mf) { if (mf == nullptr) ++s_mk_fails; else s_mk_fails = 0; }
 // The inverse: UE world cm -> room metres, same yaw and swizzle undone.
 Vec3 holster_world_to_room_at(const Vec3& world, const Vec3& hmd_room, const Vec3& cam) {
-    Vec3 anchor = hmd_room;
-    if (g_cfg.room_anchor == 1) { const auto so = API::VR::get_standing_origin(); anchor = Vec3{so.x, so.y, so.z}; }
+    const Vec3 anchor = marker_anchor(hmd_room);   // the forward map's own rule -- see marker_anchor
     const Vec3 w{world.x - cam.x, world.y - cam.y, world.z - cam.z};
     const Quat yawq = rotator_to_quat(0.0f, g_view_base_yaw.load(std::memory_order_relaxed), 0.0f);
     const Vec3 rel_ue = quat_rotate(quat_conj(yawq), w);
-    // rel_ue = (-(dz), dx, dy) * 100  ->  dx = rel_ue.y/100, dy = rel_ue.z/100, dz = -rel_ue.x/100
-    return Vec3{anchor.x + rel_ue.y * 0.01f, anchor.y + rel_ue.z * 0.01f, anchor.z - rel_ue.x * 0.01f};
+    // rel_ue = (-(dz), dx, dy) * cm  ->  dx = rel_ue.y/cm, dy = rel_ue.z/cm, dz = -rel_ue.x/cm. The SAME
+    // cm and the SAME anchor as the forward map, so a round trip through both is exact at any world
+    // scale and whichever features are on.
+    const float inv = 1.0f / uevr_cm_per_metre_cached();
+    return Vec3{anchor.x + rel_ue.y * inv, anchor.y + rel_ue.z * inv, anchor.z - rel_ue.x * inv};
 }
 Vec3 holster_world_to_room(const Vec3& world, const Vec3& hmd_room) {
     return holster_world_to_room_at(world, hmd_room,

@@ -3,8 +3,12 @@
 #
 # THIS FILE IS NOT READ BY THE MOD. It is the reference, refreshed by every update.
 # To change a setting: COPY its line into halo_vr_user.cfg (next to this file), remove
-# the leading #, and set your value there. halo_vr_user.cfg is read live (~2 s), updates
-# never touch it, and deleting it resets everything to the defaults listed here.
+# the leading #, and set your value there. halo_vr_user.cfg is read live (~2 s), nothing the
+# mod does rewrites it, and deleting it resets everything to the defaults listed here.
+# NOTE ON UPDATES: install each release fresh -- delete the whole HaloCampaignEvolved folder
+# first (see the README's "Updating" section). You can copy halo_vr_user.cfg out and put it
+# back, but that is a convenience, not a guarantee: if anything feels wrong afterwards, delete
+# it and use the shipped defaults.
 # Easier still: the in-game menu (UEVR overlay > Script UI) edits the same settings with
 # sliders and dropdowns -- key and button values are stored as codes in the file, but the
 # menu shows them by name.
@@ -668,10 +672,42 @@
 # Auto height: an optional keyboard key that re-measures your height. The Calibrate height button is
 # the intended way.
 #heightkey=0x00
+# Physical crouch: duck in the room and your character crouches, the same as holding the right
+# stick down -- so it fits under things and is harder to hit, not just a lower view. Your standing
+# height is measured while you stand still and only ever goes up; Calibrate height re-measures it.
+# Needs heightmode=absolute and a known floor. 0 off, 1 on.
+#heightcrouch=0
+# Physical crouch: where the line is, as a fraction of your standing head height (0.5 = half).
+# Raise it towards 0.7 for a shallower crouch.
+#heightcrouchfrac=0.5
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Head block: how far your head is kept from a surface, in centimetres.
 #headblockradius=12
+
+# ------------------------------------------------------------------- HAND SMOOTHING (handsmooth)
+# Hand smoothing: which hands are steadied (0 both, 1 only the hand you aim with, 2 only your other
+# hand). 2 steadies two-handed holds and the arms without adding any lag to your aim.
+#handsmoothhands=0
+# Position steadiness while still. How much a still hand's position is steadied, in Hz: lower is
+# steadier but slower to follow a slow move. 0 turns position smoothing off.
+#handsmoothposmin=0.1
+# Position follow speed. How quickly smoothing lets go as the hand moves faster (per metre per
+# second). Raise it if slow moves feel laggy, lower it if a moving hand still shakes.
+#handsmoothposbeta=1000
+# Rotation steadiness while still. How much a still hand's angle is steadied, in Hz: lower is
+# steadier but slower to follow a slow turn of the wrist -- and on your aiming hand, slower to
+# follow a slow aim. 0 turns rotation smoothing off.
+#handsmoothrotmin=1.0
+# Rotation follow speed. How quickly smoothing lets go as the wrist turns faster (per radian per
+# second). Raise it if slow aiming feels laggy, lower it if a turning hand still shakes.
+#handsmoothrotbeta=5
+# Speed estimate smoothing, in Hz. Rarely needs changing; lower it if the hand twitches between
+# steady and free.
+#handsmoothdcut=10
+# Melee uses the steadied hands. 0 = swing melee reads your hands unsmoothed (how melee has always
+# felt), 1 = it reads the steadied hands like everything else.
+#handsmoothmelee=0
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 

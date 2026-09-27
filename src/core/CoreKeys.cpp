@@ -2,6 +2,7 @@
 
 #include "Config.hpp"
 #include "Math.hpp"   // clampf
+#include "core/HandSmooth.hpp"
 #include "core/reload/ReloadKeys.hpp"
 
 #include <cstdlib>
@@ -42,6 +43,8 @@ bool core_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "palettewpnlog")  == 0) { g_cfg.palette_weapon_log   = (v != 0.0); return true; }
     // The reload engine's keys (core/reload).
     if (reload_engine_parse_key(key, val, v)) return true;
+    // SVC_HAND_SMOOTH (core/HandSmooth): the filter's tuning, owned by the handsmooth row.
+    if (hand_smooth_parse_key(key, val, v)) return true;
     return false;
 }
 

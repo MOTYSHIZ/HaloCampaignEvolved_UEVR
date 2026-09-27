@@ -162,6 +162,15 @@ std::atomic<uint64_t> s_cap_no_tls{0}, s_cap_no_ctx{0}, s_cap_gate{0}, s_cap_mis
 #else
 #define HALO_CAPCENSUS(x) ((void)0)
 #endif
+
+// THE BANK CENSUS -- see palettehook_bank_census(). context[0] is range-checked to < 2 by the gate
+// below and is the only field in the context that is shaped like a bank index, but nobody has ever
+// watched it. Two endpoints are only worth writing if this thing alternates, so count it before
+// building anything on top of it. Dev only: it answers a question rather than playing the game.
+#if HALO_VR_DEV
+std::atomic<uint64_t> s_ctx_bank0{0}, s_ctx_bank1{0}, s_ctx_bank_flips{0};
+uint8_t s_ctx_bank_prev = 0xFF;
+#endif
 char             s_resolution[192] = "not resolved";
 
 // 600 ticks is ~10 s at 60 Hz on the engine tick this is driven from. Stated here because getting
@@ -235,6 +244,15 @@ int drive_capture_banks(const PaletteAccess& live, PaletteDriveFn drive) {
     if (context[2] == 0 || context[0] >= 2) {   // capture not active this frame
         HALO_CAPCENSUS(s_cap_gate); return 0;
     }
+    // Past the gate, context[0] is 0 or 1. Count it before anything reads meaning into it.
+    const uint8_t live_bank = context[0];
+#if HALO_VR_DEV
+    (live_bank == 0 ? s_ctx_bank0 : s_ctx_bank1).fetch_add(1, std::memory_order_relaxed);
+    if (s_ctx_bank_prev != 0xFF && s_ctx_bank_prev != live_bank) {
+        s_ctx_bank_flips.fetch_add(1, std::memory_order_relaxed);
+    }
+    s_ctx_bank_prev = live_bank;
+#endif
 
     int written = 0;
     for (uint8_t bank = 0; bank < 2; ++bank) {
@@ -253,6 +271,8 @@ int drive_capture_banks(const PaletteAccess& live, PaletteDriveFn drive) {
         bank_access.palette         = reinterpret_cast<BlamMatrix4x3*>(record + CAPTURE_PALETTE_OFF);
         bank_access.is_capture_bank = true;
         bank_access.bank_index      = bank;
+        bank_access.live_bank       = live_bank;
+        bank_access.live_bank_valid = true;
         if (drive(bank_access)) ++written;
     }
     return written;
@@ -310,6 +330,16 @@ void palettehook_capture_census(std::uint64_t* no_tls, std::uint64_t* no_ctx,
 #else
     if (no_tls) *no_tls = 0; if (no_ctx) *no_ctx = 0;
     if (gate) *gate = 0;   if (mismatch) *mismatch = 0;
+#endif
+}
+
+void palettehook_bank_census(std::uint64_t* bank0, std::uint64_t* bank1, std::uint64_t* flips) {
+#if HALO_VR_DEV
+    if (bank0) *bank0 = s_ctx_bank0.load(std::memory_order_relaxed);
+    if (bank1) *bank1 = s_ctx_bank1.load(std::memory_order_relaxed);
+    if (flips) *flips = s_ctx_bank_flips.load(std::memory_order_relaxed);
+#else
+    if (bank0) *bank0 = 0; if (bank1) *bank1 = 0; if (flips) *flips = 0;
 #endif
 }
 

@@ -1089,12 +1089,20 @@ struct Config {
     bool  hand_fix_valid = false;
     // cm of rig movement per metre of hand movement.
     //
-    // MUST INCLUDE UEVR's WORLD SCALE. 100 is only correct at world scale 1.0; the accompanying
-    // profile runs VR_WorldScale=1.312, so the game renders a metre of real movement as 131.2 cm
-    // and a plain 100 under-translates the weapon by ~24%. That reads as BOTH "translation feels
-    // slow" AND "the pivot is off" -- under-translating during a wrist roll moves the apparent
-    // centre of rotation, which is very easy to mistake for a pivot bug.
+    // MUST INCLUDE UEVR's WORLD SCALE. 100 is only correct at world scale 1.0; at the profile's
+    // VR_WorldScale=1.312 the game renders a metre of real movement as 131.2 cm, and a plain 100
+    // under-translates the weapon by ~24%. That reads as BOTH "translation feels slow" AND "the
+    // pivot is off" -- under-translating during a wrist roll moves the apparent centre of rotation,
+    // which is very easy to mistake for a pivot bug.
+    //
+    // AND THE WORLD SCALE IS THE PLAYER'S, NOT OURS. This was fixed at 131.2 -- right at the
+    // profile's scale and wrong by the ratio for everyone who moved UEVR's slider (measured at 1.132:
+    // the gun sat 1.16x the hand's distance from the eye, 11.5 cm off at full reach). Since
+    // 2026-09-27 it FOLLOWS UEVR: core/WorldScale's world_scale_resolve_config() sets it to
+    // 100 x VR_WorldScale at the end of every reload. 131.2 is only what it holds until UEVR first
+    // answers. An explicit rigscale= still wins (rig_scale_explicit), as a deliberate override.
     float rig_scale    = 131.2f;
+    bool  rig_scale_explicit = false;   // set by the rigscale key; reset on every reload like g_cfg
 
     // Measure the game's turn rate at runtime and rescale the loop gain, instead of depending on
     // the player leaving controller sensitivity at the value this was hand-calibrated against.
