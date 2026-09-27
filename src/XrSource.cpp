@@ -1649,6 +1649,16 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
     t.native_rhi = rhi;
     t.dim = dim;
     t.fmt = fmt;
+    // RESOLVED NOW, SO SERVICE IT EVERY TICK FROM THE NEXT ONE. next_resolve was chosen above while
+    // t.native was still null, i.e. with the 16-tick "nothing to go stale" throttle -- and a slot can
+    // never capture on the tick it resolves (it is handed to the layer only after this loop), so its
+    // FIRST capture waited out that whole throttle. MEASURED 2026-09-27 on the scope pane (slot 9):
+    // all four opens that needed a resolve (the session's first, three after a retire) resolved
+    // within ~35 ms and first presented exactly 16 ticks later -- one tick after the scope's 16-tick
+    // arming window had given up -- so each showed ~350 ms of nothing, then a one-tick flash of the
+    // in-world pane. Any slot that re-resolves (a reticule re-allocation, a marker's new component)
+    // paid the same half second.
+    t.next_resolve = tick + 1;
     if (changed) {
         logf("slot %d resolved: rt %p -> rhi %p -> ID3D12Resource %p (%dx%d, DXGI %u)",
              s, (void*)rt, rhi, native, dim, dim, fmt);
@@ -1838,10 +1848,14 @@ void xrsource_tick(uint32_t tick) {
             Target& t = g_t[s];
             if (t.native != nullptr && t.native != t.fed) {
                 if ((int32_t)(tick - t.next_offer) >= 0) {
-                    t.next_offer = tick + 32;   // ~1 s; a refused offer must not spin the log
                     if (xrlayer_set_slot_source(s, t.native)) {
                         t.fed = t.native;
                         logf("handed %p to compositor slot %d.", t.native, s);
+                    } else {
+                        // ~1 s; a REFUSED offer must not spin the log. Armed on refusal only: armed on
+                        // every offer, it also held back a slot re-resolved within ~1 s of its last
+                        // accepted hand-over -- and a slot is not captured until it is handed over.
+                        t.next_offer = tick + 32;
                     }
                 }
             } else if (t.native == nullptr && t.fed != nullptr) {
