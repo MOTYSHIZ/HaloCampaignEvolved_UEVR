@@ -1133,12 +1133,14 @@ void reticule_widget_set_scene_hidden(bool hidden) {
         apply_widget_tint(wid, /*force=*/true);
         // WHY THIS TRANSITION HAPPENED, not just that it did.
         //
-        // g_ws_scene_hidden follows (hide_ws != 0 && xrlayer_live()), so a transition BACK to
-        // visible means the LAYER dropped out of live -- there is no other input. Printing live
-        // and the re-host count separates the two candidate causes of "the world-space reticule
-        // is showing in my main view": a layer that keeps dropping, versus a widget re-host that
-        // outran the re-assert. One failing session logged 17 of these against a working
-        // session's 5, and nothing recorded which kind they were.
+        // g_ws_scene_hidden follows (hide_ws != 0 && layer-EVER-live) -- the one-way latch in
+        // Plugin.cpp's update(), NOT the instantaneous xrlayer_live(), which it followed until the
+        // double-crosshair report of 2026-09-06 (a scope-hide dropping live handed the world
+        // reticule back). So a transition BACK to visible now means the latch was released or
+        // hide_ws changed; a live dip cannot cause one. The re-host count still separates the
+        // remaining candidate for "the world-space reticule is showing in my main view": a widget
+        // re-host that outran the re-assert. One failing session logged 17 transitions against a
+        // working session's 5, and nothing recorded which kind they were.
         //
         // bRenderInMainPass reads ABSENT ON PURPOSE -- reticule_set_capture_only deliberately
         // does not write it (writing it made the SCOPE pane lose its reticule). The old text
@@ -1147,9 +1149,9 @@ void reticule_widget_set_scene_hidden(bool hidden) {
         uevr::API::get()->log_info(
             "[Halo-CampE-UEVR] reticule: in-scene widget %s (mode 3: "
             "bVisibleInSceneCaptureOnly=%s bRenderInMainPass=%s[not written by design], "
-            "read back) | rehosts=%u -- in mode 3 `restored` IS xrlayer_live() going false, "
-            "since hidden = (hide_ws != 0 && live) and hide_ws is 3 here. The SCOPE CAPTURE "
-            "still sees the widget either way.",
+            "read back) | rehosts=%u -- in mode 3 `restored` means the layer-ever-live latch was "
+            "released (hidden = hide_ws != 0 && the latch, not the instantaneous xrlayer_live()). "
+            "The SCOPE CAPTURE still sees the widget either way.",
             hidden ? "HIDDEN from the main pass" : "restored to the main pass",
             vsco  < 0 ? "ABSENT" : (vsco  ? "true" : "false"),
             mainp < 0 ? "ABSENT" : (mainp ? "true" : "false"),
