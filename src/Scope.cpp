@@ -85,6 +85,50 @@ bool  s_pane_shown = false;
 // one scope-in. Reset to false whenever the capture component is (re)created; see the arm at the
 // cadence block and the disarm in the scope-inactive early-out.
 bool  s_capture_every_frame = false;
+// ---- THE ON-CHANGE TRACKERS FOR THE CAPTURE'S POST-PROCESS LEVERS --------------------------
+//
+// Every lever scope_apply writes onto the capture (source, AA, exposure bias, gain, main-view
+// family, blendables, bloom, DOF, persistence, blend weight...) is applied ON CHANGE, and each
+// tracker records the CONFIG VALUE it last wrote. They live HERE, not as statics inside
+// scope_apply, for one reason: ensure_components() must be able to RESET them when it creates a new
+// capture -- the same thing it already does for s_fov_applied and s_capture_every_frame above.
+//
+// THE BUG THIS FIXED (measured 2026-09-26 from two real sessions' logs, identical in both): the
+// first capture of a session logged "autoexposure bias -> +2.50 EV", "gain -> 5.500",
+// "bMainViewFamily -> 1" and "blendables from ...". A level teardown then destroyed it, the rebuilt
+// capture logged "capture component created" -- and nothing else, ever, because the config had not
+// changed so no tracker fired. Reported from a headset as "scopegain=5.5 doesn't fix the dark scope
+// sometimes; I have to change scopegain live for it to look right": a live edit was the only thing
+// that re-fired a lever, and it re-fired only that one. The scope had three looks depending on
+// history, and any tuning done in one of them was wrong for the other two.
+//
+// Resetting to these sentinels at creation makes every rebuilt capture take EXACTLY the path the
+// first one took, for every lever present and future -- no per-lever special case to forget. (A
+// first attempt re-fired each lever off a generation counter instead; review caught that it needed
+// a hand-written clause per lever and silently missed the pane's lever below.)
+struct CaptureLevers {
+    int      src        = -1;
+    float    exposure   = -1.0f;
+    int      aa         = -2;      // -1 is a meaningful value there, so seed outside the range
+    float    bias       = 0.0f;    // 0 = "inherit": a config that never sets it writes nothing
+    int      lumen      = -1;
+    float    gain       = 0.0f;    // same convention as bias
+    int      grade      = -1;
+    int      main_view[3] = { -2, -2, -2 };
+    int      ppcopy     = -1;
+    float    bloom      = -1.0f;
+    int      ppcopy_tries = 0;     // failed blendable copies on THIS component (bounded retry)
+    uint32_t ppcopy_retry_tick = 0;
+    float    dof        = -1.0f;
+    float    dof_focus  = -1.0f;
+    int      persist    = -1;
+    float    ppw        = -2.0f;
+};
+CaptureLevers s_cap_levers;
+// The PANE's one on-change lever (scopefpdepth). Same bug class, same fix: a level change rebuilds
+// the pane too, and a tracker that still matched the config left the new pane out of the
+// first-person depth group, so the arms could draw over it. Reset where the pane is created.
+int   s_fp_depth_applied = -1;
 // What the scope was opened holding -- the weapon-switch close compares against it.
 //
 // File scope, not a static inside the detector, because the detector only runs while the pane is
@@ -500,6 +544,24 @@ void apply_autoexposure_bias(API::UObject* cap, float ev) {
                              "build (value=%p override=%p), NOTHING WRITTEN", (void*)vp, (void*)op);
         return;
     }
+    // 0 = INHERIT: CLEAR the override, which is the state a freshly built capture starts in. Writing
+    // an explicit 0 instead made the live capture ignore a post-process volume's bias while a rebuilt
+    // one inherited it -- the same setting producing two brightnesses across a level change, which
+    // would corrupt exactly the re-tune this key is used for.
+    //
+    // EXCEPT when the exposure pin owns the field: pin_capture_exposure() writes AutoExposureBias with
+    // its override as part of PINNING, and clearing it here would silently unpin that term.
+    const bool pin_owns = (g_cfg.scope_capture_src == 8 || g_cfg.scope_capture_src == 9) &&
+                          g_cfg.scope_exposure > 0.0f;
+    if (ev == 0.0f && !pin_owns) {
+        if (auto* bp = static_cast<API::FBoolProperty*>(op)) {
+            auto* byte = pps + bp->get_offset();
+            *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] scope: autoexposure bias -> inherit (override "
+                             "cleared) -- the same state a freshly built capture starts in");
+        return;
+    }
     *reinterpret_cast<float*>(pps + vp->get_offset()) = ev;
     if (auto* bp = static_cast<API::FBoolProperty*>(op)) {
         auto* byte = pps + bp->get_offset();
@@ -542,15 +604,47 @@ API::UObject* pick_pp_source(const wchar_t** out_field, std::string* out_name) {
     API::UObject* src = nullptr;
     const wchar_t* field = nullptr;
     int best_cnt = 0;               // 0-blendable sources tell us nothing; require at least one
+    // FILTER BY CLASS POINTER, NOT BY CLASS NAME. This walks the WHOLE object array (~296k), and it
+    // used to build a heap-allocated std::wstring of every object's class name to substring-match
+    // two names. MEASURED from session logs: 73 and 77 ms of game-thread stall ("blendable copy
+    // STARTING" -> "blendables from"), paid on the first scope-in of a level -- a visible VR hitch,
+    // and it now runs once per LEVEL because a rebuilt capture re-copies its blendables (see
+    // CaptureLevers). is_a() walks the super chain with pointer compares and no allocation, the same
+    // prefilter the unit sweep in this file already uses.
+    //
+    // is_a also matches Blueprint subclasses, which the name test only caught by naming convention.
+    // Engine /Script classes live for the process, so they are resolved once; if either ever fails to
+    // resolve, that kind falls back to the old name test instead of silently finding nothing.
+    // Resolved ONCE: a failed lookup may itself be a walk, and this only ever runs in gameplay (from a
+    // scope-in), when the engine's /Script classes are certainly registered.
+    static API::UClass* s_cam_cls = nullptr;
+    static API::UClass* s_vol_cls = nullptr;
+    static bool         s_cls_resolved = false;
+    if (!s_cls_resolved) {
+        s_cls_resolved = true;
+        s_cam_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.CameraComponent");
+        s_vol_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.PostProcessVolume");
+        API::get()->log_info("[Halo-CampE-UEVR] scope: post-process source classes -- "
+                             "CameraComponent %s, PostProcessVolume %s%s",
+                             s_cam_cls != nullptr ? "found" : "NOT FOUND",
+                             s_vol_cls != nullptr ? "found" : "NOT FOUND",
+                             (s_cam_cls && s_vol_cls) ? "" : " (falling back to the slow name test)");
+    }
     if (auto* arr = API::get()->get_uobject_array()) {
         const int32_t n = arr->get_object_count();
         API::UObject* vol = nullptr;
         for (int32_t i = 0; i < n; ++i) {
             auto* o = reinterpret_cast<API::UObject*>(arr->get_object(i));
             if (o == nullptr) continue;
-            const std::wstring cn = class_name_of(o);
-            const bool is_cam = cn.find(L"CameraComponent") != std::wstring::npos;
-            const bool is_vol = cn.find(L"PostProcessVolume") != std::wstring::npos;
+            bool is_cam = false, is_vol = false;
+            if (s_cam_cls != nullptr && s_vol_cls != nullptr) {
+                is_cam = o->is_a(s_cam_cls);
+                is_vol = !is_cam && o->is_a(s_vol_cls);
+            } else {
+                const std::wstring cn = class_name_of(o);   // fallback only: the slow path
+                is_cam = cn.find(L"CameraComponent") != std::wstring::npos;
+                is_vol = cn.find(L"PostProcessVolume") != std::wstring::npos;
+            }
             if (!is_cam && !is_vol) continue;
             auto* oc = o->get_class();
             if (oc != nullptr && o == oc->get_class_default_object()) continue;
@@ -772,6 +866,18 @@ void apply_capture_gain(API::UObject* cap, float gain) {
     if (vp == nullptr || op == nullptr) {
         API::get()->log_info("[Halo-CampE-UEVR] scope: gain -- ColorGain not on this build "
                              "(value=%p override=%p), NOTHING WRITTEN", (void*)vp, (void*)op);
+        return;
+    }
+    // 0 (or less) = INHERIT: CLEAR the override, putting the capture back in exactly the state a
+    // freshly built one starts in. Writing a neutral 1.0 instead would set the override and stop the
+    // capture inheriting a gain from a post-process volume -- a different image at the same setting.
+    if (gain <= 0.0f) {
+        if (auto* bp = static_cast<API::FBoolProperty*>(op)) {
+            auto* byte = pps + bp->get_offset();
+            *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] scope: gain -> inherit (bOverride_ColorGain "
+                             "cleared) -- the same state a freshly built capture starts in");
         return;
     }
     const int sz = pps_field_size(vp);
@@ -2138,6 +2244,8 @@ bool ensure_components(API::UObject* rig) {
         // the "doesn't feel like a child of my controller" lag the first headset pass reported.
         s_capture.set(comp);
         s_fov_applied = 0.0f;
+        // A NEW component: every post-process lever re-applies from scratch -- see CaptureLevers.
+        s_cap_levers = CaptureLevers{};
         // READ BACK what was written, and prove the capture function exists in this build --
         // call_function on a missing name does nothing and returns cleanly, so without this a
         // dead capture is indistinguishable from a working one (the codebase's readback rule).
@@ -2261,6 +2369,7 @@ bool ensure_components(API::UObject* rig) {
         set_visibility(comp, false);   // hidden until the toggle says otherwise
         s_pane_shown = false;
         s_pane.set(comp);
+        s_fp_depth_applied = -1;   // a NEW pane: re-apply scopefpdepth to it (see its declaration)
     }
 
     const bool ready = !s_pane.empty() && !s_capture.empty() && !s_rt.empty();
@@ -3228,7 +3337,8 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // it is placed in WORLD space ~63 cm along the aim ray. If it suddenly looks the wrong size or
     // sits at the wrong depth, that is this change, and scopefpdepth=0 reverts it live.
     {
-        static int s_fp_depth_applied = -1;
+        // s_fp_depth_applied is FILE-SCOPE so a rebuilt pane can reset it -- see its declaration.
+        // Do not reintroduce a local static here: it would shadow that one and re-create the bug.
         const int want = g_cfg.scope_fp_depth ? 1 : 0;
         if (s_fp_depth_applied != want) {
             // DO NOT LATCH UNTIL THE WRITE ACTUALLY LANDS. The first pass after a config load can
@@ -3593,14 +3703,20 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         }
     }
 
+    // THE LEVER TRACKERS BELOW ARE REFERENCES INTO s_cap_levers, not statics, so that
+    // ensure_components() can reset them when it builds a new capture. Read CaptureLevers' note
+    // before adding a lever here: its tracker belongs in that struct, or a level change will leave
+    // the rebuilt capture without it.
+    CaptureLevers& L = s_cap_levers;
+
     // CAPTURE SOURCE, live. This used to be written ONLY at component creation, so changing
     // scopesrc did nothing to an existing capture: a session that had gone black on a
     // post-processed source stayed black no matter what the config said, and the key was
     // documented as live while not being live. Re-applied on change, with the exposure pin
     // following it, because the pin only matters for the post-processed sources.
-    static int s_src_applied = -1;
-    static float s_exposure_applied = -1.0f;
-    static int s_aa_applied = -2;   // -1 is a meaningful value here, so seed outside the range
+    int&   s_src_applied      = L.src;
+    float& s_exposure_applied = L.exposure;
+    int&   s_aa_applied       = L.aa;
     if (s_src_applied != g_cfg.scope_capture_src ||
         s_exposure_applied != g_cfg.scope_exposure ||
         s_aa_applied != g_cfg.scope_aa) {
@@ -3644,7 +3760,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // this field, so re-applying afterwards keeps the two in agreement regardless of which path
     // last touched it. Seeded at 0.0f so a config that never sets the key writes nothing at all
     // and the capture keeps whatever it would otherwise inherit -- the default has to be inert.
-    static float s_bias_applied = 0.0f;
+    float& s_bias_applied = L.bias;
     if (s_bias_applied != g_cfg.scope_autoexposure_bias) {
         s_bias_applied = g_cfg.scope_autoexposure_bias;
         apply_autoexposure_bias(cap, g_cfg.scope_autoexposure_bias);
@@ -3653,7 +3769,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // LUMEN. On change, seeded at -1 so a config that never sets the key writes nothing and the
     // capture keeps the engine's forced-off state -- the default must not change anyone's frame
     // time, since re-enabling it makes the capture run a second Lumen scene.
-    static int s_lumen_applied = -1;
+    int& s_lumen_applied = L.lumen;
     if (s_lumen_applied != g_cfg.scope_lumen) {
         s_lumen_applied = g_cfg.scope_lumen;
         if (g_cfg.scope_lumen >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
@@ -3665,22 +3781,28 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // GAIN. On change, seeded at 0 so a config that never sets it writes nothing -- 0 means "leave
     // ColorGain alone", which is not the same as 1.0 (neutral), because writing 1.0 would set the
     // override bit and stop the capture inheriting a gain from anywhere else.
-    static float s_gain_applied = 0.0f;
+    float& s_gain_applied = L.gain;
     if (s_gain_applied != g_cfg.scope_gain) {
         s_gain_applied = g_cfg.scope_gain;
-        if (g_cfg.scope_gain > 0.0f) apply_capture_gain(cap, g_cfg.scope_gain);
+        // Called for 0 too: a live change TO 0 must CLEAR the override, not merely stop writing it.
+        // Skipping it left the live capture on the old gain while a rebuilt one started neutral --
+        // one config value, two images, depending on whether a level change had happened since.
+        apply_capture_gain(cap, g_cfg.scope_gain);
     }
 
-    static int s_grade_applied = -1;
+    int& s_grade_applied = L.grade;
     const int grade_want = g_cfg.scope_pp_grade ? 1 : 0;
     if (s_grade_applied != grade_want) {
+        const int grade_prev = s_grade_applied;
         s_grade_applied = grade_want;
         if (grade_want != 0) {
             copy_pp_grading_onto_capture(cap);
-        } else {
+        } else if (grade_prev == 1) {
+            // Only when THIS component actually received a grade: a freshly built capture starts at
+            // -1, and telling the log its copied fields "stay copied" would be false for it.
             API::get()->log_info("[Halo-CampE-UEVR] scope: scopeppgrade off -- the fields already "
-                                 "copied STAY copied (their bOverride_ bits are set); a fresh "
-                                 "session is what actually reverts it.");
+                                 "copied STAY copied (their bOverride_ bits are set); the next "
+                                 "rebuilt capture (a level change) or a fresh session reverts it.");
         }
     }
 
@@ -3700,7 +3822,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
             { L"bMainViewResolution", g_cfg.scope_main_res },
             { L"bMainViewCamera",     g_cfg.scope_main_cam },
         };
-        static int s_applied[3] = { -2, -2, -2 };
+        int* s_applied = L.main_view;
         for (int i = 0; i < 3; ++i) {
             if (flags[i].want < 0 || s_applied[i] == flags[i].want) continue;
             s_applied[i] = flags[i].want;
@@ -3722,20 +3844,46 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         }
     }
 
-    // POST-PROCESS LEVERS, applied on change and in a DELIBERATE ORDER.
+    // POST-PROCESS LEVERS, applied on change.
     //
-    // scopeppcopy overwrites the ENTIRE FPostProcessSettings struct, so it must run FIRST -- any
-    // bloom or exposure written before it would be silently wiped by the copy, and the result
-    // would read as "the lever did nothing". Everything we want to survive is re-applied after.
-    static int   s_ppcopy_applied = -1;
-    static float s_bloom_applied  = -1.0f;
-    if (s_ppcopy_applied != (int)g_cfg.scope_pp_copy || s_bloom_applied != g_cfg.scope_bloom) {
-        s_ppcopy_applied = (int)g_cfg.scope_pp_copy;
-        s_bloom_applied  = g_cfg.scope_bloom;
-        if (g_cfg.scope_pp_copy) copy_pp_settings_onto_capture(cap);
+    // CORRECTED 2026-09-26. This comment used to say scopeppcopy "overwrites the ENTIRE
+    // FPostProcessSettings struct, so it must run FIRST". That described the old raw memcpy, which
+    // was removed as a heap hazard (see copy_pp_settings_onto_capture). The copy now only ADDS the
+    // camera's blendables through AddOrUpdateBlendable, so it wipes nothing -- the exposure bias and
+    // gain written above survive it, and there is no ordering constraint here any more. The stale
+    // claim nearly sent a diagnosis of "scope brightness needs a live poke" after the wrong cause.
+    //
+    // A FAILED COPY IS RETRIED, BOUNDEDLY. A rebuilt capture is created on the first scope-in of a
+    // level, which can land moments after a respawn -- before the pawn camera carries its
+    // blendables, so pick_pp_source finds nothing and the copy returns false. Latching on that
+    // attempt left the capture without the game's post-process materials for the whole level.
+    // Retries are spaced and capped because each attempt walks the object array.
+    constexpr int      kPpCopyMaxTries   = 4;
+    constexpr uint32_t kPpCopyRetryTicks = 64;   // ~2 s at ~32 Hz
+    const bool ppcopy_retry_due = g_cfg.scope_pp_copy && L.ppcopy_tries > 0 &&
+                                  L.ppcopy_tries < kPpCopyMaxTries &&
+                                  (tick - L.ppcopy_retry_tick) >= kPpCopyRetryTicks;
+    if (L.ppcopy != (int)g_cfg.scope_pp_copy || L.bloom != g_cfg.scope_bloom || ppcopy_retry_due) {
+        L.ppcopy = (int)g_cfg.scope_pp_copy;
+        L.bloom  = g_cfg.scope_bloom;
+        if (g_cfg.scope_pp_copy) {
+            if (copy_pp_settings_onto_capture(cap)) {
+                L.ppcopy_tries = 0;
+            } else if (++L.ppcopy_tries < kPpCopyMaxTries) {
+                L.ppcopy_retry_tick = tick;
+                API::get()->log_info("[Halo-CampE-UEVR] scope: blendable copy landed nothing "
+                                     "(attempt %d of %d) -- retrying in ~2 s", L.ppcopy_tries,
+                                     kPpCopyMaxTries);
+            } else {
+                API::get()->log_info("[Halo-CampE-UEVR] scope: blendable copy gave up after %d "
+                                     "attempts -- this capture runs WITHOUT the camera's post-process "
+                                     "materials until the next rebuild", kPpCopyMaxTries);
+            }
+        }
         if (g_cfg.scope_bloom > 0.0f) force_capture_bloom(cap, g_cfg.scope_bloom);
-        // Re-assert the exposure pin: the copy above may have replaced it, and a post-processed
-        // capture without a pinned exposure was the original cause of the fade-to-black.
+        // Re-assert the exposure pin. Defensive now rather than necessary -- the blendable copy
+        // above no longer touches exposure -- but a post-processed capture without a pinned
+        // exposure was the original cause of the fade-to-black, so it stays cheap insurance.
         if ((g_cfg.scope_capture_src == 8 || g_cfg.scope_capture_src == 9) &&
             g_cfg.scope_exposure > 0.0f) {
             pin_capture_exposure(cap, g_cfg.scope_exposure);
@@ -3745,14 +3893,15 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
 #if HALO_VR_DEV
     dev_blendable_probe(cap);
 #endif
-    static float s_dof_applied = -1.0f, s_dof_focus_applied = -1.0f;
+    float& s_dof_applied       = L.dof;
+    float& s_dof_focus_applied = L.dof_focus;
     if (s_dof_applied != g_cfg.scope_dof || s_dof_focus_applied != g_cfg.scope_dof_focus) {
         s_dof_applied = g_cfg.scope_dof;
         s_dof_focus_applied = g_cfg.scope_dof_focus;
         if (g_cfg.scope_dof > 0.0f) enable_capture_dof(cap, g_cfg.scope_dof, g_cfg.scope_dof_focus);
     }
-    static int   s_persist_applied = -1;
-    static float s_ppw_applied     = -2.0f;
+    int&   s_persist_applied = L.persist;
+    float& s_ppw_applied     = L.ppw;
     if (s_persist_applied != g_cfg.scope_persist) {
         s_persist_applied = g_cfg.scope_persist;
         cap->set_bool_property(L"bAlwaysPersistRenderingState", g_cfg.scope_persist != 0);
