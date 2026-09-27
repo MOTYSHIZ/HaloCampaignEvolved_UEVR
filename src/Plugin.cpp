@@ -7251,9 +7251,16 @@ void update() {
         // broken lane without ever needing a "disable forever" rule, and lets a lane that faulted
         // once on a transition come back on its own. Markers are cosmetic; the hands are not.
         features_tick_stage("nav_world");
+        // IN A VEHICLE, WHILE OUR OWN CAMERA DRAWS, the world markers stay on. Stick mode stood the lane
+        // down because the view there used to be the game's chase camera, whose flat HUD markers are right
+        // for it; under our camera those flat markers mark the game camera's picture, not the one you see,
+        // and the lane's own in-scene marker was left behind. Lane 2 (the objective's true world position,
+        // the default) needs neither the aim nor the game's projection, so it runs as it does on foot and
+        // hides the flat layer while it does. The projecting lanes (0/1) read the game camera, so not them.
+        const bool nav_ok = fixes_ok || (g_cfg.nav_world_src == 2 && veh_tp_anchor_active());
         if (!lane_cooling(PERF_NAVWORLD, tick)) {
             PerfScope _perf(PERF_NAVWORLD);
-            if (!features_nav_world_guarded(fixes_ok, tick)) nav_world_tick(fixes_ok, tick);
+            if (!features_nav_world_guarded(nav_ok, tick)) nav_world_tick(nav_ok, tick);
         }
         // CLEAR THE STEP MARKER ON THE WAY OUT. Without this a fault anywhere later in the tick
         // would report navworld's last engine call and read as damning evidence about a lane it
