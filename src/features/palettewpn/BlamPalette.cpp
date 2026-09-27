@@ -5,6 +5,7 @@
 #include "core/UnitState.hpp"
 #include "core/reload/ReloadEngine.hpp"   // the reload engine's pose hold request
 #include "core/WeaponObject.hpp"   // the weapon object service and the slide node it publishes
+#include "core/WorldScale.hpp"     // the palette weapon's default scale is the player's world scale
 #include "core/dev/DriverProbe.hpp"   // the arm driver comparison instrument: this detour's cost, the intended socket
 #include "Config.hpp"
 #include "features/palettewpn/PaletteTwoHand.hpp"
@@ -3060,8 +3061,10 @@ bool resolve_world_pullback(bool render_ctx = false) {
     // Desired offset from the parent origin, metres -> cm. palettewpnscale here is the
     // metre-to-game scale factor divided by 100 (UEVR world scale, the rig's own lesson:
     // rigscale MUST include it or under-translation masquerades as a pivot error).
+    // UNSET, IT IS THE PLAYER'S OWN WORLD SCALE -- it fell back to 1.0 (100 cm per metre), which
+    // ignored the very lesson above for everyone who had not set the key. _cached: any thread.
     const float cm_per_m = 100.0f * ((g_cfg.palette_weapon_scale > 0.01f)
-                                     ? g_cfg.palette_weapon_scale : 1.0f);
+                                     ? g_cfg.palette_weapon_scale : uevr_world_scale_cached());
     // THE FRAME BUG (2026-08-15, found by logging, not theory): the published hand is a HEAD-
     // RELATIVE, ROOM-YAW vector -- with the recenter at identity, "forward" is the room's forward,
     // not the camera's. The lever cam*v0 is a WORLD vector. Subtracting a world lever from a room

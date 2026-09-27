@@ -928,7 +928,8 @@ void features_log_runtime() {
 }
 
 void features_config_loaded() {
-    worldscalefollow_poll();   // every poll, before the feature-state early return: a reload resets rig_scale
+    // rig_scale is no longer re-set here (worldscalefollow_poll): core/WorldScale resolves it inside
+    // the reload, in features_apply, so hook threads never read the compiled default in between.
     const uint32_t now = enabled_mask();
     if (now == s_logged_mask) return;
     const uint32_t went_off = (s_logged_mask == 0xFFFFFFFFu) ? 0u : (s_logged_mask & ~now);

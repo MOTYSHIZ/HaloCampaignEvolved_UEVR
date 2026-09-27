@@ -8,6 +8,7 @@
 #include "Rig.hpp"                // RIG_PARAM_BUF
 #include "UeObject.hpp"
 #include "core/Services.hpp"
+#include "core/WorldScale.hpp"         // room metres <-> world cm at the player's scale, any thread
 #include "core/host/MarkersState.hpp"
 #include "core/host/PluginState.hpp"   // the view position
 
@@ -31,9 +32,12 @@ Vec3 room_to_world_at(const Vec3& room, const Vec3& hmd_room, const Vec3& cam) {
     // the HMD for the old behaviour. See Config.hpp room_anchor.
     Vec3 anchor = hmd_room;
     if (g_cfg.room_anchor == 1) { const auto so = API::VR::get_standing_origin(); anchor = Vec3{so.x, so.y, so.z}; }
-    const Vec3 rel_ue{-(room.z - anchor.z) * 100.0f,
-                       (room.x - anchor.x) * 100.0f,
-                       (room.y - anchor.y) * 100.0f};
+    // 100 x VR_WorldScale cm per real metre, not a bare 100 -- see Markers.cpp's room_to_world, which
+    // had the same fault. _cached: markers_render_place() calls this off the game thread.
+    const float cm = uevr_cm_per_metre_cached();
+    const Vec3 rel_ue{-(room.z - anchor.z) * cm,
+                       (room.x - anchor.x) * cm,
+                       (room.y - anchor.y) * cm};
     const Quat yawq = rotator_to_quat(0.0f, g_view_base_yaw.load(std::memory_order_relaxed), 0.0f);
     const Vec3 w = quat_rotate(yawq, rel_ue);
     return Vec3{cam.x + w.x, cam.y + w.y, cam.z + w.z};
@@ -86,8 +90,10 @@ Vec3 holster_world_to_room_at(const Vec3& world, const Vec3& hmd_room, const Vec
     const Vec3 w{world.x - cam.x, world.y - cam.y, world.z - cam.z};
     const Quat yawq = rotator_to_quat(0.0f, g_view_base_yaw.load(std::memory_order_relaxed), 0.0f);
     const Vec3 rel_ue = quat_rotate(quat_conj(yawq), w);
-    // rel_ue = (-(dz), dx, dy) * 100  ->  dx = rel_ue.y/100, dy = rel_ue.z/100, dz = -rel_ue.x/100
-    return Vec3{anchor.x + rel_ue.y * 0.01f, anchor.y + rel_ue.z * 0.01f, anchor.z - rel_ue.x * 0.01f};
+    // rel_ue = (-(dz), dx, dy) * cm  ->  dx = rel_ue.y/cm, dy = rel_ue.z/cm, dz = -rel_ue.x/cm, with the
+    // SAME cm the forward map uses, so a round trip through both is exact at any world scale.
+    const float inv = 1.0f / uevr_cm_per_metre_cached();
+    return Vec3{anchor.x + rel_ue.y * inv, anchor.y + rel_ue.z * inv, anchor.z - rel_ue.x * inv};
 }
 Vec3 holster_world_to_room(const Vec3& world, const Vec3& hmd_room) {
     return holster_world_to_room_at(world, hmd_room,

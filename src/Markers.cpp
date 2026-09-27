@@ -15,6 +15,7 @@
 #include "Math.hpp"
 #include "Rig.hpp"
 #include "UeObject.hpp"
+#include "core/WorldScale.hpp"      // room metres -> world cm at the player's scale, any thread
 #include "features/hooks/MarkersHooks.hpp"
 
 #include <cmath>
@@ -152,11 +153,18 @@ void marker_show(API::UObject* comp, bool show) {
 
 // Room point (UEVR tracking space, metres) -> UE world cm, via the palette's transform. The
 // swizzle (-z, x, y) is the room->UE axis map Plugin.cpp uses for head_ue/hand_ue.
+//
+// A REAL METRE IS 100 x VR_WorldScale CM, NOT 100. This used a bare 100, which is right only at world
+// scale 1.0: at the profile's 1.312 every holster, the wrist HUD, the reload magazine and well, and
+// the two-hand and vehicle markers sat 24% of their distance from the head TOWARD the head -- ~12 cm
+// short for a hand at half a metre -- because UEVR draws the hand itself at the real scale. The
+// _cached read, because the render pass (markers_render_place) calls this off the game thread.
 Vec3 room_to_world(const Vec3& room, const Vec3& hmd_room) {
     if (Vec3 anchored{}; features_room_to_world(room, hmd_room, &anchored)) return anchored;
-    const Vec3 rel_ue{-(room.z - hmd_room.z) * 100.0f,
-                       (room.x - hmd_room.x) * 100.0f,
-                       (room.y - hmd_room.y) * 100.0f};
+    const float cm = uevr_cm_per_metre_cached();
+    const Vec3 rel_ue{-(room.z - hmd_room.z) * cm,
+                       (room.x - hmd_room.x) * cm,
+                       (room.y - hmd_room.y) * cm};
     const Quat yawq = rotator_to_quat(0.0f, g_view_base_yaw.load(std::memory_order_relaxed), 0.0f);
     const Vec3 w = quat_rotate(yawq, rel_ue);
     return Vec3{g_cam_x.load(std::memory_order_relaxed) + w.x,

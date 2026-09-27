@@ -1845,7 +1845,12 @@ bool parse_config_file(const char* path) {
         else if (_stricmp(key, "rig")       == 0) g_cfg.rig_enabled = (v != 0.0);
         else if (_stricmp(key, "rigloc")    == 0) g_cfg.rig_loc     = (v != 0.0);
         else if (_stricmp(key, "grip")      == 0) g_cfg.grip_deg    = clampf((float)v, -180.0f, 180.0f);
-        else if (_stricmp(key, "rigscale")  == 0) g_cfg.rig_scale   = clampf((float)v, 0.0f, 500.0f);
+        // 0 = follow UEVR's world scale (the default, resolved in core/WorldScale); a positive value is
+        // a deliberate override that pins it. 0 used to mean a rig that did not move at all.
+        else if (_stricmp(key, "rigscale")  == 0) {
+            const float rs = clampf((float)v, 0.0f, 500.0f);
+            if (rs > 0.0f) { g_cfg.rig_scale = rs; g_cfg.rig_scale_explicit = true; }
+        }
         else if (_stricmp(key, "rigclamp")  == 0) g_cfg.rig_clamp   = clampf((float)v, 0.0f, 200.0f);
         else if (_stricmp(key, "rigtest")   == 0) g_cfg.rig_test_cm = clampf((float)v, -200.0f, 200.0f);
         else if (_stricmp(key, "gripyaw")   == 0) g_cfg.grip_yaw    = (float)v;

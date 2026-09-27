@@ -22,20 +22,34 @@
 // view, but head motion still maps into the world through this same scale. Only the collapse
 // rewrites the value.
 //
-// Every caller today is on the game thread. The cache is atomic, so a read from another thread is
-// safe; only the refresh calls into UEVR.
+// THREADS. uevr_world_scale() may refresh, and a refresh calls into UEVR, so it is for the GAME
+// THREAD. Anything else -- the render pass, the sim thread, the XInput hook -- uses the _cached form,
+// which is one atomic load and never touches UEVR. The cache cannot go stale while the plugin runs:
+// world_scale_resolve_config() refreshes it on every config poll, whichever features are on.
 
 namespace halo {
 
-// The scale, e.g. 1.312. 1.0 until UEVR has answered once -- exactly the old bare-x0.01 behaviour,
-// so nothing is worse before the first read than it was.
+// GAME THREAD. The scale, e.g. 1.312. 1.0 until UEVR has answered once -- exactly the old bare-x0.01
+// behaviour, so nothing is worse before the first read than it was.
 float uevr_world_scale();
 
-// UE cm per real metre: 100 x uevr_world_scale(). What most conversions actually want.
+// GAME THREAD. UE cm per real metre: 100 x uevr_world_scale(). What most conversions want.
 inline float uevr_cm_per_metre() { return 100.0f * uevr_world_scale(); }
 
-// True once a real value has been read. For a caller that must not act on the 1.0 fallback
-// (WorldScaleFollow writes rig_scale from it).
+// ANY THREAD. The cached value; never refreshes, never calls UEVR.
+float uevr_world_scale_cached();
+inline float uevr_cm_per_metre_cached() { return 100.0f * uevr_world_scale_cached(); }
+
+// GAME THREAD. True once a real value has been read -- for a caller that must not act on the 1.0
+// fallback.
 bool uevr_world_scale_known();
+
+// GAME THREAD, called by the registry's features_apply() as the last write of every config reload,
+// BEFORE hook threads go back to reading g_cfg. Resolves rig_scale: it follows UEVR's world scale
+// unless rigscale was set explicitly (worldscalefollow=1 makes the world scale win even then).
+// Resolving INSIDE the reload is the point: set afterwards, a sim-thread reader could catch the
+// compiled default between the reset and the fix-up -- a one-frame arm jump every poll at any
+// scale but the profile's.
+void world_scale_resolve_config();
 
 } // namespace halo
