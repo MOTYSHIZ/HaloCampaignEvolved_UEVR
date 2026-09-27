@@ -834,9 +834,12 @@ std::wstring find_head_bone(API::UObject* body, int32_t* nbones) {
 // cameras (the user, 2026-09-26). And a passenger rides the same actor as its driver, which no distance
 // tells apart. The game's own Blueprint asks exactly this (BP_Audio_VehiclePlayerRoleProvider.GetDriverSeatState).
 //
-// The field names were read out of the game executable's reflection strings on 2026-09-26:
-// SeatedUnitActor, SeatedUnitDatumIndex, bNotForPlayer, bOccupied, bIsBoardingSeat, bSeatAllowsWeapons,
-// bIsGunner, bIsDriver, bIsInvisible, EntryRadius, SeatWorldPosition. GAME THREAD: reflection calls.
+// The layout as this build's reflection reports it (the first live bind, 2026-09-26): an 80-byte seat --
+// SeatWorldPosition +0, EntryRadius +24, the flags bIsInvisible / bIsLocked / bIsDriver / bIsGunner /
+// bSeatAllowsWeapons / bIsBoardingSeat / bNotForPlayer as bits of +28, SeatedUnitDatumIndex +32, and
+// SeatedUnitActor +40 as a SOFT pointer. There is no bOccupied (that name belongs to an event's
+// parameter), so a seat is occupied when it names an occupant. The first cut accepted only plain and weak
+// pointers, refused the soft one, and so left every seat unknown for a session. GAME THREAD.
 
 std::wstring ffield_name(API::FField* f) {
     auto* n = (f != nullptr) ? f->get_fname() : nullptr;
@@ -854,7 +857,13 @@ struct SeatRefl {
     int32_t psize = 0;                         // the function's parameter block, the engine's own size
     int32_t arr_off = -1;                      // the TArray<FBlamUnitSeatState> in it (return or out)
     int32_t elem = 0;                          // sizeof(FBlamUnitSeatState)
-    int32_t actor_off = -1; int actor_kind = 0;    // SeatedUnitActor: 1 = object pointer, 2 = weak pointer
+    // SeatedUnitActor: 1 = object pointer, 2 = weak pointer, 3 = SOFT pointer (TSoftObjectPtr -- what this
+    // build has: measured 2026-09-26, +40 of an 80-byte seat). A soft pointer is a weak pointer followed by
+    // the object's path (FSoftObjectPath), so its first 8 bytes resolve like a weak pointer; the path's
+    // SubPathString ("PersistentLevel.<actor>") is the fallback witness, and it is heap memory to free.
+    int32_t actor_off = -1; int actor_kind = 0;
+    int32_t soft_str_off = -1;                 // the SubPathString within a seat; -1 = layout not proven
+    bool    soft_str_utf8 = false;             // FUtf8String rather than FString
     int32_t occ_off = -1, drv_off = -1, gun_off = -1;       // bOccupied / bIsDriver / bIsGunner: the byte...
     uint8_t occ_mask = 0, drv_mask = 0, gun_mask = 0;       // ...and its bit
 };
@@ -888,7 +897,8 @@ bool seat_refl_ready() {
             if (n == L"SeatedUnitActor") {
                 s_sr.actor_off = p->get_offset();
                 s_sr.actor_kind = (ty == L"ObjectProperty" || ty == L"ObjectPtrProperty") ? 1
-                                : (ty == L"WeakObjectProperty") ? 2 : 0;
+                                : (ty == L"WeakObjectProperty") ? 2
+                                : (ty == L"SoftObjectProperty") ? 3 : 0;
             } else if (ty == L"BoolProperty" && (n == L"bOccupied" || n == L"bIsDriver" || n == L"bIsGunner")) {
                 auto* b = reinterpret_cast<API::FBoolProperty*>(f);
                 const int32_t off = p->get_offset() + static_cast<int32_t>(b->get_byte_offset());
@@ -902,60 +912,126 @@ bool seat_refl_ready() {
 #endif
         }
     }
+    // A SOFT pointer's path, by reflection too: FSoftObjectPath is a reflected struct, so its size and the
+    // SubPathString's offset are the engine's, not ours. The layout counts as proven only when the weak
+    // half (8 bytes) plus that struct exactly fill the room the seat leaves for it -- then the string is
+    // freed after each read; otherwise it is never touched (a few bytes leak per read rather than a free
+    // of the wrong pointer).
+    if (s_sr.actor_kind == 3 && s_sr.actor_off >= 0) {
+        auto* sop = API::get()->find_uobject<API::UScriptStruct>(L"ScriptStruct /Script/CoreUObject.SoftObjectPath");
+        if (sop != nullptr) {
+            const int32_t sop_size = sop->get_struct_size();
+            for (auto* f = sop->get_child_properties(); f != nullptr; f = f->get_next()) {
+                if (ffield_name(f) != L"SubPathString") continue;
+                const std::wstring ty = ffield_type(f);
+                if (ty != L"StrProperty" && ty != L"Utf8StrProperty") break;
+                const int32_t off = s_sr.actor_off + 8 + reinterpret_cast<API::FProperty*>(f)->get_offset();
+                // The soft pointer is the seat's last field in this build; wherever it sits, its path
+                // must end inside the seat, and the next field (if any) cannot start inside it.
+                if (sop_size > 0 && s_sr.actor_off + 8 + sop_size <= s_sr.elem && off + 16 <= s_sr.elem) {
+                    s_sr.soft_str_off = off;
+                    s_sr.soft_str_utf8 = (ty == L"Utf8StrProperty");
+                }
+                break;
+            }
+        }
+    }
     const bool ok = st != nullptr && s_sr.psize > 0 && s_sr.arr_off >= 0 && s_sr.arr_off + 16 <= s_sr.psize
                  && s_sr.elem > 0 && s_sr.actor_kind != 0 && s_sr.actor_off >= 0 && s_sr.actor_off + 8 <= s_sr.elem;
     API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: GetSeatStates %s -- params %d, array +%d, seat %d bytes, "
-                         "occupant +%d (%s), occupied +%d, driver +%d, gunner +%d",
+                         "occupant +%d (%s%s), occupied +%d, driver +%d, gunner +%d",
                          ok ? "ready" : "UNUSABLE, vehicles are told by the nearest mesh",
                          s_sr.psize, s_sr.arr_off, s_sr.elem, s_sr.actor_off,
-                         s_sr.actor_kind == 1 ? "pointer" : (s_sr.actor_kind == 2 ? "weak" : "?"),
+                         s_sr.actor_kind == 1 ? "pointer" : (s_sr.actor_kind == 2 ? "weak"
+                                                           : (s_sr.actor_kind == 3 ? "soft" : "?")),
+                         s_sr.actor_kind != 3 ? "" : (s_sr.soft_str_off >= 0 ? ", path proven" : ", path NOT proven: never freed"),
                          s_sr.occ_off, s_sr.drv_off, s_sr.gun_off);
     s_sr.state = ok ? 1 : 0;
     return ok;
 }
 
-struct SeatRow { API::UObject* occupant; bool occupied, driver, gunner; };
+struct SeatRow {
+    API::UObject* occupant;   // resolved from the pointer (or a soft/weak pointer's weak half); only compared
+    std::wstring  path;       // a soft pointer's SubPathString ("PersistentLevel.<actor>"); the fallback witness
+    bool occupied, driver, gunner;
+};
 
 // One unit's seats, into rows (at most max). Returns the seat count, or -1 when the call gave nothing
 // usable. The returned array belongs to us once the native thunk has built it into our frame, so it is
-// freed here through the engine's own allocator -- every field of FBlamUnitSeatState is plain data.
+// freed here through the engine's own allocator, and with it the only heap memory a seat holds: a soft
+// pointer's path string, freed only when its layout is proven (seat_refl_ready).
 int read_seats(API::UObject* unit, SeatRow* rows, int max) {
     static std::vector<uint8_t> buf;
     buf.assign(static_cast<size_t>(s_sr.psize), 0);
     unit->process_event(s_sr.fn, buf.data());
     struct FRawArray { uint8_t* data; int32_t num; int32_t max; };
+    struct FRawString { void* data; int32_t num; int32_t max; };
     auto* arr = reinterpret_cast<FRawArray*>(buf.data() + s_sr.arr_off);
     int n = -1;
+    const bool readable = arr->data != nullptr && arr->num > 0 && arr->num <= 64 && arr->max >= arr->num
+                       && !IsBadReadPtr(arr->data, static_cast<size_t>(arr->num) * static_cast<size_t>(s_sr.elem));
     if (arr->data == nullptr && arr->num == 0) {
         n = 0;
-    } else if (arr->data != nullptr && arr->num > 0 && arr->num <= 64 && arr->max >= arr->num
-               && !IsBadReadPtr(arr->data, static_cast<size_t>(arr->num) * static_cast<size_t>(s_sr.elem))) {
+    } else if (readable) {
         n = arr->num;
         auto* objs = API::get()->get_uobject_array();
         for (int i = 0; i < n && i < max; ++i) {
             const uint8_t* e = arr->data + static_cast<size_t>(i) * static_cast<size_t>(s_sr.elem);
             SeatRow& r = rows[i];
             r.occupant = nullptr;
+            r.path.clear();
             if (s_sr.actor_kind == 1) {
                 r.occupant = *reinterpret_cast<API::UObject* const*>(e + s_sr.actor_off);
             } else {
-                // TWeakObjectPtr { int32 ObjectIndex; int32 SerialNumber }: resolved through the object array,
-                // only ever compared, never followed.
+                // TWeakObjectPtr { int32 ObjectIndex; int32 SerialNumber } -- a soft pointer starts with one.
+                // Resolved through the object array, only ever compared, never followed.
                 const int32_t idx = *reinterpret_cast<const int32_t*>(e + s_sr.actor_off);
-                if (objs != nullptr && idx >= 0 && idx < objs->get_object_count())
+                if (objs != nullptr && idx > 0 && idx < objs->get_object_count())
                     r.occupant = reinterpret_cast<API::UObject*>(objs->get_object(idx));
             }
+            if (s_sr.actor_kind == 3 && s_sr.soft_str_off >= 0) {
+                const auto* s = reinterpret_cast<const FRawString*>(e + s_sr.soft_str_off);
+                if (s->data != nullptr && s->num > 1 && s->num < 1024) {
+                    if (s_sr.soft_str_utf8) {
+                        if (!IsBadReadPtr(s->data, static_cast<size_t>(s->num))) {
+                            const char* c = static_cast<const char*>(s->data);
+                            r.path.assign(c, c + (s->num - 1));
+                        }
+                    } else if (!IsBadReadPtr(s->data, static_cast<size_t>(s->num) * sizeof(wchar_t))) {
+                        r.path.assign(static_cast<const wchar_t*>(s->data), static_cast<size_t>(s->num - 1));
+                    }
+                }
+            }
             auto bit = [&](int32_t off, uint8_t mask) { return off >= 0 && off < s_sr.elem && (e[off] & mask) != 0; };
-            r.occupied = (s_sr.occ_off >= 0) ? bit(s_sr.occ_off, s_sr.occ_mask) : r.occupant != nullptr;
+            r.occupied = (s_sr.occ_off >= 0) ? bit(s_sr.occ_off, s_sr.occ_mask)
+                                             : (r.occupant != nullptr || !r.path.empty());
             r.driver = bit(s_sr.drv_off, s_sr.drv_mask);
             r.gunner = bit(s_sr.gun_off, s_sr.gun_mask);
         }
     }
-    if (arr->data != nullptr) {
-        if (auto* m = API::FMalloc::get()) m->free(arr->data);
+    auto* m = API::FMalloc::get();
+    if (m != nullptr && readable && s_sr.actor_kind == 3 && s_sr.soft_str_off >= 0) {
+        for (int i = 0; i < arr->num; ++i) {   // every seat's path, not only the ones read
+            auto* s = reinterpret_cast<FRawString*>(arr->data + static_cast<size_t>(i) * static_cast<size_t>(s_sr.elem)
+                                                    + s_sr.soft_str_off);
+            if (s->data != nullptr) m->free(s->data);
+            s->data = nullptr; s->num = 0; s->max = 0;
+        }
     }
+    if (arr->data != nullptr && m != nullptr) m->free(arr->data);
     arr->data = nullptr; arr->num = 0; arr->max = 0;
     return n;
+}
+
+// Does a soft pointer's path name this actor? "PersistentLevel.BP_SpartansBipedActor_C_<id>" ends with the
+// actor's own name, after a dot.
+bool path_names(const std::wstring& path, API::UObject* actor) {
+    if (path.empty() || actor == nullptr) return false;
+    auto* f = actor->get_fname();
+    const std::wstring n = (f != nullptr) ? f->to_string() : std::wstring{};
+    if (n.empty() || path.size() < n.size()) return false;
+    if (path.compare(path.size() - n.size(), n.size(), n) != 0) return false;
+    return path.size() == n.size() || path[path.size() - n.size() - 1] == L'.';
 }
 
 // The last answer. The vehicle actor holding your seat, its unit, the seat, and its flags as the bits an
@@ -967,6 +1043,7 @@ struct SeatFix {
     int32_t unit_idx = -1;
     int seat = -1, nseats = 0;
     uint8_t bits = 0;
+    bool by_path = false;   // matched on the soft pointer's path rather than its weak half
 };
 SeatFix s_seat;
 // Once the game's seats have named your seat this session, they are the authority: a ride they do not
@@ -1003,9 +1080,13 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
         const int n = read_seats(cand[k]->o, rows, 16);
         if (n <= 0) continue;
         int mine = -1;
+        bool via_path = false;
         for (int i = 0; i < n && i < 16 && mine < 0; ++i)
-            for (int m = 0; m < nme; ++m)
-                if (me[m] != nullptr && rows[i].occupant == me[m]) { mine = i; break; }
+            for (int m = 0; m < nme; ++m) {
+                if (me[m] == nullptr) continue;
+                if (rows[i].occupant == me[m]) { mine = i; break; }
+                if (path_names(rows[i].path, me[m])) { mine = i; via_path = true; break; }
+            }
         if (mine < 0) {
             if (s_seat_other_n < 8) s_seat_others[s_seat_other_n++] = cand[k]->owner;
             continue;
@@ -1019,13 +1100,15 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
         out->actor = cand[k]->owner; out->unit = cand[k]->o; out->unit_idx = cand[k]->i;
         out->seat = mine; out->nseats = n;
         out->bits = vehcampresets::seat_bits(rows[mine].driver, rows[mine].gunner);
+        out->by_path = via_path;
         s_seats_proven = true;
 #if HALO_VR_DEV
         for (int i = 0; i < n && i < 16; ++i)
-            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls%s", i,
+            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls path=%ls%s", i,
                                  rows[i].driver ? "driver " : "", rows[i].gunner ? "gunner " : "",
                                  rows[i].occupied ? "occupied" : "empty",
                                  rows[i].occupant != nullptr ? rows[i].occupant->get_full_name().c_str() : L"none",
+                                 rows[i].path.empty() ? L"-" : rows[i].path.c_str(),
                                  i == mine ? "  <-- YOU" : "");
 #endif
     }
@@ -1607,9 +1690,10 @@ bool pick_tp_chassis(const SeatFix* known = nullptr) {
         alt += d;
     }
     if (s_seat.valid)
-        API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: the game seats you in %ls, seat %d of %d (%s)",
+        API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: the game seats you in %ls, seat %d of %d (%s)%s",
                              s_tp_match_name.c_str(), s_seat.seat + 1, s_seat.nseats,
-                             vehcampresets::seat_text(s_seat.bits).c_str());
+                             vehcampresets::seat_text(s_seat.bits).c_str(),
+                             s_seat.by_path ? " -- known by the seat's path, its pointer was unresolved" : "");
     else if (seat_refl_ready())
         API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: no vehicle within 15 m lists you in a seat (%d nearby with "
                              "seats) -- the nearest mesh decides", s_seat_other_n);
