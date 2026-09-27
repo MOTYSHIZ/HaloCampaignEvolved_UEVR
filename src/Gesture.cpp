@@ -357,7 +357,11 @@ void offhand_melee_update(float dt) {
                                          : API::VR::get_left_controller_index();
     Vec3 pos{}; Quat rot{};
     Vec3 hpos{}; Quat hrot{};
-    if (!get_pose(idx, &pos, &rot, /*use_aim=*/false) ||
+    // HANDSMOOTH: the swing reads the hand UNDER the smoothing layer unless handsmoothmelee=1 --
+    // its speed threshold was tuned on raw motion (core/HandSmooth.hpp).
+    const bool raw_hand = g_cfg.hand_smooth && !g_cfg.hand_smooth_melee;
+    if (!(raw_hand ? get_pose_raw(idx, &pos, &rot, /*use_aim=*/false)
+                   : get_pose(idx, &pos, &rot, /*use_aim=*/false)) ||
         !get_pose(API::VR::get_hmd_index(), &hpos, &hrot, /*use_aim=*/false)) {
         s2_have = false;
         return;
@@ -520,6 +524,13 @@ void gesture_update(float dt) {
     if (!g_cfg.melee_swing) {
         melee_reset();
         return;
+    }
+
+    // HANDSMOOTH: reload above keeps the smoothed hand; the swing reads the hand UNDER the
+    // smoothing layer unless handsmoothmelee=1 -- its speed threshold was tuned on raw motion.
+    if (poses_ok && g_cfg.hand_smooth && !g_cfg.hand_smooth_melee) {
+        Vec3 raw_pos{}; Quat raw_rot{};
+        if (get_pose_raw(ridx, &raw_pos, &raw_rot, /*use_aim=*/false)) pos = raw_pos;
     }
 
     // A stalled or absurd dt turns a stationary hand into a teleport. Drop the history rather

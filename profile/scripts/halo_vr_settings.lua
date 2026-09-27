@@ -186,6 +186,7 @@ local HINTS = {
     handsmoothrotmin  = { t = "drag", min = 0, max = 30 },
     handsmoothrotbeta = { t = "drag", min = 0, max = 100 },
     handsmoothdcut    = { t = "drag", min = 0.1, max = 100 },
+    handsmoothmelee   = { t = "bool" },
     handsmoothlog     = { t = "bool" },
     aimbore       = { t = "enum", items = { "By your hand", "Along the drawn barrel" }, values = { 0, 1 } },
     reloadseat     = { t = "drag", min = 0.05, max = 1 },
@@ -301,6 +302,7 @@ local LABELS = {
     handsmoothhands = "Hands to steady", handsmoothposmin = "Still-hand position steadiness",
     handsmoothposbeta = "Position follow speed", handsmoothrotmin = "Still-hand angle steadiness",
     handsmoothrotbeta = "Angle follow speed", handsmoothdcut = "Speed estimate smoothing",
+    handsmoothmelee = "Melee uses the steadied hands",
 }
 -- Prerequisites that are not player features.
 local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }

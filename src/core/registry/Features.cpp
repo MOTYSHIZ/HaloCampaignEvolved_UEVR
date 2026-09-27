@@ -270,7 +270,7 @@ const FeatureRow kFeatures[] = {
       "", FEATURE_INT(world_scale_follow) },
     { "handsmooth", 1, Tier::Experimental, "Arms", "Hand smoothing",
       "Steadies your tracked hands before anything reads them, so aim, the arms, two-handed holds and gestures all see the same steadied hands. A still hand is held steady; a fast move passes through with little lag.",
-      "handsmoothhands,handsmoothposmin,handsmoothposbeta,handsmoothrotmin,handsmoothrotbeta,handsmoothdcut",
+      "handsmoothhands,handsmoothposmin,handsmoothposbeta,handsmoothrotmin,handsmoothrotbeta,handsmoothdcut,handsmoothmelee",
       "handsmoothlog",
       "", FEATURE_BOOL(hand_smooth) },
     { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",

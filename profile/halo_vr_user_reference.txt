@@ -605,14 +605,18 @@
 # second). Raise it if slow moves feel laggy, lower it if a moving hand still shakes.
 #handsmoothposbeta=1000
 # Rotation steadiness while still. How much a still hand's angle is steadied, in Hz: lower is
-# steadier but slower to follow a slow turn of the wrist. 0 turns rotation smoothing off.
-#handsmoothrotmin=0.1
+# steadier but slower to follow a slow turn of the wrist -- and on your aiming hand, slower to
+# follow a slow aim. 0 turns rotation smoothing off.
+#handsmoothrotmin=1.0
 # Rotation follow speed. How quickly smoothing lets go as the wrist turns faster (per radian per
 # second). Raise it if slow aiming feels laggy, lower it if a turning hand still shakes.
 #handsmoothrotbeta=5
 # Speed estimate smoothing, in Hz. Rarely needs changing; lower it if the hand twitches between
 # steady and free.
 #handsmoothdcut=10
+# Melee uses the steadied hands. 0 = swing melee reads your hands unsmoothed (how melee has always
+# felt), 1 = it reads the steadied hands like everything else.
+#handsmoothmelee=0
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 

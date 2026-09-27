@@ -1071,9 +1071,7 @@ bool aim_sightline_origin(Vec3* out) {
     return false;
 }
 
-bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
-    API::VR::Pose latched{};
-    const auto pose = features_pose_latched(idx, use_aim, &latched) ? latched : (use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx));
+static bool pose_out(const API::VR::Pose& pose, Vec3* pos, Quat* rot) {
     const auto& q = pose.rotation;
     const float m2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
     // UEVR withholds real poses until it has observed controller INPUT, returning a non-unit
@@ -1083,6 +1081,19 @@ bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
     *pos = Vec3{pose.position.x, pose.position.y, pose.position.z};
     *rot = Quat{q.x, q.y, q.z, q.w};
     return true;
+}
+
+// THE LAYERED READ: a feature's pose layer (hand smoothing, the pose latch) if one answers, else
+// UEVR live. See core/HandSmooth.hpp for the order of the layers.
+bool get_pose(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
+    API::VR::Pose latched{};
+    const auto pose = features_pose_latched(idx, use_aim, &latched) ? latched : (use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx));
+    return pose_out(pose, pos, rot);
+}
+
+// UEVR live, under no layer, for a consumer tuned on the raw hand (the melee swing detector).
+bool get_pose_raw(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_aim) {
+    return pose_out(use_aim ? API::VR::get_aim_pose(idx) : API::VR::get_pose(idx), pos, rot);
 }
 
 

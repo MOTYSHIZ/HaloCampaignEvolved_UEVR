@@ -23,6 +23,7 @@
 #include "core/CoreKeys.hpp"
 #include "core/config/KeyAlias.hpp"
 #include "core/EyeTrace.hpp"
+#include "core/HandSmooth.hpp"
 #include "core/HiddenReload.hpp"
 #include "core/FireInput.hpp"
 #include "core/MarkerFaces.hpp"
@@ -166,6 +167,9 @@ void features_game_tick_after_leash() {
 }
 
 void features_stereo_pre_eye(int index, UEVR_Vector3f* position, bool is_double) {
+    // HANDSMOOTH: the filter's one step per rendered frame, first, so every hand read in this frame
+    // (render-rate re-apply included) gets this frame's smoothed pair. A no-op while the service is off.
+    hand_smooth_frame();
     driver_probe_stereo_begin();
     if (service_active(SVC_EYE_TRACE)) eye_note_pre_view(index, position, is_double);
 }
