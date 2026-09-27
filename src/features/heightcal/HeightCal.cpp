@@ -579,6 +579,34 @@ std::vector<float> g_pc_win;                // still, standing head_abs samples 
 float              g_pc_win_t = 0.0f;
 std::atomic<bool>      g_pc_want{false};    // tick -> XInput hook: hold crouch
 std::atomic<long long> g_pc_stamp_ms{0};    // when the tick last said so (a stale request is ignored)
+bool               g_pc_stick_latched = false;   // the stick took over from physical crouch; standing re-arms
+
+// ---- THE CROUCH YOU ASK FOR WITH THE STICK (heightstickcrouch) -- see the block before TARGET.
+std::atomic<bool>      g_stick_crouch{false};    // XInput hook -> tick: the player's OWN crouch input is held
+std::atomic<long long> g_stick_crouch_ms{0};
+bool  g_sc_prev      = false;   // last tick's stick crouch, for its edges
+bool  g_sc_settle    = false;   // released, camera still rising: keep solving against the standing eye
+float g_sc_settle_t  = 0.0f;
+bool  g_e_stand_have = false;
+float g_e_stand      = 0.0f;    // the character's STANDING eye height: E_game while nothing crouches him, UE cm
+bool  g_esolve_stand_prev = false;
+float g_esolve_last  = 0.0f;    // the E the last solve used -- for continuity when its source switches
+float g_esolve_off   = 0.0f;    // that continuity offset, decaying to 0, UE cm
+
+// The physical crouch line, real metres above the floor. heightcrouchfrac > 0: that fraction of your
+// standing head, as before. 0 (the default) = AUTO: the head height at which your view would sink
+// below the character's standing eye less heightleash -- exactly where the leash would start holding
+// it. The character then crouches as your view reaches him, instead of after a stretch of ducking with
+// the view held still (which is why only ~0.8 felt smooth with a fixed fraction). It also adapts to
+// your height against his. Clamped to 0.5-0.85 of your standing head: below 0.85 so looking down at
+// the floor never crouches you, above 0.5 so a very low character eye cannot demand a squat.
+float pc_line(float K) {
+    const float ref = g_pc_ref;
+    if (g_cfg.height_crouch_frac > 0.0f) return g_cfg.height_crouch_frac * ref;
+    if (!g_e_stand_have || !(K > 0.0f)) return 0.5f * ref;   // his eye not measured yet: deliberately deep
+    const float give = (g_cfg.height_leash > 0.0f) ? g_cfg.height_leash : 0.0f;
+    return clampf((g_e_stand - give) / K, 0.5f * ref, 0.85f * ref);
+}
 
 long long steady_ms() {
     return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -821,6 +849,15 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     //
     // Scale-free: head_abs and the reference are both real metres above the real floor, so the
     // line is the same fraction of your height whatever VR_WorldScale is.
+    // The player's OWN crouch input -- the stick-down remap or a bound crouch button -- as the XInput hook
+    // saw it BEFORE physical crouch added its own press, so this is never us. Stale after 250 ms.
+    const long long sc_age = steady_ms() - g_stick_crouch_ms.load(std::memory_order_relaxed);
+    const bool stick_crouch  = active && sc_age >= 0 && sc_age < 250 &&
+                               g_stick_crouch.load(std::memory_order_relaxed);
+    const bool stick_press   = stick_crouch && !g_sc_prev;
+    const bool stick_release = !stick_crouch && g_sc_prev;
+    g_sc_prev = stick_crouch;
+
     g_pc_can = g_cfg.height_crouch != 0 && active && eff == MODE_ABSOLUTE && g_floor_known && !pending;
     if (g_pc_can && still && !g_pc_on) {
         g_pc_win.push_back(head_abs);
@@ -833,7 +870,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             if (p90 >= 0.9f && p90 <= 2.4f && (!g_pc_have_ref || p90 > g_pc_ref + 0.005f)) {
                 g_pc_ref = p90;
                 g_pc_have_ref = true;
-                const float line = g_cfg.height_crouch_frac * g_pc_ref;
+                const float line = pc_line(K);
                 hlog("HEIGHT CROUCH: standing head %.3f m above the floor -> crouch below %.3f m, stand above %.3f m",
                      g_pc_ref, line, line + g_cfg.height_crouch_band);
             }
@@ -842,8 +879,23 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     }
     const bool pc_was = g_pc_on;
     if (g_pc_can && g_pc_have_ref) {
-        const float line = g_cfg.height_crouch_frac * g_pc_ref;
-        if (!g_pc_on && head_abs < line) {
+        const float line = pc_line(K);
+        // THE STICK TAKES OVER. Both are holds on one button, so while physical crouch holds it a stick
+        // press changes nothing -- which is how sitting down locked the stick out: a seated head sits at
+        // or under the line, physical crouch held the button, and the stick had nothing left to add.
+        // So a stick press while physical crouch holds hands the crouch to the stick and PAUSES physical
+        // crouch until you physically stand back up (above the line plus the band). The most recent
+        // deliberate input wins; standing up is deliberate too, and re-arms it.
+        if (stick_press && g_pc_on) {
+            g_pc_on = false;
+            g_pc_stick_latched = true;
+            hlog("HEIGHT CROUCH: the stick took over -- physical crouch paused until you stand up");
+        }
+        if (g_pc_stick_latched && head_abs > line + g_cfg.height_crouch_band) {
+            g_pc_stick_latched = false;
+            hlog("HEIGHT CROUCH: stood up -- physical crouch re-armed");
+        }
+        if (!g_pc_on && !g_pc_stick_latched && head_abs < line) {
             g_pc_on = true;
             hlog("HEIGHT CROUCH: head %.3f m < %.3f m -- crouching", head_abs, line);
         } else if (g_pc_on && head_abs > line + g_cfg.height_crouch_band) {
@@ -852,6 +904,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         }
     } else {
         g_pc_on = false;   // any gate closed: never leave the button held
+        g_pc_stick_latched = false;
     }
     // Every edge -- a release forced by a menu or a vehicle included -- moves the game camera, so E
     // follows it at once for a moment (see g_e_follow_t). Spent only while E is being measured, so a
@@ -861,13 +914,62 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     g_pc_want.store(g_pc_on, std::memory_order_relaxed);
     g_pc_stamp_ms.store(steady_ms(), std::memory_order_relaxed);
 
+    // ---- THE CROUCH YOU ASK FOR WITH THE STICK (heightstickcrouch) --------------------------------
+    //
+    // Absolute mode pins the view to your real head: the solve below subtracts the character's eye
+    // height E, so whatever the game camera does cancels out. For a PHYSICAL crouch that is right --
+    // your head already went down, and the camera's crouch drop must not add a second one. For a
+    // STICK crouch it is wrong: you are standing, you asked the game to crouch, and the view should go
+    // down with him. It did, briefly -- E's filter HOLDS a jump for heightholdms, so the view dropped
+    // with the camera for ~0.4 s -- and then the new E landed and the view POPPED back to your standing
+    // height, the character still crouched. Seated, the same cancelling meant a stick crouch never
+    // showed at all.
+    //
+    // So while the stick holds a crouch, the solve uses the character's STANDING eye (g_e_stand)
+    // instead of the measured one. The camera's own crouch animation then passes straight into the
+    // view -- at render rate, since only the solve's reference is frozen, not the camera. After the
+    // release it keeps doing so until the measured E is back at the standing value (or 1.5 s), so the
+    // view rises WITH the camera instead of popping when the filter lets go.
+    //
+    // g_e_stand is the last E measured while nothing crouches the character and the filter took the
+    // sample as stable ground -- so it follows slopes and stairs while you walk, and freezes the moment
+    // a crouch begins. Any switch of the solve's source carries the old value and decays the
+    // difference at kSolveBlend cm/s, so even a switch that really is a jump (the stick taking over from
+    // physical crouch, see above) arrives over ~0.2 s instead of in a frame.
+    constexpr float kSolveBlend = 300.0f;   // UE cm/s
+    const EFilt* ef = e_filter(g_e_used);
+    if (have_E && !stick_crouch && !g_pc_on && !g_sc_settle && ef != nullptr && ef->took) {
+        g_e_stand = E;
+        g_e_stand_have = true;
+    }
+    if (stick_release) { g_sc_settle = true; g_sc_settle_t = 0.0f; }
+    if (stick_crouch)  g_sc_settle = false;
+    if (g_sc_settle) {
+        g_sc_settle_t += dt;
+        if ((have_E && std::fabs(E - g_e_stand) < 3.0f) || g_sc_settle_t > 1.5f) g_sc_settle = false;
+    }
+    const bool solve_stand = g_cfg.height_stick_crouch != 0 && g_e_stand_have && have_E &&
+                             (stick_crouch || g_sc_settle);
+    float E_solve = E;
+    if (have_E) {
+        const float src = solve_stand ? g_e_stand : E;
+        if (solve_stand != g_esolve_stand_prev) g_esolve_off = g_esolve_last - src;   // stay continuous
+        g_esolve_stand_prev = solve_stand;
+        const float step = kSolveBlend * dt;
+        if (std::fabs(g_esolve_off) <= step) g_esolve_off = 0.0f;
+        else g_esolve_off += (g_esolve_off > 0.0f) ? -step : step;
+        E_solve = src + g_esolve_off;
+        g_esolve_last = E_solve;
+    }
+
     // ---- TARGET -----------------------------------------------------------------------------------
     bool have_target = false;
     float tgt = 0.0f, V_target = -1.0f;
     if (active) {
         if ((eff == MODE_ABSOLUTE || (eff == MODE_SEATED && g_have_O)) && have_E) {
             V_target = K * head_abs + ((eff == MODE_SEATED) ? g_O : 0.0f);
-            tgt = hmd.y + (E - V_target) / S;
+            // E_solve, not E: during a stick crouch the character's STANDING eye (see above).
+            tgt = hmd.y + (E_solve - V_target) / S;
             have_target = true;
         } else if (eff == MODE_EYES && g_have_H) {
             tgt = g_H - g_cfg.height_trim;
@@ -927,7 +1029,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         // height times VR_WorldScale (K = S): 1.52 m of headset at a 1.312 world scale read
         // "2.00 m", and a 5'7" player reasonably concluded the calibration was broken. It was not --
         // that scale is what puts the virtual floor on the real one -- so both are shown, labelled.
-        char st[160];
+        char st[224];
         int n = 0;
         const float v_game = (V_meas >= 0.0f ? V_meas : V_pred) * 0.01f;
         if (have_E && eff >= 0 && eff != MODE_EYES && g_floor_known) {
@@ -945,8 +1047,10 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             } else if (!g_pc_have_ref) {
                 std::snprintf(st + n, sizeof(st) - n, " | crouch: stand still to measure");
             } else {
-                std::snprintf(st + n, sizeof(st) - n, " | crouch below %.2f m%s",
-                              g_cfg.height_crouch_frac * g_pc_ref, g_pc_on ? " -- CROUCHED" : "");
+                std::snprintf(st + n, sizeof(st) - n, " | crouch below %.2f m%s%s",
+                              pc_line(K), (g_cfg.height_crouch_frac > 0.0f) ? "" : " (auto)",
+                              g_pc_stick_latched ? " -- paused by the stick, stand up to re-arm"
+                                                 : (g_pc_on ? " -- CROUCHED" : ""));
             }
         }
         // Said when the leash actually held in the last second, so tuning heightleash is a matter of
@@ -1008,7 +1112,9 @@ bool heightcal_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "heightcrouch")     == 0) { g_cfg.height_crouch      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
-    if (_stricmp(key, "heightcrouchfrac") == 0) { g_cfg.height_crouch_frac = clampf((float)v, 0.2f, 0.9f); return true; }
+    // 0 (or less) = AUTO, the line where your view would reach the character's eye (pc_line).
+    if (_stricmp(key, "heightcrouchfrac") == 0) { g_cfg.height_crouch_frac = (v <= 0.0) ? 0.0f : clampf((float)v, 0.2f, 0.9f); return true; }
+    if (_stricmp(key, "heightstickcrouch") == 0) { g_cfg.height_stick_crouch = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "heightcrouchband") == 0) { g_cfg.height_crouch_band = clampf((float)v, 1.0f, 30.0f) * 0.01f; return true; }
     // UE cm below the character's eye; any negative value switches it off.
     if (_stricmp(key, "heightleash")      == 0) { g_cfg.height_leash = (v < 0.0) ? -1.0f : clampf((float)v, 0.0f, 200.0f); return true; }
@@ -1068,18 +1174,28 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
 // the same side of mapfrom, and treated the same way by whatever crouch behaviour the game uses.
 void heightcal_xinput_before_brake(_XINPUT_STATE* state) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
-    if (g_cfg.height_cal == 0 || g_cfg.height_crouch == 0 || g_cfg.map_rstick_down == 0) return;
+    if (g_cfg.height_cal == 0 || g_cfg.map_rstick_down == 0) return;
     const auto& g_in_menu    = *host::g_plugin_state.in_menu;
     const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
+    const WORD m = (WORD)g_cfg.map_rstick_down;
     // B is "back" in every menu and a vehicle may give it an action: never there, whatever the tick
     // last said. The tick releases on these too; this is the half that cannot lag behind it.
-    if (g_in_menu.load() || g_stick_mode.load() || halo::g_unit_mounted.load(std::memory_order_relaxed)) return;
+    const bool gated = g_in_menu.load() || g_stick_mode.load() ||
+                       halo::g_unit_mounted.load(std::memory_order_relaxed);
+
+    // THE PLAYER'S OWN CROUCH INPUT, for heightstickcrouch -- read FIRST, before physical crouch adds
+    // its press below, so this can never be us. This slot runs after the rebind and after the
+    // stick-down and bound-crouch injections (Plugin.cpp), so the mask here is exactly what the
+    // player's own controls ask the game for.
+    g_stick_crouch.store(!gated && (state->Gamepad.wButtons & m) == m, std::memory_order_relaxed);
+    g_stick_crouch_ms.store(steady_ms(), std::memory_order_relaxed);
+
+    if (gated || g_cfg.height_crouch == 0) return;
     if (!g_pc_want.load(std::memory_order_relaxed)) return;
     // A tick that stopped running -- the feature switched off mid-crouch, a long hitch -- must not
     // leave the button held down forever. Honour the request only while it is fresh.
     const long long age = steady_ms() - g_pc_stamp_ms.load(std::memory_order_relaxed);
     if (age < 0 || age > 250) return;
-    const WORD m = (WORD)g_cfg.map_rstick_down;
     if ((state->Gamepad.wButtons & m) != m) {
         state->Gamepad.wButtons |= m;
         state->dwPacketNumber++;

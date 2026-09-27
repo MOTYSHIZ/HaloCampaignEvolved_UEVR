@@ -598,15 +598,20 @@
 # height is measured while you stand still and only ever goes up; Calibrate height re-measures it.
 # Needs heightmode=absolute and a known floor. 0 off, 1 on.
 #heightcrouch=0
-# Physical crouch: where the line is, as a fraction of your standing head height (0.5 = half).
-# Raise it towards 0.7 for a shallower crouch.
-#heightcrouchfrac=0.5
+# Physical crouch: where the line is. 0 (the default) = automatic: Chief crouches when your view
+# would reach his standing eyes (less heightleash), so the change is smooth whatever the leash, and
+# it fits your height against his. Or a fraction of your standing head height: 0.5 = half, 0.8 is
+# shallower. Physical crouch pauses if you crouch with the stick; stand up to bring it back.
+#heightcrouchfrac=0
 # Auto height: how far your view may drop below Chief's own eyes, in game centimetres, before it
 # stops following your head down -- so ducking cannot put your view inside his body. It follows
 # Chief: when he crouches, his eyes and this limit drop together. With physical crouch on, your view
 # holds near his eyes until you cross the crouch line, then goes down with him.
 # -1 = off; 0 = never below his eyes; around 10 leaves a little give.
 #heightleash=-1
+# Auto height: a crouch you ask for with the stick shows in your view -- it goes down with Chief and
+# comes back up with him. 0 = the old behaviour, where your view stays at your own height.
+#heightstickcrouch=1
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Head block: how far your head is kept from a surface, in centimetres.
