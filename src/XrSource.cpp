@@ -1649,6 +1649,16 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
     t.native_rhi = rhi;
     t.dim = dim;
     t.fmt = fmt;
+    // RESOLVED NOW, SO SERVICE IT EVERY TICK FROM THE NEXT ONE. next_resolve was chosen above while
+    // t.native was still null, i.e. with the 16-tick "nothing to go stale" throttle -- and a slot can
+    // never capture on the tick it resolves (it is handed to the layer only after this loop), so its
+    // FIRST capture waited out that whole throttle. MEASURED 2026-09-27 on the scope pane (slot 9):
+    // all four opens that needed a resolve (the session's first, three after a retire) resolved
+    // within ~35 ms and first presented exactly 16 ticks later -- one tick after the scope's 16-tick
+    // arming window had given up -- so each showed ~350 ms of nothing, then a one-tick flash of the
+    // in-world pane. Any slot that re-resolves (a reticule re-allocation, a marker's new component)
+    // paid the same half second.
+    t.next_resolve = tick + 1;
     if (changed) {
         logf("slot %d resolved: rt %p -> rhi %p -> ID3D12Resource %p (%dx%d, DXGI %u)",
              s, (void*)rt, rhi, native, dim, dim, fmt);
