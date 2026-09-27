@@ -1495,14 +1495,24 @@ uevr.sdk.callbacks.on_draw_ui(function()
         -- should meet the settled panels first.
         if imgui.collapsing_header("Halo VR Experimental") then
             imgui.indent(4)
-            -- The panel's own warning, before any tier. Colour rather than weight: this imgui
-            -- binding exposes no bold font, and push_style_color(0) is ImGuiCol_Text, so the
-            -- amber the calibration rows already use for "pay attention" carries it. Through
-            -- print_text_block so it wraps to the panel like every other paragraph here.
-            imgui.push_style_color(0, 0xFF2288DD)
-            print_text_block("These features are WIP, and they very likely will break things or " ..
-                             "feel incomplete. Mainly here if anyone wants to have a preview.")
-            imgui.pop_style_color(1)
+            -- The panel's own warning, before any tier. Colour rather than weight: no bold font is
+            -- exposed by this binding.
+            --
+            -- text_colored, NOT push_style_color around print_text_block. This draw runs inside a
+            -- pcall (bottom of the file), and a throw between a push and its pop would be CAUGHT
+            -- while the ImGui style stack stayed wound -- one leaked push per frame, which takes
+            -- the rest of the overlay with it. text_colored owns no stack, so the hazard cannot
+            -- exist. Short lines because it does not wrap.
+            --
+            -- LATENT, NOT OBSERVED. print_text_block has no throw path anyone has found:
+            -- avail_cols() pcalls both its imgui calls and floors at 24 columns, and the wrap loop
+            -- forces cut = cols when no space is found, so it always consumes and always
+            -- terminates. This was briefly blamed for a 2026-09-20 report of Script UI and UEVR's
+            -- own sections missing from the menu; that profile was down to FOUR files and a full
+            -- reinstall is what fixed it. Do not re-cite this as a fix for that bug.
+            imgui.text_colored("These features are WIP, and they very likely will break", 0xFF2288DD)
+            imgui.text_colored("things or feel incomplete. Mainly here if anyone wants", 0xFF2288DD)
+            imgui.text_colored("to have a preview.", 0xFF2288DD)
             imgui.spacing()
             draw_tier_sections(TIER_ORDER)
             imgui.unindent(4)
