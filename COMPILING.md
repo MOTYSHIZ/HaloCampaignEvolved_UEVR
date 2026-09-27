@@ -111,6 +111,32 @@ key is a deliberate, local act). The ones tagged `[dev build]` there only act wh
 compiled in — on a normal build they parse and do nothing, which is expected, not broken. Rebuild
 with the switch defined.
 
+## World scale is the player's
+
+UEVR draws a real metre of head or hand movement as **100 × `VR_WorldScale`** game centimetres, and
+players choose that scale themselves in UEVR's menu. The shipped profile uses 1.312, but any value is
+valid, and code that assumes one value is broken for everyone at another. Two rules follow, and the
+build enforces the second.
+
+1. **Never convert between the room and the world with a bare 100.** A length or a speed that
+   crosses between real metres (headset and controller poses, the standing origin, head offsets) and
+   game units goes through the world scale. A bare `× 100` or `× 0.01` is exact at world scale 1.0
+   and wrong by the scale everywhere else, with no error anywhere: markers sit short of the hand,
+   room-scale movement slides the view, arms under- or over-reach. **Test any such code at a world
+   scale that is not 1.0.** Quantities measured *in* the world — walking speed, geometry clearances,
+   trace distances — stay in game units; convert only where they meet a room quantity.
+2. **Read the scale through `src/core/WorldScale.hpp`, never directly.** Use `uevr_world_scale()` /
+   `uevr_cm_per_metre()` on the game thread, and the `_cached` forms from any other thread (render,
+   simulation, input hooks). The one reader keeps the player's value through the cutscene "mono
+   collapse", which temporarily writes 0.01 into `VR_WorldScale`, and gives every feature the same
+   value at the same moment. `scripts\check-world-scale.ps1` runs first in `scripts\package.ps1`, so
+   in CI, and fails on any other use of `"VR_WorldScale"` unless a `// WORLDSCALE-RAW: <reason>`
+   comment within six lines says why the raw value is the point. Run it with `-Audit` before a release
+   to list candidate bare conversions for review.
+
+The arms follow the same rule: `rig_scale` is resolved to 100 × `VR_WorldScale` on every config
+reload unless `rigscale=` is set explicitly in a config file.
+
 ## Notes for contributors
 
 - The game must be closed while deploying — the DLL is locked while injected.
