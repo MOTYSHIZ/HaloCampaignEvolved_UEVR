@@ -40,6 +40,29 @@ extern std::atomic<bool>  g_reload_slide_rot_valid;
 // Steady clock ticks, 0 = none.
 extern std::atomic<long long> g_reload_pose_hold_until;
 void reload_pose_hold(int ms);   // 0 clears
+// RELOADPOSEFREEZE (doctrine at the Config key). TRUE while the published VR pose should be left
+// exactly where it is, because a manual reload is running and the gesture would otherwise drag the
+// weapon placement about. A SUB-BEHAVIOUR OF MANUAL RELOAD: false whenever reloadvr is off, whatever
+// the rack is doing, and false with the key off. Asked by whoever publishes the pose, at the instant
+// it would publish it, on the game thread -- the answer and the pose are then one snapshot, and no
+// copy of the window can go stale between the two.
+bool reload_pose_freeze_wanted();
+// RELOADHOLD's window (doctrine at the Config key, definition beside reload_pose_freeze_wanted).
+// The same "a manual reload is running" window, for the arm driver whose weapon the pose freeze
+// above cannot reach. Published rather than asked, because its reader is the base mod's palette
+// builder on the SIM thread: `busy` is the level, `edge_ticks` the steady_clock instant it last
+// changed, and one read of the pair is one snapshot -- the reader derives its ramp from the age of
+// that edge instead of running a clock of its own.
+struct ReloadHoldWindow { bool busy; long long edge_ticks; };
+void             reload_hold_window_publish();   // game thread, once a tick
+void             reload_hold_note_seat();        // the magazine was just fully seated
+ReloadHoldWindow reload_hold_window();           // any thread
+// ---- HAPTICS (core/reload/ReloadHaptics.cpp). Hands: 0 left, 1 right.
+int  reload_gun_hand();
+void reload_haptic_raw(int hand, float seconds, float amp);                     // no keys: the rack keeps its own pulses
+void reload_haptic_step(const char* step, int hands, float seconds, float amp); // hands: bit 1 left, bit 2 right; reloadhaptic*
+void reload_rumble_tick();                                            // game thread, once a tick, after reload_hold_window_publish
+void reload_rumble_set_state(uint32_t user_index, void* vibration);   // the XInputSetState callback, after UEVR's own pulse
 // Render path (once per frame, from the stereo callback): the on-weapon ammo display is written
 // to 0 while the hidden reload is pending, after the game's own tick has set it.
 void gesture_render_tick();

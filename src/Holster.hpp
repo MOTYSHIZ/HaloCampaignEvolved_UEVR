@@ -25,6 +25,7 @@
 // ============================================================================================
 #pragma once
 
+#include "Math.hpp"   // Vec3: swing_aim_in_aim_frame
 #include "uevr/API.hpp"
 
 #include <atomic>
@@ -37,6 +38,16 @@ enum class HolsterSlot : int { None = -1, RightShoulder = 0, LeftShoulder = 1, R
 extern std::atomic<long long> g_holster_swap_until;
 extern std::atomic<long long> g_holster_throw_until;
 bool holster_swap_press_active();
+// A SWING'S HELD AIM, IN THE AIM'S OWN FRAME. The throw and both melee hands hold the aim along the
+// swing, computed in the controller path's VR frame (yaw = atan2(x, -z) + turn, pitch = asin(y)).
+// With the shot point aim active (shotaim=1 + shotaimdir=1, the default) the aim law's controller
+// angles are the weapon bore in GAME space (yaw = atan2(y, x), pitch = asin(z); see
+// derive_ctrl_angles), so a VR-frame hold sent every throw and punch off by however the room sits in
+// the world (2026-09-24: a throw held at yaw +152 while the aim read -148, "grenades are throwing to
+// my left"). This restates yaw and pitch in game space, through the same room to world transform that
+// places the pouch markers; with the controller path in use it leaves them as they are. vel_room is
+// the hand's velocity relative to the head, room frame; hmd_room the head.
+void swing_aim_in_aim_frame(const Vec3& vel_room, const Vec3& hmd_room, float* yaw, float* pitch);
 bool holster_throw_press_active();
 
 // EMOTE MODE: the weapon is put away (left shoulder / right hip grip) and the aim hand is free to

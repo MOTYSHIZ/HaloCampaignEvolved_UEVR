@@ -11,6 +11,7 @@
 #include "Markers.hpp"
 #include "WeaponCalib.hpp"        // weapon_key(): which weapon's magazine to render
 #include "features/hooks/HolsterHooks.hpp"
+#include "features/hooks/MotionAimHooks.hpp"   // features_aim_owned_by_feature: whose frame the aim law is in
 #include "core/MarkerFaces.hpp"
 
 #include <chrono>
@@ -343,6 +344,19 @@ Vec3 zone_offset(HolsterSlot s) {
 } // namespace
 
 HALO_HOLSTER_STATE_BRIDGE
+
+void swing_aim_in_aim_frame(const Vec3& vel_room, const Vec3& hmd_room, float* yaw, float* pitch) {
+    if (features_aim_owned_by_feature() || g_cfg.shot_aim != 1 || g_cfg.shot_aim_dir != 1 ||
+        !(shotpoint_bore_local(nullptr) || shotpoint_dir(nullptr))) return;
+    const Vec3 w0 = holster_room_to_world(hmd_room, hmd_room);
+    const Vec3 w1 = holster_room_to_world(Vec3{hmd_room.x + vel_room.x, hmd_room.y + vel_room.y,
+                                               hmd_room.z + vel_room.z}, hmd_room);
+    const float dx = w1.x - w0.x, dy = w1.y - w0.y, dz = w1.z - w0.z;
+    const float wl = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(wl > 1e-4f)) return;
+    *yaw   = wrap180(std::atan2(dy, dx) * RAD2DEG);
+    *pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, dz / wl))) * RAD2DEG;
+}
 
 bool holster_swap_press_active()  { const auto u = g_holster_swap_until.load(std::memory_order_relaxed);  return u != 0 && now_ticks() < u; }
 bool holster_throw_press_active() { const auto u = g_holster_throw_until.load(std::memory_order_relaxed); return u != 0 && now_ticks() < u; }
@@ -981,9 +995,10 @@ void holster_update(float dt) {
             if (g_cfg.holster_aim_hold_ms > 0) {
                 const float vlen = std::sqrt(cpeak.x * cpeak.x + cpeak.y * cpeak.y + cpeak.z * cpeak.z);
                 if (vlen > 0.2f) {
-                    const float hy = wrap180(std::atan2(cpeak.x, -cpeak.z) * RAD2DEG
-                                             + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
-                    const float hpp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, cpeak.y / vlen))) * RAD2DEG;
+                    float hy = wrap180(std::atan2(cpeak.x, -cpeak.z) * RAD2DEG
+                                       + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
+                    float hpp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, cpeak.y / vlen))) * RAD2DEG;
+                    swing_aim_in_aim_frame(cpeak, hpos, &hy, &hpp);   // see Holster.hpp
                     g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
                     g_melee_aim_ctrl_pitch.store(hpp, std::memory_order_relaxed);
                     g_melee_aim_hold_until.store(now_ticks() + ms_to_ticks(g_cfg.holster_aim_hold_ms),
