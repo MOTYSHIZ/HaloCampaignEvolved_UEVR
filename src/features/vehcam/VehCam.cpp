@@ -2357,8 +2357,10 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehtp")          == 0) { g_cfg.veh_tp = (v != 0.0); return true; }
     if (_stricmp(key, "vehaim")         == 0) { g_cfg.veh_aim = (v != 0.0); return true; }
     if (_stricmp(key, "vehstick")       == 0) { g_cfg.veh_stick_mode = (int)v; return true; }
-    if (_stricmp(key, "vehorbitrate")   == 0) { g_cfg.veh_orbit_rate = (float)v; return true; }
-    if (_stricmp(key, "vehorbitreturn") == 0) { g_cfg.veh_orbit_return = (float)v; return true; }
+    // Clamped, and a non-finite value ignored: atof takes "inf" and "nan", and the menu's drag box does not
+    // clamp a value typed with Ctrl+Click. A rate of 1e13 hung the game thread in the view-turn wrap.
+    if (_stricmp(key, "vehorbitrate")   == 0) { if (std::isfinite(v)) g_cfg.veh_orbit_rate = clampf((float)v, 0.0f, 720.0f); return true; }
+    if (_stricmp(key, "vehorbitreturn") == 0) { if (std::isfinite(v)) g_cfg.veh_orbit_return = clampf((float)v, 0.0f, 360.0f); return true; }
     if (_stricmp(key, "vehaimorigin")   == 0) { g_cfg.veh_aim_origin = (int)v; return true; }
     if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
@@ -2377,7 +2379,8 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehmarkercb")    == 0) { g_cfg.veh_marker_cb = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "vehmarkeralpha") == 0) { g_cfg.veh_marker_alpha = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
-    if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
+    // An infinite far end made the traced point infinite and the aim pitch NaN, written into Blam's aim record.
+    if (_stricmp(key, "vehaimfar")      == 0) { if (std::isfinite(v)) g_cfg.veh_aim_far = clampf((float)v, 100.0f, 1000000.0f); return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
     if (_stricmp(key, "vehcamanchor")   == 0) { g_cfg.veh_cam_anchor = (int)v; return true; }
     if (_stricmp(key, "vehhidebody")    == 0) { g_cfg.veh_hide_body = (int)v; return true; }
@@ -2951,8 +2954,9 @@ void vehcam_game_tick_vehicle() {
         if (std::fabs(sx) > dz) {
             const float s = (sx - (sx > 0.0f ? dz : -dz)) / (1.0f - dz);   // rescale past the deadzone
             turn += s * g_cfg.veh_orbit_rate * dt;
-            while (turn >  180.0f) turn -= 360.0f;
-            while (turn < -180.0f) turn += 360.0f;
+            // remainder(), not a subtract loop: past ~2^33 a float minus 360 is the same float, and the
+            // loop never ends. A non-finite turn starts over at the vehicle's front.
+            turn = std::isfinite(turn) ? std::remainder(turn, 360.0f) : 0.0f;
         } else if (g_cfg.veh_orbit_return > 0.0f) {
             const float step = g_cfg.veh_orbit_return * dt;
             if (turn > step) turn -= step; else if (turn < -step) turn += step; else turn = 0.0f;
@@ -3069,9 +3073,13 @@ void vehcam_game_tick_vehicle() {
                     g_veh_aim_tz.store(t.z, std::memory_order_relaxed);
                     const float ax = t.x - c.x, ay = t.y - c.y, az = t.z - c.z;
                     const float al = std::sqrt(ax * ax + ay * ay + az * az);
-                    if (al > 100.0f) {
-                        g_veh_aim_yaw.store(std::atan2(ay, ax) * RAD2DEG, std::memory_order_relaxed);
-                        g_veh_aim_pitch.store(std::asin(clampf(az / al, -1.0f, 1.0f)) * RAD2DEG, std::memory_order_relaxed);
+                    const float aim_y = std::atan2(ay, ax) * RAD2DEG;
+                    const float aim_p = std::asin(clampf(az / al, -1.0f, 1.0f)) * RAD2DEG;
+                    // The sim thread writes these straight into Blam's aim record: never a NaN or an inf
+                    // (clampf passes NaN through, and asin of it is NaN).
+                    if (al > 100.0f && std::isfinite(aim_y) && std::isfinite(aim_p)) {
+                        g_veh_aim_yaw.store(aim_y, std::memory_order_relaxed);
+                        g_veh_aim_pitch.store(aim_p, std::memory_order_relaxed);
                         ok = true;
                     } else {
                         // Pointing at the unit itself: the direction is undefined there, so keep the
