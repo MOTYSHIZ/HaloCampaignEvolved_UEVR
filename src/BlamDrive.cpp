@@ -652,7 +652,8 @@ int g_layout_strikes = 0;
 
 // Sampling opportunities counted so far toward LAYOUT_SETTLE_SAMPLES. At namespace scope rather
 // than a local static because blam_drive_tick() has to be able to RESET it: stick mode (cutscenes,
-// vehicles, death) returns above layout_gate entirely, so the gate cannot notice it came and went.
+// vehicles, death) never reaches the settle -- cutscenes and death return above layout_gate, a vehicle
+// ride returns from it first -- so the gate cannot notice it came and went.
 // A level that STARTS in a cutscene is fine either way -- the counter simply never starts. The case
 // this exists for is a cutscene that interrupts a measurement already in progress, where the
 // counter would otherwise still be satisfied and we would sample the view teleport on the way out.
@@ -738,6 +739,24 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     if (g_layout == Layout::Proven)    return true;
     if (g_layout == Layout::Unverified) return true;
     if (g_layout == Layout::Wrong)     return false;
+
+    // A VEHICLE RIDE CANNOT VERIFY, so it must not wait for a verdict. The check needs LAYOUT_REF_DEG of
+    // ControlRotation movement while this write is held, and a player aiming the vehicle by hand makes
+    // none; worse, the settle restarts every ~2 s in stick mode (blam_drive_tick). So a session that
+    // began in a vehicle held vehicle aim for the whole ~90 s give-up deadline. Whether record and
+    // ControlRotation even agree in a seat is unmeasured, so sampling here could condemn a good build.
+    // Write UNVERIFIED for the ride -- the doctrine above: could not verify is not known-bad -- and
+    // leave the state Unproven, so on-foot play still verifies it and a Wrong verdict still stops this.
+    if (g_stick_mode_active.load(std::memory_order_relaxed) && veh_tp_motion_aim_active()) {
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] BLAMLAYOUT: in a vehicle before the record layout was verified -- vehicle "
+                "aim writes UNVERIFIED during rides; on-foot play verifies it (a seat cannot).");
+        }
+        return true;
+    }
 
     // Once aimdirect owns the view the comparison is no longer meaningful -- see above.
     if (aim_direct_ready()) {
@@ -1108,11 +1127,11 @@ void blam_drive_tick() {
         addrcascade::set_fault_mask(g_cfg.blam_fault);
     }
 
-    // STICK MODE RESTARTS THE SETTLE, but only while the layout is still undecided. Cutscenes,
-    // vehicles and death return above layout_gate entirely, so the gate itself cannot tell that one
-    // came and went -- it would resume sampling straight into the view teleport on the way out,
-    // which is the same transient the settle exists to skip. Costs nothing once Proven, because the
-    // gate returns before any of this.
+    // STICK MODE RESTARTS THE SETTLE, but only while the layout is still undecided. Stick mode never
+    // samples -- cutscenes and death return above layout_gate, and a vehicle ride returns from it before
+    // the settle (writing unverified) -- so the gate itself cannot tell that one came and went. It would
+    // resume sampling straight into the view teleport on the way out, which is the same transient the
+    // settle exists to skip. Costs nothing once Proven, because the gate returns before any of this.
     if (g_layout != Layout::Proven && g_layout != Layout::Unverified
         && g_stick_mode_active.load(std::memory_order_relaxed)) {
         g_layout_settle = 0;
