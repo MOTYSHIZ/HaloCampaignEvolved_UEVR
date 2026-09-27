@@ -164,6 +164,17 @@ const FeatureRow kFeatures[] = {
       "headblockradius",
       "headblockchannel,headblocklean,headblocklog,headblockrelease",
       "", FEATURE_INT(head_block) },
+    // Promoted 2026-09-27 on an audit of what it still switches (features/stabilityfixes/
+    // StabilityFixes.hpp). The fixes that used to make it a bundle became unconditional on 2026-09-20;
+    // at default settings what is left is two more fixes -- the config reload bracket (CfgRead) and
+    // the reticule widget readback it silences -- plus instruments and tuning that stay off behind
+    // their own keys. Nothing in it is an experiment any more; the one that was (stabilityrendertime,
+    // measured worse than off) is a dev key and stays off.
+    { "stabilityfixes", 1, Tier::Stable, "", "Stability fixes",
+      "While a changed settings file is read back in, the controller, render and game threads keep using a copy of the old settings, so none of them ever sees a half-loaded one. Also silences a reticule readback the base mod logged every few seconds, and tints the grenade pouch markers when they are shown. The turn and melee diagnostic logs and the extra button steals it carries stay off until their own keys turn them on.",
+      "",
+      "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityrendertime,stabilityrendertimelog,stabilityturnlog,stabilitywidgetlog",
+      "", FEATURE_BOOL(stability_fixes) },
 
     // ---- Contributed from the fork (Experimental until the author promotes them). Where a fork
     // feature would collide with one of his, it has its own master key.
@@ -278,11 +289,6 @@ const FeatureRow kFeatures[] = {
       "",
       "",
       "", FEATURE_INT(world_scale_follow) },
-    { "stabilityfixes", 1, Tier::Experimental, "Stability", "Stability fixes",
-      "Guards for the base mod: nav marker fault quarantine, fault recovery and stale rig guard, head tracking dropout gate, stick mode exit after a death, UI and reticle sweep throttles, asset load failure memo, reticle re-assert, early compositor reticule tick, teardown order, aim-hand melee holster veto and aim pin, two-handed hold release on a gesture reset, menu command file poll gate and holster marker tint.",
-      "",
-      "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityrendertime,stabilityrendertimelog,stabilityturnlog,stabilitywidgetlog",
-      "", FEATURE_BOOL(stability_fixes) },
 };
 
 #undef FEATURE_BOOL

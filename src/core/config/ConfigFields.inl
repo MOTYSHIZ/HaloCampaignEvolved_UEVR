@@ -2429,7 +2429,10 @@
     // a clean sample needs the camera essentially parked; this is deliberately tight.
     float mesh_const_gate = 0.05f;
 
-    // STABILITY FIXES (stabilityfixes, Experimental): robustness fixes to the base mod's own code paths
-    // that belong to no feature (features/stabilityfixes/StabilityFixes.hpp lists them). Off = as released.
-    bool  stability_fixes = false;
+    // STABILITY FIXES (stabilityfixes): robustness fixes to the base mod's own code paths that belong to
+    // no feature (features/stabilityfixes/StabilityFixes.hpp lists them). STABLE, on by default, since
+    // 2026-09-27: an audit found nothing experimental left in it. Off = config reloads go unbracketed
+    // and the reticule readback logs, as the base mod shipped them (the always-on fixes in
+    // core/Services.hpp kAlwaysOnServices run either way).
+    bool  stability_fixes = true;
 

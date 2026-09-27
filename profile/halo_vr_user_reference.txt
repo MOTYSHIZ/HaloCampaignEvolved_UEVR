@@ -673,6 +673,16 @@
 # felt), 1 = it reads the steadied hands like everything else.
 #handsmoothmelee=0
 
+# ------------------------------------------------------------ STABILITY FIXES (stabilityfixes)
+# While a changed settings file is read back in, the controller, render and game threads keep using
+# a copy of the old settings, so none of them ever sees a half-loaded one. It also silences a
+# reticule readback the base mod logged every few seconds, and tints the grenade pouch markers when
+# they are shown. Its diagnostic logs and extra button steals stay off until their own keys turn
+# them on.
+#
+# 1 = on, 0 = off (settings are read back in unguarded, as the base mod shipped it).
+#stabilityfixes=1
+
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 
 # ---- pahands -- HANDS ONLY (hide the arms, keep the hands) -------------------------------------

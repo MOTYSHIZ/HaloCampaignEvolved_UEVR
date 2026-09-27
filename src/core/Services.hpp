@@ -51,8 +51,10 @@ constexpr int kServiceCount = 19;
 // feature, and putting one behind an experimental master key means it is off for every player who
 // never opens that menu: the bug ships, and the fix rides along disabled.
 //
-// They arrived bundled under one `stabilityfixes` key. What stayed behind that key is what genuinely
-// IS optional -- tuning and diagnostics. What is here is what we would have had to fix anyway.
+// They arrived bundled under one `stabilityfixes` key. What stayed behind that key was meant to be
+// what genuinely IS optional -- tuning and diagnostics. What is here is what we would have had to
+// fix anyway. Two fixes did stay behind it (the config reload bracket and the reticule readback
+// gate), which is part of why the key itself went Stable and on by default on 2026-09-27.
 //
 // Consequence worth knowing: features no longer need to DECLARE these to work. roomscale and
 // heightcal used to list SVC_LEASH_GATE (and roomscale SVC_RIG_GUARD) because they misbehave without
