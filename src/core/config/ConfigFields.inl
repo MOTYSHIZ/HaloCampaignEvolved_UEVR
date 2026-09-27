@@ -76,8 +76,22 @@
     // aim/view, which pins the biped's throttle frame. 0 = off.
     int   roomscale_thr_probe = 0;
     // Mode 3 targets: unit object throttle vector (fwd,left) and its second copy. 0 = skip.
+    // MEASURED ON ONE BINARY (the Steam build's BLAMUNIT-DUMP), and written every sim tick the player
+    // walks -- so roomscale writes them only once features/roomscale/ThrottleGuard has seen, on the
+    // binary it is running on, the game's OWN throttle there follow the stick the game received
+    // (addrcascade::ValueAgreement on direction, 30 deg, in at least two of four stick directions,
+    // both copies). Until then roomscale moves the player through the left stick (mode 0); two
+    // windows of sustained disagreement condemn them for the session, and roomscalethrguard=0 skips
+    // the check. Fault bits 0x1000 / 0x2000 (blamfault, dev builds) force the refusal to be seen.
+    // Their read-only neighbours stay as they are: the +0x1D4/+0x1E0 facing reads next to the write
+    // feed only the dev probe log and are read only while it runs; UnitState's +0x20 position read
+    // feeds the seat camera and heightcal's Blam eye source (not the default trace) and writes nothing.
+    // ADDR-HYGIENE: guarded -- ThrottleGuard proves both copies before roomscale writes (see above)
     int   blam_unit_throttle_off  = 0x250;
     int   blam_unit_throttle_off2 = 0x25C;
+    // THE THROTTLE GUARD itself (dev key roomscalethrguard): 1 = on, 0 = write the offsets above
+    // UNVERIFIED, as roomscale did before 2026-09-27 -- the escape hatch, and the A/B for the guard.
+    int   roomscale_thr_guard = 1;
     // Default -1, the measured handedness roomscale is tuned with. With
     // 1 the right component is mirrored and the pawn walks away from the head instead of closing on it.
     int   blam_throttle_ysign = -1;   // sign applied to the RIGHT component (frame handedness, measured)
@@ -880,6 +894,9 @@
     // launcher's clamp is part of the reload).
     char  slide_always_weapons[96] = "RocketLauncher,Shotgun";   // the shotgun: every shell wants the pump (2026-09-06)
     char  slide_copy_root[32] = "Root_M";
+    // ADDR-HYGIENE: UNGUARDED -- the weapon object's u16 rounds-loaded field, measured on the Steam
+    // binary (pistol: 12 -> 11 at a shot) and WRITTEN by the slide phantom with only IsBadWritePtr and
+    // a range check in front of it. Behind slidevr, which is Experimental and off by default.
     int   rounds_off = 0x2BE;
     // SLIDEHOOK: apply the pull inside a pre-hook on the sim's object-node render capture, right
     // before it copies the weapon's node block for the renderer (found 2026-09-03). Prologue-
@@ -1536,6 +1553,9 @@
     // swept 3226 deg as a unit vector) instead of inferring it from travel.
     // Default: the value the vehicle features are tuned with.
     int   veh_facing = 1;
+    // ADDR-HYGIENE: UNGUARDED (read-only) -- found by that spin test on the Steam binary, and nothing
+    // checks it at runtime. A wrong value turns the seat camera (vehcam, Experimental) wrong; it is
+    // never written through.
     int   veh_facing_off = 0x1D4;
     float veh_facing_bias = 0.0f;
     float veh_cam_scale = 304.8f;                   // cm per Blam world unit
@@ -1621,6 +1641,9 @@
     //                   touched: no ids are zeroed, no data unloaded.
     //   aklog=1         every post inside the window is logged (id, game object, flags, verdict),
     //                   capped, so a reload sound posted under an id we do not know shows up.
+    // ADDR-HYGIENE: guarded, weakly -- prologue-gated: ak_hook_install hooks only if the 16 bytes at
+    // exe+rva match PostEvent's prologue, else logs AKHOOK: prologue mismatch and does not hook. It is a
+    // generic MSVC prologue, so another function at the same RVA on another build could pass.
     int   ak_post_rva = 0xA551FA0;
     bool  ak_log = false;
     // FOLEY POSTED WITH THE RELOAD (aklog 2026-09-05, ids resolved by hashing the pak names): the

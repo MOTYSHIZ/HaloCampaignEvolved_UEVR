@@ -13,6 +13,7 @@
 #include "Math.hpp"
 #include "MotionAimControl.hpp"        // read_control_rotation, g_stick_mode_active
 #include "Rig.hpp"                     // g_rig_parent, call_ret_vec3
+#include "features/roomscale/ThrottleGuard.hpp"   // mode 3 writes only offsets proven on THIS binary
 #include "core/WorldScale.hpp"         // room metres <-> world cm, at the player's own scale
 #include "core/host/PluginState.hpp"
 #include "uevr/API.hpp"
@@ -71,6 +72,7 @@ bool roomscale_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "roomscalethrottle")  == 0) { g_cfg.roomscale_throttle = (int)v; return true; }
     if (_stricmp(key, "roomscalethrspeed")  == 0) { g_cfg.roomscale_thr_speed = clampf((float)v, 0.5f, 30.0f); return true; }
     if (_stricmp(key, "roomscalethrprobe")  == 0) { g_cfg.roomscale_thr_probe = (int)v; return true; }
+    if (_stricmp(key, "roomscalethrguard")  == 0) { g_cfg.roomscale_thr_guard = (v != 0.0) ? 1 : 0; return true; }
     if (_stricmp(key, "roomscalethrottleoff")  == 0) { g_cfg.blam_unit_throttle_off  = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "roomscalethrottleoff2") == 0) { g_cfg.blam_unit_throttle_off2 = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "roomscalethrottleysign")    == 0) { g_cfg.blam_throttle_ysign = (v < 0.0) ? -1 : 1; return true; }
@@ -138,7 +140,12 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             // THROTTLE MODE (roomscale_throttle=3): the command is written into the unit object's
             // own throttle vectors on the sim thread (BlamDrive), so there is no deadzone, no
             // floor and no pulsing -- throttle t is speed t x roomscale_thr_speed, down to zero.
-            const bool rs_thr = (g_cfg.roomscale_throttle == 3) && (g_cfg.blam_unit_throttle_off != 0);
+            // ONLY ONCE THE THROTTLE GUARD HAS PROVEN THOSE OFFSETS on the binary it is running on
+            // (features/roomscale/ThrottleGuard): they were measured on the Steam build, and a patched
+            // or Game Pass binary could put another field there. Until then the stick carries the
+            // command -- mode 0, which needs no offset at all -- and the guard says so, once.
+            const bool rs_thr_want = (g_cfg.roomscale_throttle == 3) && (g_cfg.blam_unit_throttle_off != 0);
+            const bool rs_thr = rs_thr_want && rs_thr_guard_allows_write();
             auto rs_speed_of = [&](float stick) -> float {
                 if (rs_thr) return (stick <= 0.0f) ? 0.0f : g_cfg.roomscale_thr_speed * stick;
                 const float dzc = g_cfg.roomscale_dz;
@@ -163,6 +170,7 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && !g_cut2d_engaged.load()
                             && g_rig_parent != nullptr;
+            if (rs_ok && rs_thr_want && !rs_thr) rs_thr_guard_note_wanted();
             static Vec3 s_rs_prev_eye{}; static bool s_rs_have_prev = false;
             static std::chrono::steady_clock::time_point s_rs_prev_t{}; static bool s_rs_have_t = false;
             static float s_rs_cmd_dir_x = 0.0f, s_rs_cmd_dir_z = 0.0f, s_rs_cmd_mag = 0.0f;   // room frame, last tick
@@ -196,8 +204,13 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             Vec3 eye{};
             const bool have_eye = rs_ok && call_ret_vec3(g_rig_parent, L"K2_GetComponentLocation", &eye);
             static uint32_t s_rs_inj_prev = 0;
+            static bool     s_rs_thr_prev = false;
             const uint32_t inj_now = rs_thr ? halo::g_rs_thr_written.load(std::memory_order_relaxed)
                                             : g_rs_injected.load(std::memory_order_relaxed);
+            // The throttle guard can switch the delivery path mid-walk (stick -> unit once it verifies).
+            // The two paths count their deliveries separately, so the tick that switches would compare
+            // one counter with the other and credit a drive that never happened.
+            if (rs_thr != s_rs_thr_prev) { s_rs_inj_prev = inj_now; s_rs_thr_prev = rs_thr; }
             const bool rs_drove = (inj_now != s_rs_inj_prev);
             s_rs_inj_prev = inj_now;
             float credit = 0.0f, eye_room_x = 0.0f, eye_room_z = 0.0f, expected = 0.0f;
@@ -456,6 +469,14 @@ void roomscale_xinput_before_brake(_XINPUT_STATE* state) {
                 g_rs_injected.fetch_add(1);
             }
         }
+
+        // THE THROTTLE GUARD'S REFERENCE: the left stick exactly as the game receives it -- after the
+        // movement rotation (Plugin.cpp, before this slot), the d-pad shift and the injection just
+        // above. Nothing touches the left stick on foot after this slot (the vehicle brake below it
+        // is stick mode only). In menus, stick mode and the d-pad shift the stick is not walking.
+        rs_thr_guard_publish_stick((float)state->Gamepad.sThumbLX / 32767.0f,
+                                   (float)state->Gamepad.sThumbLY / 32767.0f,
+                                   !g_in_menu.load() && !g_stick_mode.load() && !g_dpad_shift_active.load());
 }
 
 void roomscale_sim_unit_state_end(uintptr_t obj) {
@@ -466,25 +487,36 @@ void roomscale_sim_unit_state_end(uintptr_t obj) {
     // 6.65 m/s x throttle, linear from 0.02 up, no floor -- modes that wrote the control record
     // survived but moved nothing (consumed before the write landed). Yields to the player's own
     // stick and to stick mode, same gates as the pad path.
+    //
+    // THE OFFSETS WERE MEASURED ON ONE BINARY, so nothing is written through them until the throttle
+    // guard has proven them on this one (features/roomscale/ThrottleGuard). It samples FIRST, before
+    // anything below could write, and while it is unverified roomscale is on the stick, so nothing
+    // here writes at all. rs_thr_guard_allows_write() is checked again below as well as on the game
+    // tick: a reload that changes the offsets must stop the very next write, not the next tick's.
+    // The probe (roomscalethrprobe) writes regardless -- it is the dev experiment the offsets were
+    // found with, and nobody runs it by accident.
+    rs_thr_guard_sample(obj);
     const bool thr_probe = g_cfg.roomscale && (g_cfg.roomscale_thr_probe != 0)
                         && !g_stick_mode_active.load(std::memory_order_relaxed)
                         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick;
     if ((g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)
          && !g_stick_mode_active.load(std::memory_order_relaxed)
-         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick) || thr_probe) {
+         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick
+         && rs_thr_guard_allows_write()) || thr_probe) {
         const uintptr_t o1 = (uintptr_t)g_cfg.blam_unit_throttle_off;
         const uintptr_t o2 = (uintptr_t)g_cfg.blam_unit_throttle_off2;
         if (o1 != 0 && !IsBadWritePtr((void*)(obj + o1), 8)) {
             // Candidate BODY-FACING vectors, published for the probe log (game thread): the flat
             // direction pairs the unit dump showed. Whichever angle tracks move_world exactly is
-            // the frame the throttle is consumed in.
-            if (!IsBadReadPtr((const void*)(obj + 0x1D4), 8)) {
+            // the frame the throttle is consumed in. Read only while that log runs: these offsets
+            // (+0x1D4, +0x1E0) are as unverified as the throttle's, and nothing else reads them.
+            if (g_cfg.roomscale_thr_probe != 0 && !IsBadReadPtr((const void*)(obj + 0x1D4), 8)) {
                 g_dbg_face[0].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
                 g_dbg_face[1].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
                 g_dbg_face[4].store(*(const float*)(obj + 0x1D4), std::memory_order_relaxed);
                 g_dbg_face[5].store(*(const float*)(obj + 0x1D8), std::memory_order_relaxed);
             }
-            if (!IsBadReadPtr((const void*)(obj + 0x1E0), 8)) {
+            if (g_cfg.roomscale_thr_probe != 0 && !IsBadReadPtr((const void*)(obj + 0x1E0), 8)) {
                 g_dbg_face[2].store(*(const float*)(obj + 0x1E0), std::memory_order_relaxed);
                 g_dbg_face[3].store(*(const float*)(obj + 0x1E4), std::memory_order_relaxed);
             }
