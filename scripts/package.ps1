@@ -19,6 +19,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 
+# THE WORLD SCALE IS THE PLAYER'S. Every use of UEVR's VR_WorldScale goes through src/core/WorldScale
+# or carries a WORLDSCALE-RAW marker saying why the raw value is the point -- see the script for the
+# two bugs this exists because of. A source scan, so it runs first: seconds, not a compile.
+& (Join-Path $PSScriptRoot 'check-world-scale.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 & (Join-Path $PSScriptRoot 'build.ps1') -SdkPath $SdkPath
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

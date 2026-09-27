@@ -8,6 +8,7 @@
 #include "core/config/CfgRead.hpp"
 #include "core/config/KeyAlias.hpp"
 #include "core/fixes/HostFixes.hpp"   // stability_log_off_parity
+#include "core/WorldScale.hpp"        // world_scale_resolve_config: rig_scale, the reload's last write
 #include "uevr/API.hpp"
 
 #include <windows.h>
@@ -263,8 +264,8 @@ const FeatureRow kFeatures[] = {
       "grenadegunholdms",
       "grenadegunholdlog",
       "", FEATURE_INT(grenade_gun_hold) },
-    { "worldscalefollow", 1, Tier::Experimental, "Arms", "Arms follow the world scale",
-      "Keeps the arms and the weapon at your hand when you change UEVR's world scale.",
+    { "worldscalefollow", 1, Tier::Experimental, "Arms", "World scale beats rigscale",
+      "The arms and weapon now follow UEVR's world scale by default. This only matters if a config sets rigscale: on, the world scale wins anyway.",
       "",
       "",
       "", FEATURE_INT(world_scale_follow) },
@@ -548,6 +549,13 @@ void features_apply() {
                 owned_key_reason(i, r.state[i]));
         }
     }
+
+    // rig_scale follows UEVR's world scale unless rigscale was set (core/WorldScale). HERE, after the
+    // tier defaults have given worldscalefollow its value, as the reload's last write. load_config
+    // carries the previous resolved value across the struct reset, so no hook thread reads the
+    // compiled default in between even when the reload is not bracketed (see WorldScale.hpp). Also
+    // the call that keeps the world-scale cache fresh for every other thread.
+    world_scale_resolve_config();
 
     // The reload's last write: hook threads read g_cfg again.
     cfg_reload_end();

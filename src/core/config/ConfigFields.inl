@@ -39,14 +39,14 @@
     // the body.
     bool  roomscale       = false;
     // Default: the value roomscale is tuned with.
-    float roomscale_gain  = 4.0f;    // desired eye speed (m/s) per metre of head offset
-    float roomscale_dead  = 0.03f;   // metres, no command inside this
-    float roomscale_leash = 1.0f;    // metres, lateral leash radius while roomscale is on
+    float roomscale_gain  = 4.0f;    // per second: catch-up speed per metre of head offset, both in ROOM metres -- the same at any VR_WorldScale
+    float roomscale_dead  = 0.03f;   // room metres, no command inside this
+    float roomscale_leash = 1.0f;    // room metres, lateral leash radius while roomscale is on
     float roomscale_stick = 0.15f;   // player stick magnitude above which roomscale yields
     bool  roomscale_log   = false;   // ROOMSCALE line ~8x/s: offset, command, eye delta, slide
     // Default: the value roomscale is tuned with.
     float roomscale_min   = 0.36f;   // stick magnitude floor while a command stands (clears the game deadzone)
-    float roomscale_speed = 3.3f;    // metres/s of eye travel at full stick (measured 3.0-4.7)
+    float roomscale_speed = 3.3f;    // WORLD metres/s of eye travel at full stick (measured 3.0-4.7)
     float roomscale_lat   = 0.06f;   // seconds from command to visible eye motion (measured 20-57 ms)
     // Default: the value roomscale is tuned with.
     float roomscale_dz    = 0.30f;   // the game's own stick deadzone (measured: 0.30 -> 0.22 m/s)

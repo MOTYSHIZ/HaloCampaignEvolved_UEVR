@@ -56,6 +56,7 @@
 // The SHIPPING attachment. Included after the OpenXR headers on purpose: XrLayerAbi.h pulls in the
 // same vendored copy, and both sides of the ABI must see one set of struct layouts.
 #include "XrLayerBridge.hpp"
+#include "core/WorldScale.hpp"      // cm per metre at the player's own scale, collapse-proof
 #include "core/XrDisplayTime.hpp"
 
 #include <atomic>
@@ -1742,19 +1743,10 @@ std::atomic<float> g_cm_per_m{100.0f};
 float resolve_cm_per_metre() {
     const Mirror m = mirror_load();
     if (m.cm_per_m > 0.0f) return m.cm_per_m;
-
-    float ws = 1.0f;
-    // Read through the raw C API rather than API::VR::get_mod_value<float>(): the header's
-    // float path goes through std::stof on a buffer that is empty when the key is absent.
-    char buf[64]{};
-    if (auto* p = API::get()->param(); p != nullptr && p->vr != nullptr && p->vr->get_mod_value != nullptr) {
-        p->vr->get_mod_value("VR_WorldScale", buf, sizeof(buf));
-        if (buf[0] != 0) {
-            const float v = (float)atof(buf);
-            if (v > 0.01f && v < 100.0f) ws = v;
-        }
-    }
-    return 100.0f * ws;
+    // The shared reader (core/WorldScale), which keeps the raw-C-API read this used to do inline.
+    // It used to fall back to 1.0 at or under 0.01 -- the value the cutscene mono collapse writes --
+    // so the overlays were sized and placed at 100 cm/m, not the player's scale, for that cutscene.
+    return uevr_cm_per_metre();
 }
 
 // UE world offset -> OpenXR offset, expressed in the HMD's own frame.
