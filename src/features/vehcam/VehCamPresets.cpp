@@ -2,10 +2,13 @@
 
 #include "core/JsonLite.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace halo::vehcampresets {
 
@@ -40,11 +43,20 @@ Camera cam(const char* name, Origin origin, float f, float r, float u, Axes loc,
 // less comfortable initial setting.) No "firstperson" entry: that hands the view to the older seat
 // camera, which stays available by adding one to the file.
 std::vector<Camera> starter_cameras() {
+    // Each camera in two tethering modes (left X): held still, then turning with the vehicle.
+    auto modes = [](Camera c, Axes tethered) {
+        Tether still, teth;
+        still.name = "Untethered";
+        still.loc_yaw = c.loc_yaw; still.loc_pitch = c.loc_pitch; still.loc_roll = c.loc_roll;
+        teth = still;
+        teth.name = "Tethered";
+        teth.rot_yaw = tethered.yaw; teth.rot_pitch = tethered.pitch; teth.rot_roll = tethered.roll;
+        c.tethering = {still, teth};
+        return c;
+    };
     return {
-        cam("Cockpit",               Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kNone),
-        cam("Tethered Cockpit",      Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kAll),
-        cam("Third Person",          Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kNone),
-        cam("Tethered Third Person", Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kYaw),
+        modes(cam("Cockpit",      Origin::Seat,    0.0f,    0.0f, 0.0f,   kAll, kNone), kAll),
+        modes(cam("Third Person", Origin::Vehicle, -450.0f, 0.0f, 180.0f, kAll, kNone), kYaw),
     };
 }
 
@@ -98,8 +110,62 @@ struct Apply {
         }
         return true;
     }
+    // locationTracking: a list of axes, or "view".
+    bool loc_tracking(const Value& x, const std::string& w, bool& view, bool& yaw, bool& pitch, bool& roll) {
+        if (x.is_str()) {
+            if (!ieq(x.s, "view")) return type_error(x, w, "a list of any of \"yaw\", \"pitch\", \"roll\", or \"view\"");
+            view = true;
+            yaw = pitch = roll = false;
+            return true;
+        }
+        view = false;
+        return axes(x, w, yaw, pitch, roll);
+    }
+    // true / false, or null = inherit (-1).
+    bool tri(const Value& x, const std::string& w, int& dst, const char* what) {
+        if (x.is_null()) { dst = -1; return true; }
+        if (!x.is_bool()) return type_error(x, w, what);
+        dst = x.b ? 1 : 0;
+        return true;
+    }
+    // One tethering mode, with what it named -- the rest is the camera's, filled in once the whole camera
+    // is read (the file may list "tethering" before the camera's own tracking).
+    struct RawTether { Tether t; bool has_loc = false, has_rot = false, has_off = false; };
+    bool tether(const Value& e, const std::string& we, RawTether& rt) {
+        if (!e.is_obj()) return type_error(e, we, "an object { \"name\": ..., \"rotationTracking\": [...] }");
+        for (std::size_t k = 0; k < e.keys.size(); ++k) {
+            const std::string& key = e.keys[k];
+            const Value& x = e.items[k];
+            const std::string w = we + "." + key;
+            if (!key.empty() && key[0] == '_') continue;
+            bool ok = true;
+            if (key == "name") {
+                if (x.is_null()) { rt.t.name.clear(); continue; }
+                if (!x.is_str()) return type_error(x, w, "text");
+                rt.t.name = x.s;
+            } else if (key == "locationTracking") {
+                rt.has_loc = true;
+                ok = loc_tracking(x, w, rt.t.loc_view, rt.t.loc_yaw, rt.t.loc_pitch, rt.t.loc_roll);
+            } else if (key == "rotationTracking") {
+                rt.has_rot = true;
+                ok = axes(x, w, rt.t.rot_yaw, rt.t.rot_pitch, rt.t.rot_roll);
+            } else if (key == "offset") {
+                if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
+                rt.has_off = true;
+                for (std::size_t i = 0; i < x.items.size() && ok; ++i)
+                    ok = num(x.items[i], w + "[" + std::to_string(i) + "]", rt.t.offset[i]);
+            } else if (key == "aimMarker") {
+                ok = tri(x, w, rt.t.aim_marker, "true, false or null (null = the camera's)");
+            } else {
+                r.ignored.push_back(w);
+            }
+            if (!ok) return false;
+        }
+        return true;
+    }
     bool camera(const Value& v, const std::string& where, Camera& c) {
         if (!v.is_obj()) return type_error(v, where, "an object { \"name\": ..., \"offset\": [...] }");
+        std::vector<RawTether> raw;
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
             const std::string& key = v.keys[k];
             const Value& x = v.items[k];
@@ -126,14 +192,7 @@ struct Apply {
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
                     ok = num(x.items[i], w + "[" + std::to_string(i) + "]", c.offset[i]);
             } else if (key == "locationTracking") {
-                if (x.is_str()) {
-                    if (!ieq(x.s, "view")) return type_error(x, w, "a list of any of \"yaw\", \"pitch\", \"roll\", or \"view\"");
-                    c.loc_view = true;
-                    c.loc_yaw = c.loc_pitch = c.loc_roll = false;
-                } else {
-                    c.loc_view = false;
-                    ok = axes(x, w, c.loc_yaw, c.loc_pitch, c.loc_roll);
-                }
+                ok = loc_tracking(x, w, c.loc_view, c.loc_yaw, c.loc_pitch, c.loc_roll);
             } else if (key == "rotationTracking" || key == "viewFollows") {   // viewFollows: the first file
                 ok = axes(x, w, c.rot_yaw, c.rot_pitch, c.rot_roll);
             } else if (key == "offsetRides") {                                 // the first file's form
@@ -151,10 +210,30 @@ struct Apply {
                 if (x.is_null()) { c.hide_body = -1; continue; }
                 if (!x.is_bool()) return type_error(x, w, "true, false or null (null = hide it for seat cameras)");
                 c.hide_body = x.b ? 1 : 0;
+            } else if (key == "hideHead") {
+                ok = tri(x, w, c.hide_head, "true, false or null (null = the seat's hideHead)");
+            } else if (key == "aimMarker") {
+                ok = tri(x, w, c.aim_marker, "true, false or null (null = the seat's aimMarker)");
+            } else if (key == "tethering") {
+                if (!x.is_arr() || x.items.empty()) return type_error(x, w, "a list of at least one tethering mode");
+                if (x.items.size() > 8) return type_error(x, w, "at most 8 tethering modes");
+                for (std::size_t i = 0; i < x.items.size(); ++i) {
+                    RawTether rt;
+                    if (!tether(x.items[i], w + "[" + std::to_string(i) + "]", rt)) return false;
+                    raw.push_back(rt);
+                }
             } else {
                 r.ignored.push_back(w);
             }
             if (!ok) return false;
+        }
+        // Each mode takes the camera's own tracking for what it left out.
+        c.tethering.clear();
+        for (RawTether& rt : raw) {
+            if (!rt.has_loc) { rt.t.loc_view = c.loc_view; rt.t.loc_yaw = c.loc_yaw; rt.t.loc_pitch = c.loc_pitch; rt.t.loc_roll = c.loc_roll; }
+            if (!rt.has_rot) { rt.t.rot_yaw = c.rot_yaw; rt.t.rot_pitch = c.rot_pitch; rt.t.rot_roll = c.rot_roll; }
+            if (!rt.has_off) { rt.t.offset[0] = c.offset[0]; rt.t.offset[1] = c.offset[1]; rt.t.offset[2] = c.offset[2]; }
+            c.tethering.push_back(rt.t);
         }
         return true;
     }
@@ -189,6 +268,12 @@ struct Apply {
             } else if (fk == "defaultCamera") {
                 if (!x.is_num() || x.n < 0.0 || x.n != std::floor(x.n)) return type_error(x, w, "a camera index from 0");
                 out.default_camera = static_cast<int>(x.n);
+            } else if (fk == "defaultMode") {
+                if (!x.is_num() || x.n < 0.0 || x.n != std::floor(x.n)) return type_error(x, w, "a tethering mode index from 0");
+                out.default_mode = static_cast<int>(x.n);
+            } else if (fk == "hideHead") {
+                if (!x.is_bool()) return type_error(x, w, "true or false");
+                out.hide_head = x.b;
             } else if (fk == "motionAim") {
                 if (x.is_null()) { out.motion_aim = -1; continue; }
                 if (!x.is_bool()) return type_error(x, w, "true, false or null (null = the vehaim setting)");
@@ -236,6 +321,7 @@ struct Apply {
         if (!have_cams) return type_error(v, where, "an object with a \"cameras\" list");
         if (!have_match && !out.is_default) out.match.push_back(lower(key));
         if (out.default_camera >= static_cast<int>(out.cameras.size())) out.default_camera = 0;
+        if (out.default_mode >= out.cameras[static_cast<size_t>(out.default_camera)].mode_count()) out.default_mode = 0;
         return true;
     }
 };
@@ -300,8 +386,37 @@ std::string rotation_tracking_text(const Camera& c) { return axes_text(c.rot_yaw
 std::string location_tracking_text(const Camera& c) {
     return c.loc_view ? std::string("Your view (orbit)") : axes_text(c.loc_yaw, c.loc_pitch, c.loc_roll);
 }
+std::string rotation_tracking_text(const Tether& t) { return axes_text(t.rot_yaw, t.rot_pitch, t.rot_roll); }
+std::string location_tracking_text(const Tether& t) {
+    return t.loc_view ? std::string("Your view (orbit)") : axes_text(t.loc_yaw, t.loc_pitch, t.loc_roll);
+}
 
+int carry_mode(const Camera& to, const Tether& from) {
+    const int n = to.mode_count();
+    if (n <= 1) return 0;
+    for (int i = 0; i < n; ++i)
+        if (!from.name.empty() && lower(to.tethering[static_cast<size_t>(i)].name) == lower(from.name)) return i;
+    for (int i = 0; i < n; ++i) {
+        const Tether& m = to.tethering[static_cast<size_t>(i)];
+        if (m.rot_yaw == from.rot_yaw && m.rot_pitch == from.rot_pitch && m.rot_roll == from.rot_roll) return i;
+    }
+    return 0;
+}
+
+// THE BUILT-IN CAMERAS: a CHECKPOINT CANONIZATION of the player's own tuned file (VehCamDefaults.inc,
+// written by Scripts\VehCams-Tool.ps1 canonize). What a missing camera file gets, and what a first run
+// writes out.
 Table default_table() {
+    static const char kCanonical[] =
+#include "features/vehcam/VehCamDefaults.inc"
+        ;
+    Table t;
+    if (sizeof(kCanonical) > 1 && table_from_json(kCanonical, sizeof(kCanonical) - 1, t).ok && !t.vehicles.empty())
+        return t;
+    return starter_table();
+}
+
+Table starter_table() {
     // Vehicle actor names from the game's own assets (BP_<name>VehicleActor). The turrets are
     // separate vehicles (the Warthog's chaingun, the Wraith's and the Scorpion's anti-infantry guns), so
     // a gunner gets their own entry -- the most specific match wins (match_vehicle), and
@@ -359,11 +474,12 @@ ParseResult table_from_json(const char* text, std::size_t len, Table& out) {
     return r;
 }
 
-std::string table_to_json(const Table& t) {
+std::string table_to_json(const Table& t, bool guide) {
     std::string s;
     s += "{\n";
+    if (guide) {
     s += "  \"_readme\": [\n";
-    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = previous camera.\",\n";
+    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = that camera's next tethering mode.\",\n";
     s += "    \"Each vehicle has its own list, used in order. The entry whose 'match' text appears in the vehicle's\",\n";
     s += "    \"name is used -- the longest such text when several do, so a turret with its own entry beats its\",\n";
     s += "    \"vehicle's (case does not matter); 'default' covers any vehicle not listed.\",\n";
@@ -379,20 +495,27 @@ std::string table_to_json(const Table& t) {
     s += "    \"  rotationTracking  which vehicle rotations turn your VIEW: any of yaw, pitch, roll ([] = the world\",\n";
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
+    s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, offset,\",\n";
+    s += "    \"                    locationTracking, rotationTracking, aimMarker }, each taking the camera's own for\",\n";
+    s += "    \"                    what it leaves out -- e.g. the same cockpit held still and tethered to the vehicle\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
     s += "    \"  hideBody          true | false: hide your character's body (left out = hidden unless the origin\",\n";
     s += "    \"                    is the vehicle);\",\n";
     s += "    \"                    only while the vehcamhidebody setting is on, which it is not by default\",\n";
-    s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim;\",\n";
+    s += "    \"  hideHead, aimMarker  true | false for this camera, over the seat's own\",\n";
+    s += "    \"Per vehicle: defaultCamera / defaultMode = where you start (from 0); motionAim = true | false overrides\",\n";
+    s += "    \"  vehaim; hideHead = true hides your character's head in this seat, for true first person from a camera\",\n";
+    s += "    \"  at your head (left out = false);\",\n";
     s += "    \"  aimMarker = true | false: a ring where the VEHICLE is aiming, beside the crosshair (left out = true);\",\n";
     s += "    \"  seat = \\\"driver\\\" | \\\"gunner\\\" | \\\"passenger\\\" (or a list): this entry is only for that seat, as the\",\n";
     s += "    \"  game reports it (the readout's Seat line) -- how the Warthog's passenger gets cameras of its own. Left\",\n";
     s += "    \"  out: the driver's entry, and the one any other seat of the vehicle uses when it has none of its own;\",\n";
     s += "    \"  chassis = part of the name of the vehicle mesh the cameras follow, when it has several (left out =\",\n";
-    s += "    \"  one named hull or body, else the nearest). Your last camera and controls in each seat are kept.\",\n";
+    s += "    \"  one named hull or body, else the nearest). Your last camera, mode and controls in each seat are kept.\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
     s += "  ],\n";
+    }
     s += "  \"version\": 1,\n";
     s += "  \"vehicles\": {\n";
     for (std::size_t vi = 0; vi < t.vehicles.size(); ++vi) {
@@ -404,8 +527,10 @@ std::string table_to_json(const Table& t) {
             s += "],\n";
         }
         s += "      \"defaultCamera\": " + std::to_string(v.default_camera) + ",\n";
+        if (v.default_mode != 0) s += "      \"defaultMode\": " + std::to_string(v.default_mode) + ",\n";
         if (v.motion_aim >= 0) s += std::string("      \"motionAim\": ") + (v.motion_aim ? "true" : "false") + ",\n";
         s += std::string("      \"aimMarker\": ") + (v.aim_marker ? "true" : "false") + ",\n";
+        if (v.hide_head) s += "      \"hideHead\": true,\n";
         if (v.seats != 0) {
             std::string roles;
             for (const SeatRole r : {SeatRole::Driver, SeatRole::Gunner, SeatRole::Passenger})
@@ -431,8 +556,31 @@ std::string table_to_json(const Table& t) {
                + ", \"collide\": " + (c.collide ? "true" : "false")
                + ", \"collideMargin\": " + fmt_num(c.collide_margin)
                + (c.hide_body < 0 ? std::string() : std::string(", \"hideBody\": ") + (c.hide_body ? "true" : "false"))
-               + " }"
-               + (ci + 1 < v.cameras.size() ? ",\n" : "\n");
+               + (c.hide_head < 0 ? std::string() : std::string(", \"hideHead\": ") + (c.hide_head ? "true" : "false"))
+               + (c.aim_marker < 0 ? std::string() : std::string(", \"aimMarker\": ") + (c.aim_marker ? "true" : "false"));
+            // Each mode on its own line under the camera, naming only what differs from the camera's own
+            // tracking -- the reader fills the rest back in, so the file round-trips.
+            if (!c.tethering.empty()) {
+                s += ",\n          \"tethering\": [\n";
+                for (std::size_t mi = 0; mi < c.tethering.size(); ++mi) {
+                    const Tether& m = c.tethering[mi];
+                    std::string f;
+                    auto add = [&f](const std::string& kv) { f += (f.empty() ? "" : ", ") + kv; };
+                    if (!m.name.empty()) add("\"name\": " + quoted(m.name));
+                    if (m.offset[0] != c.offset[0] || m.offset[1] != c.offset[1] || m.offset[2] != c.offset[2])
+                        add("\"offset\": [" + fmt_num(m.offset[0]) + ", " + fmt_num(m.offset[1]) + ", " + fmt_num(m.offset[2]) + "]");
+                    if (m.loc_view != c.loc_view || m.loc_yaw != c.loc_yaw || m.loc_pitch != c.loc_pitch || m.loc_roll != c.loc_roll)
+                        add("\"locationTracking\": " + (m.loc_view ? std::string("\"view\"") : axes_json(m.loc_yaw, m.loc_pitch, m.loc_roll)));
+                    if (m.rot_yaw != c.rot_yaw || m.rot_pitch != c.rot_pitch || m.rot_roll != c.rot_roll)
+                        add("\"rotationTracking\": " + axes_json(m.rot_yaw, m.rot_pitch, m.rot_roll));
+                    if (m.aim_marker >= 0) add(std::string("\"aimMarker\": ") + (m.aim_marker ? "true" : "false"));
+                    s += "            { " + f + (f.empty() ? "}" : " }") + (mi + 1 < c.tethering.size() ? ",\n" : "\n");
+                }
+                s += "          ] }";
+            } else {
+                s += " }";
+            }
+            s += (ci + 1 < v.cameras.size() ? ",\n" : "\n");
         }
         s += "      ]\n";
         s += std::string("    }") + (vi + 1 < t.vehicles.size() ? ",\n" : "\n");
@@ -466,6 +614,115 @@ int match_vehicle(const Table& t, const std::string& actor_name, uint8_t seat) {
         }
     }
     return best >= 0 ? best : def;
+}
+
+namespace {
+Tether own_tether(const Camera& c) {
+    Tether t;
+    t.offset[0] = c.offset[0]; t.offset[1] = c.offset[1]; t.offset[2] = c.offset[2];
+    t.loc_view = c.loc_view; t.loc_yaw = c.loc_yaw; t.loc_pitch = c.loc_pitch; t.loc_roll = c.loc_roll;
+    t.rot_yaw = c.rot_yaw; t.rot_pitch = c.rot_pitch; t.rot_roll = c.rot_roll;
+    t.aim_marker = c.aim_marker;
+    return t;
+}
+bool tracks_rotation(const Tether& t) { return t.rot_yaw || t.rot_pitch || t.rot_roll; }
+bool starts_tethered(const std::string& n) { return lower(n).rfind("tethered", 0) == 0; }
+// One view in another mode: the same kind of camera from the same place, hidden the same way.
+bool same_view(const Camera& a, const Camera& b) {
+    return a.type == b.type && a.origin == b.origin && a.collide == b.collide && a.collide_margin == b.collide_margin
+        && a.hide_body == b.hide_body && a.hide_head == b.hide_head && a.tethering.empty() && b.tethering.empty();
+}
+std::string trim(std::string s) {
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+// What a camera's name adds to its group's: "Tethered Yaw HangGlider" in "HangGlider" = "Tethered Yaw".
+std::string mode_name(const std::string& name, const std::string& base, const Tether& t) {
+    if (lower(name) == lower(base)) return tracks_rotation(t) ? "Tethered" : "Untethered";
+    const std::string ln = lower(name), lb = lower(base);
+    const size_t at = ln.find(lb);
+    if (at != std::string::npos) {
+        const std::string rest = trim(name.substr(0, at) + name.substr(at + base.size()));
+        if (!rest.empty()) return rest;
+    }
+    if (starts_tethered(name)) return "Tethered";   // "Tethered OTS" under "Over the Shoulder"
+    return name;
+}
+} // namespace
+
+int merge_tethered(Table& t, std::vector<std::vector<std::pair<int, int>>>* moved) {
+    int folded = 0;
+    if (moved != nullptr) moved->clear();
+    for (Vehicle& v : t.vehicles) {
+        std::vector<Camera> out;
+        std::vector<std::pair<int, int>> where(v.cameras.size(), std::make_pair(0, 0));   // old -> (camera, mode)
+        std::size_t i = 0;
+        while (i < v.cameras.size()) {
+            // A group: this camera, and every "Tethered ..." one straight after it that is the same view.
+            std::size_t j = i + 1;
+            if (!starts_tethered(v.cameras[i].name))
+                while (j < v.cameras.size() && starts_tethered(v.cameras[j].name) && same_view(v.cameras[i], v.cameras[j])) ++j;
+            if (j - i < 2) {
+                where[i] = {static_cast<int>(out.size()), 0};
+                out.push_back(v.cameras[i]);
+                ++i;
+                continue;
+            }
+            const int at = static_cast<int>(out.size());
+            Camera c = v.cameras[i];                     // the group's own name, place and tracking
+            c.aim_marker = -1;                           // each mode carries its own
+            c.tethering.clear();
+            // The one holding the world still first when it is not already; otherwise the file's order.
+            std::vector<std::size_t> order;
+            for (std::size_t k = i; k < j; ++k) order.push_back(k);
+            for (std::size_t k = 0; k < order.size(); ++k)
+                if (!tracks_rotation(own_tether(v.cameras[order[k]]))) {
+                    const auto at_k = order.begin() + static_cast<std::ptrdiff_t>(k);
+                    std::rotate(order.begin(), at_k, at_k + 1);
+                    break;
+                }
+            for (std::size_t k = 0; k < order.size(); ++k) {
+                const Camera& src = v.cameras[order[k]];
+                Tether m = own_tether(src);
+                m.name = mode_name(src.name, v.cameras[i].name, m);
+                c.tethering.push_back(m);
+                where[order[k]] = {at, static_cast<int>(k)};
+            }
+            // The camera's own fields are the first mode's, so the file names only what the others change.
+            const Tether& m0 = c.tethering.front();
+            for (int k = 0; k < 3; ++k) c.offset[k] = m0.offset[k];
+            c.loc_view = m0.loc_view; c.loc_yaw = m0.loc_yaw; c.loc_pitch = m0.loc_pitch; c.loc_roll = m0.loc_roll;
+            c.rot_yaw = m0.rot_yaw; c.rot_pitch = m0.rot_pitch; c.rot_roll = m0.rot_roll;
+            out.push_back(c);
+            folded += static_cast<int>(j - i) - 1;
+            i = j;
+        }
+        if (v.default_camera >= 0 && v.default_camera < static_cast<int>(where.size())) {
+            v.default_mode = where[static_cast<size_t>(v.default_camera)].second;
+            v.default_camera = where[static_cast<size_t>(v.default_camera)].first;
+        }
+        v.cameras = std::move(out);
+        if (moved != nullptr) moved->push_back(std::move(where));
+    }
+    return folded;
+}
+
+bool effective_aim_marker(const Vehicle& v, int ci, int mi) {
+    if (ci < 0 || ci >= static_cast<int>(v.cameras.size())) return v.aim_marker;
+    const Camera& c = v.cameras[static_cast<size_t>(ci)];
+    if (!c.tethering.empty()) {
+        const Tether m = c.mode(mi);
+        if (m.aim_marker >= 0) return m.aim_marker != 0;
+    }
+    if (c.aim_marker >= 0) return c.aim_marker != 0;
+    return v.aim_marker;
+}
+
+bool effective_hide_head(const Vehicle& v, int ci) {
+    if (ci >= 0 && ci < static_cast<int>(v.cameras.size()) && v.cameras[static_cast<size_t>(ci)].hide_head >= 0)
+        return v.cameras[static_cast<size_t>(ci)].hide_head != 0;
+    return v.hide_head;
 }
 
 } // namespace halo::vehcampresets

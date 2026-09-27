@@ -1,7 +1,8 @@
 #pragma once
 
 // THE VEHICLE CAMERA FILE (halo_vr_vehcams.json): per vehicle, an ordered list of cameras, each with
-// its own placement and motion settings. Left Y / left X step to the next / previous camera in a vehicle.
+// its own placement and motion settings, and its TETHERING MODES. Left Y steps to the next camera in a
+// vehicle; left X steps through the current camera's modes.
 //
 //   { "version": 1,
 //     "vehicles": {
@@ -24,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace halo::vehcampresets {
@@ -34,6 +36,19 @@ enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
 // the CHIEF rather than the vehicle's mesh: he turns with a turret whose mesh does not (the Shade), where
 // yaw tethering to the mesh does nothing.
 enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2 };
+
+// ONE TETHERING MODE of a camera. Left Y steps cameras; left X steps the current camera's modes. A mode
+// sets what carries the camera's position round (locationTracking), what turns your view
+// (rotationTracking) and where it sits (offset -- a tethered view often wants a slightly different spot),
+// and may turn the vehicle aim ring on or off; anything it leaves out is the camera's own. So one camera
+// can be "Cockpit" held still AND tethered, switched with one button while filming.
+struct Tether {
+    std::string name;
+    float offset[3] = {0.0f, 0.0f, 0.0f};     // cm: forward, right, up (the camera's, unless the mode says)
+    bool loc_yaw = true, loc_pitch = true, loc_roll = true, loc_view = false;
+    bool rot_yaw = false, rot_pitch = false, rot_roll = false;
+    int  aim_marker = -1;                     // -1 = the camera's, else the vehicle entry's; 0 / 1 = off / on
+};
 
 struct Camera {
     std::string name;                         // optional; empty = unnamed (shown by its number)
@@ -52,9 +67,26 @@ struct Camera {
     float   collide_margin = 30.0f;           // cm short of whatever blocks the offset
     int     hide_body = -1;                   // -1 = auto: hidden unless the origin is the vehicle's, and
                                               //      always for a firstperson camera (its view is inside it)
+    int     hide_head = -1;                   // "hideHead": -1 = the vehicle entry's; 0 / 1
+    int     aim_marker = -1;                  // "aimMarker": -1 = the vehicle entry's; 0 / 1
+    // "tethering": the modes left X steps through. Empty = one mode, the camera's own tracking above.
+    std::vector<Tether> tethering;
     bool hides_body() const {
         if (hide_body >= 0) return hide_body != 0;
         return type == CamType::FirstPerson || origin != Origin::Vehicle;
+    }
+    int mode_count() const { return tethering.empty() ? 1 : static_cast<int>(tethering.size()); }
+    // Mode i (wrapped into range): the camera's own tracking when it lists no tethering.
+    Tether mode(int i) const {
+        if (tethering.empty()) {
+            Tether t;
+            t.offset[0] = offset[0]; t.offset[1] = offset[1]; t.offset[2] = offset[2];
+            t.loc_yaw = loc_yaw; t.loc_pitch = loc_pitch; t.loc_roll = loc_roll; t.loc_view = loc_view;
+            t.rot_yaw = rot_yaw; t.rot_pitch = rot_pitch; t.rot_roll = rot_roll;
+            return t;
+        }
+        const int n = static_cast<int>(tethering.size());
+        return tethering[static_cast<size_t>(((i % n) + n) % n)];
     }
 };
 
@@ -78,8 +110,12 @@ struct Vehicle {
     std::vector<std::string> match;   // lower-case substrings of the vehicle actor's name
     bool  is_default = false;         // the "default" entry: never matched by name
     int   default_camera = 0;
+    int   default_mode = 0;           // "defaultMode": the default camera's tethering mode to start in
     int   motion_aim = -1;            // -1 = the global vehaim key; 0 / 1 = off / on for this vehicle
     bool  aim_marker = true;          // "aimMarker": a ring where the VEHICLE aims, beside the crosshair
+                                      // (a camera or a tethering mode may say otherwise)
+    bool  hide_head = false;          // "hideHead": hide the player's HEAD in this seat -- true first person
+                                      // from a camera at the head (a camera may say otherwise). Off by default.
     // "seat": the seats this entry is for, as bits (1 << SeatRole); 0 = any seat. A passenger rides the
     // same vehicle actor as its driver, so this is what tells their entries apart. Ignored on "default".
     uint8_t seats = 0;
@@ -96,8 +132,12 @@ struct Table {
 constexpr int kMaxVehicles = 32;
 constexpr int kMaxCameras  = 16;
 
-// The built-in table: what a missing file gives, and what a first run writes out.
+// The built-in table: what a missing file gives, and what a first run writes out -- a CHECKPOINT
+// CANONIZATION of a player's tuned file (VehCamDefaults.inc, written by Scripts\VehCams-Tool.ps1 canonize).
 Table default_table();
+// The programmatic starter set default_table() falls back to if the canonized table ever failed to read
+// (a guard, never the expected path: the standalone test proves the canonized one reads).
+Table starter_table();
 
 struct ParseResult {
     bool ok{false};
@@ -109,8 +149,25 @@ struct ParseResult {
 // Parse `text` into `out`, REPLACING it. On any error `out` is left exactly as it was.
 ParseResult table_from_json(const char* text, std::size_t len, Table& out);
 
-// The table as the file format, with a short guide at the top. from_json(to_json(t)) == t.
-std::string table_to_json(const Table& t);
+// The table as the file format, with a short guide at the top (`guide` = false leaves it out -- the
+// built-in table's own source, VehCamDefaults.inc). from_json(to_json(t)) == t.
+std::string table_to_json(const Table& t, bool guide = true);
+
+// THE ONE-TIME MOVE TO TETHERING MODES, by the naming players already used. In each vehicle, a camera
+// named "Tethered ..." joins the camera before it that is not ("Cockpit" / "Tethered Cockpit",
+// "HangGlider" / "Tethered Yaw HangGlider" / "Tethered HangGlider") when both share type, origin,
+// collision and body/head hiding: they become ONE camera, named for the first, with a mode each. A mode is
+// named for what its camera's name adds ("Tethered Yaw"), "Tethered" when that is all it adds, and the
+// first "Untethered" when it turns no rotation. Offsets may differ between modes. defaultCamera /
+// defaultMode follow the camera they pointed at. Returns how many cameras were folded into another.
+// `moved` (optional): per vehicle, each old camera's new (camera, mode) -- for anything else that named
+// the old cameras, such as the per-seat memory file.
+int merge_tethered(Table& t, std::vector<std::vector<std::pair<int, int>>>* moved = nullptr);
+
+// The effective settings of camera `ci`, mode `mi` of vehicle `v`: the aim ring and the head hide, each
+// the mode's, else the camera's, else the vehicle entry's.
+bool effective_aim_marker(const Vehicle& v, int ci, int mi);
+bool effective_hide_head(const Vehicle& v, int ci);
 
 // Index of the entry for this vehicle actor name and seat (case-insensitive substring match; an entry with
 // a "seat" list is considered only when the game has named the seat and one of its flags is listed; the
@@ -131,5 +188,12 @@ std::string seat_text(uint8_t seat);
 // For readouts and logs: "Yaw, Pitch, Roll" / "Pitch, Roll" / "None"; location adds "Your view (orbit)".
 std::string rotation_tracking_text(const Camera& c);
 std::string location_tracking_text(const Camera& c);
+std::string rotation_tracking_text(const Tether& t);
+std::string location_tracking_text(const Tether& t);
+
+// Left Y onto camera `to` from a view in mode `from`: the mode that keeps what you chose -- one of the same
+// name ("Tethered" stays tethered), else one turning your view on the same axes (an untethered choice stays
+// untethered under any name), else the first. A comfort choice is not undone by changing where you sit.
+int carry_mode(const Camera& to, const Tether& from);
 
 } // namespace halo::vehcampresets
