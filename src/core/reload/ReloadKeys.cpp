@@ -21,6 +21,7 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadmagoffw")  == 0) { strncpy_s(g_cfg.reload_mag_off_w, val, _TRUNCATE); return true; }
     // Parsed exactly as the author parses reloadjoin and reloadmagoff, so a value means the same
     // thing in either key: the same clamp on the one, a bare three-float read on the other.
+    if (_stricmp(key, "reloadslidekeep") == 0) { g_cfg.reload_slide_keep_m = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "reloadseat")     == 0) { g_cfg.reload_seat_dist = clampf((float)v, 0.05f, 1.0f); return true; }
     if (_stricmp(key, "reloadmagbelt")  == 0) { sscanf_s(val, "%f,%f,%f", &g_cfg.reload_mag_belt[0], &g_cfg.reload_mag_belt[1], &g_cfg.reload_mag_belt[2]); return true; }
     if (_stricmp(key, "reloadholdfire") == 0) { g_cfg.reload_hold_fire = (v != 0.0); return true; }
@@ -78,6 +79,16 @@ bool reload_engine_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "reloadwellmarker") == 0) { g_cfg.reload_well_marker = (v != 0.0); return true; }
     if (_stricmp(key, "reloadslidems")  == 0) { g_cfg.reload_slide_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
     if (_stricmp(key, "reloadmaskms")   == 0) { g_cfg.reload_mask_ms  = (int)clampf((float)v, 0.0f, 6000.0f); return true; }
+    if (_stricmp(key, "reloadposefreeze") == 0) { g_cfg.reload_pose_freeze = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "reloadgunhold")     == 0) { g_cfg.reload_hold     = (int)clampf((float)v, 0.0f, 3.0f); return true; }
+    if (_stricmp(key, "reloadgunholdms")   == 0) { g_cfg.reload_gun_hold_ms = (int)clampf((float)v, 0.0f, 3000.0f); return true; }
+    if (_stricmp(key, "reloadgunholdramp") == 0) { g_cfg.reload_hold_ramp_ms = clampf((float)v, 0.0f, 2000.0f); return true; }
+    if (_stricmp(key, "reloadgunholdlog")  == 0) { g_cfg.reload_hold_log = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "reloadhaptic")      == 0) { g_cfg.reload_haptic = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "reloadhapticamp")   == 0) { g_cfg.reload_haptic_amp = clampf((float)v, 0.0f, 2.0f); return true; }
+    if (_stricmp(key, "reloadhapticms")    == 0) { g_cfg.reload_haptic_ms = (int)clampf((float)v, 0.0f, 500.0f); return true; }
+    if (_stricmp(key, "reloadrumblemute")  == 0) { g_cfg.reload_rumble_mute = (int)clampf((float)v, 0.0f, 7.0f); return true; }
+    if (_stricmp(key, "reloadrumblelog")   == 0) { g_cfg.reload_rumble_log = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "reloadanimrate") == 0) { g_cfg.reload_anim_rate = clampf((float)v, 0.0f, 200.0f); return true; }
     if (_stricmp(key, "reloadanimms")   == 0) { g_cfg.reload_anim_ms   = (int)clampf((float)v, 0.0f, 6000.0f); return true; }
     if (_stricmp(key, "reloadholdstate") == 0) { g_cfg.reload_hold_state = (v != 0.0); return true; }

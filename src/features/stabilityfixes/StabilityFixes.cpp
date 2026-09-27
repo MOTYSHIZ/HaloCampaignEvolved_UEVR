@@ -2,6 +2,7 @@
 #include "core/config/CfgRead.hpp"
 
 #include "Config.hpp"
+#include "core/fixes/RenderTime.hpp"
 #include "Math.hpp"   // clampf
 #include "core/Services.hpp"
 
@@ -23,6 +24,8 @@ bool stabilityfixes_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "stabilityholstermarkercolor") == 0) { strncpy_s(g_cfg.holster_marker_color, val, _TRUNCATE); return true; }
     // The minimum throw speed.
     if (_stricmp(key, "stabilitygrenminthrow")   == 0) { g_cfg.gren_min_throw = clampf((float)v, 0.0f, 6.0f); return true; }
+    if (_stricmp(key, "stabilityrendertime")     == 0) { g_cfg.stab_render_time = (int)clampf((float)v, 0.0f, 4.0f); return true; }
+    if (_stricmp(key, "stabilityrendertimelog")  == 0) { g_cfg.stab_render_time_log = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     return false;
 }
 
@@ -31,6 +34,7 @@ bool stabilityfixes_parse_key(const char* key, const char* val, double v) {
 constinit const FeatureHooks kStabilityFixesHooks{
     .key       = "stabilityfixes",
     .parse_key = &stabilityfixes_parse_key,
+    .render_refresh = &render_time_refresh,   // stabilityrendertime (core/fixes/RenderTime.hpp)
     .enabled   = &stability_fixes_enabled,
     .services  = SVC_STABILITY | SVC_MELEE_INSTRUMENTS,
 };

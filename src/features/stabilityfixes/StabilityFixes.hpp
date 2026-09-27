@@ -17,8 +17,11 @@
 // WHAT IS STILL SWITCHED BY THIS ROW:
 //   SVC_STABILITY
 //     turn instrument (stabilityturnlog) and the widget probe log gate (stabilitywidgetlog)
-//     holster marker tint (stabilityholstermarkercolor) and minimum throw speed (stabilitygrenminthrow)
+//     holster marker tint (stabilityholstermarkercolor). The minimum throw speed (stabilitygrenminthrow)
+//     moved to the grenade gesture: it is on whenever holstergren is (core/fixes/HostFixes.cpp)
 //     the holster button steal's extra/dead masks
+//     render time for the base mod's gun and hands (stabilityrendertime, a DEV key, off; measured
+//     worse than off, kept for the timing work) -- core/fixes/RenderTime.hpp
 //   SVC_MELEE_INSTRUMENTS  aim-hand melee holster veto, second aim pin, hold check, FIRED line
 //
 // ONE ENTRY WAS DROPPED AS REDUNDANT: the late re-assert for xrlayerhidews 3/4. We already run

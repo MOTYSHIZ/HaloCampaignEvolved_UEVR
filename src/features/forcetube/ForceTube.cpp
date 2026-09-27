@@ -64,6 +64,10 @@ constexpr uint8_t   FT_CREATE_PROLOGUE[] = {
 constexpr uintptr_t FT_P_VEC1 = 0x1C;   // muzzle origin, Blam units
 
 typedef uintptr_t (*CreateFn)(uintptr_t);
+// forcetubelog: what the spawn filter saw since the last summary (sim thread adds, game thread drains).
+std::atomic<uint32_t> s_seen{0}, s_rej_nopos{0}, s_rej_trigger{0}, s_rej_far{0};
+uint32_t s_kicks = 0, s_kick_shots = 0, s_log_tick = 0, s_conn_tick = 0;
+int      s_last_batt = -2;
 CreateFn s_orig_create = nullptr;
 int      s_hook_id = -1;
 bool     s_hook_refused = false;
@@ -74,6 +78,10 @@ uintptr_t hooked_create_for_haptics(uintptr_t params) {
     // the guard above). A spawn whose muzzle origin sits on the player is
     // the player's round; NPC fire from further than ~4.5 m never matches, and the rare enemy
     // shooting from inside your chest has bigger problems than a phantom kick.
+    if (g_cfg.force_tube && g_cfg.force_tube_log) {
+        s_seen.fetch_add(1, std::memory_order_relaxed);
+        if (!g_unit_pvalid.load(std::memory_order_relaxed)) s_rej_nopos.fetch_add(1, std::memory_order_relaxed);
+    }
     if (g_cfg.force_tube && g_unit_pvalid.load(std::memory_order_relaxed) &&
         params != 0 && !IsBadReadPtr((const void*)(params + FT_P_VEC1), 12)) {
         float v1[3];
@@ -89,8 +97,12 @@ uintptr_t hooked_create_for_haptics(uintptr_t params) {
         const long long fired = g_ft_fire_at.load(std::memory_order_relaxed);
         const bool mine = fired != 0 &&
                           (now_ticks() - fired) < ms_to_ticks(g_cfg.force_tube_fire_ms);
-        if (mine && dx * dx + dy * dy + dz * dz < rr * rr) {
+        const bool on_you = dx * dx + dy * dy + dz * dz < rr * rr;
+        if (mine && on_you) {
             g_ft_shots.fetch_add(1, std::memory_order_relaxed);
+        } else if (g_cfg.force_tube_log) {
+            if (on_you) s_rej_trigger.fetch_add(1, std::memory_order_relaxed);   // on you, but your trigger was not down
+            else      s_rej_far.fetch_add(1, std::memory_order_relaxed);       // someone else's muzzle
         }
     }
     return s_orig_create ? s_orig_create(params) : 0;
@@ -177,8 +189,35 @@ void forcetube_tick() {
                              who != nullptr ? who : "(n/a)", batt);
     }
 
+    // forcetubelog: the connection re-read every ~10 s (logged when it changes), and a summary of the
+    // spawn filter every ~2 s while anything spawned.
+    if (g_cfg.force_tube_log) {
+        if (++s_conn_tick >= 320) {
+            s_conn_tick = 0;
+            const int batt = s_battery != nullptr ? (int)s_battery() : -1;
+            if (batt != s_last_batt) {
+                s_last_batt = batt;
+                const char* who = s_list != nullptr ? s_list() : nullptr;
+                API::get()->log_info("[Halo-CampE-UEVR] FORCETUBE: connected='%s' battery=%d (list %s, battery %s)",
+                                     who != nullptr ? who : "(n/a)", batt,
+                                     s_list != nullptr ? "exported" : "missing", s_battery != nullptr ? "exported" : "missing");
+            }
+        }
+        if (++s_log_tick >= 64) {
+            s_log_tick = 0;
+            const uint32_t seen = s_seen.exchange(0, std::memory_order_relaxed);
+            const uint32_t nopos = s_rej_nopos.exchange(0, std::memory_order_relaxed);
+            const uint32_t trig = s_rej_trigger.exchange(0, std::memory_order_relaxed);
+            const uint32_t far_ = s_rej_far.exchange(0, std::memory_order_relaxed);
+            if (seen != 0 || s_kicks != 0)
+                API::get()->log_info("[Halo-CampE-UEVR] FORCETUBE: last ~2 s: %u projectile spawns, %u kicks sent for %u of your rounds (power %d, channel %d) | not yours: %u too far, %u without your trigger, %u with no player position",
+                                     seen, s_kicks, s_kick_shots, g_cfg.force_tube_kick, g_cfg.force_tube_channel, far_, trig, nopos);
+            s_kicks = 0; s_kick_shots = 0;
+        }
+    }
     const uint32_t shots = g_ft_shots.exchange(0, std::memory_order_relaxed);
     if (shots == 0 || s_kick == nullptr) return;
+    ++s_kicks; s_kick_shots += shots;
     // Multiple rounds in one tick collapse into one pulse at slightly higher power -- the stock
     // cannot recycle in 31 ms, and queueing kicks would smear the cadence instead of keeping it.
     uint32_t power = (uint32_t)g_cfg.force_tube_kick;
@@ -193,6 +232,7 @@ bool forcetube_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "forcetuberadius")  == 0) { g_cfg.force_tube_radius = clampf((float)v, 0.05f, 5.0f); return true; }
     if (_stricmp(key, "forcetubefirems")  == 0) { g_cfg.force_tube_fire_ms = (int)clampf((float)v, 0.0f, 2000.0f); return true; }
     if (_stricmp(key, "forcetubechannel") == 0) { g_cfg.force_tube_channel = (int)clampf((float)v, 0.0f, 7.0f); return true; }
+    if (_stricmp(key, "forcetubelog")     == 0) { g_cfg.force_tube_log = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     return false;
 }
 

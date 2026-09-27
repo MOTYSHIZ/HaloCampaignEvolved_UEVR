@@ -173,6 +173,7 @@ void reload_release_windows(const char* why) {
     // A tap made while the window held the tick belongs to the body that is gone: the first frame
     // control comes back must not fire it.
     s_reset_drop_tap = true;
+    s_reset_drop_at = now_ticks();
     if (g_cfg.reload_vr_log || g_cfg.reload_state_log)
         API::get()->log_info("[Halo-CampE-UEVR] RELOAD released the press, the state hold, the rate clamp, the sound mute and the pose hold (%s)", why);
 }

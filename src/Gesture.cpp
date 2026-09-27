@@ -459,9 +459,10 @@ void offhand_melee_update(float dt) {
 
     // Aim hold along the punch, mode 1 only (the shipped mode), exactly as the aim hand does it.
     if (g_cfg.melee_aim_mode == 1 && g_cfg.melee_aim_hold_ms > 0 && speed > 0.0001f) {
-        const float hy = wrap180(std::atan2(s2_vel.x, -s2_vel.z) * RAD2DEG
-                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
-        const float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, s2_vel.y / speed))) * RAD2DEG;
+        float hy = wrap180(std::atan2(s2_vel.x, -s2_vel.z) * RAD2DEG
+                           + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
+        float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, s2_vel.y / speed))) * RAD2DEG;
+        swing_aim_in_aim_frame(s2_vel, hpos, &hy, &hp);   // see Holster.hpp
         g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
         g_melee_aim_ctrl_pitch.store(hp, std::memory_order_relaxed);
         g_melee_aim_hold_until.store(nowt + ms_to_ticks(g_cfg.melee_aim_hold_ms),
@@ -665,10 +666,11 @@ void gesture_update(float dt) {
     // elevation, clamped before asin because a normalised-looking ratio can still land at 1.0000001
     // and produce a NaN that would poison the aim for the rest of the session.
     if (g_cfg.melee_aim_mode == 1 && g_cfg.melee_aim_hold_ms > 0 && speed > 0.0001f) {
-        const float hy = wrap180(std::atan2(s_vel.x, -s_vel.z) * RAD2DEG
-                                 + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
+        float hy = wrap180(std::atan2(s_vel.x, -s_vel.z) * RAD2DEG
+                           + g_cfg.aim_turn * g_turn_offset.load(std::memory_order_relaxed));
         const float ratio = s_vel.y / speed;
-        const float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, ratio))) * RAD2DEG;
+        float hp = std::asin(std::fmax(-1.0f, std::fmin(1.0f, ratio))) * RAD2DEG;
+        swing_aim_in_aim_frame(s_vel, hpos, &hy, &hp);   // see Holster.hpp
         g_melee_aim_ctrl_yaw.store(hy, std::memory_order_relaxed);
         g_melee_aim_ctrl_pitch.store(hp, std::memory_order_relaxed);
         g_melee_aim_hold_until.store(now + ms_to_ticks(g_cfg.melee_aim_hold_ms),

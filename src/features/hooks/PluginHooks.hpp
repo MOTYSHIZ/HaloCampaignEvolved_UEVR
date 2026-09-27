@@ -22,6 +22,10 @@ void features_xinput_raw_pad(_XINPUT_STATE* state);
 // is composed in the same poll.
 void features_xinput_note_buttons(unsigned short buttons);
 
+// on_xinput_set_state (the XInput hook's thread), the whole body: after the real XInputSetState and
+// after UEVR's own VR mod has turned the rumble into a controller pulse. vibration is XINPUT_VIBRATION*.
+void features_xinput_set_state(unsigned int user_index, void* vibration);
+
 // update() (game thread), right after blam_aim_tick() and before aim_watch_tick().
 void features_game_tick_after_blam_aim();
 
@@ -94,6 +98,16 @@ void features_render_frame();
 // on_post_calculate_stereo_view_offset (render thread), right after the STOMPLOG sample and before
 // aim_converge_note_post: the head offset, and a feature's clamp of the rendered eye.
 void features_stereo_post_eye(int index, UEVR_Vector3f* position, bool is_double);
+
+// on_post_calculate_stereo_view_offset (render thread), right after features_stereo_post_eye: the finished view of
+// this eye (position and rotation after UEVR composed the head pose) and the callback's world_to_meters. Read only;
+// the driver probe's one-snapshot reference (core/dev/DriverProbe).
+void features_stereo_post_view(int index, float world_to_meters, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double);
+
+// update() (game thread), the rig block under the palette mesh stand-down, right after palettearm_note_rig_weapon:
+// the weapon point rig mode computed, as a world-axes offset from the rig's attach parent (cm), and its mesh rotation.
+// Read only; the driver probe's record of the author's driver's target.
+void features_rig_weapon_target(bool valid, const Vec3& off_world_cm, const Quat& q_mesh);
 
 // update() (game thread), inside palettewpn's per-tick block, after the rendered-hand pose publish and
 // before the parent frame measurement: the vehicle body work, the wheel and the heading.
