@@ -2940,10 +2940,33 @@ void seed_weapon_watch(uint32_t tick) {
     s_scope_open_tick = tick;
 }
 
+// ---- HOLD-TO-ZOOM (scopehold) -----------------------------------------------------------------
+//
+// Which inputs are currently HOLDING the scope open. Two, because the trigger and a bound button
+// can both be live at once, and in hold mode the scope stays open while EITHER is held: letting go
+// of one while the other is still down must not close it. Both stay false in toggle mode, so every
+// release helper below is a no-op there and toggle behaves exactly as it always has.
+//
+// s_lt_down is the trigger's edge detector, lifted out of scope_handle_lt so scope_lt_unrouted()
+// can resync it. With gripzoom the trigger only reaches the scope while the support grip is
+// latched; a release that happens while NOT gripping is never seen, the detector stays "down", and
+// in hold mode the next press after re-gripping would be swallowed -- the zoom simply would not
+// open.
+bool s_lt_down  = false;
+bool s_lt_held  = false;
+bool s_btn_held = false;
+
+// Let go of one input's hold. Closes the scope only if the OTHER input is not also holding it, and
+// only if this one actually was -- so it is safe to call on every refusal tick.
+void hold_release(bool& held, bool other_held) {
+    if (!held) return;
+    held = false;
+    if (!other_held) g_scope_active = false;
+}
+
 } // namespace
 
 bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
-    static bool s_down = false;
     if (lt_raw > g_scope_lt_max.load(std::memory_order_relaxed))
         g_scope_lt_max.store(lt_raw, std::memory_order_relaxed);   // diagnostic; race harmless
     // scopedevray also lifts the stick-mode refusal: under SimVR the FP route never establishes
@@ -2951,20 +2974,45 @@ bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
     // be unreachable by the very automation the dev ray exists for. Release builds synthesize no
     // ray, so even a hand-set key there just toggles a state the frame end immediately drops.
     if (!g_cfg.scope_enabled || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
-        s_down = false;
+        s_lt_down = false;
+        // A HOLD cannot outlive the trigger being ours: the release that ends it may happen inside
+        // the menu or seat, where this function never sees it, and the scope would then stay open
+        // with nothing holding it. Idempotent, so running on every refusal tick is fine.
+        hold_release(s_lt_held, s_btn_held);
         return false;   // menus and seats keep the game's own trigger semantics
     }
-    if (features_scope_trigger_stood_down(s_down)) return false;
+    if (features_scope_trigger_stood_down(s_lt_down)) {
+        s_lt_held = false;   // the standing-down feature has already closed the scope
+        return false;
+    }
     const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
     const uint8_t off_t = (uint8_t)(on_t / 2);   // hysteresis: no re-fire on an analog wobble
-    if (!s_down && lt_raw >= on_t) {
-        s_down = true;
-        g_scope_active = !g_scope_active.load();
+    if (!s_lt_down && lt_raw >= on_t) {
+        s_lt_down = true;
+        // HOLD (default): the scope is open exactly while the trigger is squeezed, as Halo's own
+        // zoom is. TOGGLE: each squeeze flips it, the behaviour before scopehold existed.
+        if (g_cfg.scope_hold) { s_lt_held = true; g_scope_active = true; }
+        else                  { g_scope_active = !g_scope_active.load(); }
         g_scope_lt_edges.fetch_add(1, std::memory_order_relaxed);
-    } else if (s_down && lt_raw <= off_t) {
-        s_down = false;
+    } else if (s_lt_down && lt_raw <= off_t) {
+        s_lt_down = false;
+        hold_release(s_lt_held, s_btn_held);   // no-op in toggle mode: s_lt_held stays false
     }
     return g_cfg.scope_eat_lt;
+}
+
+// The trigger is NOT reaching the scope this poll (gripzoom, with no support grip latched), so any
+// release happening now would never be seen. In hold mode, resync as if released; the grip-release
+// close has already shut the scope, so nothing is closed here -- only the stale state is cleared,
+// and a trigger still squeezed when the grip returns reads as a fresh press and zooms, which is
+// what "hold to zoom" means.
+//
+// Toggle mode is deliberately left alone: there a trigger still held from a grenade throw would
+// read as a press on re-grip and flip the scope open unasked.
+void scope_lt_unrouted() {
+    if (!g_cfg.scope_hold) return;
+    s_lt_down = false;
+    s_lt_held = false;
 }
 
 // Scope toggle from a BOUND BUTTON (bindscope) instead of the left trigger.
@@ -2980,14 +3028,17 @@ void scope_handle_button(bool down, bool in_menu, bool stick_mode) {
     static bool s_down = false;
     if (!g_cfg.scope_enabled || features_scope_pane_stands_down() || in_menu || (stick_mode && !g_cfg.scope_dev_ray)) {
         s_down = false;
+        hold_release(s_btn_held, s_lt_held);   // same reason as the trigger's refusal path
         return;
     }
     if (down && !s_down) {
         s_down = true;
-        g_scope_active = !g_scope_active.load();
+        if (g_cfg.scope_hold) { s_btn_held = true; g_scope_active = true; }
+        else                  { g_scope_active = !g_scope_active.load(); }
         g_scope_lt_edges.fetch_add(1, std::memory_order_relaxed);
-    } else if (!down) {
+    } else if (!down && s_down) {
         s_down = false;
+        hold_release(s_btn_held, s_lt_held);   // no-op in toggle mode
     }
 }
 
