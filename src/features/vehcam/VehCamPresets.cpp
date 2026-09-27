@@ -185,6 +185,30 @@ struct Apply {
             } else if (fk == "aimMarker") {
                 if (!x.is_bool()) return type_error(x, w, "true or false");
                 out.aim_marker = x.b;
+            } else if (fk == "seat") {
+                // "passenger", or a list of them; [] or null = any seat.
+                out.seats = 0;
+                if (x.is_null()) continue;
+                const char* want = "\"driver\", \"gunner\" or \"passenger\" (or a list of them)";
+                auto role_bit = [](const std::string& s) -> uint8_t {
+                    if (ieq(s, "driver"))    return 1u << static_cast<int>(SeatRole::Driver);
+                    if (ieq(s, "gunner"))    return 1u << static_cast<int>(SeatRole::Gunner);
+                    if (ieq(s, "passenger")) return 1u << static_cast<int>(SeatRole::Passenger);
+                    return 0;
+                };
+                if (x.is_str()) {
+                    const uint8_t b = role_bit(x.s);
+                    if (b == 0) return type_error(x, w, want);
+                    out.seats = b;
+                    continue;
+                }
+                if (!x.is_arr()) return type_error(x, w, want);
+                for (std::size_t i = 0; i < x.items.size(); ++i) {
+                    const Value& e = x.items[i];
+                    const uint8_t b = e.is_str() ? role_bit(e.s) : 0;
+                    if (b == 0) return type_error(e, w + "[" + std::to_string(i) + "]", "\"driver\", \"gunner\" or \"passenger\"");
+                    out.seats |= b;
+                }
             } else if (fk == "cameras") {
                 have_cams = true;
                 if (!x.is_arr() || x.items.empty()) return type_error(x, w, "a list of at least one camera");
@@ -245,6 +269,14 @@ const char* type_name(CamType t)  { return t == CamType::FirstPerson ? "firstper
 const char* origin_name(Origin o) {
     return o == Origin::Seat ? "seat" : (o == Origin::Head ? "playerhead" : "vehicle");
 }
+const char* seat_role_name(SeatRole s) {
+    switch (s) {
+        case SeatRole::Driver:    return "driver";
+        case SeatRole::Gunner:    return "gunner";
+        case SeatRole::Passenger: return "passenger";
+        default:                  return "unknown";
+    }
+}
 
 std::string rotation_tracking_text(const Camera& c) { return axes_text(c.rot_yaw, c.rot_pitch, c.rot_roll); }
 std::string location_tracking_text(const Camera& c) {
@@ -253,18 +285,23 @@ std::string location_tracking_text(const Camera& c) {
 
 Table default_table() {
     // Vehicle actor names from the game's own assets (BP_<name>VehicleActor). The turrets are
-    // separate vehicles (the Warthog's chaingun, the Wraith's anti-infantry turret, the Scorpion's guns),
-    // so a gunner gets their own entry -- the most specific match wins (match_vehicle), and
-    // "WarthogVehicleActor" is chosen over "Warthog" so it does not match the chaingun at all.
+    // separate vehicles (the Warthog's chaingun, the Wraith's and the Scorpion's anti-infantry guns), so
+    // a gunner gets their own entry -- the most specific match wins (match_vehicle), and
+    // "WarthogVehicleActor" is chosen over "Warthog" so it does not match the chaingun at all. The
+    // Warthog's passenger rides the Warthog actor itself, so that entry is told apart by its seat.
     Table t;
-    t.vehicles.push_back(vehicle("Banshee",        {"bansheevehicleactor"}));
-    t.vehicles.push_back(vehicle("Ghost",          {"ghostvehicleactor"}));
-    t.vehicles.push_back(vehicle("Warthog gunner", {"warthogchaingunvehicleactor"}));
-    t.vehicles.push_back(vehicle("Warthog",        {"warthogvehicleactor"}));
-    t.vehicles.push_back(vehicle("Scorpion",       {"scorpion"}));
-    t.vehicles.push_back(vehicle("Wraith turret",  {"wraithantiinfantry"}));
-    t.vehicles.push_back(vehicle("Wraith",         {"wraith"}));
-    t.vehicles.push_back(vehicle("Shade",          {"shade"}));
+    t.vehicles.push_back(vehicle("Banshee",           {"bansheevehicleactor"}));
+    t.vehicles.push_back(vehicle("Ghost",             {"ghostvehicleactor"}));
+    t.vehicles.push_back(vehicle("Warthog gunner",    {"warthogchaingunvehicleactor"}));
+    t.vehicles.push_back(vehicle("Warthog",           {"warthogvehicleactor"}));
+    Vehicle wp = vehicle("Warthog passenger", {"warthogvehicleactor"});
+    wp.seats = 1u << static_cast<int>(SeatRole::Passenger);
+    t.vehicles.push_back(wp);
+    t.vehicles.push_back(vehicle("Scorpion gunner",   {"scorpionantiinfantry"}));
+    t.vehicles.push_back(vehicle("Scorpion",          {"scorpion"}));
+    t.vehicles.push_back(vehicle("Wraith turret",     {"wraithantiinfantry"}));
+    t.vehicles.push_back(vehicle("Wraith",            {"wraith"}));
+    t.vehicles.push_back(vehicle("Shade",             {"shade"}));
     Vehicle d = vehicle("default", {});
     d.is_default = true;
     t.vehicles.push_back(d);
@@ -329,7 +366,9 @@ std::string table_to_json(const Table& t) {
     s += "    \"                    is the vehicle);\",\n";
     s += "    \"                    only while the vehcamhidebody setting is on, which it is not by default\",\n";
     s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim;\",\n";
-    s += "    \"  aimMarker = true | false: a ring where the VEHICLE is aiming, beside the crosshair (left out = true).\",\n";
+    s += "    \"  aimMarker = true | false: a ring where the VEHICLE is aiming, beside the crosshair (left out = true);\",\n";
+    s += "    \"  seat = \\\"driver\\\" | \\\"gunner\\\" | \\\"passenger\\\" (or a list): this entry is only for that seat, as the\",\n";
+    s += "    \"  game reports it -- how the Warthog's passenger gets cameras of its own (left out = any seat).\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
     s += "  ],\n";
@@ -346,6 +385,13 @@ std::string table_to_json(const Table& t) {
         s += "      \"defaultCamera\": " + std::to_string(v.default_camera) + ",\n";
         if (v.motion_aim >= 0) s += std::string("      \"motionAim\": ") + (v.motion_aim ? "true" : "false") + ",\n";
         s += std::string("      \"aimMarker\": ") + (v.aim_marker ? "true" : "false") + ",\n";
+        if (v.seats != 0) {
+            std::string roles;
+            for (const SeatRole r : {SeatRole::Driver, SeatRole::Gunner, SeatRole::Passenger})
+                if ((v.seats & (1u << static_cast<int>(r))) != 0)
+                    roles += std::string(roles.empty() ? "" : ", ") + "\"" + seat_role_name(r) + "\"";
+            s += "      \"seat\": [" + roles + "],\n";
+        }
         s += "      \"cameras\": [\n";
         for (std::size_t ci = 0; ci < v.cameras.size(); ++ci) {
             const Camera& c = v.cameras[ci];
@@ -370,19 +416,27 @@ std::string table_to_json(const Table& t) {
     return s;
 }
 
-// THE MOST SPECIFIC MATCH WINS: the longest "match" text found in the name, then the earlier entry. So a
-// seat with an actor of its own gets its own entry wherever it sits in the file -- the Wraith's turret
-// ("wraithantiinfantry") beats the Wraith ("wraith"), which also appears in the turret's name.
-int match_vehicle(const Table& t, const std::string& actor_name) {
+// THE MOST SPECIFIC MATCH WINS: the longest "match" text found in the name, then an entry naming your seat
+// over one that does not, then the earlier entry. So a seat with an actor of its own gets its own entry
+// wherever it sits in the file -- the Wraith's turret ("wraithantiinfantry") beats the Wraith ("wraith"),
+// which also appears in the turret's name -- and a seat sharing its vehicle's actor (the Warthog's
+// passenger) gets its own by naming the seat. An entry with a "seat" list is never picked while the seat
+// is unknown: guessing would hand a driver the passenger's cameras.
+int match_vehicle(const Table& t, const std::string& actor_name, SeatRole seat) {
     const std::string n = lower(actor_name);
     int def = -1, best = -1;
     std::size_t best_len = 0;
+    bool best_seated = false;
     for (std::size_t i = 0; i < t.vehicles.size(); ++i) {
         const Vehicle& v = t.vehicles[i];
         if (v.is_default) { if (def < 0) def = static_cast<int>(i); continue; }
+        const bool seated = v.seats != 0;
+        if (seated && (seat == SeatRole::Unknown || (v.seats & (1u << static_cast<int>(seat))) == 0)) continue;
         for (const std::string& m : v.match) {
-            if (m.empty() || m.size() <= best_len) continue;
-            if (n.find(m) != std::string::npos) { best = static_cast<int>(i); best_len = m.size(); }
+            if (m.empty() || n.find(m) == std::string::npos) continue;
+            if (m.size() > best_len || (m.size() == best_len && seated && !best_seated)) {
+                best = static_cast<int>(i); best_len = m.size(); best_seated = seated;
+            }
         }
     }
     return best >= 0 ? best : def;

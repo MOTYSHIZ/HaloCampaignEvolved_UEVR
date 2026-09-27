@@ -43,10 +43,12 @@ void vehcam_presets_init(const char* path);
 void vehcam_presets_poll();
 
 // GAME thread, every tick. `in_vehicle` = our camera system is running in a vehicle; `chassis` = the
-// resolved vehicle mesh (0 = not yet); `chassis_name` its full object name. Identifies the vehicle when
-// the chassis changes, applies left X / left Y steps, keeps the published camera current, and owns
-// UEVR's decoupled-pitch switch while a camera that tilts with the vehicle is up.
-void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& chassis_name);
+// resolved vehicle mesh (0 = not yet); `vehicle_name` = the full object name the camera file is matched
+// against -- the vehicle actor your SEAT belongs to when the game has said, else the chassis mesh's;
+// `seat_role` = vehcampresets::SeatRole as the game reports it (-1 = unknown). Identifies the vehicle when
+// the chassis or the seat changes, applies left X / left Y steps, keeps the published camera current,
+// and owns UEVR's decoupled-pitch switch while a camera that tilts with the vehicle is up.
+void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat_role);
 
 // Any thread (the input hook): +1 = next camera, -1 = previous.
 void veh_cam_step(int dir);

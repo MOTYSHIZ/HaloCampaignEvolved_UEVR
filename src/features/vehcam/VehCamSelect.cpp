@@ -41,6 +41,8 @@ char               s_path[MAX_PATH]{};
 unsigned long long s_stamp = ~0ull;                 // last write time seen; ~0 = never looked
 
 uintptr_t          s_chassis = 0;                   // the vehicle mesh the selection was made for
+int                s_seat = -1;                     // ...and the seat (vcp::SeatRole; -1 = the game has not said)
+std::string        s_vehicle_actor;                 // ...and the name it was matched against
 int                s_vehicle = -1;                  // index into s_table.vehicles; -1 = none
 int                s_camera = 0;
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
@@ -147,11 +149,11 @@ void select(int vi, int ci, const char* why, bool recenter) {
     const std::string loc = vcp::location_tracking_text(c), rot = vcp::rotation_tracking_text(c);
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera %d/%d \"%s\" (%s): %s, origin %s, "
                          "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, "
-                         "controls %s",
+                         "controls %s, seat %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
                          loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
-                         motion_on(a) ? "motion" : "stick");
+                         motion_on(a) ? "motion" : "stick", vcp::seat_role_name(static_cast<vcp::SeatRole>(s_seat)));
 
     // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name
     // when it has one, and what it does. Placed and timed by the xrtext* defaults.
@@ -170,6 +172,9 @@ void select(int vi, int ci, const char* why, bool recenter) {
             md += "**Rotation Tracking:** " + rot + "\n";
         }
         md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
+        // The seat as the GAME reports it -- what an entry's "seat" is matched against.
+        static const char* const kSeat[] = { "Driver", "Gunner", "Passenger" };
+        if (s_seat >= 0 && s_seat <= 2) md += std::string("**Seat:** ") + kSeat[s_seat] + "\n";
         xrtext_show(md);
     }
 }
@@ -348,31 +353,45 @@ void vehcam_presets_poll() {
                          ign.empty() ? "" : " -- IGNORED (no such setting): ", ign.c_str());
 }
 
-void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& chassis_name) {
+void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat_role) {
     ++s_ticks;
     if (s_ticks == 300) decoupled_pitch_startup_check();
 
     if (!in_vehicle || chassis == 0) {
         // Out of the vehicle (or not identified yet): nothing selected, nothing forced, and a step
         // pressed meanwhile does not carry into the next ride.
-        if (!in_vehicle) { if (s_vehicle >= 0 || s_chassis != 0) clear_selection(); s_chassis = 0; }
+        if (!in_vehicle) {
+            if (s_vehicle >= 0 || s_chassis != 0) clear_selection();
+            s_chassis = 0; s_seat = -1; s_vehicle_actor.clear();
+        }
         s_step.store(0, std::memory_order_relaxed);
         s_ctrl_toggle.store(0, std::memory_order_relaxed);
         decoupled_pitch_update(false);
         return;
     }
 
-    if (chassis != s_chassis || s_table_changed) {
-        const bool reload = (chassis == s_chassis);
+    // Re-matched when the chassis changes, the file changes, or the GAME names the seat (it may do so a
+    // little after you get in, and a seat swap names another).
+    const std::string actor = narrow(vehicle_name);
+    const bool seat_changed = seat_role != s_seat || actor != s_vehicle_actor;
+    if (chassis != s_chassis || s_table_changed || seat_changed) {
+        const bool reload = chassis == s_chassis && !seat_changed;   // only the file changed
+        const bool seat_only = chassis == s_chassis && !s_table_changed && seat_changed;
         const std::string prev = s_vehicle_name;
         s_chassis = chassis;
+        s_seat = seat_role;
+        s_vehicle_actor = actor;
         s_table_changed = false;
-        const std::string actor = narrow(chassis_name);
-        const int vi = vcp::match_vehicle(s_table, actor);
+        const int vi = vcp::match_vehicle(s_table, actor, static_cast<vcp::SeatRole>(seat_role));
         if (vi < 0) {
             clear_selection();
-            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: no camera entry matches %s and there is no "
-                                 "\"default\" entry -- the game's camera stays", actor.c_str());
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: no camera entry matches %s (seat %s) and there is no "
+                                 "\"default\" entry -- the game's camera stays", actor.c_str(),
+                                 vcp::seat_role_name(static_cast<vcp::SeatRole>(seat_role)));
+        } else if (seat_only && vi == s_vehicle) {
+            // The seat was named and changes nothing: same entry, so keep the camera and the view as they are.
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game names your seat: %s", s_vehicle_name.c_str(),
+                                 vcp::seat_role_name(static_cast<vcp::SeatRole>(seat_role)));
         } else {
             const vcp::Vehicle& v = s_table.vehicles[vi];
             int ci = v.default_camera;
@@ -381,7 +400,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
             } else if (auto it = s_remembered.find(v.name); it != s_remembered.end()) {
                 ci = it->second;                     // back in a vehicle you used: the camera you left it in
             }
-            select(vi, ci, reload ? "file reloaded" : "entered", /*recenter=*/!reload);
+            select(vi, ci, reload ? "file reloaded" : (seat_only ? "seat named" : "entered"), /*recenter=*/!reload);
         }
     }
 

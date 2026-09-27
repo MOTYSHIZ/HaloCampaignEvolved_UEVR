@@ -542,8 +542,20 @@ constexpr uint8_t kScanMesh       = 2;    // class is a *Mesh*Component* (a body
 constexpr uint8_t kScanVehicle    = 4;    // actor class named *VehicleActor*
 constexpr uint8_t kScanSpartan    = 8;    // actor class named *SpartansBipedActor* -- the player's biped
 constexpr uint8_t kScanPersistent = 16;   // (an owner) sits in the persistent level
+constexpr uint8_t kScanUnit       = 32;   // class is (or derives from) BlamUnitComponent -- a unit's seats
 
 struct ScanHit { API::UObject* o; int32_t i; API::UObject* owner; };
+
+// The Blam unit's UE component, whose GetSeatStates says who sits where (the seat resolve, below).
+API::UClass* unit_class() {
+    static API::UClass* s_cls = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        s_cls = API::get()->find_uobject<API::UClass>(L"Class /Script/BlamSynchronization.BlamUnitComponent");
+    }
+    return s_cls;
+}
 
 PtrKindCache s_scan_classes, s_scan_owners;   // per walk: classes and actors can unload between rides
 bool     s_scan_active = false;
@@ -554,8 +566,8 @@ uint32_t s_scan_gen = 0;        // the stick-mode window: bumped as stick mode e
 uint32_t s_scan_walk_gen = 0, s_scan_result_gen = 0;
 int      s_scan_ticks = 0;
 double   s_scan_ms = 0.0, s_scan_max_ms = 0.0;
-std::vector<ScanHit> s_walk_chassis, s_walk_bodies, s_walk_parts;   // being filled
-std::vector<ScanHit> s_res_chassis, s_res_bodies, s_res_parts;      // the last finished walk
+std::vector<ScanHit> s_walk_chassis, s_walk_bodies, s_walk_parts, s_walk_units;   // being filled
+std::vector<ScanHit> s_res_chassis, s_res_bodies, s_res_parts, s_res_units;      // the last finished walk
 
 uint8_t scan_class_kind(API::UClass* cls) {
     uint8_t k = 0;
@@ -566,6 +578,11 @@ uint8_t scan_class_kind(API::UClass* cls) {
     if (n.find(L"Mesh") != std::wstring::npos && n.find(L"Component") != std::wstring::npos) k |= kScanMesh;
     if (n.find(L"VehicleActor") != std::wstring::npos) k |= kScanVehicle;
     if (n.find(L"SpartansBipedActor") != std::wstring::npos) k |= kScanSpartan;
+    // By class pointer up the super chain, not by name: once per class, so the walk never pays for it.
+    if (auto* uc = unit_class()) {
+        for (API::UStruct* s = cls; s != nullptr; s = s->get_super_struct())
+            if (s == uc) { k |= kScanUnit; break; }
+    }
     s_scan_classes.put(cls, k);
     return k;
 }
@@ -596,7 +613,7 @@ uint32_t ride_scan_request(bool force_new) {
     ++s_scan_serial;
     s_scan_walk_gen = s_scan_gen;
     s_scan_ticks = 0; s_scan_ms = 0.0; s_scan_max_ms = 0.0;
-    s_walk_chassis.clear(); s_walk_bodies.clear(); s_walk_parts.clear();
+    s_walk_chassis.clear(); s_walk_bodies.clear(); s_walk_parts.clear(); s_walk_units.clear();
     s_scan_classes.clear(); s_scan_owners.clear();
     return s_scan_serial;
 }
@@ -627,10 +644,15 @@ void ride_scan_step() {
         auto* c = o->get_class();
         if (c == nullptr) continue;
         const uint8_t k = scan_class_kind(c);
-        if ((k & kScanMesh) == 0) continue;
+        if ((k & (kScanMesh | kScanUnit)) == 0) continue;
         auto* owner = o->get_outer();
         if (owner == nullptr) continue;
         const uint8_t ok = scan_owner_kind(owner);
+        if ((k & kScanUnit) != 0) {
+            // A VEHICLE's Blam unit (a biped's is skipped): asked for its seats by the seat resolve.
+            if ((ok & kScanVehicle) != 0 && (ok & kScanPersistent) != 0) s_walk_units.push_back({o, i, owner});
+            continue;
+        }
         if ((k & kScanSkm) != 0 && (ok & kScanVehicle) != 0 && (ok & kScanPersistent) != 0)
             s_walk_chassis.push_back({o, i, owner});
         if ((ok & kScanSpartan) != 0) {
@@ -652,11 +674,13 @@ void ride_scan_step() {
     s_res_chassis.swap(s_walk_chassis);
     s_res_bodies.swap(s_walk_bodies);
     s_res_parts.swap(s_walk_parts);
+    s_res_units.swap(s_walk_units);
     s_scan_done = s_scan_serial;
     s_scan_result_gen = s_scan_walk_gen;
     API::get()->log_info("[Halo-CampE-UEVR] VEHSCAN: %d objects in %d tick(s), %.1f ms of work (%.1f ms at most in one "
-                         "tick): %d vehicle meshes, %d Spartan bodies",
-                         n, s_scan_ticks, s_scan_ms, s_scan_max_ms, (int)s_res_chassis.size(), (int)s_res_bodies.size());
+                         "tick): %d vehicle meshes, %d Spartan bodies, %d vehicle units",
+                         n, s_scan_ticks, s_scan_ms, s_scan_max_ms, (int)s_res_chassis.size(), (int)s_res_bodies.size(),
+                         (int)s_res_units.size());
 }
 
 // Is this hit still the object it was? Its slot must still hold it.
@@ -793,6 +817,213 @@ std::wstring find_head_bone(API::UObject* body, int32_t* nbones) {
         if (rank < best_rank) { best_rank = rank; best = n; }
     }
     return best;
+}
+
+// ---------------------------------------------------------------- THE SEAT, AS THE GAME REPORTS IT
+//
+// WHICH VEHICLE YOU ARE IN, AND IN WHICH SEAT -- asked of the game, not guessed. Every Blam unit's UE
+// component (BlamUnitComponent) answers GetSeatStates(): one FBlamUnitSeatState per seat, naming its
+// occupant (SeatedUnitActor) and its role (bIsDriver, bIsGunner, bOccupied). Every offset comes from the
+// game's own reflection, by field NAME, so this resolves on any build that keeps those names and fails
+// closed -- the nearest mesh decides, as before -- on one that does not. Nothing is measured on one build.
+//
+// WHY. The nearest vehicle mesh is not always your vehicle's. In the Wraith's driver seat the
+// anti-infantry turret's mesh is nearer than the Wraith's own, so the driver was handed the turret's
+// cameras (the user, 2026-09-26). And a passenger rides the same actor as its driver, which no distance
+// tells apart. The game's own Blueprint asks exactly this (BP_Audio_VehiclePlayerRoleProvider.GetDriverSeatState).
+//
+// The field names were read out of the game executable's reflection strings on 2026-09-26:
+// SeatedUnitActor, SeatedUnitDatumIndex, bNotForPlayer, bOccupied, bIsBoardingSeat, bSeatAllowsWeapons,
+// bIsGunner, bIsDriver, bIsInvisible, EntryRadius, SeatWorldPosition. GAME THREAD: reflection calls.
+
+std::wstring ffield_name(API::FField* f) {
+    auto* n = (f != nullptr) ? f->get_fname() : nullptr;
+    return (n != nullptr) ? n->to_string() : std::wstring{};
+}
+std::wstring ffield_type(API::FField* f) {
+    auto* c = (f != nullptr) ? f->get_class() : nullptr;
+    auto* n = (c != nullptr) ? c->get_fname() : nullptr;
+    return (n != nullptr) ? n->to_string() : std::wstring{};
+}
+
+struct SeatRefl {
+    int state = -1;                            // -1 not tried, 0 unusable (fail closed), 1 ready
+    API::UFunction* fn = nullptr;
+    int32_t psize = 0;                         // the function's parameter block, the engine's own size
+    int32_t arr_off = -1;                      // the TArray<FBlamUnitSeatState> in it (return or out)
+    int32_t elem = 0;                          // sizeof(FBlamUnitSeatState)
+    int32_t actor_off = -1; int actor_kind = 0;    // SeatedUnitActor: 1 = object pointer, 2 = weak pointer
+    int32_t occ_off = -1, drv_off = -1, gun_off = -1;       // bOccupied / bIsDriver / bIsGunner: the byte...
+    uint8_t occ_mask = 0, drv_mask = 0, gun_mask = 0;       // ...and its bit
+};
+SeatRefl s_sr;
+
+bool seat_refl_ready() {
+    if (s_sr.state >= 0) return s_sr.state == 1;
+    s_sr.state = 0;
+    auto* uc = unit_class();
+    s_sr.fn = (uc != nullptr) ? uc->find_function(L"GetSeatStates") : nullptr;
+    if (s_sr.fn == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: BlamUnitComponent.GetSeatStates not found (class %s) -- "
+                             "vehicles are told by the nearest mesh", uc != nullptr ? "found" : "NOT FOUND");
+        return false;
+    }
+    s_sr.psize = s_sr.fn->get_properties_size();
+    API::UScriptStruct* st = nullptr;
+    for (auto* f = s_sr.fn->get_child_properties(); f != nullptr; f = f->get_next()) {
+        if (ffield_type(f) != L"ArrayProperty") continue;
+        auto* inner = reinterpret_cast<API::FArrayProperty*>(f)->get_inner();
+        if (inner == nullptr || ffield_type(inner) != L"StructProperty") continue;
+        st = reinterpret_cast<API::FStructProperty*>(inner)->get_struct();
+        s_sr.arr_off = reinterpret_cast<API::FProperty*>(f)->get_offset();
+        break;
+    }
+    if (st != nullptr) {
+        s_sr.elem = st->get_struct_size();
+        for (auto* f = st->get_child_properties(); f != nullptr; f = f->get_next()) {
+            const std::wstring n = ffield_name(f), ty = ffield_type(f);
+            auto* p = reinterpret_cast<API::FProperty*>(f);
+            if (n == L"SeatedUnitActor") {
+                s_sr.actor_off = p->get_offset();
+                s_sr.actor_kind = (ty == L"ObjectProperty" || ty == L"ObjectPtrProperty") ? 1
+                                : (ty == L"WeakObjectProperty") ? 2 : 0;
+            } else if (ty == L"BoolProperty" && (n == L"bOccupied" || n == L"bIsDriver" || n == L"bIsGunner")) {
+                auto* b = reinterpret_cast<API::FBoolProperty*>(f);
+                const int32_t off = p->get_offset() + static_cast<int32_t>(b->get_byte_offset());
+                const uint8_t mask = static_cast<uint8_t>(b->get_byte_mask());
+                if (n == L"bOccupied")      { s_sr.occ_off = off; s_sr.occ_mask = mask; }
+                else if (n == L"bIsDriver") { s_sr.drv_off = off; s_sr.drv_mask = mask; }
+                else                        { s_sr.gun_off = off; s_sr.gun_mask = mask; }
+            }
+#if HALO_VR_DEV
+            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   field %-24ls %-20ls +%d", n.c_str(), ty.c_str(), p->get_offset());
+#endif
+        }
+    }
+    const bool ok = st != nullptr && s_sr.psize > 0 && s_sr.arr_off >= 0 && s_sr.arr_off + 16 <= s_sr.psize
+                 && s_sr.elem > 0 && s_sr.actor_kind != 0 && s_sr.actor_off >= 0 && s_sr.actor_off + 8 <= s_sr.elem;
+    API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: GetSeatStates %s -- params %d, array +%d, seat %d bytes, "
+                         "occupant +%d (%s), occupied +%d, driver +%d, gunner +%d",
+                         ok ? "ready" : "UNUSABLE, vehicles are told by the nearest mesh",
+                         s_sr.psize, s_sr.arr_off, s_sr.elem, s_sr.actor_off,
+                         s_sr.actor_kind == 1 ? "pointer" : (s_sr.actor_kind == 2 ? "weak" : "?"),
+                         s_sr.occ_off, s_sr.drv_off, s_sr.gun_off);
+    s_sr.state = ok ? 1 : 0;
+    return ok;
+}
+
+struct SeatRow { API::UObject* occupant; bool occupied, driver, gunner; };
+
+// One unit's seats, into rows (at most max). Returns the seat count, or -1 when the call gave nothing
+// usable. The returned array belongs to us once the native thunk has built it into our frame, so it is
+// freed here through the engine's own allocator -- every field of FBlamUnitSeatState is plain data.
+int read_seats(API::UObject* unit, SeatRow* rows, int max) {
+    static std::vector<uint8_t> buf;
+    buf.assign(static_cast<size_t>(s_sr.psize), 0);
+    unit->process_event(s_sr.fn, buf.data());
+    struct FRawArray { uint8_t* data; int32_t num; int32_t max; };
+    auto* arr = reinterpret_cast<FRawArray*>(buf.data() + s_sr.arr_off);
+    int n = -1;
+    if (arr->data == nullptr && arr->num == 0) {
+        n = 0;
+    } else if (arr->data != nullptr && arr->num > 0 && arr->num <= 64 && arr->max >= arr->num
+               && !IsBadReadPtr(arr->data, static_cast<size_t>(arr->num) * static_cast<size_t>(s_sr.elem))) {
+        n = arr->num;
+        auto* objs = API::get()->get_uobject_array();
+        for (int i = 0; i < n && i < max; ++i) {
+            const uint8_t* e = arr->data + static_cast<size_t>(i) * static_cast<size_t>(s_sr.elem);
+            SeatRow& r = rows[i];
+            r.occupant = nullptr;
+            if (s_sr.actor_kind == 1) {
+                r.occupant = *reinterpret_cast<API::UObject* const*>(e + s_sr.actor_off);
+            } else {
+                // TWeakObjectPtr { int32 ObjectIndex; int32 SerialNumber }: resolved through the object array,
+                // only ever compared, never followed.
+                const int32_t idx = *reinterpret_cast<const int32_t*>(e + s_sr.actor_off);
+                if (objs != nullptr && idx >= 0 && idx < objs->get_object_count())
+                    r.occupant = reinterpret_cast<API::UObject*>(objs->get_object(idx));
+            }
+            auto bit = [&](int32_t off, uint8_t mask) { return off >= 0 && off < s_sr.elem && (e[off] & mask) != 0; };
+            r.occupied = (s_sr.occ_off >= 0) ? bit(s_sr.occ_off, s_sr.occ_mask) : r.occupant != nullptr;
+            r.driver = bit(s_sr.drv_off, s_sr.drv_mask);
+            r.gunner = bit(s_sr.gun_off, s_sr.gun_mask);
+        }
+    }
+    if (arr->data != nullptr) {
+        if (auto* m = API::FMalloc::get()) m->free(arr->data);
+    }
+    arr->data = nullptr; arr->num = 0; arr->max = 0;
+    return n;
+}
+
+// The last answer. The vehicle actor holding your seat, its unit, the seat, its role (vcp::SeatRole).
+struct SeatFix {
+    bool valid = false;
+    API::UObject* actor = nullptr;
+    API::UObject* unit = nullptr;
+    int32_t unit_idx = -1;
+    int seat = -1, nseats = 0;
+    int role = -1;
+};
+SeatFix s_seat;
+// The OTHER vehicles near you that have seats of their own -- never your chassis, when yours has no mesh.
+API::UObject* s_seat_others[8];
+int s_seat_other_n = 0;
+
+// Ask the vehicles within 15 m, nearest first, which one lists YOU in a seat. me = the actors that are
+// you (the pawn, and the Spartan biped the body hider picks). Nearest wins if more than one does.
+bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* out) {
+    *out = SeatFix{};
+    s_seat_other_n = 0;
+    if (!seat_refl_ready()) return false;
+    constexpr int kMax = 12;
+    const ScanHit* cand[kMax]; double cd[kMax]; int nc = 0;
+    for (const ScanHit& h : s_res_units) {
+        if (h.owner == nullptr || !scan_hit_live(h)) continue;
+        Vec3 w{};
+        if (!call_ret_vec3(h.owner, L"K2_GetActorLocation", &w)) continue;
+        const double d = std::sqrt(((double)w.x - p[0]) * ((double)w.x - p[0]) + ((double)w.y - p[1]) * ((double)w.y - p[1])
+                                 + ((double)w.z - p[2]) * ((double)w.z - p[2]));
+        if (d > 1500.0) continue;
+        if (nc == kMax && d >= cd[kMax - 1]) continue;       // full, and farther than the farthest kept
+        int at = (nc < kMax) ? nc++ : kMax - 1;               // append, or replace the farthest
+        while (at > 0 && cd[at - 1] > d) { cand[at] = cand[at - 1]; cd[at] = cd[at - 1]; --at; }
+        cand[at] = &h; cd[at] = d;
+    }
+    SeatRow rows[16];
+    int found = 0;
+    for (int k = 0; k < nc; ++k) {
+        const int n = read_seats(cand[k]->o, rows, 16);
+        if (n <= 0) continue;
+        int mine = -1;
+        for (int i = 0; i < n && i < 16 && mine < 0; ++i)
+            for (int m = 0; m < nme; ++m)
+                if (me[m] != nullptr && rows[i].occupant == me[m]) { mine = i; break; }
+        if (mine < 0) {
+            if (s_seat_other_n < 8) s_seat_others[s_seat_other_n++] = cand[k]->owner;
+            continue;
+        }
+        if (++found > 1) {
+            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: %ls also lists you (seat %d) -- the nearer vehicle is kept",
+                                 cand[k]->owner->get_full_name().c_str(), mine);
+            continue;
+        }
+        out->valid = true;
+        out->actor = cand[k]->owner; out->unit = cand[k]->o; out->unit_idx = cand[k]->i;
+        out->seat = mine; out->nseats = n;
+        out->role = rows[mine].driver ? static_cast<int>(vehcampresets::SeatRole::Driver)
+                  : rows[mine].gunner ? static_cast<int>(vehcampresets::SeatRole::Gunner)
+                                      : static_cast<int>(vehcampresets::SeatRole::Passenger);
+#if HALO_VR_DEV
+        for (int i = 0; i < n && i < 16; ++i)
+            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls%s", i,
+                                 rows[i].driver ? "driver " : "", rows[i].gunner ? "gunner " : "",
+                                 rows[i].occupied ? "occupied" : "empty",
+                                 rows[i].occupant != nullptr ? rows[i].occupant->get_full_name().c_str() : L"none",
+                                 i == mine ? "  <-- YOU" : "");
+#endif
+    }
+    return out->valid;
 }
 
 } // namespace
@@ -1217,37 +1448,73 @@ bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out) {
 }
 
 namespace {
-// The resolved chassis's full object name ("...BP_BansheeVehicleActor_C_<id>.hull"): the camera file
-// picks a vehicle's cameras by matching it. GAME THREAD.
+// The resolved chassis's full object name ("...BP_BansheeVehicleActor_C_<id>.hull"), for the log.
 std::wstring s_tp_chassis_name;
+// What the camera file is matched against: the vehicle actor your SEAT belongs to when the game has said
+// (seat_resolve), else the chassis mesh's name. GAME THREAD.
+std::wstring s_tp_match_name;
 
-// GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
-// vehicle the player is in, from the last finished RIDE SCAN (the walk itself is spread over ticks
-// there). No name gate (chassis naming varies: Banshee ".hull", Wraith "SK_WraithMortar"). The next
-// two nearest are logged beside it, so a seat that picks the wrong mesh names the alternatives --
-// the Warthog driver's seat is suspected of seeing the chaingun first. True = resolved.
-bool pick_tp_chassis() {
+// Who "you" are to the seat resolve: the pawn, and the Spartan biped the body hider would pick.
+int seat_me(API::UObject** me, double p[3]) {
     auto* pawn = API::get()->get_local_pawn(0);
     Vec3 ploc{};
-    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &ploc)) return false;
-    const double px = (double)ploc.x, py = (double)ploc.y, pz = (double)ploc.z;
+    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &ploc)) return 0;
+    p[0] = (double)ploc.x; p[1] = (double)ploc.y; p[2] = (double)ploc.z;
+    me[0] = pawn;
+    me[1] = nullptr;
+    if (const ScanHit* b = ride_scan_pick_driver_body()) me[1] = b->owner;
+    return 2;
+}
+
+// GAME THREAD. THE VEHICLE YOU ARE IN, and the mesh the cameras use as its frame, from the last finished
+// RIDE SCAN (the walk itself is spread over ticks there). The game names the vehicle actor holding your
+// seat (seat_resolve) -- that actor's own mesh is the chassis, and that actor is what the camera file
+// matches. When the game does not say, or that actor has no mesh of its own, the nearest VehicleActor
+// SkeletalMeshComponent to the pawn stands in, skipping the meshes of OTHER vehicles near you that have
+// seats (from the Wraith's driver seat the anti-infantry turret's mesh is the nearer one). No name gate
+// (chassis naming varies: Banshee ".hull", Wraith "SK_WraithMortar"). The next two nearest are logged
+// beside it. `known` = a seat already resolved by the caller. True = resolved.
+bool pick_tp_chassis(const SeatFix* known = nullptr) {
+    API::UObject* me[2] = {};
+    double pp[3] = {};
+    if (seat_me(me, pp) == 0) return false;
+    const double px = pp[0], py = pp[1], pz = pp[2];
+    if (known != nullptr) s_seat = *known;
+    else seat_resolve(me, 2, pp, &s_seat);
+
+    auto other_seated = [](API::UObject* owner) {
+        for (int i = 0; i < s_seat_other_n; ++i) if (s_seat_others[i] == owner) return true;
+        return false;
+    };
+    // pass 0: your seat's own vehicle (up to 30 m: it IS yours); 1: the nearest within 8 m, skipping other
+    // seated vehicles; 2: the nearest within 8 m.
+    static const wchar_t* const kWhy[] = { L"your seat's vehicle (the game)", L"nearest, skipping other seated vehicles",
+                                           L"nearest" };
     const ScanHit* cand[3] = {nullptr, nullptr, nullptr};
     double nd[3] = {1e18, 1e18, 1e18};
-    for (const ScanHit& h : s_res_chassis) {
-        if (!scan_hit_live(h)) continue;
-        Vec3 w{}; if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
-        const double d = std::sqrt(((double)w.x - px) * ((double)w.x - px)
-                                 + ((double)w.y - py) * ((double)w.y - py)
-                                 + ((double)w.z - pz) * ((double)w.z - pz));
-        for (int k = 0; k < 3; ++k) {
-            if (d < nd[k]) {
-                for (int m = 2; m > k; --m) { nd[m] = nd[m - 1]; cand[m] = cand[m - 1]; }
-                nd[k] = d; cand[k] = &h;
-                break;
+    int used = -1;
+    for (int pass = s_seat.valid ? 0 : 1; pass <= 2 && used < 0; ++pass) {
+        cand[0] = cand[1] = cand[2] = nullptr;
+        nd[0] = nd[1] = nd[2] = 1e18;
+        for (const ScanHit& h : s_res_chassis) {
+            if (!scan_hit_live(h)) continue;
+            if (pass == 0 && h.owner != s_seat.actor) continue;
+            if (pass == 1 && other_seated(h.owner)) continue;
+            Vec3 w{}; if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
+            const double d = std::sqrt(((double)w.x - px) * ((double)w.x - px)
+                                     + ((double)w.y - py) * ((double)w.y - py)
+                                     + ((double)w.z - pz) * ((double)w.z - pz));
+            for (int k = 0; k < 3; ++k) {
+                if (d < nd[k]) {
+                    for (int m = 2; m > k; --m) { nd[m] = nd[m - 1]; cand[m] = cand[m - 1]; }
+                    nd[k] = d; cand[k] = &h;
+                    break;
+                }
             }
         }
+        if (cand[0] != nullptr && nd[0] < (pass == 0 ? 3000.0 : 800.0)) used = pass;
     }
-    if (cand[0] == nullptr || nd[0] >= 800.0) {   // within 8 m of the pawn = the vehicle it is in
+    if (used < 0) {   // within 8 m of the pawn = the vehicle it is in
         API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no VehicleActor mesh within 8 m of pawn "
                              "(best %.0f, pawn %.0f %.0f %.0f, %d candidates)",
                              cand[0] != nullptr ? nd[0] : -1.0, px, py, pz, (int)s_res_chassis.size());
@@ -1256,6 +1523,7 @@ bool pick_tp_chassis() {
     g_tp_chassis_ptr.store((uintptr_t)cand[0]->o, std::memory_order_relaxed);
     g_tp_chassis_idx.store(cand[0]->i, std::memory_order_relaxed);
     s_tp_chassis_name = cand[0]->o->get_full_name();
+    s_tp_match_name = s_seat.valid ? s_seat.actor->get_full_name() : s_tp_chassis_name;
     std::wstring alt;
     for (int k = 1; k < 3; ++k) {
         if (cand[k] == nullptr) break;
@@ -1264,8 +1532,15 @@ bool pick_tp_chassis() {
         alt += cand[k]->o->get_full_name();
         alt += d;
     }
-    API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f) -- next nearest: %ls",
-                         s_tp_chassis_name.c_str(), nd[0], px, py, pz, alt.empty() ? L"none" : alt.c_str() + 2);
+    if (s_seat.valid)
+        API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: the game seats you in %ls, seat %d of %d (%s)",
+                             s_tp_match_name.c_str(), s_seat.seat + 1, s_seat.nseats,
+                             vehcampresets::seat_role_name(static_cast<vehcampresets::SeatRole>(s_seat.role)));
+    else if (seat_refl_ready())
+        API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: no vehicle within 15 m lists you in a seat (%d nearby with "
+                             "seats) -- the nearest mesh decides", s_seat_other_n);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f), %ls -- next nearest: %ls",
+                         s_tp_chassis_name.c_str(), nd[0], px, py, pz, kWhy[used], alt.empty() ? L"none" : alt.c_str() + 2);
     return true;
 }
 
@@ -1760,11 +2035,31 @@ void vehcam_game_tick_vehicle() {
             g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
             g_tp_seat_valid.store(false, std::memory_order_relaxed);
             s_ch_wait = 0; s_ch_retry = 0;
+            s_seat = SeatFix{};
+            s_tp_match_name.clear();
         }
         s_sys_was = sys;
 
+        // THE SEAT, asked again every ~2 s while riding: the game may name it a moment after you get in, and
+        // a seat swap changes it. A newly named or different seat re-picks the vehicle -- and with it the
+        // camera entry and the frame. An answer that goes missing keeps the one you have.
+        if (sys && g_tp_chassis_ptr.load(std::memory_order_relaxed) != 0) {
+            static uint32_t s_seat_tick = 0;
+            if ((++s_seat_tick % 64u) == 0u && seat_refl_ready()) {
+                API::UObject* me[2] = {};
+                double pp[3] = {};
+                SeatFix now;
+                if (seat_me(me, pp) != 0 && seat_resolve(me, 2, pp, &now)
+                    && (!s_seat.valid || now.actor != s_seat.actor || now.seat != s_seat.seat || now.role != s_seat.role)) {
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: your seat is %s now -- choosing the vehicle again",
+                                         s_seat.valid ? "different" : "named");
+                    pick_tp_chassis(&now);
+                }
+            }
+        }
+
         const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
-        vehcam_select_tick(sys, cp, s_tp_chassis_name);
+        vehcam_select_tick(sys, cp, s_tp_match_name, s_seat.valid ? s_seat.role : -1);
         // The tick the chassis resolved, the camera was selected just now -- AFTER this tick's body hide
         // ran. Run it again so a seat camera's first frames are not drawn from inside your own body.
         if (resolved_now) driver_hide_update();

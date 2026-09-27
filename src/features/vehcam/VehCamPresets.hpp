@@ -13,8 +13,10 @@
 //       "default": { "cameras": [ ... ] } } }
 //
 // A vehicle is picked by the entry with the LONGEST "match" string (case-insensitive substrings; the
-// entry's own key when absent) found in the vehicle actor's name, the earlier entry on a tie -- so a seat
-// with an actor of its own gets its own entry wherever it sits in the file; "default" catches the rest. A camera
+// entry's own key when absent) found in the name of the vehicle actor your seat belongs to, the earlier
+// entry on a tie -- so a seat with an actor of its own gets its own entry wherever it sits in the file. An
+// entry may also name its "seat" (driver / gunner / passenger), which tells apart seats that share one
+// actor, such as the Warthog's driver and passenger; "default" catches the rest. A camera
 // field the file leaves out takes its built-in default. Keys starting with '_' are notes and ignored.
 // The first release of the file said "viewFollows" / "offsetRides"; both are still read.
 //
@@ -52,13 +54,21 @@ struct Camera {
     bool hides_body() const { return hide_body < 0 ? origin != Origin::Vehicle : hide_body != 0; }
 };
 
+// THE SEAT YOU ARE IN, as the GAME reports it (BlamUnitComponent.GetSeatStates: bIsDriver / bIsGunner on
+// the seat whose occupant is you). Driver wins over gunner when a seat says both. Unknown = the game did
+// not say: seat detection unavailable on this build, or not read yet this ride.
+enum class SeatRole : int8_t { Unknown = -1, Driver = 0, Gunner = 1, Passenger = 2 };
+
 struct Vehicle {
     std::string name;                 // the entry's key
     std::vector<std::string> match;   // lower-case substrings of the vehicle actor's name
     bool  is_default = false;         // the "default" entry: never matched by name
     int   default_camera = 0;
     int   motion_aim = -1;            // -1 = the global vehaim key; 0 / 1 = off / on for this vehicle
-    bool  aim_marker = true;          // "aimMarker": a ring where the VEHICLE points, beside the crosshair
+    bool  aim_marker = true;          // "aimMarker": a ring where the VEHICLE aims, beside the crosshair
+    // "seat": the seats this entry is for, as bits (1 << SeatRole); 0 = any seat. A passenger rides the
+    // same vehicle actor as its driver, so this is what tells their entries apart. Ignored on "default".
+    uint8_t seats = 0;
     std::vector<Camera> cameras;
 };
 
@@ -85,12 +95,14 @@ ParseResult table_from_json(const char* text, std::size_t len, Table& out);
 // The table as the file format, with a short guide at the top. from_json(to_json(t)) == t.
 std::string table_to_json(const Table& t);
 
-// Index of the entry for this vehicle actor name (case-insensitive substring match, the longest match,
-// then file order), else the "default" entry, else -1.
-int match_vehicle(const Table& t, const std::string& actor_name);
+// Index of the entry for this vehicle actor name and seat (case-insensitive substring match; an entry with
+// a "seat" list is considered only when the seat's role is known and listed; the longest match wins, then
+// an entry with a seat list over one without, then file order), else the "default" entry, else -1.
+int match_vehicle(const Table& t, const std::string& actor_name, SeatRole seat = SeatRole::Unknown);
 
 const char* type_name(CamType t);
 const char* origin_name(Origin o);
+const char* seat_role_name(SeatRole s);   // "driver" / "gunner" / "passenger" / "unknown"
 
 // For readouts and logs: "Yaw, Pitch, Roll" / "Pitch, Roll" / "None"; location adds "Your view (orbit)".
 std::string rotation_tracking_text(const Camera& c);
