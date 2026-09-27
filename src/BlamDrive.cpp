@@ -1036,6 +1036,14 @@ static void drive_angles_impl(bool off_thread) {
         // through the point the controller's world ray hits (VehCam.cpp) -- so it must NOT also be
         // bent by aim_converge_apply, whose delta and range describe the infantry eye, not this
         // geometry. Only reachable in a vehicle with the owned third-person camera on.
+    } else if (g_stick_mode_active.load(std::memory_order_relaxed) && g_cfg.veh_aim_ray) {
+        // IN A VEHICLE WITH NO FRESH RAY SOLUTION -- the first ticks of a ride, before our camera has
+        // drawn; the controller losing tracking; a failed pawn read. HOLD: leave the record as it is.
+        // Falling through to desired_aim_now() below would aim the vehicle with the INFANTRY mapping,
+        // which in a vehicle reads 70-90 deg off the camera (measured 2026-09-23) -- a lurch on every
+        // tracking blip. (Stick mode reaches here only with vehicle motion aim on; see the gate above.
+        // vehaimray=0 is the deliberate infantry-mapping A/B, and still takes the path below.)
+        return;
     } else {
         if (!desired_aim_now(&yaw, &pitch)) return;
 
