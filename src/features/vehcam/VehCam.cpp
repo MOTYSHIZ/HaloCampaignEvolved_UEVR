@@ -1756,6 +1756,17 @@ bool veh_aim_ray_angles(float* yaw, float* pitch) {
 namespace {
 float veh_cm_per_m() { return halo::uevr_cm_per_metre_cached(); }
 
+// UEVR'S ROTATION OFFSET -- what its "Recenter View" writes. UEVR draws the view AND the hands as
+// rotation_offset . (pose - standing_origin), in VR space before the axis swap (FFakeStereoRenderingHook.cpp
+// calculate_stereo_view_offset; UObjectHook.cpp for the hands). A raw get_pose() leaves it out, so every
+// room -> world step here puts it back: without it, after a Recenter View the pointing ray, the head capture
+// and the recenter all turned by its angle away from the hand you see. The on-foot rig applies the same
+// value (Plugin.cpp, q_ro). GAME THREAD: the tick and the eye.
+Quat veh_rotation_offset() {
+    const auto ro = API::VR::get_rotation_offset();
+    return quat_normalize(Quat{ro.x, ro.y, ro.z, ro.w});
+}
+
 // The range the reticule and the aim use: the held measurement, or the far end of the ray before this
 // ride has measured anything. ONE rule for the tick and the per-frame stamp, so they cannot disagree.
 float veh_aim_range_eff() {
@@ -1765,7 +1776,8 @@ float veh_aim_range_eff() {
 }
 
 // The controller's world ray EXACTLY as UEVR draws it in our third-person camera:
-//     world = view_base + R(view) . swizzle(room - standing_origin) . (100 x VR_WorldScale)
+//     world = view_base + R(view) . swizzle(ro . (room - standing_origin)) . (100 x VR_WorldScale)
+// where ro is UEVR's rotation offset (veh_rotation_offset), applied in VR space before the swizzle.
 // -- the transform the head gets too (the anchor capture in the eye uses the same one). R(view) is the
 // FULL view rotation: a camera that tilts with the vehicle tilts the whole tracking space, hands included,
 // and UEVR composes it as UE's own rotator (yaw, then pitch, then roll -- FFakeStereoRenderingHook.cpp's
@@ -1781,14 +1793,17 @@ void veh_room_ray(const Vec3& cpos, const Vec3& fwd, const double base[3],
     const double rs = (double)veh_cm_per_m();
     double X[3], Y[3], Z[3];
     rot_axes(view_pitch, view_yaw, view_roll, X, Y, Z);
+    const Quat ro = veh_rotation_offset();
+    const Vec3 rel = quat_rotate(ro, Vec3{cpos.x - so.x, cpos.y - so.y, cpos.z - so.z});
+    const Vec3 rf  = quat_rotate(ro, fwd);
     // room -> UE: X = -z, Y = x, Z = y. Same rotation as the eye's anchor subtraction.
-    const double lx = -((double)cpos.z - (double)so.z) * rs;
-    const double ly =  ((double)cpos.x - (double)so.x) * rs;
-    const double lz =  ((double)cpos.y - (double)so.y) * rs;
+    const double lx = -(double)rel.z * rs;
+    const double ly =  (double)rel.x * rs;
+    const double lz =  (double)rel.y * rs;
     *o = Vec3{ (float)(base[0] + lx * X[0] + ly * Y[0] + lz * Z[0]),
                (float)(base[1] + lx * X[1] + ly * Y[1] + lz * Z[1]),
                (float)(base[2] + lx * X[2] + ly * Y[2] + lz * Z[2]) };
-    const double fx = -(double)fwd.z, fy = (double)fwd.x, fz = (double)fwd.y;
+    const double fx = -(double)rf.z, fy = (double)rf.x, fz = (double)rf.y;
     double dx = fx * X[0] + fy * Y[0] + fz * Z[0];
     double dy = fx * X[1] + fy * Y[1] + fz * Z[1];
     double dz = fx * X[2] + fy * Y[2] + fz * Z[2];
@@ -3329,17 +3344,23 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // offset then describes a room that is gone: you sit off the camera's point by however far you
             // had been from the old origin (the user, 2026-09-27: "slightly offset" after a system reset).
             // With the leash off nothing of ours moves the origin under this camera, so a move of it IS that
-            // recentre: re-capture, and your head goes back on the camera's point.
+            // recentre: re-capture, and your head goes back on the camera's point. UEVR's own Recenter View
+            // moves no origin: it writes only its rotation offset, which the capture applies as UEVR does
+            // (veh_rotation_offset) -- so a turn of THAT is a recentre too.
             static UEVR_Vector3f s_so_seen{};
+            static Quat s_ro_seen{0.0f, 0.0f, 0.0f, 1.0f};
             static bool s_so_have = false;
             bool origin_moved = false;
             if (!leash) {
                 const auto so = API::VR::get_standing_origin();
+                const Quat ro = veh_rotation_offset();
                 if (s_so_have) {
                     const float dx = so.x - s_so_seen.x, dy = so.y - s_so_seen.y, dz = so.z - s_so_seen.z;
-                    origin_moved = dx * dx + dy * dy + dz * dz > 0.01f * 0.01f;   // 1 cm: a reset, not float noise
+                    origin_moved = dx * dx + dy * dy + dz * dz > 0.01f * 0.01f    // 1 cm: a reset, not float noise
+                                || std::fabs(quat_dot(ro, s_ro_seen)) < 0.99999f;  // ~0.5 deg of offset turn
                 }
                 s_so_seen = so;
+                s_ro_seen = ro;
                 s_so_have = true;
             } else {
                 s_so_have = false;   // the leash moves it every tick: not a signal while it runs
@@ -3388,9 +3409,11 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
                         const auto so = API::VR::get_standing_origin();
                         const double rs = (double)halo::veh_cm_per_m(); // UE cm per real metre, LIVE world scale
-                        s_c0[0] = -((double)hp.z - (double)so.z) * rs; // room -> UE: X = -z, Y = x, Z = y
-                        s_c0[1] =  ((double)hp.x - (double)so.x) * rs;
-                        s_c0[2] =  ((double)hp.y - (double)so.y) * rs;
+                        // UEVR's rotation offset first, in VR space: the head as UEVR draws it.
+                        const Vec3 rel = quat_rotate(veh_rotation_offset(), Vec3{hp.x - so.x, hp.y - so.y, hp.z - so.z});
+                        s_c0[0] = -(double)rel.z * rs; // room -> UE: X = -z, Y = x, Z = y
+                        s_c0[1] =  (double)rel.x * rs;
+                        s_c0[2] =  (double)rel.y * rs;
                     }
                 }
             }
@@ -3528,7 +3551,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     have = hi >= 0 && get_pose(hi, &sp, &sq, /*use_aim=*/false);
                 }
                 if (have) {
-                    const double src = vehcammath::pose_yaw_deg(sq.x, sq.y, sq.z, sq.w);
+                    // Where it points as UEVR DRAWS it: its rotation offset composed in first (VR space).
+                    const Quat sd = quat_mul(veh_rotation_offset(), sq);
+                    const double src = vehcammath::pose_yaw_deg(sd.x, sd.y, sd.z, sd.w);
                     halo::g_veh_turn_reset_val.store((float)vehcammath::recenter_turn_deg(tgt, F0, R0, src),
                                                      std::memory_order_relaxed);
                     halo::g_veh_turn_reset_seq.fetch_add(1, std::memory_order_release);
