@@ -295,6 +295,13 @@ struct Apply {
         out.name = key;
         out.is_default = ieq(key, "default");
         bool have_match = false, have_cams = false;
+        // The seat's leash FIRST, wherever the file puts it: every camera starts from it (a camera, and then a
+        // tethering mode, may override it), and "cameras" may well come before it in the file.
+        for (std::size_t k = 0; k < v.keys.size(); ++k) {
+            const std::string& fk = v.keys[k];
+            if (fk == "leashMin" && !leash(v.items[k], where + "." + fk, out.leash_min, /*is_min=*/true)) return false;
+            if (fk == "leashMax" && !leash(v.items[k], where + "." + fk, out.leash_max, /*is_min=*/false)) return false;
+        }
         for (std::size_t k = 0; k < v.keys.size(); ++k) {
             const std::string& fk = v.keys[k];
             const Value& x = v.items[k];
@@ -337,6 +344,8 @@ struct Apply {
             } else if (fk == "aimMarker") {
                 if (!x.is_bool()) return type_error(x, w, "true or false");
                 out.aim_marker = x.b;
+            } else if (fk == "leashMin" || fk == "leashMax") {
+                continue;   // read above, before the cameras
             } else if (fk == "seat") {
                 // "passenger", or a list of them; [] or null = any seat.
                 out.seats = 0;
@@ -367,6 +376,7 @@ struct Apply {
                 if (static_cast<int>(x.items.size()) > kMaxCameras) return type_error(x, w, "at most 16 cameras");
                 for (std::size_t i = 0; i < x.items.size(); ++i) {
                     Camera c;
+                    for (int j = 0; j < 3; ++j) { c.leash_min[j] = out.leash_min[j]; c.leash_max[j] = out.leash_max[j]; }
                     if (!camera(x.items[i], w + "[" + std::to_string(i) + "]", c)) return false;
                     out.cameras.push_back(c);
                 }
@@ -624,6 +634,8 @@ std::string table_to_json(const Table& t, bool guide) {
         if (v.motion_aim >= 0) s += std::string("      \"motionAim\": ") + (v.motion_aim ? "true" : "false") + ",\n";
         s += std::string("      \"aimMarker\": ") + (v.aim_marker ? "true" : "false") + ",\n";
         if (v.hide_head) s += "      \"hideHead\": true,\n";
+        if (leash_set(v.leash_min)) s += "      \"leashMin\": " + leash_json(v.leash_min) + ",\n";
+        if (leash_set(v.leash_max)) s += "      \"leashMax\": " + leash_json(v.leash_max) + ",\n";
         if (v.seats != 0) {
             std::string roles;
             for (const SeatRole r : {SeatRole::Driver, SeatRole::Gunner, SeatRole::Passenger})
@@ -644,8 +656,9 @@ std::string table_to_json(const Table& t, bool guide) {
             s += std::string("\"type\": \"") + type_name(c.type) + "\""
                + ", \"origin\": " + quoted(origin_text(c.origin, c.origin_socket))
                + ", \"offset\": [" + fmt_num(c.offset[0]) + ", " + fmt_num(c.offset[1]) + ", " + fmt_num(c.offset[2]) + "]"
-               + (leash_set(c.leash_min) ? ", \"leashMin\": " + leash_json(c.leash_min) : std::string())
-               + (leash_set(c.leash_max) ? ", \"leashMax\": " + leash_json(c.leash_max) : std::string())
+               // Only where the camera differs from its seat's (null = it drops the seat's leash).
+               + (!same3(c.leash_min, v.leash_min) ? ", \"leashMin\": " + leash_json(c.leash_min) : std::string())
+               + (!same3(c.leash_max, v.leash_max) ? ", \"leashMax\": " + leash_json(c.leash_max) : std::string())
                + ", \"locationTracking\": " + (c.loc_view ? std::string("\"view\"") : axes_json(c.loc_yaw, c.loc_pitch, c.loc_roll))
                + ", \"rotationTracking\": " + axes_json(c.rot_yaw, c.rot_pitch, c.rot_roll)
                + ", \"collide\": " + (c.collide ? "true" : "false")
@@ -720,6 +733,7 @@ namespace {
 Tether own_tether(const Camera& c) {
     Tether t;
     t.offset[0] = c.offset[0]; t.offset[1] = c.offset[1]; t.offset[2] = c.offset[2];
+    for (int k = 0; k < 3; ++k) { t.leash_min[k] = c.leash_min[k]; t.leash_max[k] = c.leash_max[k]; }
     t.loc_view = c.loc_view; t.loc_yaw = c.loc_yaw; t.loc_pitch = c.loc_pitch; t.loc_roll = c.loc_roll;
     t.rot_yaw = c.rot_yaw; t.rot_pitch = c.rot_pitch; t.rot_roll = c.rot_roll;
     t.aim_marker = c.aim_marker;

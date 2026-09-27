@@ -148,6 +148,11 @@ struct Vehicle {
                                       // (a camera or a tethering mode may say otherwise)
     bool  hide_head = false;          // "hideHead": hide the player's HEAD in this seat -- true first person
                                       // from a camera at the head (a camera may say otherwise). Off by default.
+    // "leashMin" / "leashMax" for every camera of this seat: the seat's own box, which a camera and then a
+    // tethering mode may override (null at either = no leash there). The parser resolves the cascade, so
+    // each Camera and Tether already holds its effective values.
+    float leash_min[3] = {-kUnleashed, -kUnleashed, -kUnleashed};
+    float leash_max[3] = { kUnleashed,  kUnleashed,  kUnleashed};
     // "seat": the seats this entry is for, as bits (1 << SeatRole); 0 = any seat. A passenger rides the
     // same vehicle actor as its driver, so this is what tells their entries apart. Ignored on "default".
     uint8_t seats = 0;
