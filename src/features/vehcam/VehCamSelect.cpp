@@ -50,7 +50,15 @@ int                s_vehicle = -1;                  // index into s_table.vehicl
 int                s_camera = 0;
 int                s_mode = 0;                      // the camera's tethering mode
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
-uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen: bumped by select(..., recenter)
+uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen / place_gen: bumped by
+uint32_t           s_place_gen = 0;                 //   camera_change() -- select(..., recenter), controls, seat
+
+// A camera CHANGE the player made or got: the view lines up with the vehicle's aim (vehcamrecenter) and your
+// head goes back on the camera's point (vehcamrecenterpos). Published with the next make_active().
+void camera_change() {
+    if (g_cfg.veh_cam_recenter) ++s_recenter_gen;
+    if (g_cfg.veh_cam_recenter_pos) ++s_place_gen;
+}
 
 // ---- YOUR LAST CAMERA, ITS MODE AND YOUR CONTROLS IN EACH SEAT, kept across sessions ----------------
 // Keyed by the entry AND the seat the game names (a Scorpion's driver and a rider on it can share one
@@ -224,17 +232,18 @@ VehActiveCam make_active(int vi, int ci, int mi) {
     const int nm = c.mode_count();
     mi = ((mi % nm) + nm) % nm;
     const vcp::Tether m = c.mode(mi);
+    const vcp::Origin origin = c.origin_of(m);             // the mode's, else the camera's
     VehActiveCam a;
     a.valid = true;
     a.type = static_cast<uint8_t>(c.type);
-    a.origin = static_cast<uint8_t>(c.origin);
+    a.origin = static_cast<uint8_t>(origin);
     a.loc_yaw = m.loc_yaw; a.loc_pitch = m.loc_pitch; a.loc_roll = m.loc_roll; a.loc_view = m.loc_view;
     // Independent: pitch and roll without yaw tilt the view with the vehicle's deck while it keeps its
     // own heading (vehcammath::tracked_frame says exactly what that means).
     a.rot_yaw = m.rot_yaw; a.rot_pitch = m.rot_pitch; a.rot_roll = m.rot_roll;
     a.collide = c.collide;
     a.collide_margin = c.collide_margin;
-    a.hide_body = c.hides_body();
+    a.hide_body = c.hides_body(origin);
     a.hide_head = vcp::effective_hide_head(v, ci);
     for (int k = 0; k < 3; ++k) a.offset[k] = m.offset[k];
     const int choice = ctrl_choice(v);                      // the left stick click beats the file
@@ -245,6 +254,7 @@ VehActiveCam make_active(int vi, int ci, int mi) {
     a.mode = mi;
     a.mode_count = nm;
     a.recenter_gen = s_recenter_gen;
+    a.place_gen = s_place_gen;
     return a;
 }
 
@@ -261,9 +271,10 @@ void clear_selection() {
     g_veh_tp_active.store(false, std::memory_order_relaxed);
 }
 
-// recenter: this selection is a camera CHANGE the player made or got (getting in, left Y / X), so the view
-// turns until what aims the vehicle points where it aims (vehcamrecenter; the eye works it out). A file
-// reload keeps your view where it is: editing a number should not spin you round.
+// recenter: this selection is a camera CHANGE the player made or got (getting in, left Y / X, a seat), so
+// the view turns until what aims the vehicle points where it aims and your head goes back on the camera's
+// point (camera_change(); the eye works both out). A file reload keeps your view where it is: editing a
+// number should not spin you round.
 void select(int vi, int ci, int mi, const char* why, bool recenter) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const int n = static_cast<int>(v.cameras.size());
@@ -287,7 +298,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
             s_memory_dirty = true;
         }
     }
-    if (recenter && g_cfg.veh_cam_recenter) ++s_recenter_gen;
+    if (recenter) camera_change();
     const VehActiveCam a = make_active(vi, ci, mi);
     publish(a);
     // Our camera draws only for a chase camera; a first-person entry hands the view to the seat camera.
@@ -299,7 +310,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
                          "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, head %s, "
                          "aim ring %s, controls %s, seat %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), mi + 1, nm, mlabel.c_str(), why, vcp::type_name(c.type),
-                         vcp::origin_name(c.origin), a.offset[0], a.offset[1], a.offset[2],
+                         vcp::origin_name(static_cast<vcp::Origin>(a.origin)), a.offset[0], a.offset[1], a.offset[2],
                          loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
                          a.hide_head ? "hidden" : "shown", a.aim_marker ? "on" : "off",
                          motion_on(a) ? "motion" : "stick",
@@ -319,8 +330,9 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
             md += "**Type:** First-person seat camera\n";
         } else {
             if (modes) md += "**Tethering:** " + std::to_string(mi + 1) + " of " + std::to_string(nm) + " *(left X)*\n";
+            const vcp::Origin o = static_cast<vcp::Origin>(a.origin);   // the mode's, else the camera's
             md += std::string("**Origin:** ")
-                + (c.origin == vcp::Origin::Seat ? "Seat" : (c.origin == vcp::Origin::Head ? "Player's head" : "Vehicle")) + "\n";
+                + (o == vcp::Origin::Seat ? "Seat" : (o == vcp::Origin::Head ? "Player's head" : "Vehicle")) + "\n";
             char off[96];
             std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
             md += off;
@@ -358,6 +370,10 @@ void apply_ctrl_toggle() {
         else              { m.ctrl = want ? 1 : 0; m.ctrl_base = base ? 1 : 0; }
         s_memory_dirty = true;
     }
+    // A change of what aims the vehicle is a camera change like any other: line the new aim source up with
+    // where the vehicle aims -- switched to the hand in a view that turns with the vehicle, a hand held off
+    // its heading would otherwise start the vehicle turning -- and put your head back on the camera's point.
+    camera_change();
     if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera, s_mode));
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: %s controls%s", v.name.c_str(),
                          want ? "MOTION" : "STICK",
@@ -575,6 +591,8 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     if (chassis != s_chassis || s_table_changed || seat_changed) {
         const bool reload = chassis == s_chassis && !seat_changed;   // only the file changed
         const bool seat_only = chassis == s_chassis && !s_table_changed && seat_changed;
+        // A SWITCH, not the game naming the seat you got in with: it was already named, as something else.
+        const bool seat_switched = s_seat != 0 && seat != 0 && (seat != s_seat || actor != s_vehicle_actor);
         const std::string prev = s_vehicle_name;
         s_chassis = chassis;
         s_seat = seat;
@@ -591,9 +609,11 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
             const int kept = remembered_camera(v);   // this seat's last camera, from any earlier ride or session
             if (seat_only && vi == s_vehicle && (kept < 0 || kept == s_camera)) {
                 // The seat was named and changes nothing: same entry, same camera -- keep the view as it is,
-                // but take this seat's kept controls.
-                API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game names your seat: %s", s_vehicle_name.c_str(),
-                                     seat_said.c_str());
+                // but take this seat's kept controls. A seat SWITCH within one entry still moves you, so it
+                // is a camera change: your head goes back on the camera's point at the new seat.
+                API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game %s your seat: %s", s_vehicle_name.c_str(),
+                                     seat_switched ? "switched" : "names", seat_said.c_str());
+                if (seat_switched) camera_change();
                 if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size()))
                     publish(make_active(s_vehicle, s_camera, s_mode));
             } else {

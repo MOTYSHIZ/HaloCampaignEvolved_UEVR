@@ -1134,18 +1134,84 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
 // there -- the engine ignores the call on those, as on a part without that bone. The parameter blocks come
 // from the functions' own reflection, by name, so a build that reshapes them is refused, not written into.
 // UNDONE on the way out -- a camera without it, the seat left, a cutscene: the Chief appears in cutscenes.
+//
+// THE HELMET IS NOT IN THE SKELETON. The first in-headset test (2026-09-27): the bone hide landed on the
+// Body ("readback says hidden on 1 of 1") and the head still drew. The Spartan is modular -- the pak lists
+// SK_Spartans_<armour> plus STATIC meshes per piece (SM_Spartans_Helmet_M_<armour>, ..._Chest_..., ...),
+// hung from its skeleton -- and a hidden bone scales only the skinning, never what hangs from its socket.
+// The whole-body hide had removed the helmet with the rest (the user). So the helmet pieces are found among
+// his mesh parts by the mesh they draw, the socket they hang from or their name, and hidden AND shrunk the
+// way the body hider does it (hiding alone did not take on this character); each keeps its own scale for
+// the restore. The bone hide stays, for whatever of the head the skeleton itself draws under the helmet.
+constexpr int kMaxHeadItems = 8;
 struct HeadHide {
     int state = -1;                              // -1 not tried; 0 unusable (fail closed); 1 ready
     API::UClass* skinned = nullptr;              // USkinnedMeshComponent: the parts the call is for
     int32_t hide_name = -1, hide_op = -1, unhide_name = -1, is_name = -1, is_ret = -1;
     TrackedObject parts[kMaxDriverParts];
     int n = 0;
+    TrackedObject items[kMaxHeadItems];          // the helmet pieces, hidden and shrunk
+    double item_scale[kMaxHeadItems][3] = {};    // ...and the relative scale each had
+    int ni = 0;
     uintptr_t body = 0;                          // the Body the parts were collected for
     std::wstring bone;
     bool on = false;
     uint32_t reassert = 0;
 };
 HeadHide s_hh;
+
+std::wstring lower_w(std::wstring s) {
+    for (auto& ch : s) ch = (wchar_t)towlower(ch);
+    return s;
+}
+
+// A helmet piece: by the static mesh it draws (SM_Spartans_Helmet_M_<armour>), the socket or bone it hangs
+// from (the head bone, or one named for the helmet), or its own name. `why` says which. GAME THREAD.
+bool is_head_item(API::UObject* c, const std::wstring& head_bone, std::wstring* why) {
+    if (auto* pm = c->get_property_data<API::UObject*>(L"StaticMesh"); pm != nullptr && !IsBadReadPtr(pm, sizeof(void*))) {
+        if (auto* mesh = *pm) {
+            auto* fn = mesh->get_fname();
+            const std::wstring m = (fn != nullptr) ? fn->to_string() : std::wstring{};
+            const std::wstring lm = lower_w(m);
+            if (lm.find(L"helmet") != std::wstring::npos || lm.find(L"visor") != std::wstring::npos) {
+                *why = L"mesh " + m;
+                return true;
+            }
+        }
+    }
+    if (auto* ps = c->get_property_data<API::FName>(L"AttachSocketName"); ps != nullptr && !IsBadReadPtr(ps, sizeof(API::FName))) {
+        const std::wstring s = ps->to_string();
+        const std::wstring ls = lower_w(s);
+        if ((!head_bone.empty() && ls == lower_w(head_bone)) || ls.find(L"helmet") != std::wstring::npos
+            || ls.find(L"visor") != std::wstring::npos) {
+            *why = L"socket " + s;
+            return true;
+        }
+    }
+    auto* f = c->get_fname();
+    const std::wstring n = (f != nullptr) ? f->to_string() : std::wstring{};
+    const std::wstring ln = lower_w(n);
+    if (ln.find(L"helmet") != std::wstring::npos || ln.find(L"visor") != std::wstring::npos) {
+        *why = L"name " + n;
+        return true;
+    }
+    return false;
+}
+
+void head_item_hide(API::UObject* c) {
+    host::g_arms_state.call_set_hidden(c, true);
+    host::g_arms_state.call_set_visibility(c, false);
+    call_set_scale(c, 0.001);
+}
+
+void head_item_restore(API::UObject* c, const double sc[3]) {
+    host::g_arms_state.call_set_hidden(c, false);
+    host::g_arms_state.call_set_visibility(c, true);
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    auto* d = reinterpret_cast<double*>(p);
+    d[0] = sc[0]; d[1] = sc[1]; d[2] = sc[2];
+    c->call_function(L"SetRelativeScale3D", p);
+}
 
 int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
     for (auto* f = fn->get_child_properties(); f != nullptr; f = f->get_next())
@@ -1171,9 +1237,9 @@ bool head_hide_ready() {
         }
         if (s_hh.hide_name >= 0 && s_hh.hide_op >= 0 && s_hh.unhide_name >= 0) s_hh.state = 1;
     }
-    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: hiding the player's head %s (SkinnedMeshComponent %s, "
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: hiding the player's head bone %s (SkinnedMeshComponent %s, "
                          "HideBoneByName %s, UnHideBoneByName %s)",
-                         s_hh.state == 1 ? "is available" : "is NOT available on this build -- hideHead does nothing",
+                         s_hh.state == 1 ? "is available" : "is NOT available on this build -- hideHead hides the helmet pieces only",
                          s_hh.skinned != nullptr ? "found" : "NOT found", hide != nullptr ? "found" : "NOT found",
                          unhide != nullptr ? "found" : "NOT found");
     return s_hh.state == 1;
@@ -1204,11 +1270,15 @@ int head_hidden_readback(API::UObject* part) {
 
 void head_hide_restore(const char* why) {
     if (!s_hh.on) return;
-    int n = 0;
+    int n = 0, ni = 0;
     for (int i = 0; i < s_hh.n; ++i)
         if (auto* c = s_hh.parts[i].get()) { head_hide_call(c, false); ++n; }
-    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head shown again (%s; %d part(s))", why, n);
+    for (int i = 0; i < s_hh.ni; ++i)
+        if (auto* c = s_hh.items[i].get()) { head_item_restore(c, s_hh.item_scale[i]); ++ni; }
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head shown again (%s; %d helmet piece(s), "
+                         "the head bone on %d part(s))", why, ni, n);
     s_hh.on = false;
+    s_hh.ni = 0;
 }
 
 // Game thread, every tick. want = the selected camera asks for it; body = the Chief's Body (nullptr = not
@@ -1216,23 +1286,41 @@ void head_hide_restore(const char* why) {
 // change and re-asserted once a second -- a hidden bone state is component state, and nothing is known to
 // reset it, but a ride is long.
 void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std::wstring& bone) {
-    if (!want || body == nullptr || bone.empty() || !g_cfg.enabled) {
-        head_hide_restore(!want ? "this camera does not hide it" : "the player's body or head bone is not resolved");
+    if (!want || body == nullptr || !g_cfg.enabled) {
+        head_hide_restore(!want ? "this camera does not hide it" : "the player's body is not resolved");
         return;
     }
     if (s_hh.on && ((uintptr_t)body != s_hh.body || bone != s_hh.bone)) head_hide_restore("a new body");
-    if (!head_hide_ready()) return;
+    // No head bone found, or no bone hide on this build: the helmet pieces still go.
+    const bool bones = !bone.empty() && head_hide_ready();
     if (!s_hh.on) {
         s_hh.body = (uintptr_t)body;
         s_hh.bone = bone;
         s_hh.n = 0;
+        s_hh.ni = 0;
         auto* owner = body->get_outer();
+        std::wstring item_names;
         for (const ScanHit& h : s_res_parts) {
-            if (s_hh.n >= kMaxDriverParts) break;
-            if (h.owner != owner || !scan_hit_live(h) || !h.o->is_a(s_hh.skinned)) continue;
-            s_hh.parts[s_hh.n++].set_at(h.o, h.i);
+            if (h.owner != owner || !scan_hit_live(h)) continue;
+            std::wstring why;
+            if (h.o != body && s_hh.ni < kMaxHeadItems && is_head_item(h.o, bone, &why)) {
+                // Its own relative scale, for the restore (1 is only the usual answer).
+                double sc[3] = {1.0, 1.0, 1.0};
+                if (auto* ps = h.o->get_property_data<double>(L"RelativeScale3D"); ps != nullptr && !IsBadReadPtr(ps, 24)
+                    && std::isfinite(ps[0]) && std::isfinite(ps[1]) && std::isfinite(ps[2]) && ps[0] > 0.01 && ps[1] > 0.01 && ps[2] > 0.01) {
+                    sc[0] = ps[0]; sc[1] = ps[1]; sc[2] = ps[2];
+                }
+                s_hh.items[s_hh.ni].set_at(h.o, h.i);
+                for (int k = 0; k < 3; ++k) s_hh.item_scale[s_hh.ni][k] = sc[k];
+                ++s_hh.ni;
+                item_names += (item_names.empty() ? L"" : L", ") + why;
+                continue;
+            }
+            if (bones && s_hh.n < kMaxDriverParts && h.o->is_a(s_hh.skinned)) s_hh.parts[s_hh.n++].set_at(h.o, h.i);
         }
-        if (s_hh.n == 0) { s_hh.parts[0].set_at(body, body_idx); s_hh.n = 1; }   // not in the walk: the Body itself
+        if (bones && s_hh.n == 0) { s_hh.parts[0].set_at(body, body_idx); s_hh.n = 1; }   // not in the walk: the Body itself
+        for (int i = 0; i < s_hh.ni; ++i)
+            if (auto* c = s_hh.items[i].get()) head_item_hide(c);
         int hidden = 0, readable = 0;
         for (int i = 0; i < s_hh.n; ++i) {
             auto* c = s_hh.parts[i].get();
@@ -1243,21 +1331,35 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
         }
         s_hh.on = true;
         s_hh.reassert = 0;
-        // The readback says the call LANDED on the part that owns the pose (the followers report their own,
-        // untouched state) -- not that the head stopped drawing: only the headset says that.
-        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- bone \"%ls\" on %d part(s); "
-                             "the readback says hidden on %d of %d", s_hh.bone.c_str(), s_hh.n, hidden, readable);
+        // The readback says the bone call LANDED, not that the head stopped drawing: only the headset says that.
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- %d helmet piece(s) hidden and shrunk "
+                             "(%ls); bone \"%ls\" on %d part(s), the readback says hidden on %d of %d", s_hh.ni,
+                             item_names.empty() ? L"NONE FOUND" : item_names.c_str(), s_hh.bone.c_str(), s_hh.n, hidden, readable);
 #if HALO_VR_DEV
-        for (int i = 0; i < s_hh.n; ++i)
-            if (auto* c = s_hh.parts[i].get())
-                API::get()->log_info("[Halo-CampE-UEVR] VEHCAM   head-hide part %ls (hidden=%d)", c->get_full_name().c_str(),
-                                     head_hidden_readback(c));
+        // Every mesh part of him, so a helmet this test missed is named in the log.
+        for (const ScanHit& h : s_res_parts) {
+            if (h.owner != owner || !scan_hit_live(h)) continue;
+            std::wstring why, mesh, sock;
+            const bool item = is_head_item(h.o, bone, &why);
+            if (auto* pm = h.o->get_property_data<API::UObject*>(L"StaticMesh"); pm != nullptr && !IsBadReadPtr(pm, sizeof(void*)) && *pm != nullptr)
+                if (auto* fn = (*pm)->get_fname()) mesh = fn->to_string();
+            if (auto* ps = h.o->get_property_data<API::FName>(L"AttachSocketName"); ps != nullptr && !IsBadReadPtr(ps, sizeof(API::FName)))
+                sock = ps->to_string();
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM   head-hide scan: %ls mesh=%ls socket=%ls%s", h.o->get_full_name().c_str(),
+                                 mesh.empty() ? L"-" : mesh.c_str(), sock.empty() ? L"-" : sock.c_str(),
+                                 item ? "  <-- HELMET" : "");
+        }
 #endif
         return;
     }
-    if ((++s_hh.reassert % 32u) == 0u)
+    // Re-asserted once a second, like the body hider: anything that re-applies the pieces' visibility or
+    // scale (the body hider's own restore, among others) is overruled within a second.
+    if ((++s_hh.reassert % 32u) == 0u) {
         for (int i = 0; i < s_hh.n; ++i)
             if (auto* c = s_hh.parts[i].get()) head_hide_call(c, true);
+        for (int i = 0; i < s_hh.ni; ++i)
+            if (auto* c = s_hh.items[i].get()) head_item_hide(c);
+    }
 }
 
 } // namespace
@@ -2212,6 +2314,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
     if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
+    if (_stricmp(key, "vehcamrecenterpos") == 0) { g_cfg.veh_cam_recenter_pos = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamhidebody") == 0) { g_cfg.veh_cam_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehmarker")      == 0) { g_cfg.veh_marker = (v != 0.0); return true; }
     if (_stricmp(key, "vehmarkerradius") == 0) { g_cfg.veh_marker_radius = (float)v; return true; }
@@ -2546,6 +2649,26 @@ void vehcam_game_tick_vehicle() {
             xrlayer_retire_quad(XRLAYER_SLOT_VEHAIM);
         }
         s_tp_was = tp_on;
+
+        // YOUR HEAD BACK ON THE CAMERA'S POINT on a camera change (vehcamrecenterpos), the leash-ON half: the
+        // leash lets the head sit anywhere inside its radius of the anchor, so the change puts the standing
+        // origin right under the head -- no offset left over from the last camera. (With the leash off the
+        // eye re-captures the head's offset instead; with a zero radius this changes nothing.)
+        {
+            static uint32_t s_place_tick = 0;
+            const uint32_t pg = veh_active_cam().place_gen;
+            if (pg != s_place_tick) {
+                s_place_tick = pg;
+                if (tp_on && g_cfg.hmd_leash) {
+                    Vec3 hp{}; Quat hq{};
+                    const auto hi = API::VR::get_hmd_index();
+                    if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
+                        const UEVR_Vector3f n{hp.x, hp.y, hp.z};
+                        API::VR::set_standing_origin(n);
+                    }
+                }
+            }
+        }
 
         // VEHCAMPATH (release-safe, bc24's pattern): name each fallback the eye takes, when it starts and
         // when it ends -- after 8 ticks (~0.25 s) of the new path, so a one-frame blip does not flood the log.
@@ -2945,10 +3068,39 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             rot_axes(crot.x, crot.y, crot.z, MX, MY, MZ);
             const uint32_t gen = halo::g_tp_mount_gen.load(std::memory_order_relaxed);
             const bool rearm = (gen != s_arm_gen || cp != s_arm_cp);
-            // A world-scale change mid-ride re-captures too: c0 is in UE cm at the scale it was read at.
+            // A world-scale change mid-ride re-captures too: c0 is in UE cm at the scale it was read at. So does
+            // every CAMERA CHANGE (vehcamrecenterpos: a camera, a tethering mode, a seat, the controls): with the
+            // leash off you may have leaned or walked anywhere in the room, and a new camera should start with
+            // your head on its point, not wherever the last one left it (the user, 2026-09-27). The leash-on
+            // half is the tick's: it snaps the standing origin onto the head (vehcam_game_tick_vehicle).
             static float s_arm_cmpm = 0.0f;
+            static uint32_t s_place_seen = 0;
             const float cmpm = halo::veh_cm_per_m();
-            const bool recapture_head = rearm || leash != s_arm_leash || std::fabs(cmpm - s_arm_cmpm) > 0.05f;
+            const bool place = ac.place_gen != s_place_seen;
+            s_place_seen = ac.place_gen;
+            // A RECENTRE OF YOUR PLAY SPACE -- the headset's own (holding the Quest's Meta button) or UEVR's.
+            // UEVR answers OpenXR's reference-space change by resetting the standing origin (OpenXR.cpp:
+            // REFERENCE_SPACE_CHANGE_PENDING -> wants_reset_origin), and with the leash off the captured
+            // offset then describes a room that is gone: you sit off the camera's point by however far you
+            // had been from the old origin (the user, 2026-09-27: "slightly offset" after a system reset).
+            // With the leash off nothing of ours moves the origin under this camera, so a move of it IS that
+            // recentre: re-capture, and your head goes back on the camera's point.
+            static UEVR_Vector3f s_so_seen{};
+            static bool s_so_have = false;
+            bool origin_moved = false;
+            if (!leash) {
+                const auto so = API::VR::get_standing_origin();
+                if (s_so_have) {
+                    const float dx = so.x - s_so_seen.x, dy = so.y - s_so_seen.y, dz = so.z - s_so_seen.z;
+                    origin_moved = dx * dx + dy * dy + dz * dz > 0.01f * 0.01f;   // 1 cm: a reset, not float noise
+                }
+                s_so_seen = so;
+                s_so_have = true;
+            } else {
+                s_so_have = false;   // the leash moves it every tick: not a signal while it runs
+            }
+            const bool recapture_head = rearm || place || origin_moved || leash != s_arm_leash
+                                     || std::fabs(cmpm - s_arm_cmpm) > 0.05f;
             s_arm_cmpm = cmpm;
             if (rearm) {
                 s_arm_gen = gen; s_arm_cp = cp;
@@ -3045,8 +3197,10 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             //    forever, the view turning along with it. Recentring the HEAD left the hand off by however it
             //    happened to be held, and the vehicle kept turning that way (the user, 2026-09-26);
             //  - a camera that holds its heading: where the vehicle is already aimed (the ray aim's direction),
-            //    so stepping cameras swings nothing -- a turret stays where it points;
-            //  - before this ride has aimed at all (getting in): the vehicle's forward.
+            //    so stepping cameras swings nothing -- a turret stays where it points. Until the ray aim has a
+            //    solution (stick controls, or the frame the left stick click hands the aim to your hand), the
+            //    GAME's own camera stands for it: it follows the aim within 1-2 deg (measured 2026-09-26);
+            //  - on getting in (the ride's first frame): the vehicle's forward.
             // Worked out here, where the view's own frame is, on the new camera's first frame (eye 0), with
             // this camera's frame before any turn; the tick adopts it into the turn it owns. Yaw only, about
             // your head, through the right stick's own turn.
@@ -3057,12 +3211,27 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, 0.0, F0, R0, U0);
                 const bool hand_aims = halo::veh_tp_motion_aim_selected();   // this frame may be the eye's first
                 double tgt[3] = { VF[0], VF[1], VF[2] };
-                if (!ac.rot_yaw && hand_aims && halo::g_veh_aim_valid.load(std::memory_order_relaxed)) {
-                    const double ay = (double)halo::g_veh_aim_yaw.load(std::memory_order_relaxed) * D2R;
-                    const double ap = (double)halo::g_veh_aim_pitch.load(std::memory_order_relaxed) * D2R;
-                    tgt[0] = std::cos(ap) * std::cos(ay);
-                    tgt[1] = std::cos(ap) * std::sin(ay);
-                    tgt[2] = std::sin(ap);
+                if (!ac.rot_yaw && !rearm) {
+                    double ay = 0.0, ap = 0.0;
+                    bool have_aim = false;
+                    if (hand_aims && halo::g_veh_aim_valid.load(std::memory_order_relaxed)) {
+                        ay = (double)halo::g_veh_aim_yaw.load(std::memory_order_relaxed) * D2R;
+                        ap = (double)halo::g_veh_aim_pitch.load(std::memory_order_relaxed) * D2R;
+                        have_aim = true;
+                    } else if (rotation != nullptr) {
+                        // The game camera, as handed to this callback before the view override.
+                        const double gy = is_double ? reinterpret_cast<UEVR_Rotatord*>(rotation)->yaw : (double)rotation->yaw;
+                        const double gp = is_double ? reinterpret_cast<UEVR_Rotatord*>(rotation)->pitch : (double)rotation->pitch;
+                        // Looking nearly straight up or down, its heading is not a direction.
+                        if (std::isfinite(gy) && std::isfinite(gp) && std::cos(gp * D2R) > 0.2) {
+                            ay = gy * D2R; ap = gp * D2R; have_aim = true;
+                        }
+                    }
+                    if (have_aim) {
+                        tgt[0] = std::cos(ap) * std::cos(ay);
+                        tgt[1] = std::cos(ap) * std::sin(ay);
+                        tgt[2] = std::sin(ap);
+                    }
                 }
                 Vec3 sp{}; Quat sq{};
                 const int32_t hand = hand_aims ? veh_aim_hand_index() : -1;

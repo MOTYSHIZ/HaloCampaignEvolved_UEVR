@@ -568,11 +568,15 @@
 # camera's number and name, its tethering mode, what it does (anything that turns your view is in
 # yellow), and which controls it uses.
 #vehcamreadout=1
-# Line up with the vehicle on a camera change. Getting in, stepping cameras with left Y, or stepping
-# tethering modes with left X turns your view so your aiming hand points where the vehicle is aiming
-# (your head, when you aim with the stick). A camera that turns with the vehicle then holds still until
-# you move your hand.
+# Line up with the vehicle on a camera change. Getting in, stepping cameras with left Y, stepping
+# tethering modes with left X, switching controls with the left stick click, or changing seats turns
+# your view so your aiming hand points where the vehicle is aiming (your head, when you aim with the
+# stick). A camera that turns with the vehicle then holds still until you move your hand.
 #vehcamrecenter=1
+# Put your head back on the camera's point on the same camera changes, wherever you had leaned or
+# walked to in your room. Matters most with the head leash (hmdleash) off. 0 keeps your head's offset
+# from one camera to the next.
+#vehcamrecenterpos=1
 # Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
 # that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
 # shrinks it, for a body that shows through the hide. In the Ghost and the Wraith turret only armour

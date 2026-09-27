@@ -33,10 +33,13 @@ struct VehActiveCam {
     bool    aim_marker = true;                // "aimMarker": the ring where the vehicle aims (the eye poses it)
     int     index = 0, count = 0;             // the camera, of how many
     int     mode = 0, mode_count = 1;         // its tethering mode, of how many
-    // Bumped by a camera CHANGE that should line what aims the vehicle up with where it aims
-    // (vehcamrecenter): getting in, left Y (camera) and left X (tethering mode). Not by a file reload or the
-    // controls toggle. The eye acts on a change.
+    // Bumped by a CHANGE of camera the player made or got -- getting in, left Y (camera), left X
+    // (tethering mode), the left stick click (controls), a seat switch -- never by a file reload. The eye
+    // acts on a change: recenter_gen lines what aims the vehicle up with where it aims (vehcamrecenter);
+    // place_gen puts your head back on the camera's point (vehcamrecenterpos), wherever you had leaned
+    // or walked to in the room.
     uint32_t recenter_gen = 0;
+    uint32_t place_gen = 0;
 };
 
 // Any thread: the selected camera as last published.

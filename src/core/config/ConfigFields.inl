@@ -1381,15 +1381,21 @@
     // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
     // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
     int   veh_ctrl_click = 1;
-    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X -- turn the view so what
-    // aims the vehicle points where the vehicle is aiming (yaw only, about your head, through the same turn
-    // the right stick uses). What aims it: your aim hand while your hand aims this vehicle, else your head.
-    // Where it is aiming: in a camera that turns with the vehicle, the vehicle's own heading -- the only
-    // place such a camera rests, so it does not start the vehicle turning; in one that holds its heading,
-    // where the vehicle is already aimed, so nothing swings; on getting in, its forward. Not on a
-    // camera-file reload (editing a number must not spin you round) and not on the controls toggle.
+    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X, the left stick click (what
+    // aims changes), a seat switch -- turn the view so what aims the vehicle points where the vehicle is
+    // aiming (yaw only, about your head, through the same turn the right stick uses). What aims it: your aim
+    // hand while your hand aims this vehicle, else your head. Where it is aiming: in a camera that turns
+    // with the vehicle, the vehicle's own heading -- the only place such a camera rests, so it does not start
+    // the vehicle turning; in one that holds its heading, where the vehicle is already aimed (the hand's ray
+    // aim, or until that has a solution the game's own camera, which follows the aim), so nothing swings; on
+    // getting in, its forward. Not on a camera-file reload (editing a number must not spin you round).
     // 0 = the view keeps its turn.
     bool  veh_cam_recenter = true;
+    // vehcamrecenterpos: 1 = on the same camera changes, put your HEAD back on the camera's point -- wherever
+    // you had leaned or walked to in the room. Matters most with hmdleash off, where nothing else brings you
+    // back (the user, 2026-09-27); with the leash on it clears whatever lean the leash radius allowed.
+    // 0 = your head keeps its offset from the camera's point from one camera to the next.
+    bool  veh_cam_recenter_pos = true;
     // vehcamhidebody: your character's body in the vehicle cameras. 0 = never hidden (default -- you see
     // the Chief in the seat, the user's call 2026-09-26); 1 = hidden in the cameras whose "hideBody" says
     // so (left out = the seat cameras); 2 = hidden and shrunk, for a body that draws whatever its visibility
