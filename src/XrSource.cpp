@@ -1848,10 +1848,14 @@ void xrsource_tick(uint32_t tick) {
             Target& t = g_t[s];
             if (t.native != nullptr && t.native != t.fed) {
                 if ((int32_t)(tick - t.next_offer) >= 0) {
-                    t.next_offer = tick + 32;   // ~1 s; a refused offer must not spin the log
                     if (xrlayer_set_slot_source(s, t.native)) {
                         t.fed = t.native;
                         logf("handed %p to compositor slot %d.", t.native, s);
+                    } else {
+                        // ~1 s; a REFUSED offer must not spin the log. Armed on refusal only: armed on
+                        // every offer, it also held back a slot re-resolved within ~1 s of its last
+                        // accepted hand-over -- and a slot is not captured until it is handed over.
+                        t.next_offer = tick + 32;
                     }
                 }
             } else if (t.native == nullptr && t.fed != nullptr) {
