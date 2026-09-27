@@ -498,13 +498,15 @@ bool xrlayer_mono_flat_active();
 // the state logging. Never blocks. Does nothing but one bool test when the feature is off.
 void xrlayer_tick();
 
-// True only while the layer is PROVEN to be reaching the compositor -- i.e. our hook ran and
-// appended a layer within the watchdog window, not merely that installation returned success.
+// True only while the layer is PROVEN to be reaching the compositor -- i.e. a layer of ours was
+// appended within the last ~250 ms (kLiveHoldMs in xrlayer_tick), not merely that installation
+// returned success. A time window, not "since the last tick": at similar tick and frame rates the
+// per-tick form read false for single ticks while healthy, and every fallback below flapped with it.
 //
 // "Installed" is not "running": register_inline_hook succeeds on any readable address and reports
-// success. A caller that wants to hide the in-scene reticule in favour of this one must gate on
-// THIS, never on whether setup succeeded. Nothing gates on it today (stage 1 deliberately draws
-// alongside the in-scene reticule); it exists so stage 2 has an honest signal to use.
+// success. A caller that wants to hide an in-scene fallback in favour of the layer must gate on
+// THIS, never on whether setup succeeded. It gates the grab guide's route and the world reticule's
+// one-way latch directly, and the markers and the scope pane through xrlayer_slot_ready().
 bool xrlayer_live();
 
 // ATTACHED, not DRAWING. True once the hook is installed and the swapchain exists (state Armed),
