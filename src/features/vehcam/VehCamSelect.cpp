@@ -10,9 +10,11 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 using uevr::API;
 
@@ -41,18 +43,29 @@ char               s_path[MAX_PATH]{};
 unsigned long long s_stamp = ~0ull;                 // last write time seen; ~0 = never looked
 
 uintptr_t          s_chassis = 0;                   // the vehicle mesh the selection was made for
-int                s_seat = -1;                     // ...and the seat (vcp::SeatRole; -1 = the game has not said)
+int                s_seat = 0;                      // ...and the seat (vcp::seat_bits; 0 = the game has not said)
 std::string        s_vehicle_actor;                 // ...and the name it was matched against
 int                s_vehicle = -1;                  // index into s_table.vehicles; -1 = none
 int                s_camera = 0;
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
-std::map<std::string, int> s_remembered;            // entry name -> the camera you last used, this session
-// Entry name -> the controls you picked with the left stick click, this session -- kept WITH the default
-// it was picked against, so a later edit of that default (the file's motionAim, or vehaim) wins over it:
-// the edit is the newer statement of what you want.
-struct CtrlChoice { bool motion; bool base; };
-std::map<std::string, CtrlChoice> s_ctrl;
 uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen: bumped by select(..., recenter)
+
+// ---- YOUR LAST CAMERA AND CONTROLS IN EACH SEAT, kept across sessions ------------------------------
+// Keyed by the entry AND the seat the game names (a Scorpion's driver and a rider on it can share one
+// entry). The camera is kept by NAME as well as number, so reordering the file's cameras does not move
+// you. The controls are kept WITH the default they were chosen against, so a later edit of that default
+// (the file's motionAim, or vehaim) wins over the choice: the edit is the newer statement of what you
+// want, and a choice that lands back on the default simply forgets itself. Written beside the camera
+// file (halo_vr_vehcams_last.txt: user-owned, never shipped), at most every ~2 s, replaced whole.
+struct SeatMemory {
+    int         camera = -1;          // the camera's index; -1 = none kept
+    std::string camera_name;
+    int         ctrl = -1;            // the left stick click's choice: -1 none, 0 stick, 1 motion
+    int         ctrl_base = -1;       // ...and the default it was chosen against (0 stick, 1 motion)
+};
+std::map<std::string, SeatMemory> s_memory;
+bool s_memory_dirty = false;
+char s_mem_path[MAX_PATH]{};
 
 // ---- UEVR's decoupled pitch --------------------------------------------------------------------
 bool     s_dp_forced = false;                       // we turned VR_DecoupledPitch off
@@ -78,13 +91,96 @@ std::string narrow(const std::wstring& w) {
 // What this vehicle starts in: its motionAim in the file, else the vehaim key.
 bool base_motion(const vcp::Vehicle& v) { return v.motion_aim >= 0 ? v.motion_aim != 0 : g_cfg.veh_aim; }
 
-// The left-stick choice for this vehicle: -1 = none (or its default has changed under it since, which
+// A driver's seat that does not also fire: there, Halo steers the vehicle toward where it aims.
+bool driver_steers() {
+    return (s_seat & vcp::kSeatDriver) != 0 && (s_seat & vcp::kSeatGunner) == 0;
+}
+
+// The memory's key: the entry, and the seat as the game names it.
+std::string mem_key(const vcp::Vehicle& v) {
+    const std::string seat = vcp::seat_text(static_cast<uint8_t>(s_seat));
+    return v.name + "|" + (seat.empty() ? std::string("any seat") : seat);
+}
+
+// The left-stick choice for this seat: -1 = none (or its default has changed under it since, which
 // drops it), else 0 = stick / 1 = motion.
 int ctrl_choice(const vcp::Vehicle& v) {
-    const auto it = s_ctrl.find(v.name);
-    if (it == s_ctrl.end()) return -1;
-    if (it->second.base != base_motion(v)) { s_ctrl.erase(it); return -1; }
-    return it->second.motion ? 1 : 0;
+    const auto it = s_memory.find(mem_key(v));
+    if (it == s_memory.end() || it->second.ctrl < 0) return -1;
+    if (it->second.ctrl_base != (base_motion(v) ? 1 : 0)) {
+        it->second.ctrl = -1; it->second.ctrl_base = -1;
+        s_memory_dirty = true;
+        return -1;
+    }
+    return it->second.ctrl;
+}
+
+// The camera this seat was last left in: by name when the entry still has one of that name, else by
+// number while it is in range; -1 = none.
+int remembered_camera(const vcp::Vehicle& v) {
+    const auto it = s_memory.find(mem_key(v));
+    if (it == s_memory.end() || it->second.camera < 0) return -1;
+    const int n = static_cast<int>(v.cameras.size());
+    if (!it->second.camera_name.empty())
+        for (int i = 0; i < n; ++i) if (v.cameras[i].name == it->second.camera_name) return i;
+    return it->second.camera < n ? it->second.camera : -1;
+}
+
+// ---- the memory file: tab-separated, one seat a line --------------------------------------------
+void memory_load() {
+    if (s_mem_path[0] == 0) return;
+    FILE* f = nullptr;
+    if (fopen_s(&f, s_mem_path, "rb") != 0 || f == nullptr) return;   // none yet: nothing kept
+    char line[512];
+    int n = 0;
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
+        std::string fld[6];
+        int k = 0;
+        for (const char* p = line; *p != 0 && *p != '\r' && *p != '\n'; ++p) {
+            if (*p == '\t') { if (++k >= 6) break; continue; }
+            fld[k].push_back(*p);
+        }
+        if (k != 5 || fld[0].empty() || fld[1].empty()) continue;   // not a line of ours
+        SeatMemory m;
+        const int num = std::atoi(fld[2].c_str());
+        m.camera = num > 0 ? num - 1 : -1;
+        m.camera_name = fld[3];
+        m.ctrl = fld[4] == "motion" ? 1 : (fld[4] == "stick" ? 0 : -1);
+        m.ctrl_base = fld[5] == "motion" ? 1 : (fld[5] == "stick" ? 0 : -1);
+        if (m.ctrl < 0 || m.ctrl_base < 0) { m.ctrl = -1; m.ctrl_base = -1; }
+        s_memory[fld[0] + "|" + fld[1]] = m;
+        ++n;
+    }
+    fclose(f);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: your last camera and controls kept for %d seat(s) (%s)", n, s_mem_path);
+}
+
+void memory_save() {
+    if (!s_memory_dirty || s_mem_path[0] == 0) return;
+    s_memory_dirty = false;
+    char tmp[MAX_PATH + 8];
+    strcpy_s(tmp, sizeof(tmp), s_mem_path);
+    strcat_s(tmp, sizeof(tmp), ".tmp");
+    FILE* f = nullptr;
+    if (fopen_s(&f, tmp, "wb") != 0 || f == nullptr) { s_memory_dirty = true; return; }   // try again next poll
+    fputs("# Your last camera and controls in each vehicle seat -- written by the mod, read when it starts.\r\n"
+          "# Delete this file to start every seat in its defaultCamera and default controls again.\r\n"
+          "# entry\tseat\tcamera number\tcamera name\tcontrols you chose\tthe default you chose them against\r\n", f);
+    for (const auto& kv : s_memory) {
+        const size_t bar = kv.first.rfind('|');
+        if (bar == std::string::npos) continue;
+        const SeatMemory& m = kv.second;
+        if (m.camera < 0 && m.ctrl < 0) continue;
+        std::fprintf(f, "%s\t%s\t%d\t%s\t%s\t%s\r\n", kv.first.substr(0, bar).c_str(), kv.first.substr(bar + 1).c_str(),
+                     m.camera + 1, m.camera_name.c_str(), m.ctrl == 1 ? "motion" : (m.ctrl == 0 ? "stick" : "-"),
+                     m.ctrl_base == 1 ? "motion" : (m.ctrl_base == 0 ? "stick" : "-"));
+    }
+    fclose(f);
+    if (!MoveFileExA(tmp, s_mem_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileA(tmp);
+        s_memory_dirty = true;
+    }
 }
 
 // Whether the controller aims under this published camera. Only under one of OUR chase cameras: the
@@ -138,7 +234,14 @@ void select(int vi, int ci, const char* why, bool recenter) {
     s_vehicle = vi;
     s_vehicle_name = v.name;
     s_camera = ci;
-    s_remembered[v.name] = ci;
+    {
+        SeatMemory& m = s_memory[mem_key(v)];
+        if (m.camera != ci || m.camera_name != v.cameras[ci].name) {
+            m.camera = ci;
+            m.camera_name = v.cameras[ci].name;
+            s_memory_dirty = true;
+        }
+    }
     if (recenter && g_cfg.veh_cam_recenter) ++s_recenter_gen;
     const VehActiveCam a = make_active(vi, ci);
     publish(a);
@@ -153,7 +256,8 @@ void select(int vi, int ci, const char* why, bool recenter) {
                          v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
                          loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
-                         motion_on(a) ? "motion" : "stick", vcp::seat_role_name(static_cast<vcp::SeatRole>(s_seat)));
+                         motion_on(a) ? "motion" : "stick",
+                         s_seat != 0 ? vcp::seat_text(static_cast<uint8_t>(s_seat)).c_str() : "unknown");
 
     // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name
     // when it has one, and what it does. Placed and timed by the xrtext* defaults.
@@ -173,15 +277,16 @@ void select(int vi, int ci, const char* why, bool recenter) {
         }
         md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
         // The seat as the GAME reports it -- what an entry's "seat" is matched against.
-        static const char* const kSeat[] = { "Driver", "Gunner", "Passenger" };
-        if (s_seat >= 0 && s_seat <= 2) md += std::string("**Seat:** ") + kSeat[s_seat] + "\n";
+        if (s_seat != 0) md += "**Seat:** " + vcp::seat_text(static_cast<uint8_t>(s_seat)) + "\n";
+        // Halo steers a vehicle toward where it aims, so in the driver's seat pointing IS steering.
+        if (motion_on(a) && driver_steers()) md += "*Point to steer and aim*\n";
         xrtext_show(md);
     }
 }
 
-// LEFT STICK CLICK: flip this vehicle between motion controls and stick controls, and say which on the
-// text panel -- always, since it answers a press (vehcamreadout is for the camera readout). Remembered
-// for the entry, like the camera; a choice that lands back on the default simply forgets itself.
+// LEFT STICK CLICK: flip this seat between motion controls and stick controls, and say which on the text
+// panel -- always, since it answers a press (vehcamreadout is for the camera readout). Kept for the seat
+// across sessions, like the camera; a choice that lands back on the default simply forgets itself.
 void apply_ctrl_toggle() {
     const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
     const VehActiveCam cur = veh_active_cam();
@@ -195,14 +300,20 @@ void apply_ctrl_toggle() {
     }
     const bool want = !motion_on(cur);
     const bool base = base_motion(v);
-    if (want == base) s_ctrl.erase(v.name); else s_ctrl[v.name] = CtrlChoice{want, base};
+    {
+        SeatMemory& m = s_memory[mem_key(v)];
+        if (want == base) { m.ctrl = -1; m.ctrl_base = -1; }                // back on the default: forgets itself
+        else              { m.ctrl = want ? 1 : 0; m.ctrl_base = base ? 1 : 0; }
+        s_memory_dirty = true;
+    }
     if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- left stick click: %s controls%s", v.name.c_str(),
                          want ? "MOTION" : "STICK",
-                         want == base ? " (this vehicle's default)" : " (for this vehicle, this session)");
+                         want == base ? " (this vehicle's default)" : " (kept for this seat)");
     std::string md;
     if (want) {
-        md = "# Motion controls\n" + which + "Aim with the controller\n";
+        md = "# Motion controls\n" + which + (driver_steers() ? "Point with the controller to steer and aim\n"
+                                                              : "Aim with the controller\n");
         md += (g_cfg.veh_stick_mode == 1) ? "Right stick turns your view\n" : "Right stick: the game's own\n";
     } else {
         md = "# Stick controls\n" + which + "Aim with the right stick\n";
@@ -296,10 +407,13 @@ void veh_ctrl_toggle() {
 void vehcam_presets_init(const char* path) {
     if (path == nullptr || path[0] == 0) return;
     strcpy_s(s_path, sizeof(s_path), path);
-    // The decoupled-pitch marker lives beside the file.
+    // The decoupled-pitch marker lives beside the file, and so does your per-seat memory.
     strcpy_s(s_dp_marker, sizeof(s_dp_marker), path);
     if (char* dot = std::strrchr(s_dp_marker, '.')) *dot = 0;
+    strcpy_s(s_mem_path, sizeof(s_mem_path), s_dp_marker);
     strcat_s(s_dp_marker, sizeof(s_dp_marker), ".decoupledpitch.restore");
+    strcat_s(s_mem_path, sizeof(s_mem_path), "_last.txt");
+    memory_load();
     // Written ONCE, from the built-in table, when the player has no file. Never touched again: it is
     // theirs (user-owned, never shipped). 'wx' refuses to open a file that already exists.
     FILE* f = nullptr;
@@ -314,6 +428,7 @@ void vehcam_presets_init(const char* path) {
 
 void vehcam_presets_poll() {
     if (s_path[0] == 0) return;
+    memory_save();                             // your per-seat memory, when it changed (~2 s at most late)
     const unsigned long long stamp = file_stamp(s_path);
     if (stamp == s_stamp) return;              // one stat call per poll; the file is read on change only
     s_stamp = stamp;
@@ -353,7 +468,13 @@ void vehcam_presets_poll() {
                          ign.empty() ? "" : " -- IGNORED (no such setting): ", ign.c_str());
 }
 
-void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat_role) {
+std::vector<std::string> vehcam_chassis_hint(const std::wstring& vehicle_name, int seat) {
+    const int vi = vcp::match_vehicle(s_table, narrow(vehicle_name), static_cast<uint8_t>(seat));
+    if (vi < 0) return {};
+    return s_table.vehicles[vi].chassis;
+}
+
+void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat) {
     ++s_ticks;
     if (s_ticks == 300) decoupled_pitch_startup_check();
 
@@ -362,7 +483,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         // pressed meanwhile does not carry into the next ride.
         if (!in_vehicle) {
             if (s_vehicle >= 0 || s_chassis != 0) clear_selection();
-            s_chassis = 0; s_seat = -1; s_vehicle_actor.clear();
+            s_chassis = 0; s_seat = 0; s_vehicle_actor.clear();
         }
         s_step.store(0, std::memory_order_relaxed);
         s_ctrl_toggle.store(0, std::memory_order_relaxed);
@@ -373,34 +494,36 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     // Re-matched when the chassis changes, the file changes, or the GAME names the seat (it may do so a
     // little after you get in, and a seat swap names another).
     const std::string actor = narrow(vehicle_name);
-    const bool seat_changed = seat_role != s_seat || actor != s_vehicle_actor;
+    const bool seat_changed = seat != s_seat || actor != s_vehicle_actor;
     if (chassis != s_chassis || s_table_changed || seat_changed) {
         const bool reload = chassis == s_chassis && !seat_changed;   // only the file changed
         const bool seat_only = chassis == s_chassis && !s_table_changed && seat_changed;
         const std::string prev = s_vehicle_name;
         s_chassis = chassis;
-        s_seat = seat_role;
+        s_seat = seat;
         s_vehicle_actor = actor;
         s_table_changed = false;
-        const int vi = vcp::match_vehicle(s_table, actor, static_cast<vcp::SeatRole>(seat_role));
+        const int vi = vcp::match_vehicle(s_table, actor, static_cast<uint8_t>(seat));
+        const std::string seat_said = seat != 0 ? vcp::seat_text(static_cast<uint8_t>(seat)) : std::string("unknown");
         if (vi < 0) {
             clear_selection();
             API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: no camera entry matches %s (seat %s) and there is no "
-                                 "\"default\" entry -- the game's camera stays", actor.c_str(),
-                                 vcp::seat_role_name(static_cast<vcp::SeatRole>(seat_role)));
-        } else if (seat_only && vi == s_vehicle) {
-            // The seat was named and changes nothing: same entry, so keep the camera and the view as they are.
-            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game names your seat: %s", s_vehicle_name.c_str(),
-                                 vcp::seat_role_name(static_cast<vcp::SeatRole>(seat_role)));
+                                 "\"default\" entry -- the game's camera stays", actor.c_str(), seat_said.c_str());
         } else {
             const vcp::Vehicle& v = s_table.vehicles[vi];
-            int ci = v.default_camera;
-            if (reload && prev == v.name) {
-                ci = s_camera;                       // an edit keeps you in the camera you are in
-            } else if (auto it = s_remembered.find(v.name); it != s_remembered.end()) {
-                ci = it->second;                     // back in a vehicle you used: the camera you left it in
+            const int kept = remembered_camera(v);   // this seat's last camera, from any earlier ride or session
+            if (seat_only && vi == s_vehicle && (kept < 0 || kept == s_camera)) {
+                // The seat was named and changes nothing: same entry, same camera -- keep the view as it is,
+                // but take this seat's kept controls.
+                API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game names your seat: %s", s_vehicle_name.c_str(),
+                                     seat_said.c_str());
+                if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
+            } else {
+                int ci = v.default_camera;
+                if (reload && prev == v.name) ci = s_camera;   // an edit keeps you in the camera you are in
+                else if (kept >= 0) ci = kept;                 // this seat's last camera
+                select(vi, ci, reload ? "file reloaded" : (seat_only ? "seat named" : "entered"), /*recenter=*/!reload);
             }
-            select(vi, ci, reload ? "file reloaded" : (seat_only ? "seat named" : "entered"), /*recenter=*/!reload);
         }
     }
 
@@ -411,10 +534,12 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     if (s_ctrl_toggle.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_ctrl_toggle();
 
     // A left-stick choice whose default has since changed under it (vehaim edited live -- a file edit
-    // already re-selects above) gives way to the edit, and the aim follows at once.
-    if (!s_ctrl.empty() && s_vehicle >= 0) {
+    // already re-selects above) gives way to the edit, and the aim follows at once. Checked about twice a
+    // second: the default only changes on the ~2 s config poll.
+    if (s_vehicle >= 0 && (s_ticks % 16u) == 0u) {
         const vcp::Vehicle& v = s_table.vehicles[s_vehicle];
-        if (s_ctrl.count(v.name) != 0 && ctrl_choice(v) < 0) {
+        const auto it = s_memory.find(mem_key(v));
+        if (it != s_memory.end() && it->second.ctrl >= 0 && ctrl_choice(v) < 0) {
             if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) publish(make_active(s_vehicle, s_camera));
             API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- its default controls changed, so your left-stick "
                                  "choice gives way to it (%s)", v.name.c_str(), base_motion(v) ? "motion" : "stick");

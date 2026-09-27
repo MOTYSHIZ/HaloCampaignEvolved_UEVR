@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace halo {
 
@@ -45,10 +46,14 @@ void vehcam_presets_poll();
 // GAME thread, every tick. `in_vehicle` = our camera system is running in a vehicle; `chassis` = the
 // resolved vehicle mesh (0 = not yet); `vehicle_name` = the full object name the camera file is matched
 // against -- the vehicle actor your SEAT belongs to when the game has said, else the chassis mesh's;
-// `seat_role` = vehcampresets::SeatRole as the game reports it (-1 = unknown). Identifies the vehicle when
+// `seat` = vehcampresets::seat_bits as the game reports them (0 = unknown). Identifies the vehicle when
 // the chassis or the seat changes, applies left X / left Y steps, keeps the published camera current,
-// and owns UEVR's decoupled-pitch switch while a camera that tilts with the vehicle is up.
-void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat_role);
+// remembers your camera and controls per seat across sessions, and owns UEVR's decoupled-pitch switch
+// while a camera that tilts with the vehicle is up.
+void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat);
+
+// GAME thread: the "chassis" names of the entry this vehicle and seat would get (empty = none given).
+std::vector<std::string> vehcam_chassis_hint(const std::wstring& vehicle_name, int seat);
 
 // Any thread (the input hook): +1 = next camera, -1 = previous.
 void veh_cam_step(int dir);
