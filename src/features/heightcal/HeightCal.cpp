@@ -585,13 +585,18 @@ bool               g_pc_stick_latched = false;   // the stick took over from phy
 std::atomic<bool>      g_stick_crouch{false};    // XInput hook -> tick: the player's OWN crouch input is held
 std::atomic<long long> g_stick_crouch_ms{0};
 bool  g_sc_prev      = false;   // last tick's stick crouch, for its edges
-bool  g_sc_settle    = false;   // released, camera still rising: keep solving against the standing eye
-float g_sc_settle_t  = 0.0f;
+bool  g_sc_own       = false;   // the stick's crouch owns the view: from a press until he is SEEN standing
+float g_sc_quiet_t   = 0.0f;    // how long E has sat still at the standing eye since the stick was let go
+float g_sc_quiet_ref = 0.0f;    // E when that run began: a crouch camera still on its way down is not still
 bool  g_e_stand_have = false;
 float g_e_stand      = 0.0f;    // the character's STANDING eye height: E_game while nothing crouches him, UE cm
+float g_e_stand_away_t = 0.0f;  // how long E has disagreed with it by more than the tolerance
 bool  g_esolve_stand_prev = false;
 float g_esolve_last  = 0.0f;    // the E the last solve used -- for continuity when its source switches
-float g_esolve_off   = 0.0f;    // that continuity offset, decaying to 0, UE cm
+float g_esolve_off0  = 0.0f;    // the continuity offset at the last switch, eased out to 0, UE cm
+float g_esolve_bt    = 1.0f;    // seconds since that switch
+bool  g_pc_watch     = false;   // physical crouch just let go: is he seen standing after it? (log only)
+float g_pc_watch_t   = 0.0f;
 
 // The physical crouch line, real metres above the floor. heightcrouchfrac > 0: that fraction of your
 // standing head, as before. 0 (the default) = AUTO: the head height at which your view would sink
@@ -857,6 +862,20 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     const bool stick_press   = stick_crouch && !g_sc_prev;
     const bool stick_release = !stick_crouch && g_sc_prev;
     g_sc_prev = stick_crouch;
+    // Taken here, before physical crouch below, so a press hands over from it on the same tick. What
+    // ends it is in the stick block before TARGET: seeing him stand, not letting go of the stick. Only
+    // with a standing eye to solve against -- and since that is not learned while the stick owns the
+    // view, taking it without one could never end.
+    if (g_cfg.height_stick_crouch == 0) g_sc_own = false;
+    else if (stick_press && g_e_stand_have) {
+        if (!g_sc_own) hlog("HEIGHT STICK: crouch pressed -- the view shows his crouch (E %.1f cm, standing eye %.1f cm)",
+                            have_E ? E : -1.0f, g_e_stand);
+        g_sc_own = true;
+        g_sc_quiet_t = 0.0f;
+    }
+    if (stick_release && g_sc_own)
+        hlog("HEIGHT STICK: released -- his crouch stays in the view until he is seen standing (E %.1f cm)",
+             have_E ? E : -1.0f);
 
     g_pc_can = g_cfg.height_crouch != 0 && active && eff == MODE_ABSOLUTE && g_floor_known && !pending;
     if (g_pc_can && still && !g_pc_on) {
@@ -880,12 +899,14 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     const bool pc_was = g_pc_on;
     if (g_pc_can && g_pc_have_ref) {
         const float line = pc_line(K);
-        // THE STICK TAKES OVER. Both are holds on one button, so while physical crouch holds it a stick
-        // press changes nothing -- which is how sitting down locked the stick out: a seated head sits at
-        // or under the line, physical crouch held the button, and the stick had nothing left to add.
-        // So a stick press while physical crouch holds hands the crouch to the stick and PAUSES physical
+        // THE STICK TAKES OVER. Both press one button, so while physical crouch holds it a stick press
+        // changes nothing -- which is how sitting down locked the stick out: a seated head sits at or
+        // under the line, physical crouch held the button, and the stick had nothing left to add. So a
+        // stick press while physical crouch holds hands the crouch to the stick and PAUSES physical
         // crouch until you physically stand back up (above the line plus the band). The most recent
-        // deliberate input wins; standing up is deliberate too, and re-arms it.
+        // deliberate input wins; standing up is deliberate too, and re-arms it. The button stays down
+        // across the hand-over (the stick holds it before we let go), so the game sees no new press --
+        // which is also what keeps it from standing him up when its crouch is a TOGGLE.
         if (stick_press && g_pc_on) {
             g_pc_on = false;
             g_pc_stick_latched = true;
@@ -895,7 +916,10 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             g_pc_stick_latched = false;
             hlog("HEIGHT CROUCH: stood up -- physical crouch re-armed");
         }
-        if (!g_pc_on && !g_pc_stick_latched && head_abs < line) {
+        // Not while the stick's crouch owns the view: he is crouched already, and under a toggle crouch
+        // (the game's default) our press would stand him up instead. Ducking then only lowers the view,
+        // which heightleash holds at his eye.
+        if (!g_pc_on && !g_pc_stick_latched && !g_sc_own && head_abs < line) {
             g_pc_on = true;
             hlog("HEIGHT CROUCH: head %.3f m < %.3f m -- crouching", head_abs, line);
         } else if (g_pc_on && head_abs > line + g_cfg.height_crouch_band) {
@@ -911,6 +935,23 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     // release that happens in a menu is still honoured on the first on-foot ticks after it.
     if (g_pc_on != pc_was) g_e_follow_t = 0.6f;
     if (active && g_e_follow_t > 0.0f) g_e_follow_t -= dt;
+    // Does letting go of the button stand him up? With the game's controller crouch set to hold, or
+    // a toggle that treats a long press as a hold, yes. With a plain toggle he stays down, and this
+    // feature would stand him up on every OTHER duck instead. Nothing acts on it yet -- it is logged,
+    // at heightlog=1, so a headset session can say which one this game does.
+    if (pc_was && !g_pc_on && !g_pc_stick_latched) { g_pc_watch = true; g_pc_watch_t = 0.0f; }
+    if (g_pc_on) g_pc_watch = false;
+    if (g_pc_watch && active && have_E && g_e_stand_have) {
+        g_pc_watch_t += dt;
+        if (g_pc_watch_t >= 1.5f) {
+            g_pc_watch = false;
+            if (E < 0.88f * g_e_stand)
+                hlog("HEIGHT CROUCH: let go 1.5 s ago but he still looks crouched (E %.1f cm, standing eye %.1f cm) -- "
+                     "is the game's controller crouch a toggle? (Settings > Controller > Hold to crouch)", E, g_e_stand);
+            else
+                hlog("HEIGHT CROUCH: let go, and he stood up (E %.1f cm)", E);
+        }
+    }
     g_pc_want.store(g_pc_on, std::memory_order_relaxed);
     g_pc_stamp_ms.store(steady_ms(), std::memory_order_relaxed);
 
@@ -925,40 +966,76 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     // height, the character still crouched. Seated, the same cancelling meant a stick crouch never
     // showed at all.
     //
-    // So while the stick holds a crouch, the solve uses the character's STANDING eye (g_e_stand)
-    // instead of the measured one. The camera's own crouch animation then passes straight into the
-    // view -- at render rate, since only the solve's reference is frozen, not the camera. After the
-    // release it keeps doing so until the measured E is back at the standing value (or 1.5 s), so the
-    // view rises WITH the camera instead of popping when the filter lets go.
+    // So while the stick's crouch owns the view (g_sc_own), the solve uses the character's STANDING
+    // eye (g_e_stand) instead of the measured one. The camera's own crouch animation then passes
+    // straight into the view -- at render rate, since only the solve's reference is frozen, not the
+    // camera -- and so does his standing back up.
+    //
+    // WHAT ENDS IT IS SEEING HIM STAND, NOT LETTING GO OF THE STICK. This game's controller crouch is a
+    // TOGGLE by default (Settings > Controller > Hold to crouch is off): a flick crouches him and he
+    // STAYS down after the stick comes back. The first version ended on the release, plus a settle that
+    // waited for E to return to the standing value -- and at the release E was still HELD at that value
+    // by its own filter (the camera was mid-drop), so the settle ended on the spot, the filter let the
+    // crouched E through ~0.4 s later, and the view popped back up with him still crouched: the very
+    // pop this block exists to remove. So ownership now lasts until E has sat STILL, as a sample the
+    // filter took, within kStandTol of the standing eye for kQuietS -- which is true only once he is
+    // standing and the filter has caught up. Hold or toggle, whichever the player chose: the same
+    // test, since both end with him standing. A press the game ignored ends the same way, at once.
     //
     // g_e_stand is the last E measured while nothing crouches the character and the filter took the
-    // sample as stable ground -- so it follows slopes and stairs while you walk, and freezes the moment
-    // a crouch begins. Any switch of the solve's source carries the old value and decays the
-    // difference at kSolveBlend cm/s, so even a switch that really is a jump (the stick taking over from
-    // physical crouch, see above) arrives over ~0.2 s instead of in a frame.
-    constexpr float kSolveBlend = 300.0f;   // UE cm/s
+    // sample as stable ground -- so it follows slopes and stairs while you walk -- and it is not
+    // learned while any crouch owns the view, so a release can never teach it a crouched eye (the first
+    // version learned it on the release tick itself, before the settle began). A jump in it bigger than
+    // kStandTol must persist kStandAwayS before it is believed: a crouch nothing here knows about, a
+    // ledge or a crate under the trace. Any switch of the solve's source carries the old value and
+    // eases the difference out over kSolveBlendS (smoothstep: no step in speed at either end), so a
+    // switch that really is a jump -- the stick taking over from physical crouch -- reads as a crouch.
+    constexpr float kSolveBlendS = 0.35f;   // s
+    constexpr float kQuietS      = 0.2f;    // s
+    constexpr float kStandAwayS  = 5.0f;    // s
+    // "At the standing eye": 12% of it, ~23 cm for Chief. His crouched eye is ~32% lower (camera
+    // heights 0.42 vs 0.62 world units, from the biped tag), and pitching the camera down raises it by
+    // up to ~8% (the tag's camera offset), so this is inside a crouch and outside the pitch.
+    const float kStandTol = 0.12f * g_e_stand;
     const EFilt* ef = e_filter(g_e_used);
-    if (have_E && !stick_crouch && !g_pc_on && !g_sc_settle && ef != nullptr && ef->took) {
+    const bool e_took = active && have_E && ef != nullptr && ef->took;
+    if (g_sc_own && !stick_crouch && e_took && g_e_stand_have && std::fabs(E - g_e_stand) < kStandTol) {
+        if (g_sc_quiet_t <= 0.0f) g_sc_quiet_ref = E;
+        if (std::fabs(E - g_sc_quiet_ref) < 8.0f) g_sc_quiet_t += dt;   // still (walking bob allowed), not a camera on its way down
+        else { g_sc_quiet_t = 0.0f; g_sc_quiet_ref = E; }
+    } else {
+        g_sc_quiet_t = 0.0f;
+    }
+    if (g_sc_own && g_sc_quiet_t >= kQuietS) {
+        g_sc_own = false;
+        g_sc_quiet_t = 0.0f;
+        hlog("HEIGHT STICK: he is standing again (E %.1f cm, standing eye %.1f cm) -- the view follows your head again",
+             E, g_e_stand);
+    }
+    // After the ownership update, so the tick that ends a crouch is never the one that teaches it.
+    if (!e_took || stick_crouch || g_sc_own || g_pc_on) {
+        g_e_stand_away_t = 0.0f;
+    } else if (!g_e_stand_have || std::fabs(E - g_e_stand) < kStandTol) {
         g_e_stand = E;
         g_e_stand_have = true;
+        g_e_stand_away_t = 0.0f;
+    } else if ((g_e_stand_away_t += dt) >= kStandAwayS) {
+        hlog("HEIGHT STICK: standing eye re-learned %.1f -> %.1f cm (E stayed there %.0f s)", g_e_stand, E, kStandAwayS);
+        g_e_stand = E;
+        g_e_stand_away_t = 0.0f;
     }
-    if (stick_release) { g_sc_settle = true; g_sc_settle_t = 0.0f; }
-    if (stick_crouch)  g_sc_settle = false;
-    if (g_sc_settle) {
-        g_sc_settle_t += dt;
-        if ((have_E && std::fabs(E - g_e_stand) < 3.0f) || g_sc_settle_t > 1.5f) g_sc_settle = false;
-    }
-    const bool solve_stand = g_cfg.height_stick_crouch != 0 && g_e_stand_have && have_E &&
-                             (stick_crouch || g_sc_settle);
+    const bool solve_stand = g_cfg.height_stick_crouch != 0 && g_e_stand_have && have_E && g_sc_own;
     float E_solve = E;
     if (have_E) {
         const float src = solve_stand ? g_e_stand : E;
-        if (solve_stand != g_esolve_stand_prev) g_esolve_off = g_esolve_last - src;   // stay continuous
+        if (solve_stand != g_esolve_stand_prev) {   // stay continuous: carry the old value, ease it out
+            g_esolve_off0 = g_esolve_last - src;
+            g_esolve_bt = 0.0f;
+        }
         g_esolve_stand_prev = solve_stand;
-        const float step = kSolveBlend * dt;
-        if (std::fabs(g_esolve_off) <= step) g_esolve_off = 0.0f;
-        else g_esolve_off += (g_esolve_off > 0.0f) ? -step : step;
-        E_solve = src + g_esolve_off;
+        g_esolve_bt += dt;
+        const float u = clampf(g_esolve_bt / kSolveBlendS, 0.0f, 1.0f);
+        E_solve = src + g_esolve_off0 * (1.0f - u * u * (3.0f - 2.0f * u));
         g_esolve_last = E_solve;
     }
 
@@ -1060,6 +1137,11 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             if (u + 1 < sizeof(st)) std::snprintf(st + u, sizeof(st) - u, " | held by heightleash");
         }
         g_leash_seen = false;
+        // While the stick's crouch owns the view -- after a toggle crouch that is until he stands again.
+        if (g_sc_own) {
+            const std::size_t u = std::strlen(st);
+            if (u + 1 < sizeof(st)) std::snprintf(st + u, sizeof(st) - u, " | stick crouch");
+        }
         g_status = st;
 
         if (g_cfg.height_log >= 2) {
@@ -1067,7 +1149,8 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             hlog("HEIGHT mode=%s cfg=%s src=%s floor_off=%.3f resid=%.3f S=%.1f K=%.1f hmd_y=%.3f head_abs=%.3f | "
                  "E trace=%.1f(raw %.1f ok %d floor_z %.1f) blam=%.1f(raw %.1f ok %d unit_zcm %.1f off %.1f%s) "
                  "pawn=%.1f(raw %.1f ok %d root_z %.1f half %.1f%s off %.1f) use=%s E=%.1f | O=%.1f T=%.1f "
-                 "V_target=%.1f so_y=%.4f V_pred=%.1f V_meas=%.1f err=%.1f cm | active=%d still=%d own=%d H=%.3f(%d)",
+                 "V_target=%.1f so_y=%.4f V_pred=%.1f V_meas=%.1f err=%.1f cm | active=%d still=%d own=%d H=%.3f(%d) | "
+                 "stick=%d sc_own=%d E_stand=%.1f E_solve=%.1f pc=%d",
                  mode_name(eff), mode_name(cfg_mode), src_name(g_active_src), g_floor_off, g_resid, S, K, hmd.y, head_abs,
                  g_etr.E, g_etr.raw, (int)g_etr.raw_ok, g_floor_z,
                  g_eblam.E, g_eblam.raw, (int)g_eblam.raw_ok, g_unit_zcm, g_blam_off,
@@ -1075,7 +1158,8 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
                  g_epawn.E, g_epawn.raw, (int)g_epawn.raw_ok, g_root_z, g_half, g_half_ok ? " capsule" : " nocapsule", g_pawn_off,
                  e_name(g_e_used), E, g_have_O ? g_O : 0.0f, g_T, want_log, so_now, V_pred, V_meas,
                  (want_log >= 0.0f && V_meas >= 0.0f) ? V_meas - want_log : 0.0f,
-                 (int)active, (int)still, (int)own, g_H, (int)g_have_H);
+                 (int)active, (int)still, (int)own, g_H, (int)g_have_H,
+                 (int)stick_crouch, (int)g_sc_own, g_e_stand_have ? g_e_stand : -1.0f, E_solve, (int)g_pc_on);
         }
     }
     return own;

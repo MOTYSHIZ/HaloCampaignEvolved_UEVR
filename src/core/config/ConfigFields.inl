@@ -117,9 +117,11 @@
     // the one value that happened to land near the leash (~0.8 in the first headset test).
     float height_crouch_frac = 0.0f;
     float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
-    // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): while the stick holds a crouch, absolute mode lets
-    // the game camera's crouch through instead of pinning the view to your real head -- it popped back
-    // up ~0.4 s after every stick crouch. A player-facing fix, so ON; 0 restores the old behaviour.
+    // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): from a stick crouch press until the character is
+    // seen standing again, absolute mode lets the game camera's crouch through instead of pinning the
+    // view to your real head -- it popped back up ~0.4 s after every stick crouch. Until he is SEEN
+    // standing, not until the stick is let go: the game's controller crouch is a toggle by default.
+    // A player-facing fix, so ON; 0 restores the old behaviour.
     int   height_stick_crouch = 1;    // heightstickcrouch: 1 on, 0 off
     // THE LEASH BELOW THE CHARACTER'S EYE (HeightCal.cpp): the most the view may drop below the game
     // camera -- the character's own eye -- so ducking cannot take it inside his body. Game side, so UE
@@ -1310,17 +1312,17 @@
     //   *beta:  how fast the cutoff opens with speed -- position per m/s, rotation per rad/s
     //   dcut:   the cutoff in Hz of the speed estimate itself
     //   melee:  0 = the swing detector reads the RAW hand (get_pose_raw), 1 = the smoothed one
-    // Position defaults are VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff
-    // 10, CutoffSlope 10) converted to this filter's units: its slope acted on cm/s per axis, i.e.
-    // 1000 per m/s. Its rotation slope acted on quaternion components per second, about half of
-    // rad/s, i.e. ~5 per rad/s, and that is kept -- but rotmin is 1.0, not VRE's 0.1: rotation here
-    // drives the AIM ray, and at 0.1 Hz a slow 3 deg/s track trails the hand by ~1.3 deg (tau
-    // ~0.45 s); at 1.0 Hz it is ~0.4 deg while a still hand is still settled with tau ~0.16 s.
-    // The conversion is approximate (VRE's cutoff is per axis, this one is on the speed magnitude).
+    // Started from VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff 10,
+    // CutoffSlope 10) converted to this filter's units -- its slope acted on cm/s per axis (1000 per
+    // m/s) and on quaternion components per second (~5 per rad/s); approximate, since VRE's cutoff is
+    // per axis and this one is on the speed magnitude. Then:
+    //   rotmin 0.1 -> 1.0: rotation drives the AIM ray, and at 0.1 Hz a slow 3 deg/s track trailed
+    //     the hand by ~1.3 deg (tau ~0.45 s); at 1.0 Hz it is ~0.4 deg (review, 2026-09-27).
+    //   posmin 0.1 -> 1.0, posbeta 1000 -> 500: tuned in headset by the user, canonized 2026-09-27.
     bool  hand_smooth = false;
     int   hand_smooth_hands = 0;
-    float hand_smooth_pos_min = 0.1f;
-    float hand_smooth_pos_beta = 1000.0f;
+    float hand_smooth_pos_min = 1.0f;
+    float hand_smooth_pos_beta = 500.0f;
     float hand_smooth_rot_min = 1.0f;
     float hand_smooth_rot_beta = 5.0f;
     float hand_smooth_dcut = 10.0f;
