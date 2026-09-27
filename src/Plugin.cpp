@@ -13683,9 +13683,10 @@ public:
             state->dwPacketNumber++;
         }
 
-        // ---- SEATED PRESS EDGES, for the two vehicle bindings below: the buttons that went DOWN on this
-        // poll, taken off the physical snapshot whether or not you are seated. A binding acts only on a
-        // press that STARTS while seated. Edges computed on (seated && button) fired on every boarding:
+        // ---- SEATED PRESS EDGES, for the stick-click binding below (left X / Y read their own action
+        // states): the buttons that went DOWN on this poll, taken off the physical snapshot whether or not
+        // you are seated. A binding acts only on a press that STARTS while seated. Edges computed on
+        // (seated && button) fired on every boarding:
         // the button that boards the vehicle is still held when stick mode engages, so the camera
         // stepped the moment you sat down (both rides in the 2026-09-25 log: "(entered)", then
         // "(left X: next)" 6 ms later), and a sprint held into a seat would have flipped the controls
@@ -13694,16 +13695,46 @@ public:
         const WORD seat_btn_down = (WORD)(raw_btn & ~s_seat_prev_btn);
         s_seat_prev_btn = raw_btn;
 
-        // ---- VEHICLE LEFT X / LEFT Y -> NEXT / PREVIOUS CAMERA. Each vehicle has its own list of
-        // cameras in halo_vr_vehcams.json (VehCamSelect.cpp applies the step on the game tick). X and Y
-        // are free for a driver in stick mode (the on-foot remaps stand down and the game has no seated
-        // use for them). Press edges above; !g_in_menu belt-and-braces. Additive: both still pass
-        // through to the game -- which does mean a PASSENGER with a weapon also reloads (X) or swaps
-        // weapons (Y) when stepping cameras.
+        // ---- VEHICLE LEFT X / LEFT Y -> PREVIOUS / NEXT CAMERA. Each vehicle has its own list of
+        // cameras in halo_vr_vehcams.json (VehCamSelect.cpp applies the step on the game tick).
+        //
+        // READ BY UEVR ACTION, NOT BY PAD MASK. The masks do not follow the controller's labels here
+        // (Config.hpp, measured: left X arrives as 0x2000, which XInput calls B, and the right
+        // controller's B as 0x4000, "X"), so the old test for 0x4000 never saw left X -- and stepped the
+        // camera on RIGHT B, reload, instead. AButtonLeft / BButtonLeft on the left hand ARE the
+        // physical X and Y whatever the pad calls them (the grenade swallow reads the same action).
+        // Polled at most every 4 ms, and only while seated; the first poll of a seat only records the
+        // state, so a button held while boarding never fires. Additive: both still reach the game as
+        // whatever the pad calls them.
         {
+            static decltype(API::VR::get_action_handle("")) s_ax = nullptr, s_ay = nullptr;
+            static bool s_tried = false, s_primed = false, s_x = false, s_y = false;
+            static ULONGLONG s_at = 0;
             const bool seated = g_stick_mode.load() && !g_in_menu.load();
-            if (seated && (seat_btn_down & XINPUT_GAMEPAD_X) != 0) veh_cam_next_prev(+1);
-            if (seated && (seat_btn_down & XINPUT_GAMEPAD_Y) != 0) veh_cam_next_prev(-1);
+            if (!seated) {
+                s_primed = false;
+            } else {
+                if (!s_tried) {
+                    s_tried = true;
+                    s_ax = API::VR::get_action_handle("/actions/default/in/AButtonLeft");
+                    s_ay = API::VR::get_action_handle("/actions/default/in/BButtonLeft");
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: left X / Y camera steps read by action: "
+                                         "AButtonLeft %s, BButtonLeft %s",
+                                         s_ax ? "resolved" : "NOT found", s_ay ? "resolved" : "NOT found");
+                }
+                const ULONGLONG t = GetTickCount64();
+                if (t - s_at >= 4) {
+                    s_at = t;
+                    const auto left = API::VR::get_left_joystick_source();
+                    const bool x = s_ax != nullptr && API::VR::is_action_active(s_ax, left);
+                    const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
+                    if (s_primed) {
+                        if (x && !s_x) veh_cam_next_prev(-1);   // X: previous camera
+                        if (y && !s_y) veh_cam_next_prev(+1);   // Y: next camera
+                    }
+                    s_x = x; s_y = y; s_primed = true;
+                }
+            }
         }
 
         // ---- VEHICLE LEFT STICK CLICK -> MOTION / STICK CONTROLS (vehctrlclick). In any seat our vehicle
