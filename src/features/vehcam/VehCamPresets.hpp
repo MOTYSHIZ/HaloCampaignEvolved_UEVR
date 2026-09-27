@@ -50,14 +50,28 @@ struct Camera {
     bool    rot_yaw = false, rot_pitch = false, rot_roll = false;
     bool    collide = true;
     float   collide_margin = 30.0f;           // cm short of whatever blocks the offset
-    int     hide_body = -1;                   // -1 = auto (hide your body when the origin is your seat)
-    bool hides_body() const { return hide_body < 0 ? origin != Origin::Vehicle : hide_body != 0; }
+    int     hide_body = -1;                   // -1 = auto: hidden unless the origin is the vehicle's, and
+                                              //      always for a firstperson camera (its view is inside it)
+    bool hides_body() const {
+        if (hide_body >= 0) return hide_body != 0;
+        return type == CamType::FirstPerson || origin != Origin::Vehicle;
+    }
 };
 
 // THE SEAT YOU ARE IN, as the GAME reports it (BlamUnitComponent.GetSeatStates: bIsDriver / bIsGunner on
-// the seat whose occupant is you). Driver wins over gunner when a seat says both. Unknown = the game did
-// not say: seat detection unavailable on this build, or not read yet this ride.
+// the seat whose occupant is you). A seat can be both (a turret's seat may drive the turret AND fire it),
+// so an entry's "seat" list is tested against the seat's FLAGS: "driver" = bIsDriver, "gunner" =
+// bIsGunner, "passenger" = neither. Unknown = the game did not say: seat detection unavailable on this
+// build, or not read yet this ride.
 enum class SeatRole : int8_t { Unknown = -1, Driver = 0, Gunner = 1, Passenger = 2 };
+constexpr uint8_t kSeatDriver    = 1u << static_cast<int>(SeatRole::Driver);
+constexpr uint8_t kSeatGunner    = 1u << static_cast<int>(SeatRole::Gunner);
+constexpr uint8_t kSeatPassenger = 1u << static_cast<int>(SeatRole::Passenger);
+// The bits for a seat from its flags; 0 = the game has not said.
+constexpr uint8_t seat_bits(bool driver, bool gunner) {
+    return static_cast<uint8_t>((driver ? kSeatDriver : 0) | (gunner ? kSeatGunner : 0)
+                              | ((!driver && !gunner) ? kSeatPassenger : 0));
+}
 
 struct Vehicle {
     std::string name;                 // the entry's key
@@ -69,6 +83,9 @@ struct Vehicle {
     // "seat": the seats this entry is for, as bits (1 << SeatRole); 0 = any seat. A passenger rides the
     // same vehicle actor as its driver, so this is what tells their entries apart. Ignored on "default".
     uint8_t seats = 0;
+    // "chassis": lower-case substrings of the MESH the cameras use as the vehicle's frame, when its actor
+    // has more than one ("hull", "sk_wraithmortar"). Left out: a mesh named hull or body, else the nearest.
+    std::vector<std::string> chassis;
     std::vector<Camera> cameras;
 };
 
@@ -96,13 +113,20 @@ ParseResult table_from_json(const char* text, std::size_t len, Table& out);
 std::string table_to_json(const Table& t);
 
 // Index of the entry for this vehicle actor name and seat (case-insensitive substring match; an entry with
-// a "seat" list is considered only when the seat's role is known and listed; the longest match wins, then
-// an entry with a seat list over one without, then file order), else the "default" entry, else -1.
-int match_vehicle(const Table& t, const std::string& actor_name, SeatRole seat = SeatRole::Unknown);
+// a "seat" list is considered only when the game has named the seat and one of its flags is listed; the
+// longest match wins, then an entry with a seat list over one without, then file order), else the
+// "default" entry, else -1. `seat` = seat_bits(); 0 = unknown. An entry with no "seat" list is therefore
+// the driver's -- and the one any other seat of that vehicle falls back to when it has none of its own.
+int match_vehicle(const Table& t, const std::string& actor_name, uint8_t seat = 0);
+inline int match_vehicle(const Table& t, const std::string& actor_name, SeatRole role) {
+    return match_vehicle(t, actor_name, role == SeatRole::Unknown ? uint8_t{0} : static_cast<uint8_t>(1u << static_cast<int>(role)));
+}
 
 const char* type_name(CamType t);
 const char* origin_name(Origin o);
 const char* seat_role_name(SeatRole s);   // "driver" / "gunner" / "passenger" / "unknown"
+// For readouts and logs: "Driver", "Gunner", "Driver, Gunner", "Passenger"; "" = unknown.
+std::string seat_text(uint8_t seat);
 
 // For readouts and logs: "Yaw, Pitch, Roll" / "Pitch, Roll" / "None"; location adds "Your view (orbit)".
 std::string rotation_tracking_text(const Camera& c);
