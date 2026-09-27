@@ -56,6 +56,10 @@ appropriately.
   free your gun hand for gestures (squeeze there again to bring it back).
 - **Head-relative movement** — push the stick where you look, walk where you look, independent of
   where the gun points. Snap turn supported.
+- **Roomscale** — walk around your play space and Chief walks with you, through the game's own
+  movement, so walls and collision still hold him. Your view height follows your real height, ducking
+  in the room crouches him, and your head is kept out of walls. Calibrate height from the in-game
+  menu; each part can be switched off there.
 - **VR control layout** — crouch on right-stick-down, equipment on left-X, and the d-pad on the
   right stick whenever a hand is near your head (or on the left stick while you hold
   right-stick-up), all remappable. Menu-aware: in menus your right controller's B acts as *back* and
@@ -398,9 +402,11 @@ that weapon's barrel line; it's remembered from then on.
 Do the weapon pose first — it sets where the weapon sits. If a calibration ever feels off, just repeat
 it — the latest one wins.
 
-**Reset your play area first, and calibrate standing where you normally play.** This matters only if
-you've turned the head leash off (`hmdleash=0`); with the default leash it's automatic. Unleashed,
-your eye can be metres from where the game thinks you are, and the mod bends your aim to compensate —
+**Reset your play area first, and calibrate standing where you normally play.** With the default
+settings this is automatic: roomscale walks Chief to wherever you stand, so your eye stays with the
+place the game thinks you are. It matters if you've turned roomscale off (`roomscale=0`) without
+turning the head leash on (`hmdleash=1`). Then your eye can be metres from where the game thinks
+you are, and the mod bends your aim to compensate —
 so calibrating from over there measures your grip through that correction instead of measuring your
 grip. Recentre, calibrate from your neutral position, and the result is exact and stays correct
 wherever you wander afterwards. If you skip this, the fit will be a little noisier; nothing is
