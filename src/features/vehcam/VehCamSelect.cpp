@@ -50,6 +50,7 @@ std::map<std::string, int> s_remembered;            // entry name -> the camera 
 // the edit is the newer statement of what you want.
 struct CtrlChoice { bool motion; bool base; };
 std::map<std::string, CtrlChoice> s_ctrl;
+uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen: bumped by select(..., recenter)
 
 // ---- UEVR's decoupled pitch --------------------------------------------------------------------
 bool     s_dp_forced = false;                       // we turned VR_DecoupledPitch off
@@ -109,8 +110,10 @@ VehActiveCam make_active(int vi, int ci) {
     for (int k = 0; k < 3; ++k) a.offset[k] = c.offset[k];
     const int choice = ctrl_choice(v);                      // the left stick click beats the file
     a.motion_aim = choice >= 0 ? choice : v.motion_aim;
+    a.aim_marker = v.aim_marker;
     a.index = ci;
     a.count = static_cast<int>(v.cameras.size());
+    a.recenter_gen = s_recenter_gen;
     return a;
 }
 
@@ -122,7 +125,10 @@ void clear_selection() {
     g_veh_tp_active.store(false, std::memory_order_relaxed);
 }
 
-void select(int vi, int ci, const char* why) {
+// recenter: this selection is a camera CHANGE the player made or got (getting in, left X / Y), so the view
+// turns onto the vehicle's forward (vehcamrecenter). A file reload keeps your view where it is: editing a
+// number should not spin you round.
+void select(int vi, int ci, const char* why, bool recenter) {
     const vcp::Vehicle& v = s_table.vehicles[vi];
     const int n = static_cast<int>(v.cameras.size());
     if (n <= 0) { clear_selection(); return; }
@@ -131,6 +137,7 @@ void select(int vi, int ci, const char* why) {
     s_vehicle_name = v.name;
     s_camera = ci;
     s_remembered[v.name] = ci;
+    if (recenter && g_cfg.veh_cam_recenter) ++s_recenter_gen;
     const VehActiveCam a = make_active(vi, ci);
     publish(a);
     // Our camera draws only for a chase camera; a first-person entry hands the view to the seat camera.
@@ -326,6 +333,9 @@ void vehcam_presets_poll() {
         // Keep what is running: a half-typed edit must not drop you out of your camera.
         API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s NOT applied -- %s. The previous cameras stay in "
                              "use until the file reads cleanly.", s_path, r.error.c_str());
+        // Said in the headset too: otherwise a typo shows only as "my edit did nothing".
+        if (g_cfg.veh_tp)
+            xrtext_show("# Camera file not applied\n" + r.error + "\n*The cameras you had stay in use until it reads cleanly*\n");
         return;
     }
     s_table = std::move(t);
@@ -370,13 +380,13 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
             } else if (auto it = s_remembered.find(v.name); it != s_remembered.end()) {
                 ci = it->second;                     // back in a vehicle you used: the camera you left it in
             }
-            select(vi, ci, reload ? "file reloaded" : "entered");
+            select(vi, ci, reload ? "file reloaded" : "entered", /*recenter=*/!reload);
         }
     }
 
     const int step = s_step.exchange(0, std::memory_order_relaxed);
     if (step != 0 && s_vehicle >= 0)
-        select(s_vehicle, s_camera + step, step > 0 ? "left X: next" : "left Y: previous");
+        select(s_vehicle, s_camera + step, step > 0 ? "left Y: next" : "left X: previous", /*recenter=*/true);
 
     if (s_ctrl_toggle.exchange(0, std::memory_order_relaxed) != 0 && s_vehicle >= 0) apply_ctrl_toggle();
 

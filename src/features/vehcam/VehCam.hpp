@@ -97,7 +97,7 @@ bool veh_tp_anchor_active();
 // RUNTIME third-person-camera state: true while a chase camera from halo_vr_vehcams.json is selected
 // for the vehicle you are in (VehCamSelect.cpp). The TP gates read this.
 extern std::atomic<bool> g_veh_tp_active;
-// Left X / left Y in a vehicle: +1 = next camera, -1 = previous. Called from the input hook.
+// Left Y / left X in a vehicle: +1 = next camera, -1 = previous. Called from the input hook.
 void veh_cam_next_prev(int dir);
 
 // vehaimray: the vehicle aim toward WHERE THE CONTROLLER POINTS (UE degrees), computed on the game

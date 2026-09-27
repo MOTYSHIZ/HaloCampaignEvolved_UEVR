@@ -134,4 +134,42 @@ inline void vehicle_axes(const double C[9], const double MX[3], const double MY[
     }
 }
 
+// THE HEAD'S YAW IN THE ROOM, from its tracking quaternion (the runtime's axes: -Z forward, +Y up, +X
+// right), in degrees, positive to the RIGHT (UE's sense). UEVR turns the whole room by the view's
+// rotation, so this is also the head's yaw about the VIEW's own up, tilted view or not. Taken from the
+// forward vector's level part; looking nearly straight up or down that part vanishes, so then from the
+// right vector's (turned back by the 90 degrees between them), which the pitch of your head leaves alone.
+inline double head_yaw_deg(double qx, double qy, double qz, double qw) {
+    const double R2D = 57.29577951;
+    // forward = q . (0,0,-1); in the view's frame its forward part is -z and its right part is x (the swizzle
+    // the controller ray and the head anchor use: UE X = -z, Y = x, Z = y).
+    const double fx = -2.0 * (qw * qy + qx * qz);
+    const double fz = -(1.0 - 2.0 * (qx * qx + qy * qy));
+    if (fx * fx + fz * fz >= 0.04) return std::atan2(fx, -fz) * R2D;
+    const double rx = 1.0 - 2.0 * (qy * qy + qz * qz);   // right = q . (1,0,0)
+    const double rz = 2.0 * (qx * qz - qw * qy);
+    double y = std::atan2(rx, -rz) * R2D - 90.0;
+    while (y > 180.0) y -= 360.0;
+    while (y <= -180.0) y += 360.0;
+    return y;
+}
+
+// THE TURN THAT PUTS WHERE YOU ARE LOOKING ON THE VEHICLE'S FORWARD (vehcamrecenter). F0/R0 are the view's
+// forward and right before any turn (tracked_frame with no turn), VF the vehicle's forward, head_yaw your
+// head's yaw in the room (head_yaw_deg). The stick turn rotates the view about its own up, and UEVR adds
+// your head's yaw about that same axis, so after this turn your gaze's heading IS the vehicle's -- in a
+// camera that tilts with the vehicle too, since both angles are measured in the tilted frame. With the
+// vehicle's forward nearly along the view's up (it cannot be seen as a heading) only your head is undone.
+// Degrees, in (-180, 180].
+inline double recenter_turn_deg(const double VF[3], const double F0[3], const double R0[3], double head_yaw) {
+    const double R2D = 57.29577951;
+    const double f = VF[0] * F0[0] + VF[1] * F0[1] + VF[2] * F0[2];
+    const double r = VF[0] * R0[0] + VF[1] * R0[1] + VF[2] * R0[2];
+    const double veh = (f * f + r * r > 0.01) ? std::atan2(r, f) * R2D : 0.0;
+    double t = veh - head_yaw;
+    while (t > 180.0) t -= 360.0;
+    while (t <= -180.0) t += 360.0;
+    return t;
+}
+
 } // namespace halo::vehcammath

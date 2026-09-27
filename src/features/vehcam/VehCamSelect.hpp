@@ -25,7 +25,11 @@ struct VehActiveCam {
     float   offset[3] = {-450.0f, 0.0f, 180.0f};
     float   collide_margin = 30.0f;
     int     motion_aim = -1;                  // -1 = the vehaim key, else this vehicle's (file or left stick click)
+    bool    aim_marker = true;                // "aimMarker": the ring where the vehicle points (the eye poses it)
     int     index = 0, count = 0;             // for the log line
+    // Bumped by a camera CHANGE that should turn your view onto the vehicle's forward (vehcamrecenter):
+    // getting in, and left X / left Y. Not by a file reload or the controls toggle. The eye acts on a change.
+    uint32_t recenter_gen = 0;
 };
 
 // Any thread: the selected camera as last published.

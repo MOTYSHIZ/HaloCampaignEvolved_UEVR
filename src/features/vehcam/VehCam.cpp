@@ -35,6 +35,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <string>
+#include <vector>
 
 using uevr::API;
 
@@ -493,6 +494,177 @@ void call_set_scale(API::UObject* comp, double sc) {
     comp->call_function(L"SetRelativeScale3D", p);
 }
 
+// ---------------------------------------------------------------- THE RIDE SCAN
+//
+// ONE WALK of the object array per ride, SPREAD OVER TICKS, finding both things a ride needs from it:
+// the vehicle's chassis mesh (the cameras' frame, and how the camera file knows the vehicle) and the
+// driver's body parts (hidden while a camera sits inside them).
+//
+// WHY. Boarding froze the game for about a third of a second. The chassis search and the body hider
+// each walked all ~290k objects building every object's CLASS NAME as a string, and the hider walked
+// twice: ~90-106 ms a walk, measured in the 2026-09-25 log (VEHBODY .176 -> .264 -> .370, STICK MODE
+// ENTER .929 -> VEHTP chassis .076). Now one walk serves both, each class is named once (a
+// class-pointer cache), each owning actor is looked at once, and the walk spends at most ~1.5 ms of any
+// tick, carrying on from where it stopped. The answer arrives a few ticks later and no frame pays for it.
+//
+// What is kept is a pointer plus its array slot, checked against the array again when used, so an
+// object destroyed mid-walk is dropped rather than followed. GAME THREAD.
+
+// A pointer -> byte cache, open-addressed: the walk asks it ~290k times, and a node per entry is what
+// makes std::unordered_map slow at that. At most half full; past that it answers without caching.
+struct PtrKindCache {
+    static constexpr uint32_t N = 1u << 15;
+    const void* key[N];
+    uint8_t     val[N];
+    uint32_t    used = 0;
+    void clear() { std::memset(key, 0, sizeof(key)); used = 0; }
+    static uint32_t slot(const void* p) {
+        uint64_t x = (uint64_t)(uintptr_t)p;
+        x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33;
+        return (uint32_t)x & (N - 1);
+    }
+    bool find(const void* p, uint8_t* v) const {
+        for (uint32_t h = slot(p);; h = (h + 1) & (N - 1)) {   // never full, so an empty slot ends it
+            if (key[h] == nullptr) return false;
+            if (key[h] == p) { *v = val[h]; return true; }
+        }
+    }
+    void put(const void* p, uint8_t v) {
+        if (used * 2 >= N) return;
+        uint32_t h = slot(p);
+        while (key[h] != nullptr) h = (h + 1) & (N - 1);
+        key[h] = p; val[h] = v; ++used;
+    }
+};
+
+constexpr uint8_t kScanSkm        = 1;    // class is exactly SkeletalMeshComponent (a chassis, a Body)
+constexpr uint8_t kScanMesh       = 2;    // class is a *Mesh*Component* (a body part)
+constexpr uint8_t kScanVehicle    = 4;    // actor class named *VehicleActor*
+constexpr uint8_t kScanSpartan    = 8;    // actor class named *SpartansBipedActor* -- the player's biped
+constexpr uint8_t kScanPersistent = 16;   // (an owner) sits in the persistent level
+
+struct ScanHit { API::UObject* o; int32_t i; API::UObject* owner; };
+
+PtrKindCache s_scan_classes, s_scan_owners;   // per walk: classes and actors can unload between rides
+bool     s_scan_active = false;
+int32_t  s_scan_next = 0;
+uint32_t s_scan_serial = 0;     // bumped when a walk STARTS
+uint32_t s_scan_done = 0;       // the serial of the last walk that FINISHED -- the s_res_* below
+uint32_t s_scan_gen = 0;        // the stick-mode window: bumped as stick mode engages
+uint32_t s_scan_walk_gen = 0, s_scan_result_gen = 0;
+int      s_scan_ticks = 0;
+double   s_scan_ms = 0.0, s_scan_max_ms = 0.0;
+std::vector<ScanHit> s_walk_chassis, s_walk_bodies, s_walk_parts;   // being filled
+std::vector<ScanHit> s_res_chassis, s_res_bodies, s_res_parts;      // the last finished walk
+
+uint8_t scan_class_kind(API::UClass* cls) {
+    uint8_t k = 0;
+    if (s_scan_classes.find(cls, &k)) return k;
+    auto* f = cls->get_fname();
+    const std::wstring n = (f != nullptr) ? f->to_string() : std::wstring{};
+    if (n == L"SkeletalMeshComponent") k |= kScanSkm;
+    if (n.find(L"Mesh") != std::wstring::npos && n.find(L"Component") != std::wstring::npos) k |= kScanMesh;
+    if (n.find(L"VehicleActor") != std::wstring::npos) k |= kScanVehicle;
+    if (n.find(L"SpartansBipedActor") != std::wstring::npos) k |= kScanSpartan;
+    s_scan_classes.put(cls, k);
+    return k;
+}
+
+uint8_t scan_owner_kind(API::UObject* owner) {
+    uint8_t k = 0;
+    if (s_scan_owners.find(owner, &k)) return k;
+    if (auto* oc = owner->get_class()) k = scan_class_kind(oc) & (kScanVehicle | kScanSpartan);
+    if ((k & kScanVehicle) != 0) {
+        // In the persistent level, as the old full-name test required: a template's owner is a
+        // package, and a streamed level's actors belong to that level.
+        auto* lvl = owner->get_outer();
+        auto* lf = (lvl != nullptr) ? lvl->get_fname() : nullptr;
+        if (lf != nullptr && lf->to_string() == L"PersistentLevel") k |= kScanPersistent;
+    }
+    s_scan_owners.put(owner, k);
+    return k;
+}
+
+// Start a walk, or join the one running; returns the serial the caller waits for (ride_scan_done()
+// reaching it). force_new: a retry wants a FRESH look; otherwise a walk finished in this stick-mode
+// window is answer enough, and the caller has it at once.
+uint32_t ride_scan_request(bool force_new) {
+    if (s_scan_active) return s_scan_serial;
+    if (!force_new && s_scan_done != 0 && s_scan_result_gen == s_scan_gen) return s_scan_done;
+    s_scan_active = true;
+    s_scan_next = 0;
+    ++s_scan_serial;
+    s_scan_walk_gen = s_scan_gen;
+    s_scan_ticks = 0; s_scan_ms = 0.0; s_scan_max_ms = 0.0;
+    s_walk_chassis.clear(); s_walk_bodies.clear(); s_walk_parts.clear();
+    s_scan_classes.clear(); s_scan_owners.clear();
+    return s_scan_serial;
+}
+uint32_t ride_scan_done() { return s_scan_done; }
+bool     ride_scan_fresh() { return s_scan_done != 0 && s_scan_result_gen == s_scan_gen; }
+void     ride_scan_cancel() { s_scan_active = false; }
+void     ride_scan_new_window() { ++s_scan_gen; }
+
+// Once per tick: carry the walk on for at most ~1.5 ms.
+void ride_scan_step() {
+    if (!s_scan_active) return;
+    auto* arr = API::get()->get_uobject_array();
+    if (arr == nullptr) { s_scan_active = false; return; }
+    static LARGE_INTEGER s_freq{};
+    if (s_freq.QuadPart == 0) QueryPerformanceFrequency(&s_freq);
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    const LONGLONG budget = s_freq.QuadPart * 15 / 10000;
+    const int32_t n = arr->get_object_count();
+    int32_t i = s_scan_next;
+    for (; i < n; ++i) {
+        if (((i - s_scan_next) & 1023) == 1023) {
+            QueryPerformanceCounter(&t1);
+            if (t1.QuadPart - t0.QuadPart > budget) break;
+        }
+        auto* o = static_cast<API::UObject*>(arr->get_object(i));
+        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
+        auto* c = o->get_class();
+        if (c == nullptr) continue;
+        const uint8_t k = scan_class_kind(c);
+        if ((k & kScanMesh) == 0) continue;
+        auto* owner = o->get_outer();
+        if (owner == nullptr) continue;
+        const uint8_t ok = scan_owner_kind(owner);
+        if ((k & kScanSkm) != 0 && (ok & kScanVehicle) != 0 && (ok & kScanPersistent) != 0)
+            s_walk_chassis.push_back({o, i, owner});
+        if ((ok & kScanSpartan) != 0) {
+            s_walk_parts.push_back({o, i, owner});
+            if ((k & kScanSkm) != 0) {
+                auto* f = o->get_fname();
+                if (f != nullptr && f->to_string() == L"Body") s_walk_bodies.push_back({o, i, owner});
+            }
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)s_freq.QuadPart;
+    s_scan_ms += ms;
+    if (ms > s_scan_max_ms) s_scan_max_ms = ms;
+    ++s_scan_ticks;
+    s_scan_next = i;
+    if (i < n) return;
+    s_scan_active = false;
+    s_res_chassis.swap(s_walk_chassis);
+    s_res_bodies.swap(s_walk_bodies);
+    s_res_parts.swap(s_walk_parts);
+    s_scan_done = s_scan_serial;
+    s_scan_result_gen = s_scan_walk_gen;
+    API::get()->log_info("[Halo-CampE-UEVR] VEHSCAN: %d objects in %d tick(s), %.1f ms of work (%.1f ms at most in one "
+                         "tick): %d vehicle meshes, %d Spartan bodies",
+                         n, s_scan_ticks, s_scan_ms, s_scan_max_ms, (int)s_res_chassis.size(), (int)s_res_bodies.size());
+}
+
+// Is this hit still the object it was? Its slot must still hold it.
+bool scan_hit_live(const ScanHit& h) {
+    auto* arr = API::get()->get_uobject_array();
+    return arr != nullptr && h.i >= 0 && h.i < arr->get_object_count() && arr->get_object(h.i) == h.o;
+}
+
 // ---------------------------------------------------------------- DRIVER BODY HIDE
 //
 // WHAT IT IS, measured 2026-08-21 by a ranked sweep around the rendered eye:
@@ -500,27 +672,9 @@ void call_set_scale(API::UObject* comp, double sc) {
 //   BP_SpartansBipedActor_C_<id>.Body     SkeletalMeshComponent, SK_Spartans_AnimDynamics
 //
 // That actor is the player. With the camera at the seat your head is inside it, so it clips
-// constantly. MATCHED BY OUTER CHAIN, NOT BY CLASS: the class is plain "SkeletalMeshComponent",
-// shared with every marine, weapon and NPC in the level. The full name carries the owning actor,
-// so "SpartansBipedActor" + ".Body" is the thing that actually identifies it; the instance id
-// changes per load, so it is deliberately not part of the match.
-bool is_driver_body(const std::wstring& full) {
-    return full.find(L"SpartansBipedActor") != std::wstring::npos
-        && full.size() >= 5 && full.compare(full.size() - 5, 5, L".Body") == 0;
-}
-
-// Pull "BP_SpartansBipedActor_C_<id>" out of a full name. The instance id changes every load,
-// so the ACTOR TOKEN has to be read from a component we already matched.
-std::wstring driver_actor_token(const std::wstring& full) {
-    const size_t k = full.find(L"SpartansBipedActor");
-    if (k == std::wstring::npos) return L"";
-    const size_t start = full.rfind(L'.', k);
-    const size_t end = full.find(L'.', k);
-    if (end == std::wstring::npos) return L"";
-    const size_t from = (start == std::wstring::npos) ? 0 : start + 1;
-    if (end <= from) return L"";
-    return full.substr(from, end - from);
-}
+// constantly. MATCHED BY OWNER, NOT BY CLASS: the class is plain "SkeletalMeshComponent", shared
+// with every marine, weapon and NPC in the level; the owning actor's class (SpartansBipedActor) and
+// the component's name (Body) are what identify it. The ride scan collects them.
 
 // EVERY mesh component on the driver actor, not just .Body. These are modular characters (the
 // marines nearby are SIX components each), so the Spartan is one too and .Body is one piece.
@@ -529,15 +683,13 @@ TrackedObject s_driver_parts[kMaxDriverParts];
 int           s_driver_part_count = 0;
 bool          s_driver_hidden = false;
 int           s_driver_tries = 0; ULONGLONG s_driver_try_at = 0;
+uint32_t      s_driver_wait = 0;   // the ride scan serial the hider waits for; 0 = not waiting
 
-// Resolve the driver actor, then collect its parts. Enumerates every Spartan body with distance
-// from BOTH references and SELECTS ON d_blam: the Blam unit position is the player's biped by
-// definition, while the eye is only meaningful after the vehicle camera has run -- and at the
-// mount edge it has not. (Selecting on the eye once picked a Spartan 847 cm away.)
-int resolve_driver_parts() {
+// The driver's parts from the last finished ride scan. SELECTS ON d_blam: the Blam unit position is
+// the player's biped by definition, while the eye is only meaningful after the vehicle camera has
+// run -- and at the mount edge it has not. (Selecting on the eye once picked a Spartan 847 cm away.)
+int ride_scan_take_driver_parts() {
     s_driver_part_count = 0;
-    auto* arr = API::get()->get_uobject_array();
-    if (arr == nullptr) return 0;
     const double ex = (double)g_cam_x.load(std::memory_order_relaxed);
     const double ey = (double)g_cam_y.load(std::memory_order_relaxed);
     const double ez = (double)g_cam_z.load(std::memory_order_relaxed);
@@ -556,17 +708,12 @@ int resolve_driver_parts() {
     }
     API::get()->log_info("[Halo-CampE-UEVR] VEHBODY: eye=(%.0f %.0f %.0f) blam=(%.0f %.0f %.0f)",
                          ex, ey, ez, bx, by, bz);
-    const int32_t n = arr->get_object_count();
-    std::wstring token; double bestd = 1e18;
+    API::UObject* owner = nullptr; double bestd = 1e18;
     int spartans = 0;
-    for (int32_t i = 0; i < n; ++i) {
-        auto* o = static_cast<API::UObject*>(arr->get_object(i));
-        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
-        if (class_name_of(o) != L"SkeletalMeshComponent") continue;
-        const std::wstring full = o->get_full_name();
-        if (!is_driver_body(full)) continue;
+    for (const ScanHit& h : s_res_bodies) {
+        if (!scan_hit_live(h)) continue;
         Vec3 w{};
-        if (!call_ret_vec3(o, L"K2_GetComponentLocation", &w)) continue;
+        if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
         const double de = std::sqrt(((double)w.x - ex) * ((double)w.x - ex)
                                   + ((double)w.y - ey) * ((double)w.y - ey)
                                   + ((double)w.z - ez) * ((double)w.z - ez));
@@ -575,23 +722,18 @@ int resolve_driver_parts() {
                                   + ((double)w.z - bz) * ((double)w.z - bz));
         ++spartans;
         API::get()->log_info("[Halo-CampE-UEVR] VEHBODY   spartan d_eye=%8.1f d_blam=%8.1f  %ls",
-                             de, db, full.c_str());
-        if (db < bestd) { bestd = db; token = driver_actor_token(full); }
+                             de, db, h.o->get_full_name().c_str());
+        if (db < bestd) { bestd = db; owner = h.owner; }
     }
     API::get()->log_info("[Halo-CampE-UEVR] VEHBODY: %d spartan bodies in the level", spartans);
-    if (token.empty()) return 0;
-    for (int32_t i = 0; i < n && s_driver_part_count < kMaxDriverParts; ++i) {
-        auto* o = static_cast<API::UObject*>(arr->get_object(i));
-        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
-        const std::wstring cn = class_name_of(o);
-        if (cn.find(L"Mesh") == std::wstring::npos) continue;
-        if (cn.find(L"Component") == std::wstring::npos) continue;
-        const std::wstring full = o->get_full_name();
-        if (full.find(token) == std::wstring::npos) continue;
-        s_driver_parts[s_driver_part_count++].set_at(o, i);
+    if (owner == nullptr) return 0;
+    for (const ScanHit& h : s_res_parts) {
+        if (s_driver_part_count >= kMaxDriverParts) break;
+        if (h.owner != owner || !scan_hit_live(h)) continue;
+        s_driver_parts[s_driver_part_count++].set_at(h.o, h.i);
     }
     API::get()->log_info("[Halo-CampE-UEVR] VEHBODY: chose %ls at d_blam=%.1f -- %d mesh parts",
-                         token.c_str(), bestd, s_driver_part_count);
+                         owner->get_full_name().c_str(), bestd, s_driver_part_count);
     return s_driver_part_count;
 }
 
@@ -642,6 +784,7 @@ void driver_hide_update() {
         }
         if (!still_seated) s_driver_part_count = 0;   // the next ride resolves afresh
         s_driver_tries = 0;
+        s_driver_wait = 0;
         return;
     }
 
@@ -658,13 +801,22 @@ void driver_hide_update() {
     }
 
     if (!s_driver_hidden) {
-        // Two full object-array walks per try: every 2 s, ten tries per mount, then it gives up
-        // until the next mount (it retried every tick before, perf audit 2026-09-06).
-        if (s_driver_tries >= 10) return;
-        const ULONGLONG t = GetTickCount64();
-        if (t - s_driver_try_at < 2000) return;
-        s_driver_try_at = t; ++s_driver_tries;
-        if (resolve_driver_parts() == 0) return;      // not resolvable yet; retry in 2 s
+        // The parts come from the RIDE SCAN: one walk shared with the chassis search and spread over
+        // ticks, instead of two full walks of its own on the one tick that needed them (~200 ms, most
+        // of the boarding freeze). Every 2 s, ten tries per mount, then it gives up until the next
+        // mount. The first try takes a walk already finished in this stick-mode window -- the chassis
+        // search's -- so it usually costs nothing; a retry looks again.
+        if (s_driver_wait == 0) {
+            if (s_driver_tries >= 10) return;
+            const ULONGLONG t = GetTickCount64();
+            if (t - s_driver_try_at < 2000) return;
+            s_driver_try_at = t;
+            s_driver_wait = ride_scan_request(/*force_new=*/s_driver_tries > 0);
+            ++s_driver_tries;
+        }
+        if (ride_scan_done() < s_driver_wait) return;     // still walking
+        s_driver_wait = 0;
+        if (ride_scan_take_driver_parts() == 0) return;    // none found: the next try, in 2 s
         s_driver_tries = 0;
         s_driver_hidden = true;
         API::get()->log_info("[Halo-CampE-UEVR] VEHBODY: driver hidden (%d parts)",
@@ -718,7 +870,7 @@ std::atomic<uintptr_t> g_hog_body_ptr{0};
 std::atomic<int32_t>   g_hog_body_idx{-1};
 
 // ---- ROUTE A P0: owned THIRD-PERSON camera chassis. Resolved off the PLAYER PAWN's world
-// position (the pawn sits in the vehicle; the Blam seat resolution reads dead), published game-side;
+// position (the pawn sits in the vehicle), found when a ride starts (veh_ride_update), published game-side;
 // the render callbacks read its transform FRESH each frame. The yaw is published by the eye
 // callback (which already reads the transform) for the view override to consume.
 std::atomic<uintptr_t> g_tp_chassis_ptr{0};
@@ -771,8 +923,13 @@ std::atomic<bool>      g_veh_tp_active{false};
 // swing round with it -- that camera is an orbit by choice). Accumulated on the game tick, read by the
 // eye; zeroed on every new ride, held otherwise (vehorbitreturn=0).
 std::atomic<float>     g_veh_turn_yaw{0.0f};
+// THE RECENTER ON A CAMERA CHANGE (vehcamrecenter). The eye works out the turn that puts where you are
+// looking onto the vehicle's forward, publishes it here and uses it at once; the tick adopts it into
+// g_veh_turn_yaw, the turn it owns, and acknowledges. Until then the eye keeps using the published value.
+std::atomic<float>     g_veh_turn_reset_val{0.0f};
+std::atomic<uint32_t>  g_veh_turn_reset_seq{0}, g_veh_turn_reset_ack{0};
 
-// Left X / left Y in a vehicle: next / previous camera. Called from the input hook (any thread); the
+// Left Y / left X in a vehicle: next / previous camera. Called from the input hook (any thread); the
 // game tick applies it (VehCamSelect.cpp).
 void veh_cam_next_prev(int dir) { veh_cam_step(dir); }
 
@@ -823,6 +980,18 @@ std::atomic<float> g_veh_aim_range{0.0f};
 // The point the vehicle is aimed THROUGH (the pointing ray at that range), world cm, from this tick.
 // Consumed on the same tick by the world-space reticules; the compositor copy is re-stamped per frame.
 std::atomic<float> g_veh_aim_tx{0.0f}, g_veh_aim_ty{0.0f}, g_veh_aim_tz{0.0f};
+
+// THE VEHICLE-FACING MARKER (the camera file's "aimMarker", XRLAYER_SLOT_VEHAIM): the generated ring
+// where the VEHICLE points, beside the crosshair that shows where you point -- with a camera that turns
+// with the vehicle, the view settles only once the two meet, and this is how you see where that is. The
+// eye publishes the ray it is drawn along (its origin as an offset from the chassis, and the vehicle's
+// forward); the tick traces that ray for its depth -- the reticule's rule: on what it hits, the last range
+// held on a miss, the far end before any hit -- and publishes the range; the eye rebuilds the point each
+// frame on the live chassis and forward. A range crosses the clock boundary, never a point.
+std::atomic<float> g_vmk_ox{0.0f}, g_vmk_oy{0.0f}, g_vmk_oz{0.0f};
+std::atomic<float> g_vmk_fx{1.0f}, g_vmk_fy{0.0f}, g_vmk_fz{0.0f};
+std::atomic<bool>  g_vmk_ray_valid{false};
+std::atomic<float> g_vmk_range{0.0f};
 
 bool veh_aim_ray_angles(float* yaw, float* pitch) {
     if (!veh_tp_motion_aim_active() || !g_cfg.veh_aim_ray) return false;
@@ -975,50 +1144,95 @@ namespace {
 std::wstring s_tp_chassis_name;
 
 // GAME THREAD. Nearest VehicleActor SkeletalMeshComponent to the player pawn = the chassis of the
-// vehicle the player is in. No name gate (chassis naming varies: Banshee ".hull", Wraith
-// "SK_WraithMortar"); no rider-Blam seed (dead). Walks the object array, so callers throttle it.
-void resolve_tp_chassis() {
-    auto* arr = API::get()->get_uobject_array();
-    if (arr == nullptr) return;
+// vehicle the player is in, from the last finished RIDE SCAN (the walk itself is spread over ticks
+// there). No name gate (chassis naming varies: Banshee ".hull", Wraith "SK_WraithMortar"). The next
+// two nearest are logged beside it, so a seat that picks the wrong mesh names the alternatives --
+// the Warthog driver's seat is suspected of seeing the chaingun first. True = resolved.
+bool pick_tp_chassis() {
     auto* pawn = API::get()->get_local_pawn(0);
     Vec3 ploc{};
-    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &ploc)) {
-        g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
-        g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
-        return;
-    }
+    if (pawn == nullptr || !call_ret_vec3(pawn, L"K2_GetActorLocation", &ploc)) return false;
     const double px = (double)ploc.x, py = (double)ploc.y, pz = (double)ploc.z;
-    const int32_t n = arr->get_object_count();
-    API::UObject* best = nullptr; int32_t besti = -1; double bestd = 1e18;
-    for (int32_t i = 0; i < n; ++i) {
-        auto* o = static_cast<API::UObject*>(arr->get_object(i));
-        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
-        if (class_name_of(o) != L"SkeletalMeshComponent") continue;
-        const std::wstring full = o->get_full_name();
-        if (full.find(L"PersistentLevel") == std::wstring::npos) continue;
-        if (full.find(L"VehicleActor")   == std::wstring::npos) continue;
-        Vec3 w{}; if (!call_ret_vec3(o, L"K2_GetComponentLocation", &w)) continue;
+    const ScanHit* cand[3] = {nullptr, nullptr, nullptr};
+    double nd[3] = {1e18, 1e18, 1e18};
+    for (const ScanHit& h : s_res_chassis) {
+        if (!scan_hit_live(h)) continue;
+        Vec3 w{}; if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
         const double d = std::sqrt(((double)w.x - px) * ((double)w.x - px)
                                  + ((double)w.y - py) * ((double)w.y - py)
                                  + ((double)w.z - pz) * ((double)w.z - pz));
-        if (d < bestd) { bestd = d; best = o; besti = i; }
+        for (int k = 0; k < 3; ++k) {
+            if (d < nd[k]) {
+                for (int m = 2; m > k; --m) { nd[m] = nd[m - 1]; cand[m] = cand[m - 1]; }
+                nd[k] = d; cand[k] = &h;
+                break;
+            }
+        }
     }
-    if (best != nullptr && bestd < 800.0) {   // within 8 m of the pawn = the vehicle it is in
-        const uintptr_t prev = g_tp_chassis_ptr.load(std::memory_order_relaxed);
-        g_tp_chassis_ptr.store((uintptr_t)best, std::memory_order_relaxed);
-        g_tp_chassis_idx.store(besti, std::memory_order_relaxed);
-        s_tp_chassis_name = best->get_full_name();
-        if ((uintptr_t)best != prev)
-            API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f)",
-                                 best->get_full_name().c_str(), bestd, px, py, pz);
-    } else {
-        g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
-        g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
-        static uint32_t s_warn = 0;
-        if ((s_warn++ % 90u) == 0u)
-            API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no VehicleActor mesh within 8 m of pawn "
-                                 "(best %.0f, pawn %.0f %.0f %.0f)", bestd < 1e17 ? bestd : -1.0, px, py, pz);
+    if (cand[0] == nullptr || nd[0] >= 800.0) {   // within 8 m of the pawn = the vehicle it is in
+        API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no VehicleActor mesh within 8 m of pawn "
+                             "(best %.0f, pawn %.0f %.0f %.0f, %d candidates)",
+                             cand[0] != nullptr ? nd[0] : -1.0, px, py, pz, (int)s_res_chassis.size());
+        return false;
     }
+    g_tp_chassis_ptr.store((uintptr_t)cand[0]->o, std::memory_order_relaxed);
+    g_tp_chassis_idx.store(cand[0]->i, std::memory_order_relaxed);
+    s_tp_chassis_name = cand[0]->o->get_full_name();
+    std::wstring alt;
+    for (int k = 1; k < 3; ++k) {
+        if (cand[k] == nullptr) break;
+        wchar_t d[32]; swprintf_s(d, L" %.0fcm", nd[k]);
+        alt += L"; ";
+        alt += cand[k]->o->get_full_name();
+        alt += d;
+    }
+    API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f) -- next nearest: %ls",
+                         s_tp_chassis_name.c_str(), nd[0], px, py, pz, alt.empty() ? L"none" : alt.c_str() + 2);
+    return true;
+}
+
+// ---- THE RIDE: a POSITIVE "you are in a vehicle seat", not merely stick mode.
+//
+// Stick mode is also every cutscene, every death and the window after a level load, and the chassis
+// search used to run in all of them -- every ~3 s, a full walk of the object array each time. The
+// game's own MOUNT FLAG (the biped's parent datum, core/UnitState, published on the sim thread while
+// our cameras are on) says "in a seat" and nothing else: it read mounted on 302 of 318 samples of a
+// ride, the rest at its edges (2026-09-25 log). So a ride is stick mode AND mounted AND no cutscene --
+// a cutscene is never a ride, mounted or not.
+//
+// The flag only means something once the seat publish has run at all this session (it has published a
+// rider position); on a build where the unit record never resolves, this falls back to stick mode
+// minus cutscenes rather than to nothing. Leaving waits ~0.5 s of unmounted readings, so a flicker
+// mid-ride never drops the camera; stick mode ending or a cutscene starting ends it at once.
+// GAME THREAD (the cutscene flags are the tick's own).
+bool s_in_ride = false;
+
+bool veh_ride_update(bool stick) {
+    static bool     s_proven = false;
+    static uint32_t s_unmounted = 0;
+    static bool     s_said = false;
+    if (!s_proven && halo::g_seat_pub_seq.load(std::memory_order_relaxed) != 0) s_proven = true;
+    const auto& ps = host::g_plugin_state;
+    const bool cine = *ps.cine_answering && *ps.cine_active;
+    if (!stick || cine) {
+        s_unmounted = 0; s_said = false;
+        s_in_ride = false;
+        return false;
+    }
+    if (!s_proven || halo::g_unit_mounted.load(std::memory_order_relaxed)) {
+        s_unmounted = 0;
+        s_in_ride = true;
+        return true;
+    }
+    ++s_unmounted;
+    if (s_in_ride && s_unmounted < 16) return true;          // a flicker mid-ride
+    s_in_ride = false;
+    if (s_unmounted == 64 && !s_said) {                      // ~2 s: say once why nothing is searched
+        s_said = true;
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: stick mode without the mount flag -- not a vehicle seat "
+                             "(a death, a load or a scripted scene), so no vehicle search");
+    }
+    return false;
 }
 } // namespace
 
@@ -1127,15 +1341,13 @@ void vehprobe_dump_props(API::UObject* obj, const char* label) {
     }
 }
 
-// One walk of the UObject array: log every VehicleActor SkeletalMeshComponent near the search
-// CENTRE with its WORLD rotation, and latch the nearest one NOT named .hull/.body as the turret
-// candidate. Centre is the rendered VIEW position (reliable in stick mode); the seat resolution
-// (g_seat_obj / g_unit_mounted) can read 0, so this does not depend on it. If no centre is
-// available it logs all VehicleActor meshes (capped). The rotations tell whether the gun points
-// independently of the hull; the record aim (each beat) tells whether that aim is the shared value.
+// Log every VehicleActor SkeletalMeshComponent near the search CENTRE with its WORLD rotation, and latch
+// the nearest one NOT named .hull/.body as the turret candidate. The meshes come from the RIDE SCAN's
+// finished walk (it used to walk the whole object array itself -- another ~100 ms stall per boarding).
+// Centre is the rendered VIEW position. If no centre is available it logs all VehicleActor meshes
+// (capped). The rotations tell whether the gun points independently of the hull; the record aim (each
+// beat) tells whether that aim is the shared value.
 void vehprobe_scan(bool have_ctr, double cx, double cy, double cz) {
-    auto* arr = API::get()->get_uobject_array();
-    if (arr == nullptr) return;
     auto ends_with_ci = [](const std::wstring& s, const wchar_t* suf) {
         const size_t m = wcslen(suf);
         if (s.size() < m) return false;
@@ -1143,17 +1355,13 @@ void vehprobe_scan(bool have_ctr, double cx, double cy, double cz) {
             if (towlower(s[s.size() - m + k]) != towlower(suf[k])) return false;
         return true;
     };
-    const int32_t n = arr->get_object_count();
     API::UObject* nearest_gun = nullptr; double ngd = 1e18; int logged = 0;
     API::get()->log_info("[Halo-CampE-UEVR] VEHPROBE scan (haveCtr=%d ctr=%.0f,%.0f,%.0f): VehicleActor skeletal meshes --",
                          (int)have_ctr, cx, cy, cz);
-    for (int32_t i = 0; i < n; ++i) {
-        auto* o = static_cast<API::UObject*>(arr->get_object(i));
-        if (o == nullptr || IsBadReadPtr(o, sizeof(void*))) continue;
-        if (class_name_of(o) != L"SkeletalMeshComponent") continue;
+    for (const ScanHit& h : s_res_chassis) {
+        if (!scan_hit_live(h)) continue;
+        auto* o = h.o;
         const std::wstring full = o->get_full_name();
-        if (full.find(L"PersistentLevel") == std::wstring::npos) continue;
-        if (full.find(L"VehicleActor")   == std::wstring::npos) continue;
         Vec3 w{}; const bool haveLoc = call_ret_vec3(o, L"K2_GetComponentLocation", &w);
         double d = -1.0;
         if (have_ctr && haveLoc) {
@@ -1183,18 +1391,18 @@ void vehprobe_scan(bool have_ctr, double cx, double cy, double cz) {
 
 void vehprobe_tick() {
     if (!g_cfg.veh_probe) return;
-    // Gate on STICK MODE, not g_unit_mounted: stick mode is the proven vehicle signal (the log
-    // shows it reliably), while UnitState's seat/datum resolve can read 0 and leave g_unit_mounted
-    // stuck false -- which silently killed the first cut of this probe. Stick mode also covers
-    // cutscenes/death, where the scan just finds no VehicleActor mesh (harmless).
-    const bool stick = g_stick_mode_active.load(std::memory_order_relaxed);
-    static bool was_stick = false;
-    if (!stick) {   // reset on exit so the next vehicle re-scans
-        if (was_stick) { g_vehprobe_scanned = false; g_vehprobe_turret.store(0, std::memory_order_relaxed); }
-        was_stick = false;
+    // Gate on THE RIDE (veh_ride_update: stick mode + the mount flag, never a cutscene). The first cut
+    // gated on stick mode alone, which also ran it through every cutscene, death and post-load window.
+    // (The "g_unit_mounted reads dead" that pushed it there was a probe run without the seat publish
+    // switched on -- see docs\VEHICLE-BC24-COMPARISON-2026-09-26.md.)
+    const bool ride = s_in_ride;
+    static bool was_ride = false;
+    if (!ride) {   // reset on exit so the next vehicle re-scans
+        if (was_ride) { g_vehprobe_scanned = false; g_vehprobe_turret.store(0, std::memory_order_relaxed); }
+        was_ride = false;
         return;
     }
-    was_stick = true;
+    was_ride = true;
 
     // Search centre: the rendered view position, via the plugin-state bridge (reliable).
     auto& vpx = *host::g_plugin_state.view_pos_x;
@@ -1205,7 +1413,7 @@ void vehprobe_tick() {
     const double cz = (double)vpz.load(std::memory_order_relaxed);
     const bool have_ctr = (cx != 0.0 || cy != 0.0 || cz != 0.0);
 
-    if (!g_vehprobe_scanned) {
+    if (!g_vehprobe_scanned && ride_scan_fresh()) {   // the ride scan's walk for this window, once it is in
         vehprobe_scan(have_ctr, cx, cy, cz);
         // Is the possessed pawn the VEHICLE (boom off it directly) or the biped (find its vehicle
         // ref)? get_local_pawn is the cheap live handle -- no object-array walk. A
@@ -1344,6 +1552,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehaimorigin")   == 0) { g_cfg.veh_aim_origin = (int)v; return true; }
     if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
+    if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }
@@ -1397,15 +1606,27 @@ void vehcam_game_tick_vehicle() {
     // The seat camera's always mode keeps the rendered eye off the body even unmounted.
     g_view_seat_always.store(g_cfg.veh_cam == 2, std::memory_order_relaxed);
 
+    // THE RIDE SCAN'S WINDOW. A new stick-mode window makes any earlier walk's answer stale; leaving
+    // stick mode abandons a walk nobody needs any more. Then carry a running walk on (~1.5 ms at most).
+    // First in the tick, so the body hide and the chassis search below both see this tick's state.
+    const bool stick_now = halo::g_stick_mode_active.load(std::memory_order_relaxed);
+    {
+        static bool s_stick_was = false;
+        if (stick_now && !s_stick_was) ride_scan_new_window();
+        if (!stick_now && s_stick_was) ride_scan_cancel();
+        s_stick_was = stick_now;
+        ride_scan_step();
+    }
+
     // Vehicle work: the driver-body hide + hog hull resolve, then the wheel gesture and heading
     // publisher. Menus drop the hold like the holsters do.
     g_tick_stage = "vehicle_body";
     vehicle_body_update();
     if (g_in_menu.load()) vehicle_reset(); else vehicle_update(g_last_dt.load());
-    // ROUTE A P0: resolve the vehicle's chassis off the pawn, on the stick-mode ENTER edge (reliable,
-    // unlike the dead mount flag) and retried every ~3 s while unresolved; cleared on exit so the next
-    // vehicle re-resolves. Only walks the object array when it must -- never per tick. The render
-    // callbacks read the resolved mesh's transform fresh.
+    // ROUTE A P0: find the vehicle's chassis when a RIDE starts (stick mode + the mount flag, never a
+    // cutscene -- veh_ride_update), from the ride scan's walk, and retry every ~3 s while unresolved,
+    // ten times a ride at most; cleared on exit so the next vehicle re-resolves. The render callbacks
+    // read the resolved mesh's transform fresh.
     //
     // Resolved whenever the camera system runs in a vehicle (vehtp), WHICHEVER camera is selected: the
     // chassis is how the vehicle is identified, and a first-person entry still needs it to step back.
@@ -1414,29 +1635,51 @@ void vehcam_game_tick_vehicle() {
     {
         static bool s_sys_was = false;
         static bool s_tp_was = false;
-        static uint32_t s_tp_tick = 0;
-        const bool stick = halo::g_stick_mode_active.load(std::memory_order_relaxed);
-        const bool sys = stick && g_cfg.veh_tp;
+        static uint32_t s_ch_wait = 0, s_ch_tries = 0, s_ch_retry = 0;
+        const bool ride = veh_ride_update(stick_now);
+        const bool sys = ride && g_cfg.veh_tp;
         // The live world scale: read at the ride's start (before the eye's first head capture uses it)
         // and re-read every ~2 s during it, so a world-scale change lands mid-ride. Never on foot.
         static uint32_t s_ws_tick = 0;
         if (sys && (!s_sys_was || (++s_ws_tick % 64u) == 0u)) veh_poll_world_scale();
+        bool resolved_now = false;
         if (sys && !s_sys_was) {
-            resolve_tp_chassis(); s_tp_tick = 0;
+            g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
+            g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
+            s_ch_tries = 1; s_ch_retry = 0;
+            s_ch_wait = ride_scan_request(/*force_new=*/false);
             g_veh_turn_yaw.store(0.0f, std::memory_order_relaxed);    // each ride starts facing its heading
         }
-        else if (sys && g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) {
-            if ((++s_tp_tick % 90u) == 0u) resolve_tp_chassis();
+        if (sys && g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) {
+            if (s_ch_wait != 0) {
+                if (ride_scan_done() >= s_ch_wait) {
+                    s_ch_wait = 0;
+                    if (pick_tp_chassis()) resolved_now = true;
+                    else s_ch_retry = 90;                               // ~3 s
+                }
+            } else if (s_ch_retry > 0 && --s_ch_retry == 0) {
+                if (s_ch_tries < 10) {
+                    ++s_ch_tries;
+                    s_ch_wait = ride_scan_request(/*force_new=*/true);
+                } else {
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no vehicle mesh found in 10 tries this ride -- "
+                                         "the game's own camera stays");
+                }
+            }
         }
         if (!sys && s_sys_was) {
             g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
             g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
             g_tp_seat_valid.store(false, std::memory_order_relaxed);
+            s_ch_wait = 0; s_ch_retry = 0;
         }
         s_sys_was = sys;
 
         const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
         vehcam_select_tick(sys, cp, s_tp_chassis_name);
+        // The tick the chassis resolved, the camera was selected just now -- AFTER this tick's body hide
+        // ran. Run it again so a seat camera's first frames are not drawn from inside your own body.
+        if (resolved_now) driver_hide_update();
 
         // THE SEAT, in the chassis mesh's frame (origin "seat"): the pawn's offset from the chassis,
         // pawn and chassis read in the same game state, rotated into the mesh's axes. Two reads and a
@@ -1473,6 +1716,9 @@ void vehcam_game_tick_vehicle() {
             g_tp_ncam_valid.store(false, std::memory_order_relaxed);
             g_tp_view_pitch.store(0.0f, std::memory_order_relaxed);
             g_tp_view_roll.store(0.0f, std::memory_order_relaxed);
+            // The eye no longer runs to retire the vehicle-facing marker, so do it here.
+            g_vmk_ray_valid.store(false, std::memory_order_relaxed);
+            xrlayer_retire_quad(XRLAYER_SLOT_VEHAIM);
         }
         s_tp_was = tp_on;
     }
@@ -1485,8 +1731,16 @@ void vehcam_game_tick_vehicle() {
     // where you leave it (vehorbitreturn=0, default). The first cut orbited the boom and eased back at
     // 60 deg/s, which in-headset read as "the stick lerps my head yaw back to the front of the
     // vehicle". Zeroed on every new ride. The game's own stick-look is masked by the aim write.
+    //
+    // THE ONLY WRITER of g_veh_turn_yaw. A camera change's recenter (vehcamrecenter) is worked out by
+    // the eye, which has the view's frame; it is ADOPTED here, then acknowledged -- in that order, so
+    // an eye that sees the acknowledgement also sees the turn that includes it.
     {
-        float turn = g_veh_turn_yaw.load(std::memory_order_relaxed);
+        static uint32_t s_reset_ack = 0;
+        const uint32_t rseq = g_veh_turn_reset_seq.load(std::memory_order_acquire);
+        const bool adopt = (rseq != s_reset_ack);
+        float turn = adopt ? g_veh_turn_reset_val.load(std::memory_order_relaxed)
+                           : g_veh_turn_yaw.load(std::memory_order_relaxed);
         const float dt = g_last_dt.load();
         const bool can_turn = veh_tp_motion_aim_active() && g_cfg.veh_stick_mode == 1;
         const float sx = can_turn ? host::g_plugin_state.raw_stick_x->load() : 0.0f;
@@ -1500,7 +1754,11 @@ void vehcam_game_tick_vehicle() {
             const float step = g_cfg.veh_orbit_return * dt;
             if (turn > step) turn -= step; else if (turn < -step) turn += step; else turn = 0.0f;
         }
-        g_veh_turn_yaw.store(turn, std::memory_order_relaxed);
+        g_veh_turn_yaw.store(turn, std::memory_order_release);
+        if (adopt) {
+            s_reset_ack = rseq;
+            g_veh_turn_reset_ack.store(rseq, std::memory_order_release);
+        }
     }
 
     // VEHICLE RAY AIM (vehaimray) -- aim the vehicle at WHERE THE CONTROLLER POINTS.
@@ -1645,6 +1903,47 @@ void vehcam_game_tick_vehicle() {
             g_veh_aim_range.store(0.0f, std::memory_order_relaxed);   // next ride measures afresh
         }
         g_veh_aim_valid.store(ok, std::memory_order_relaxed);
+    }
+
+    // THE VEHICLE-FACING MARKER'S DEPTH (aimMarker). The ray the eye published -- from the aim's origin
+    // along the vehicle's forward -- traced here for what it meets, on the reticule's rule: the hit's
+    // range, held on a miss (sky has no range), the far end before any hit this ride. GAME THREAD:
+    // hit_trace is reflection. The eye places and draws the ring every frame from this range.
+    {
+        const VehActiveCam mk = veh_active_cam();
+        const bool want = g_veh_tp_active.load(std::memory_order_relaxed)
+                       && halo::g_stick_mode_active.load(std::memory_order_relaxed)
+                       && mk.valid && mk.aim_marker && g_vmk_ray_valid.load(std::memory_order_relaxed);
+        if (want) {
+            static TrackedObject s_tpc_mk;
+            static uintptr_t s_tpc_mk_raw = 0;
+            const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
+            if (cp != s_tpc_mk_raw) {
+                s_tpc_mk_raw = cp;
+                s_tpc_mk.set_at(reinterpret_cast<API::UObject*>(cp), g_tp_chassis_idx.load(std::memory_order_relaxed));
+            }
+            auto* ch = (cp != 0) ? s_tpc_mk.get_checked(L"SkeletalMeshComponent") : nullptr;
+            Vec3 cl{};
+            if (ch != nullptr && call_ret_vec3(ch, L"K2_GetComponentLocation", &cl)) {
+                const Vec3 o{ cl.x + g_vmk_ox.load(std::memory_order_relaxed),
+                              cl.y + g_vmk_oy.load(std::memory_order_relaxed),
+                              cl.z + g_vmk_oz.load(std::memory_order_relaxed) };
+                const Vec3 d{ g_vmk_fx.load(std::memory_order_relaxed), g_vmk_fy.load(std::memory_order_relaxed),
+                              g_vmk_fz.load(std::memory_order_relaxed) };
+                const float far_cm = g_cfg.veh_aim_far;
+                API::UObject* ignore[2] = {}; int ni = 0;
+                if (auto* pawn = API::get()->get_local_pawn(0)) ignore[ni++] = pawn;
+                if (auto* owner = ch->get_outer()) ignore[ni++] = owner;
+                Vec3 hit{};
+                if (far_cm > 1.0f && hit_trace(o, Vec3{o.x + d.x * far_cm, o.y + d.y * far_cm, o.z + d.z * far_cm},
+                                               ignore, ni, &hit)) {
+                    const float hx = hit.x - o.x, hy = hit.y - o.y, hz = hit.z - o.z;
+                    g_vmk_range.store(std::sqrt(hx * hx + hy * hy + hz * hz), std::memory_order_relaxed);
+                }
+            }
+        } else if (!g_veh_tp_active.load(std::memory_order_relaxed)) {
+            g_vmk_range.store(0.0f, std::memory_order_relaxed);   // the next ride measures afresh
+        }
     }
 
     // ROUTE A P0: CAMERA COLLISION (spring arm). Trace game-side from the camera's origin point (the
@@ -1827,7 +2126,31 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             vehicle_axes(s_C, MX, MY, MZ, VF, VR, VU);
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
             if (ac.rot_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
-            const float turn = g_veh_turn_yaw.load(std::memory_order_relaxed);   // right-stick turn (vehstick=1)
+            // RECENTER ON A CAMERA CHANGE (vehcamrecenter): getting in, or left X / left Y, turns the view so
+            // the way you are looking becomes the vehicle's forward -- your body then faces the way the
+            // vehicle points, which is what a camera that turns with it and a hand that aims it want. Worked
+            // out here, where the view's own frame is, on the new camera's first frame (eye 0), with this
+            // camera's frame before any turn; the tick adopts it into the turn it owns. Yaw only, about your
+            // head, through the right stick's own turn.
+            static uint32_t s_recenter_seen = 0;
+            if (index == 0 && ac.recenter_gen != s_recenter_seen) {
+                s_recenter_seen = ac.recenter_gen;
+                double F0[3], R0[3], U0[3];
+                tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, 0.0, F0, R0, U0);
+                Vec3 hp{}; Quat hq{};
+                const auto hi = API::VR::get_hmd_index();
+                if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false)) {
+                    const double head = vehcammath::head_yaw_deg(hq.x, hq.y, hq.z, hq.w);
+                    halo::g_veh_turn_reset_val.store((float)vehcammath::recenter_turn_deg(VF, F0, R0, head),
+                                                     std::memory_order_relaxed);
+                    halo::g_veh_turn_reset_seq.fetch_add(1, std::memory_order_release);
+                }
+            }
+            // The right-stick turn (vehstick=1) -- or a recenter the tick has not adopted yet.
+            const uint32_t rseq = halo::g_veh_turn_reset_seq.load(std::memory_order_acquire);
+            const uint32_t rack = halo::g_veh_turn_reset_ack.load(std::memory_order_acquire);
+            const float turn = (rseq != rack) ? halo::g_veh_turn_reset_val.load(std::memory_order_relaxed)
+                                              : g_veh_turn_yaw.load(std::memory_order_relaxed);
             // THE VIEW ROTATION, from the camera's rotationTracking (vehcammath::tracked_frame). Nothing
             // tracked: the heading captured this ride, level, and the vehicle turns within your view. Yaw:
             // the vehicle's heading. Pitch / roll: your view tilts with the vehicle's deck -- about the
@@ -1934,6 +2257,62 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     const auto layer_anchor = host::g_plugin_state.layer_anchor;
                     halo::xrlayer_note_publish_gate(0);
                     halo::xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, t), g_ret_scale_mul.load());
+                }
+            }
+
+            // THE VEHICLE-FACING MARKER (aimMarker): the generated ring where the VEHICLE points -- on the
+            // ray from the aim's origin (the game's camera, where the vehicle's aim is taken from with
+            // vehaimorigin=1; else the seat) along the vehicle's forward, THIS frame's, at the range the tick
+            // traced. Placed and sized on the vehicle reticule's rules: pulled back off the surface it lands
+            // on, and held at its apparent size. Aiming a vehicle whose camera turns with it, the view settles
+            // once your crosshair meets this ring. Eye 0 only; the layer re-anchors it for both eyes.
+            if (index == 0) {
+                static bool s_mk_was = false;
+                if (g_cfg.xr_layer && ac.aim_marker) {
+                    double o[3] = { ogx, ogy, ogz };
+                    if (g_cfg.veh_aim_origin != 1) {
+                        o[0] = (double)cloc.x; o[1] = (double)cloc.y; o[2] = (double)cloc.z;
+                        if (halo::g_tp_seat_valid.load(std::memory_order_relaxed)) {
+                            const double sx = halo::g_tp_seat_x.load(std::memory_order_relaxed);
+                            const double sy = halo::g_tp_seat_y.load(std::memory_order_relaxed);
+                            const double sz = halo::g_tp_seat_z.load(std::memory_order_relaxed);
+                            for (int k = 0; k < 3; ++k) o[k] += sx * MX[k] + sy * MY[k] + sz * MZ[k];
+                        }
+                    }
+                    halo::g_vmk_ox.store((float)(o[0] - (double)cloc.x), std::memory_order_relaxed);
+                    halo::g_vmk_oy.store((float)(o[1] - (double)cloc.y), std::memory_order_relaxed);
+                    halo::g_vmk_oz.store((float)(o[2] - (double)cloc.z), std::memory_order_relaxed);
+                    halo::g_vmk_fx.store((float)VF[0], std::memory_order_relaxed);
+                    halo::g_vmk_fy.store((float)VF[1], std::memory_order_relaxed);
+                    halo::g_vmk_fz.store((float)VF[2], std::memory_order_relaxed);
+                    halo::g_vmk_ray_valid.store(true, std::memory_order_relaxed);
+                    float range = halo::g_vmk_range.load(std::memory_order_relaxed);
+                    if (!(range > 1.0f)) range = (g_cfg.veh_aim_far > 1.0f) ? g_cfg.veh_aim_far : 10000.0f;
+                    const float r = range - std::fmin(g_cfg.aim_reticule_surface_off, range * 0.5f);
+                    const Vec3 t{ (float)(o[0] + VF[0] * r), (float)(o[1] + VF[1] * r), (float)(o[2] + VF[2] * r) };
+                    // Apparent size: the vehicle reticule's (distance from the eye / aimreticuledist, times
+                    // aimreticulescaleveh), through the reticule's own world-size formula.
+                    const double dx = (double)t.x - ecx, dy = (double)t.y - ecy, dz = (double)t.z - ecz;
+                    const float d = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+                    const float ref = (g_cfg.aim_reticule_dist > 1.0f) ? g_cfg.aim_reticule_dist : 500.0f;
+                    const float cm = g_cfg.aim_widget_draw * g_cfg.aim_widget_scale * (d / ref)
+                                   * g_cfg.aim_reticule_scale_veh * g_cfg.xr_layer_size;
+                    const auto mk_anchor = host::g_plugin_state.layer_anchor;
+                    halo::xrlayer_notice_quad(halo::XRLAYER_SLOT_VEHAIM, mk_anchor(halo::XRLAYER_SLOT_VEHAIM, t), cm,
+                                              /*hold_cm=*/0.0f, /*priority=*/1);
+                    // Upright like the reticule when xrlayerroll=0; otherwise it faces you as it is.
+                    if (g_cfg.xr_layer_roll == 0) {
+                        Vec3 fwd{}, up{};
+                        if (halo::xrlayer_view_basis(&fwd, &up))
+                            halo::xrlayer_set_quad_orientation(halo::XRLAYER_SLOT_VEHAIM, fwd, Vec3{0.0f, 0.0f, 1.0f});
+                    } else {
+                        halo::xrlayer_clear_quad_orientation(halo::XRLAYER_SLOT_VEHAIM);
+                    }
+                    s_mk_was = true;
+                } else if (s_mk_was) {
+                    s_mk_was = false;
+                    halo::g_vmk_ray_valid.store(false, std::memory_order_relaxed);
+                    halo::xrlayer_retire_quad(halo::XRLAYER_SLOT_VEHAIM);
                 }
             }
         } else if (index == 0) {

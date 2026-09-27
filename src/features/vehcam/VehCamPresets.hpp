@@ -1,7 +1,7 @@
 #pragma once
 
 // THE VEHICLE CAMERA FILE (halo_vr_vehcams.json): per vehicle, an ordered list of cameras, each with
-// its own placement and motion settings. Left X / left Y step to the next / previous camera in a vehicle.
+// its own placement and motion settings. Left Y / left X step to the next / previous camera in a vehicle.
 //
 //   { "version": 1,
 //     "vehicles": {
@@ -54,6 +54,7 @@ struct Vehicle {
     bool  is_default = false;         // the "default" entry: never matched by name
     int   default_camera = 0;
     int   motion_aim = -1;            // -1 = the global vehaim key; 0 / 1 = off / on for this vehicle
+    bool  aim_marker = true;          // "aimMarker": a ring where the VEHICLE points, beside the crosshair
     std::vector<Camera> cameras;
 };
 

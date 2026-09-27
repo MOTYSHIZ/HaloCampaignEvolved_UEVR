@@ -181,6 +181,9 @@ struct Apply {
                 if (x.is_null()) { out.motion_aim = -1; continue; }
                 if (!x.is_bool()) return type_error(x, w, "true, false or null (null = the vehaim setting)");
                 out.motion_aim = x.b ? 1 : 0;
+            } else if (fk == "aimMarker") {
+                if (!x.is_bool()) return type_error(x, w, "true or false");
+                out.aim_marker = x.b;
             } else if (fk == "cameras") {
                 have_cams = true;
                 if (!x.is_arr() || x.items.empty()) return type_error(x, w, "a list of at least one camera");
@@ -300,7 +303,7 @@ std::string table_to_json(const Table& t) {
     std::string s;
     s += "{\n";
     s += "  \"_readme\": [\n";
-    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT X = next camera, LEFT Y = previous camera.\",\n";
+    s += "    \"VEHICLE CAMERAS. In a vehicle: LEFT Y = next camera, LEFT X = previous camera.\",\n";
     s += "    \"Each vehicle has its own list, used in order. The first entry whose 'match' text appears in the\",\n";
     s += "    \"vehicle's name is used (case does not matter); 'default' covers any vehicle not listed.\",\n";
     s += "    \"Camera fields -- all optional; anything left out takes its default:\",\n";
@@ -315,7 +318,8 @@ std::string table_to_json(const Table& t) {
     s += "    \"                    while you keep your own heading.\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
     s += "    \"  hideBody          true | false: hide your character's body (left out = hidden for seat cameras)\",\n";
-    s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim.\",\n";
+    s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim;\",\n";
+    s += "    \"  aimMarker = true | false: a ring where the VEHICLE points, beside the crosshair (left out = true).\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
     s += "  ],\n";
@@ -331,6 +335,7 @@ std::string table_to_json(const Table& t) {
         }
         s += "      \"defaultCamera\": " + std::to_string(v.default_camera) + ",\n";
         if (v.motion_aim >= 0) s += std::string("      \"motionAim\": ") + (v.motion_aim ? "true" : "false") + ",\n";
+        s += std::string("      \"aimMarker\": ") + (v.aim_marker ? "true" : "false") + ",\n";
         s += "      \"cameras\": [\n";
         for (std::size_t ci = 0; ci < v.cameras.size(); ++ci) {
             const Camera& c = v.cameras[ci];

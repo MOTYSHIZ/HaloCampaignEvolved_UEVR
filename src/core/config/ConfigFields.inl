@@ -1330,14 +1330,14 @@
     bool  veh_probe = false;
     // ROUTE A P0: owned vehicle cameras -- a sibling OPTION to bc24's first-person veh_cam (never
     // modifies it), for players who get motion sick in first person. 1 = on: in a vehicle, the
-    // cameras listed for it in halo_vr_vehcams.json, stepped with left X (next) / left Y (previous).
+    // cameras listed for it in halo_vr_vehcams.json, stepped with left Y (next) / left X (previous).
     // EVERY per-camera setting lives in that file -- offset, origin (vehicle or seat), what carries the
     // offset, which vehicle motions the view follows, collision, body hiding -- so each vehicle and
     // each camera can differ. (The vehtpboom / vehtpyaw / vehtpanchor / vehtpattitude / vehtpcollide*
     // keys that did this globally are gone; the file replaced them.) Always head-anchored: your head,
     // not the play-space origin, is what rides the vehicle, and hmdleash is respected -- on, the leash
     // holds your head to the camera's point as it holds it to your body on foot; off, you lean freely.
-    // Gated on stick mode. 0 = off.
+    // Runs in a RIDE: stick mode + the game's mount flag, never in a cutscene or a death. 0 = off.
     bool  veh_tp = false;
     // vehaim: 1 = while the owned third-person camera is on IN A VEHICLE, let the motion controller
     // drive the aim (turret/hull), the same direct-drive write infantry uses. Safe only because we
@@ -1380,6 +1380,12 @@
     // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
     // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
     int   veh_ctrl_click = 1;
+    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left X / left Y -- turn the view so the way
+    // you are looking becomes the vehicle's forward (yaw only, about your head, through the same turn the
+    // right stick uses). Your body then faces the way the vehicle points, which is what a camera that
+    // turns with the vehicle and a controller that aims it want. Not on a camera-file reload (editing a
+    // number must not spin you round) and not on the controls toggle. 0 = the view keeps its turn.
+    bool  veh_cam_recenter = true;
     // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
     // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
     // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every
