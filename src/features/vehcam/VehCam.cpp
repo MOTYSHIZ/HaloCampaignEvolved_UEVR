@@ -1149,8 +1149,8 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
 // The whole-body hide had removed the helmet with the rest (the user) -- by shrinking his
 // BlamMeshSynchronization component, which the armour hangs under (the second test: his actor owns only
 // Collider, Body and that component). So the helmet pieces are found in his attachment tree (rider_tree) by
-// the mesh they draw, the socket they hang from or their name, and hidden AND shrunk the way the body hider
-// does it (hiding alone did not take on this character); each keeps its own scale for the restore. The
+// the mesh they draw, the socket they hang from or their name, and SHRUNK (head_item_hide says why not
+// hidden too); each keeps its own scale for the restore. The
 // bone hide stays, on every skinned mesh of his, for whatever of the head the skeleton draws under it.
 constexpr int kMaxHeadItems = 8;
 struct HeadHide {
@@ -1158,8 +1158,9 @@ struct HeadHide {
     API::UClass* skinned = nullptr;              // USkinnedMeshComponent: the parts the call is for
     int32_t hide_name = -1, hide_op = -1, unhide_name = -1, is_name = -1, is_ret = -1;
     TrackedObject parts[kMaxDriverParts];
+    bool part_was_hidden[kMaxDriverParts] = {};  // the head bone was hidden before we came: the game's, left so
     int n = 0;
-    TrackedObject items[kMaxHeadItems];          // the helmet pieces, hidden and shrunk
+    TrackedObject items[kMaxHeadItems];          // the helmet pieces, shrunk
     double item_scale[kMaxHeadItems][3] = {};    // ...and the relative scale each had
     int ni = 0;
     uintptr_t body = 0;                          // the Body the parts were collected for
@@ -1238,15 +1239,25 @@ int rider_tree(API::UObject* actor, API::UObject** out, int max) {
     return n;
 }
 
+// SHRUNK, NOT HIDDEN -- and that is a fix, not a style (the user, 2026-09-27: "the helmet ended up present
+// on infantry when I jumped out"). The first cut also cleared the pieces' visibility flags and, on the way
+// out, set them to "visible, not hidden" -- which is not their state on foot: in first person the game keeps
+// its third-person helmet out of your view itself, and the restore undid that. Scale is the part that does
+// the work on this character (the body hider's history: SetHiddenInGame took and the Spartan still drew),
+// and the game has no reason to touch a helmet's scale, so the restore owns it cleanly: the scale it had,
+// and only while it is still ours.
+constexpr double kHeadItemScale = 0.001;
+
 void head_item_hide(API::UObject* c) {
-    host::g_arms_state.call_set_hidden(c, true);
-    host::g_arms_state.call_set_visibility(c, false);
-    call_set_scale(c, 0.001);
+    call_set_scale(c, kHeadItemScale);
 }
 
 void head_item_restore(API::UObject* c, const double sc[3]) {
-    host::g_arms_state.call_set_hidden(c, false);
-    host::g_arms_state.call_set_visibility(c, true);
+    if (auto* ps = c->get_property_data<double>(L"RelativeScale3D"); ps != nullptr && !IsBadReadPtr(ps, 24)) {
+        const bool ours = std::fabs(ps[0] - kHeadItemScale) < 1e-4 && std::fabs(ps[1] - kHeadItemScale) < 1e-4
+                       && std::fabs(ps[2] - kHeadItemScale) < 1e-4;
+        if (!ours) return;                        // something else set it since: not ours to put back
+    }
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
     auto* d = reinterpret_cast<double*>(p);
     d[0] = sc[0]; d[1] = sc[1]; d[2] = sc[2];
@@ -1311,8 +1322,8 @@ int head_hidden_readback(API::UObject* part) {
 void head_hide_restore(const char* why) {
     if (!s_hh.on) return;
     int n = 0, ni = 0;
-    for (int i = 0; i < s_hh.n; ++i)
-        if (auto* c = s_hh.parts[i].get()) { head_hide_call(c, false); ++n; }
+    for (int i = 0; i < s_hh.n; ++i)   // only a bone WE hid: one the game had hidden stays the game's
+        if (auto* c = s_hh.parts[i].get(); c != nullptr && !s_hh.part_was_hidden[i]) { head_hide_call(c, false); ++n; }
     for (int i = 0; i < s_hh.ni; ++i)
         if (auto* c = s_hh.items[i].get()) { head_item_restore(c, s_hh.item_scale[i]); ++ni; }
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head shown again (%s; %d helmet piece(s), "
@@ -1371,7 +1382,9 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
         int hidden = 0, readable = 0;
         for (int i = 0; i < s_hh.n; ++i) {
             auto* c = s_hh.parts[i].get();
+            s_hh.part_was_hidden[i] = false;
             if (c == nullptr) continue;
+            s_hh.part_was_hidden[i] = head_hidden_readback(c) == 1;   // before we touch it
             head_hide_call(c, true);
             const int r = head_hidden_readback(c);
             if (r >= 0) { ++readable; hidden += r; }
@@ -1379,7 +1392,7 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
         s_hh.on = true;
         s_hh.reassert = 0;
         // The readback says the bone call LANDED, not that the head stopped drawing: only the headset says that.
-        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- %d helmet piece(s) hidden and shrunk "
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head hidden -- %d helmet piece(s) shrunk "
                              "(%ls) of %d component(s) on him; bone \"%ls\" on %d part(s), the readback says hidden on %d of %d",
                              s_hh.ni, item_names.empty() ? L"NONE FOUND" : item_names.c_str(), nt, s_hh.bone.c_str(), s_hh.n,
                              hidden, readable);
@@ -1600,11 +1613,20 @@ std::atomic<uintptr_t> g_tp_rider_ptr{0};
 std::atomic<int32_t>   g_tp_rider_idx{-1};
 std::atomic<float>     g_tp_head_x{0.0f}, g_tp_head_y{0.0f}, g_tp_head_z{0.0f};
 std::atomic<bool>      g_tp_head_valid{false};
+// A SOCKET ORIGIN (a camera file "origin" naming a bone or socket, e.g. the Scorpion cannon's MainTurret_M):
+// the mesh component it was found on and the name as an FName's 8 bytes, resolved on the tick
+// (socket_resolve). The eye reads the socket's live transform every frame and re-captures its frame when
+// the generation moves (a new socket, a new vehicle).
+std::atomic<uintptr_t> g_tp_sock_ptr{0};
+std::atomic<int32_t>   g_tp_sock_idx{-1};
+std::atomic<uint64_t>  g_tp_sock_fname{0};
+std::atomic<uint32_t>  g_tp_sock_gen{0};
 // WHICH PATH OUR CAMERA TOOK THIS FRAME (bc24's VEHCAMPATH, release-safe): the eye cannot log, so it sets
 // these bits and the game tick names each change, the moment a fallback starts or ends.
 constexpr uint8_t kTpPathEngine = 1;      // the vehicle's transform could not be read: the game's own camera
 constexpr uint8_t kTpPathHeadToSeat = 2;  // a playerhead camera with no head measured: the seat stands in
 constexpr uint8_t kTpPathToOrigin = 4;    // a seat/head camera with no seat measured: the vehicle's origin
+constexpr uint8_t kTpPathSocketToVehicle = 8;   // a socket camera whose socket is not found: the vehicle's origin
 std::atomic<uint8_t>   g_tp_path{0};
 // The VIEW BASE the eye handed UEVR last frame, as an offset from the chassis: the anchor, the spring
 // arm and the head-offset subtraction all included. The ray aim rebuilds the controller's world ray on
@@ -2424,6 +2446,131 @@ struct VehCamDbg {
 };
 VehCamDbg g_vcd;
 
+// ---------------------------------------------------------------- A SOCKET ORIGIN
+//
+// A camera file "origin" that is not vehicle / seat / playerhead names a BONE OR SOCKET on the vehicle, so a
+// camera can ride a part that turns on its own: the Scorpion's cannon turns separately from its hull, its seat
+// and the Chief (the user, 2026-09-27). Searched on the vehicle's own mesh first, then on the vehicle meshes
+// near your seat (a turret is often an actor of its own -- BP_ScorpionCannonVehicleActor), nearest first;
+// "Part/Name" keeps only meshes whose path (and so their actor's name) contains Part. An exact bone or
+// socket name first (DoesSocketExist answers both), then the first bone whose name CONTAINS it.
+//
+// The names came from the pak, without a session (2026-09-27, retoc to-legacy of the SK_* assets): nearly
+// every vehicle skeleton carries Root_M / Pedestal / AimYaw / AimPitch -- the Scorpion's HULL included -- so
+// "AimYaw" alone finds the hull's; the cannon's own parts (MainTurret_M, Barrel_M, aiming_pivot) are unique
+// to it, or name the part: "ScorpionCannon/AimYaw".
+namespace {
+struct SockFnRefl { int state = -1; int32_t name_off = -1, ret_off = -1; };
+SockFnRefl s_dse;   // USceneComponent.DoesSocketExist(FName InSocketName) -> bool
+
+bool does_socket_exist(API::UObject* comp, const API::FName& name) {
+    if (s_dse.state < 0) {
+        s_dse.state = 0;
+        auto* sc = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.SceneComponent");
+        if (auto* fn = (sc != nullptr) ? sc->find_function(L"DoesSocketExist") : nullptr) {
+            s_dse.name_off = fn_param(fn, L"InSocketName");
+            s_dse.ret_off = fn_param(fn, L"ReturnValue");
+            if (s_dse.name_off >= 0 && s_dse.ret_off >= 0 && fn->get_properties_size() <= (int32_t)RIG_PARAM_BUF)
+                s_dse.state = 1;
+        }
+        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: DoesSocketExist %s", s_dse.state == 1
+                             ? "resolved -- socket origins search by exact name" : "NOT resolved -- socket origins search bone names only");
+    }
+    if (s_dse.state != 1) return false;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    std::memcpy(p + s_dse.name_off, &name, sizeof(int32_t) * 2);
+    comp->call_function(L"DoesSocketExist", p);
+    return p[s_dse.ret_off] != 0;
+}
+
+std::wstring widen_ascii(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+// GetSocketLocation / GetSocketRotation(FName) with the name as its raw 8 bytes -- made once on the tick, so
+// the render thread never builds an FName. The FVector / FRotator return lands at offset 8 (Rig.cpp's
+// call_socket_location documents the layout).
+bool socket_vec(API::UObject* comp, const wchar_t* fn, uint64_t fname, Vec3* out) {
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    std::memcpy(p, &fname, sizeof(fname));
+    comp->call_function(fn, p);
+    const auto* d = reinterpret_cast<const double*>(p + 8);
+    if (!std::isfinite(d[0]) || !std::isfinite(d[1]) || !std::isfinite(d[2])) return false;
+    *out = Vec3{(float)d[0], (float)d[1], (float)d[2]};
+    return true;
+}
+
+std::wstring short_path(API::UObject* o) {   // "BP_ScorpionCannonVehicleActor_C_12.SkeletalMeshComponent0"
+    const std::wstring f = o->get_full_name();
+    const size_t pl = f.find(L"PersistentLevel.");
+    return pl != std::wstring::npos ? f.substr(pl + 16) : f;
+}
+
+// On success: the component, its object-array slot and the exact bone/socket name found. `tried` lists the
+// meshes searched, for the log.
+bool socket_resolve(const char* want, uintptr_t chassis, int32_t chassis_idx, API::UObject** comp, int32_t* idx,
+                    std::wstring* found, std::wstring* tried) {
+    std::string part, name = want;
+    if (const char* sl = std::strchr(want, '/')) { part.assign(want, static_cast<size_t>(sl - want)); name = sl + 1; }
+    auto trim = [](std::string& s) {
+        while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+    };
+    trim(part); trim(name);
+    if (name.empty()) return false;
+    const std::wstring wname = widen_ascii(name), lname = lower_w(wname), lpart = lower_w(widen_ascii(part));
+
+    // Where you sit: the distance the nearby parts are ordered by.
+    Vec3 me{};
+    bool have_me = false;
+    if (auto* pawn = API::get()->get_local_pawn(0)) have_me = call_ret_vec3(pawn, L"K2_GetActorLocation", &me);
+
+    struct Cand { API::UObject* o; int32_t i; double d; };
+    constexpr int kMax = 16;
+    Cand cand[kMax];
+    int nc = 0;
+    auto* ch = reinterpret_cast<API::UObject*>(chassis);
+    if (ch != nullptr && uobject_slot_valid(ch)) cand[nc++] = {ch, chassis_idx, -1.0};
+    for (const ScanHit& h : s_res_chassis) {
+        if (h.o == ch || !scan_hit_live(h)) continue;
+        Vec3 w{};
+        if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
+        const double d = have_me ? std::sqrt(((double)w.x - me.x) * ((double)w.x - me.x) + ((double)w.y - me.y) * ((double)w.y - me.y)
+                                             + ((double)w.z - me.z) * ((double)w.z - me.z)) : 0.0;
+        if (d > 1200.0) continue;                                      // not part of what you are sitting in
+        if (nc == kMax && d >= cand[kMax - 1].d) continue;
+        int at = (nc < kMax) ? nc++ : kMax - 1;
+        while (at > 1 && cand[at - 1].d > d) { cand[at] = cand[at - 1]; --at; }   // [0] stays the chassis
+        cand[at] = {h.o, h.i, d};
+    }
+    auto part_ok = [&](API::UObject* o) { return lpart.empty() || lower_w(o->get_full_name()).find(lpart) != std::wstring::npos; };
+    for (int k = 0; k < nc; ++k)
+        if (part_ok(cand[k].o)) *tried += (tried->empty() ? L"" : L", ") + short_path(cand[k].o);
+
+    const API::FName fname = make_fname(wname.c_str());
+    for (int k = 0; k < nc; ++k) {                                     // the exact name, bone or socket
+        if (!part_ok(cand[k].o) || !does_socket_exist(cand[k].o, fname)) continue;
+        *comp = cand[k].o; *idx = cand[k].i; *found = wname;
+        return true;
+    }
+    for (int k = 0; k < nc; ++k) {                                     // else a bone whose name contains it
+        if (!part_ok(cand[k].o)) continue;
+        alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+        cand[k].o->call_function(L"GetNumBones", p);
+        const int32_t nb = *reinterpret_cast<int32_t*>(p);
+        if (nb <= 0 || nb > 512) continue;
+        for (int32_t b = 0; b < nb; ++b) {
+            std::memset(p, 0, 16);
+            *reinterpret_cast<int32_t*>(p) = b;
+            cand[k].o->call_function(L"GetBoneName", p);
+            const std::wstring bn = reinterpret_cast<API::FName*>(p + 4)->to_string();
+            if (lower_w(bn).find(lname) == std::wstring::npos) continue;
+            *comp = cand[k].o; *idx = cand[k].i; *found = bn;
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
 void vehcam_game_tick_vehicle() {
     // Plugin.cpp's own state, through the bridge: the same objects under the same names.
     const auto& g_in_menu = *host::g_plugin_state.in_menu;
@@ -2690,6 +2837,64 @@ void vehcam_game_tick_vehicle() {
             head_hide_update(want_hide, hide_body, s_rider.index, s_head_bone);
         }
 
+        // A SOCKET ORIGIN (socket_resolve, above): found when a camera asks for one -- a new name or a new
+        // vehicle -- and retried every ~2 s, five times, while not found (a turret actor may stream in a
+        // moment after you sit). The eye reads the socket's transform live; until it is found the vehicle's
+        // origin stands in, and the log says what was searched.
+        {
+            static std::string   s_sock_want;
+            static uintptr_t     s_sock_cp = 0;
+            static TrackedObject s_sock_comp;
+            static uint32_t      s_sock_tries = 0;
+            static ULONGLONG     s_sock_at = 0;
+            const VehActiveCam sc = veh_active_cam();
+            const bool want_sock = sys && cp != 0 && sc.valid && sc.socket[0] != 0
+                                && sc.origin == static_cast<uint8_t>(vehcampresets::Origin::Socket);
+            if (!want_sock) {
+                if (!s_sock_want.empty()) {
+                    s_sock_want.clear(); s_sock_cp = 0; s_sock_comp.reset();
+                    g_tp_sock_ptr.store(0, std::memory_order_relaxed);
+                    g_tp_sock_idx.store(-1, std::memory_order_relaxed);
+                }
+            } else {
+                if (s_sock_want != sc.socket || s_sock_cp != cp) {
+                    s_sock_want = sc.socket; s_sock_cp = cp;
+                    s_sock_comp.reset(); s_sock_tries = 0; s_sock_at = 0;
+                    g_tp_sock_ptr.store(0, std::memory_order_relaxed);
+                    g_tp_sock_idx.store(-1, std::memory_order_relaxed);
+                }
+                if (s_sock_comp.ptr != nullptr && s_sock_comp.get() == nullptr) {   // gone with its vehicle
+                    g_tp_sock_ptr.store(0, std::memory_order_relaxed);
+                    g_tp_sock_idx.store(-1, std::memory_order_relaxed);
+                }
+                const ULONGLONG now = GetTickCount64();
+                if (s_sock_comp.get() == nullptr && s_sock_tries < 5 && (s_sock_tries == 0 || now - s_sock_at >= 2000)) {
+                    s_sock_at = now;
+                    ++s_sock_tries;
+                    API::UObject* comp = nullptr;
+                    int32_t idx = -1;
+                    std::wstring found, tried;
+                    if (socket_resolve(sc.socket, cp, g_tp_chassis_idx.load(std::memory_order_relaxed), &comp, &idx, &found, &tried)
+                        && idx >= 0) {
+                        s_sock_comp.set_at(comp, idx);
+                        const API::FName fn = make_fname(found.c_str());
+                        uint64_t raw = 0;
+                        std::memcpy(&raw, &fn, sizeof(int32_t) * 2);
+                        g_tp_sock_fname.store(raw, std::memory_order_relaxed);
+                        g_tp_sock_idx.store(idx, std::memory_order_relaxed);
+                        g_tp_sock_gen.fetch_add(1, std::memory_order_relaxed);
+                        g_tp_sock_ptr.store(reinterpret_cast<uintptr_t>(comp), std::memory_order_release);
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: origin \"%s\" is \"%ls\" on %ls", sc.socket, found.c_str(),
+                                             short_path(comp).c_str());
+                    } else {
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: origin \"%s\" not found (try %u of 5) on: %ls -- the "
+                                             "vehicle's origin stands in", sc.socket, s_sock_tries,
+                                             tried.empty() ? L"no meshes" : tried.c_str());
+                    }
+                }
+            }
+        }
+
         const bool tp_on = sys && cp != 0 && g_veh_tp_active.load(std::memory_order_relaxed);
         if (tp_on && !s_tp_was) g_tp_mount_gen.fetch_add(1, std::memory_order_relaxed);   // the eye re-arms
         if (!tp_on && s_tp_was) {
@@ -2740,10 +2945,11 @@ void vehcam_game_tick_vehicle() {
                     if (p == 0)
                         API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH: back on the camera's own path");
                     else
-                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH:%s%s%s",
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH:%s%s%s%s",
                                              (p & kTpPathEngine) ? " the vehicle's transform cannot be read -- the game's own camera shows;" : "",
                                              (p & kTpPathHeadToSeat) ? " no head measured -- this playerhead camera sits at your seat;" : "",
-                                             (p & kTpPathToOrigin) ? " no seat measured -- this camera sits at the vehicle's origin;" : "");
+                                             (p & kTpPathToOrigin) ? " no seat measured -- this camera sits at the vehicle's origin;" : "",
+                                             (p & kTpPathSocketToVehicle) ? " its socket is not found -- this camera sits at the vehicle's origin;" : "");
                 }
             }
         }
@@ -3240,6 +3446,48 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     head_ok = true;
                 }
             }
+            // A SOCKET CAMERA RIDES ITS BONE -- a turret that turns on its own, like the Scorpion's cannon. Its
+            // live transform, read now like the chassis, gives the origin point and the frame this camera
+            // tracks. A bone's local axes follow no convention, so the frame is snapped to the socket's
+            // principal axes once (capture_vehicle_frame): up the one nearest world up, forward the one nearest
+            // where the GAME's camera looks -- down the gun's line, which is where the barrel points once it
+            // has caught up with the aim -- re-taken on every camera change, so a reset re-squares it too.
+            bool   sock_ok = false;
+            double sock_w[3] = { 0.0, 0.0, 0.0 };
+            if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Socket)) {
+                static TrackedObject s_sk;
+                static uintptr_t s_sk_raw = 0;
+                static double    s_Cs[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0};
+                static uint32_t  s_cs_gen = 0xFFFFFFFFu;
+                const uintptr_t sp = halo::g_tp_sock_ptr.load(std::memory_order_acquire);
+                if (sp != s_sk_raw) {
+                    s_sk_raw = sp;
+                    s_sk.set_at(reinterpret_cast<API::UObject*>(sp), halo::g_tp_sock_idx.load(std::memory_order_relaxed));
+                }
+                auto* skc = (sp != 0) ? s_sk.get() : nullptr;
+                const uint64_t sfn = halo::g_tp_sock_fname.load(std::memory_order_relaxed);
+                Vec3 sl{}, sr{};
+                if (skc != nullptr && socket_vec(skc, L"GetSocketLocation", sfn, &sl) && socket_vec(skc, L"GetSocketRotation", sfn, &sr)) {
+                    double SX[3], SY[3], SZ[3];
+                    rot_axes(sr.x, sr.y, sr.z, SX, SY, SZ);
+                    const uint32_t sg = halo::g_tp_sock_gen.load(std::memory_order_relaxed);
+                    if (sg != s_cs_gen || rearm || place) {
+                        s_cs_gen = sg;
+                        double ref = std::atan2(VF[1], VF[0]) * R2D;   // the vehicle's heading, else
+                        if (rotation != nullptr) {
+                            const double gy = is_double ? reinterpret_cast<UEVR_Rotatord*>(rotation)->yaw : (double)rotation->yaw;
+                            if (std::isfinite(gy)) ref = gy;           // the game camera: down the gun's line
+                        }
+                        bool snapped = false;
+                        capture_vehicle_frame(SX, SY, SZ, ref, s_Cs, &snapped);
+                    }
+                    double F[3], R[3], U[3];
+                    vehicle_axes(s_Cs, SX, SY, SZ, F, R, U);
+                    for (int k = 0; k < 3; ++k) { VF[k] = F[k]; VR[k] = R[k]; VU[k] = U[k]; }
+                    sock_w[0] = sl.x; sock_w[1] = sl.y; sock_w[2] = sl.z;
+                    sock_ok = true;
+                }
+            }
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
             if (ac.rot_yaw) s_frozen_yaw = (float)heading;   // keep the freeze current -> seamless when you step to one that holds
             // RECENTER ON A CAMERA CHANGE (vehcamrecenter): getting in, left Y or left X, turns the view so
@@ -3326,7 +3574,12 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // the tick measured in the mesh's frame, rebuilt against its rotation now, so it rides the
             // vehicle rigidly at render rate. Until the tick has measured it, the vehicle's origin.
             double org[3] = { 0.0, 0.0, 0.0 };
-            if (head_ok) {
+            if (sock_ok) {
+                // THE SOCKET (above), as an offset from the chassis like every origin here.
+                org[0] = sock_w[0] - (double)cloc.x;
+                org[1] = sock_w[1] - (double)cloc.y;
+                org[2] = sock_w[2] - (double)cloc.z;
+            } else if (head_ok) {
                 // THE PLAYER'S HEAD (above), as an offset from the chassis like every origin here.
                 org[0] = head_w[0] - (double)cloc.x;
                 org[1] = head_w[1] - (double)cloc.y;
@@ -3346,6 +3599,8 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 if (wants_head && !head_ok) path |= halo::kTpPathHeadToSeat;
                 if (wants_seat && !head_ok && !halo::g_tp_seat_valid.load(std::memory_order_relaxed))
                     path |= halo::kTpPathToOrigin;
+                if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Socket) && !sock_ok)
+                    path |= halo::kTpPathSocketToVehicle;
                 halo::g_tp_path.store(path, std::memory_order_relaxed);
             }
             // THE OFFSET, in the frame its locationTracking describes -- the same builder, so "pitch" means

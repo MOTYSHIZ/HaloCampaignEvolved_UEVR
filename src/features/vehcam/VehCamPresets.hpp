@@ -34,8 +34,11 @@ enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
 // Where a camera's offset is measured FROM: the vehicle's own origin, the seat you sit in, or -- Head,
 // "playerhead" in the file -- the Chief's head (his body's head bone). A Head camera's tracking follows
 // the CHIEF rather than the vehicle's mesh: he turns with a turret whose mesh does not (the Shade), where
-// yaw tethering to the mesh does nothing.
-enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2 };
+// yaw tethering to the mesh does nothing. Socket: ANY OTHER NAME in the file is a bone or socket on the
+// vehicle -- its own mesh first, then the parts near your seat (a turret that is an actor of its own, like
+// the Scorpion's cannon); "Part/Name" picks the part ("ScorpionCannon/AimYaw"). Its tracking follows that
+// bone, so a camera can ride a gun that turns on its own. Not found: the vehicle's origin stands in.
+enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2, Socket = 3 };
 
 // ONE TETHERING MODE of a camera. Left Y steps cameras; left X steps the current camera's modes. A mode
 // sets what carries the camera's position round (locationTracking), what turns your view
@@ -51,12 +54,14 @@ struct Tether {
     bool rot_yaw = false, rot_pitch = false, rot_roll = false;
     int  aim_marker = -1;                     // -1 = the camera's, else the vehicle entry's; 0 / 1 = off / on
     int  origin = -1;                         // -1 = the camera's; else an Origin
+    std::string origin_socket;                // origin Socket: the bone / socket name ("Part/Name" allowed)
 };
 
 struct Camera {
     std::string name;                         // optional; empty = unnamed (shown by its number)
     CamType type = CamType::Chase;
     Origin  origin = Origin::Vehicle;
+    std::string origin_socket;                // origin Socket: the bone / socket name ("Part/Name" allowed)
     float   offset[3] = {0.0f, 0.0f, 0.0f};   // cm: forward, right, up
     // LOCATION TRACKING: which of the vehicle's rotations carry the offset round. All three = rigid to
     // the vehicle; yaw only = a level offset that turns with it; none = a fixed world direction.
@@ -78,10 +83,12 @@ struct Camera {
     // ...from origin `o` -- a tethering mode may measure from somewhere else than its camera.
     bool hides_body(Origin o) const {
         if (hide_body >= 0) return hide_body != 0;
-        return type == CamType::FirstPerson || o != Origin::Vehicle;
+        // At your seat or your head the view is inside you; a vehicle part is not.
+        return type == CamType::FirstPerson || o == Origin::Seat || o == Origin::Head;
     }
-    // Mode `m`'s origin: its own, else this camera's.
+    // Mode `m`'s origin: its own, else this camera's -- and, for a Socket origin, the name.
     Origin origin_of(const Tether& m) const { return m.origin >= 0 ? static_cast<Origin>(m.origin) : origin; }
+    const std::string& socket_of(const Tether& m) const { return m.origin >= 0 ? m.origin_socket : origin_socket; }
     int mode_count() const { return tethering.empty() ? 1 : static_cast<int>(tethering.size()); }
     // Mode i (wrapped into range): the camera's own tracking when it lists no tethering.
     Tether mode(int i) const {
@@ -188,6 +195,8 @@ inline int match_vehicle(const Table& t, const std::string& actor_name, SeatRole
 
 const char* type_name(CamType t);
 const char* origin_name(Origin o);
+// As the file writes it: the socket's own name for a Socket origin, else origin_name.
+std::string origin_text(Origin o, const std::string& socket);
 const char* seat_role_name(SeatRole s);   // "driver" / "gunner" / "passenger" / "unknown"
 // For readouts and logs: "Driver", "Gunner", "Driver, Gunner", "Passenger"; "" = unknown.
 std::string seat_text(uint8_t seat);

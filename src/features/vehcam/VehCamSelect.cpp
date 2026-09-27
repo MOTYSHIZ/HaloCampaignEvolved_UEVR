@@ -238,6 +238,7 @@ VehActiveCam make_active(int vi, int ci, int mi) {
     a.valid = true;
     a.type = static_cast<uint8_t>(c.type);
     a.origin = static_cast<uint8_t>(origin);
+    if (origin == vcp::Origin::Socket) strncpy_s(a.socket, sizeof(a.socket), c.socket_of(m).c_str(), _TRUNCATE);
     a.loc_yaw = m.loc_yaw; a.loc_pitch = m.loc_pitch; a.loc_roll = m.loc_roll; a.loc_view = m.loc_view;
     // Independent: pitch and roll without yaw tilt the view with the vehicle's deck while it keeps its
     // own heading (vehcammath::tracked_frame says exactly what that means).
@@ -311,7 +312,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
                          "offset (%.0f %.0f %.0f), location tracking %s, rotation tracking %s, body %s, head %s, "
                          "aim ring %s, controls %s, seat %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), mi + 1, nm, mlabel.c_str(), why, vcp::type_name(c.type),
-                         vcp::origin_name(static_cast<vcp::Origin>(a.origin)), a.offset[0], a.offset[1], a.offset[2],
+                         vcp::origin_text(static_cast<vcp::Origin>(a.origin), a.socket).c_str(), a.offset[0], a.offset[1], a.offset[2],
                          loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
                          a.hide_head ? "hidden" : "shown", a.aim_marker ? "on" : "off",
                          motion_on(a) ? "motion" : "stick",
@@ -333,7 +334,8 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
             if (modes) md += "**Tethering:** " + std::to_string(mi + 1) + " of " + std::to_string(nm) + " *(left X)*\n";
             const vcp::Origin o = static_cast<vcp::Origin>(a.origin);   // the mode's, else the camera's
             md += std::string("**Origin:** ")
-                + (o == vcp::Origin::Seat ? "Seat" : (o == vcp::Origin::Head ? "Player's head" : "Vehicle")) + "\n";
+                + (o == vcp::Origin::Seat ? std::string("Seat") : (o == vcp::Origin::Head ? std::string("Player's head")
+                   : (o == vcp::Origin::Socket ? std::string(a.socket) : std::string("Vehicle")))) + "\n";
             char off[96];
             std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
             md += off;

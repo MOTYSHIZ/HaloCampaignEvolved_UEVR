@@ -158,8 +158,10 @@ struct Apply {
                 ok = tri(x, w, rt.t.aim_marker, "true, false or null (null = the camera's)");
             } else if (key == "origin") {
                 Origin o = Origin::Vehicle;
-                if (x.is_null()) { rt.t.origin = -1; continue; }
-                if (!origin_value(x, w, o, "\"vehicle\", \"seat\", \"playerhead\" or null (null = the camera's)")) return false;
+                if (x.is_null()) { rt.t.origin = -1; rt.t.origin_socket.clear(); continue; }
+                if (!origin_value(x, w, o, rt.t.origin_socket,
+                                  "\"vehicle\", \"seat\", \"playerhead\", a bone or socket name, or null (null = the camera's)"))
+                    return false;
                 rt.t.origin = static_cast<int>(o);
             } else {
                 r.ignored.push_back(w);
@@ -168,13 +170,14 @@ struct Apply {
         }
         return true;
     }
-    // "vehicle" | "seat" | "playerhead" ("head" too).
-    bool origin_value(const Value& x, const std::string& w, Origin& o, const char* want) {
-        if (!x.is_str()) return type_error(x, w, want);
+    // "vehicle" | "seat" | "playerhead" ("head" too); any other name is a bone or socket on the vehicle.
+    bool origin_value(const Value& x, const std::string& w, Origin& o, std::string& sock, const char* want) {
+        if (!x.is_str() || x.s.empty()) return type_error(x, w, want);
+        sock.clear();
         if (ieq(x.s, "vehicle")) o = Origin::Vehicle;
         else if (ieq(x.s, "seat")) o = Origin::Seat;
         else if (ieq(x.s, "playerhead") || ieq(x.s, "head")) o = Origin::Head;
-        else return type_error(x, w, want);
+        else { o = Origin::Socket; sock = x.s; }
         return true;
     }
     bool camera(const Value& v, const std::string& where, Camera& c) {
@@ -196,7 +199,9 @@ struct Apply {
                 else if (ieq(x.s, "firstperson")) c.type = CamType::FirstPerson;
                 else return type_error(x, w, "\"chase\" or \"firstperson\"");
             } else if (key == "origin") {
-                if (!origin_value(x, w, c.origin, "\"vehicle\", \"seat\" or \"playerhead\"")) return false;
+                if (!origin_value(x, w, c.origin, c.origin_socket,
+                                  "\"vehicle\", \"seat\", \"playerhead\", or a bone or socket name on the vehicle"))
+                    return false;
             } else if (key == "offset") {
                 if (!x.is_arr() || x.items.size() > 3) return type_error(x, w, "[forward, right, up] in cm");
                 for (std::size_t i = 0; i < x.items.size() && ok; ++i)
@@ -374,7 +379,10 @@ std::string axes_text(bool yaw, bool pitch, bool roll) {
 
 const char* type_name(CamType t)  { return t == CamType::FirstPerson ? "firstperson" : "chase"; }
 const char* origin_name(Origin o) {
-    return o == Origin::Seat ? "seat" : (o == Origin::Head ? "playerhead" : "vehicle");
+    return o == Origin::Seat ? "seat" : (o == Origin::Head ? "playerhead" : (o == Origin::Socket ? "socket" : "vehicle"));
+}
+std::string origin_text(Origin o, const std::string& socket) {
+    return o == Origin::Socket ? socket : std::string(origin_name(o));
 }
 const char* seat_role_name(SeatRole s) {
     switch (s) {
@@ -499,7 +507,10 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  type              chase (this mod's camera) | firstperson (the older seat camera)\",\n";
     s += "    \"  origin            seat | vehicle | playerhead : where 'offset' is measured from (your seat, the\",\n";
     s += "    \"                    vehicle's centre, or the Chief's head -- a playerhead camera's tracking follows\",\n";
-    s += "    \"                    the Chief, so it turns with a turret even where the turret's mesh does not)\",\n";
+    s += "    \"                    the Chief, so it turns with a turret even where the turret's mesh does not);\",\n";
+    s += "    \"                    or any other name: a bone or socket on the vehicle, and the camera rides it --\",\n";
+    s += "    \"                    e.g. \\\"MainTurret_M\\\", the Scorpion cannon's turret. \\\"Part/Name\\\" picks the part\",\n";
+    s += "    \"                    (\\\"ScorpionCannon/AimYaw\\\"); not found = the vehicle's centre (the log says why)\",\n";
     s += "    \"  offset            [forward, right, up] in cm (negative forward = behind)\",\n";
     s += "    \"  locationTracking  which vehicle rotations carry the camera's position round: any of yaw, pitch,\",\n";
     s += "    \"                    roll ([] = a fixed world direction), or \\\"view\\\" to orbit with YOUR view\",\n";
@@ -561,7 +572,7 @@ std::string table_to_json(const Table& t, bool guide) {
             s += "        { ";
             if (!c.name.empty()) s += "\"name\": " + quoted(c.name) + ", ";
             s += std::string("\"type\": \"") + type_name(c.type) + "\""
-               + ", \"origin\": \"" + origin_name(c.origin) + "\""
+               + ", \"origin\": " + quoted(origin_text(c.origin, c.origin_socket))
                + ", \"offset\": [" + fmt_num(c.offset[0]) + ", " + fmt_num(c.offset[1]) + ", " + fmt_num(c.offset[2]) + "]"
                + ", \"locationTracking\": " + (c.loc_view ? std::string("\"view\"") : axes_json(c.loc_yaw, c.loc_pitch, c.loc_roll))
                + ", \"rotationTracking\": " + axes_json(c.rot_yaw, c.rot_pitch, c.rot_roll)
@@ -579,8 +590,9 @@ std::string table_to_json(const Table& t, bool guide) {
                     std::string f;
                     auto add = [&f](const std::string& kv) { f += (f.empty() ? "" : ", ") + kv; };
                     if (!m.name.empty()) add("\"name\": " + quoted(m.name));
-                    if (m.origin >= 0 && m.origin != static_cast<int>(c.origin))
-                        add(std::string("\"origin\": \"") + origin_name(static_cast<Origin>(m.origin)) + "\"");
+                    if (m.origin >= 0 && (m.origin != static_cast<int>(c.origin)
+                                          || (m.origin == static_cast<int>(Origin::Socket) && m.origin_socket != c.origin_socket)))
+                        add("\"origin\": " + quoted(origin_text(static_cast<Origin>(m.origin), m.origin_socket)));
                     if (m.offset[0] != c.offset[0] || m.offset[1] != c.offset[1] || m.offset[2] != c.offset[2])
                         add("\"offset\": [" + fmt_num(m.offset[0]) + ", " + fmt_num(m.offset[1]) + ", " + fmt_num(m.offset[2]) + "]");
                     if (m.loc_view != c.loc_view || m.loc_yaw != c.loc_yaw || m.loc_pitch != c.loc_pitch || m.loc_roll != c.loc_roll)
@@ -643,7 +655,8 @@ bool tracks_rotation(const Tether& t) { return t.rot_yaw || t.rot_pitch || t.rot
 bool starts_tethered(const std::string& n) { return lower(n).rfind("tethered", 0) == 0; }
 // One view in another mode: the same kind of camera from the same place, hidden the same way.
 bool same_view(const Camera& a, const Camera& b) {
-    return a.type == b.type && a.origin == b.origin && a.collide == b.collide && a.collide_margin == b.collide_margin
+    return a.type == b.type && a.origin == b.origin && a.origin_socket == b.origin_socket
+        && a.collide == b.collide && a.collide_margin == b.collide_margin
         && a.hide_body == b.hide_body && a.hide_head == b.hide_head && a.tethering.empty() && b.tethering.empty();
 }
 std::string trim(std::string s) {

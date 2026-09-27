@@ -22,6 +22,7 @@ struct VehActiveCam {
     bool    valid = false;                    // a vehicle is identified and one of its cameras selected
     uint8_t type = 0;                         // vehcampresets::CamType
     uint8_t origin = 0;                       // vehcampresets::Origin
+    char    socket[64] = {};                  // origin Socket: the bone / socket name ("Part/Name"), else empty
     bool    loc_yaw = true, loc_pitch = true, loc_roll = true, loc_view = false;   // locationTracking
     bool    rot_yaw = false, rot_pitch = false, rot_roll = false;                  // rotationTracking
     bool    collide = true;
