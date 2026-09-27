@@ -147,6 +147,27 @@ inline Vec3 quat_rotate(const Quat& q, const Vec3& v) {
     };
 }
 
+inline float quat_dot(const Quat& a, const Quat& b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+
+// Unit length; identity for a degenerate input rather than a NaN.
+inline Quat quat_normalize(const Quat& q) {
+    const float m = std::sqrt(quat_dot(q, q));
+    if (!(m > 1e-8f)) return Quat{0.0f, 0.0f, 0.0f, 1.0f};
+    return Quat{q.x / m, q.y / m, q.z / m, q.w / m};
+}
+
+// a toward b by t along the SHORTER arc. Nlerp when the two are nearly equal, where slerp's divide
+// by sin(theta) loses precision. (palettearm keeps its own slerp_short on its own Quat type.)
+inline Quat quat_slerp_short(const Quat& a, Quat b, float t) {
+    float d = quat_dot(a, b);
+    if (d < 0.0f) { b = Quat{-b.x, -b.y, -b.z, -b.w}; d = -d; }
+    if (d > 0.9995f)
+        return quat_normalize(Quat{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t});
+    const float th = std::acos(clampf(d, -1.0f, 1.0f)), s = std::sin(th);
+    const float wa = std::sin((1.0f - t) * th) / s, wb = std::sin(t * th) / s;
+    return quat_normalize(Quat{a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb, a.w * wa + b.w * wb});
+}
+
 // UE rotator -> FQuat, matching UE's ZYX (yaw, pitch, roll) composition order.
 //
 // !!! EXACTLY UE's FRotator::Quaternion(). This MUST be the precise inverse of quat_to_rotator() or

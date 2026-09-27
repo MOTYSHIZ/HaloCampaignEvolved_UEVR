@@ -1292,18 +1292,23 @@
     //           0 = that channel is not smoothed at all
     //   *beta:  how fast the cutoff opens with speed -- position per m/s, rotation per rad/s
     //   dcut:   the cutoff in Hz of the speed estimate itself
-    // Defaults are VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff 10,
-    // CutoffSlope 10) converted to this filter's units: its slope acted on cm/s per axis, i.e. 1000
-    // per m/s, and on quaternion components per second, about half of rad/s, i.e. ~5 per rad/s.
+    //   melee:  0 = the swing detector reads the RAW hand (get_pose_raw), 1 = the smoothed one
+    // Position defaults are VRExpansionPlugin's FBPEuroLowPassFilterTrans (MinCutoff 0.1, DeltaCutoff
+    // 10, CutoffSlope 10) converted to this filter's units: its slope acted on cm/s per axis, i.e.
+    // 1000 per m/s. Its rotation slope acted on quaternion components per second, about half of
+    // rad/s, i.e. ~5 per rad/s, and that is kept -- but rotmin is 1.0, not VRE's 0.1: rotation here
+    // drives the AIM ray, and at 0.1 Hz a slow 3 deg/s track trails the hand by ~1.3 deg (tau
+    // ~0.45 s); at 1.0 Hz it is ~0.4 deg while a still hand is still settled with tau ~0.16 s.
     // The conversion is approximate (VRE's cutoff is per axis, this one is on the speed magnitude).
     bool  hand_smooth = false;
     int   hand_smooth_hands = 0;
     float hand_smooth_pos_min = 0.1f;
     float hand_smooth_pos_beta = 1000.0f;
-    float hand_smooth_rot_min = 0.1f;
+    float hand_smooth_rot_min = 1.0f;
     float hand_smooth_rot_beta = 5.0f;
     float hand_smooth_dcut = 10.0f;
-    bool  hand_smooth_log = false;
+    bool  hand_smooth_melee = false;
+    bool  hand_smooth_log = false;   // dev builds only (HALO_VR_DEV)
 
     // ---- (after the author's Config.hpp line 4529)
     // ---- HANDS ON THE WHEEL (Vehicle.hpp). The record's movement pair steers the vehicle while
