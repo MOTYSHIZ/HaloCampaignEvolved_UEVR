@@ -40,12 +40,13 @@ enum class CamType : uint8_t { Chase = 0, FirstPerson = 1 };
 // bone, so a camera can ride a gun that turns on its own. Not found: the vehicle's origin stands in.
 enum class Origin : uint8_t { Vehicle = 0, Seat = 1, Head = 2, Socket = 3 };
 
-// THE CAMERA'S LEASH ("leashMin" / "leashMax"): how far YOUR HEAD may move from the camera's point, per axis
-// of the frame "offset" is in -- [forward, right, up], cm, so the two are tuned together. For seats tuned to
-// tight tolerances: past a limit the view stops following your head that way, so leaning cannot put your
-// eyes through the canopy or into the gun. A min is 0 or less and a max 0 or more (the camera's point is
-// always inside the box: a leash only ever stops you, never moves you). kUnleashed on an axis = no limit
-// that way (null in the file, or left out).
+// THE CAMERA'S LEASH ("leashMin" / "leashMax"): a box YOUR HEAD stays inside, in the SAME SPACE AS "offset"
+// -- [forward, right, up], cm FROM THE ORIGIN on the offset's directions, so a limit is a place and the two
+// are tuned together (an offset 360 up with a max of 360 up is a camera already at its ceiling). For seats
+// tuned to tight tolerances: past a limit the view stops following your head that way, so leaning cannot put
+// your eyes through the canopy or into the gun. Any value may take any sign; the camera's own point is kept
+// inside the box when it is applied (vehcammath::leash_relative), so a leash only ever stops you, never moves
+// you. kUnleashed on an axis = no limit that way (null in the file, or left out).
 constexpr float kUnleashed = 1.0e9f;
 // Any axis of this side limited.
 inline bool leash_set(const float v[3]) {
@@ -56,7 +57,7 @@ inline bool leash_set(const float v[3]) {
 // ONE TETHERING MODE of a camera. Left Y steps cameras; left X steps the current camera's modes. A mode
 // sets what carries the camera's position round (locationTracking), what turns your view
 // (rotationTracking), where it sits (offset -- a tethered view often wants a slightly different spot),
-// what that is measured from (origin) and how far your head may lean from it (leashMin / leashMax), and
+// what that is measured from (origin) and the box your head stays inside (leashMin / leashMax), and
 // may turn the vehicle aim ring on or off; anything it leaves out is the camera's own. So one camera can be "Cockpit" held still AND tethered, switched with one button
 // while filming -- and a turret's tethered mode can ride the Chief ("playerhead", who turns with the gun)
 // while its untethered mode stays on the seat.

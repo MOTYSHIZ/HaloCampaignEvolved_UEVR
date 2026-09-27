@@ -3642,15 +3642,16 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 ecx -= s_c0[0] * X[0] + s_c0[1] * Y[0] + s_c0[2] * Z[0];
                 ecy -= s_c0[0] * X[1] + s_c0[1] * Y[1] + s_c0[2] * Z[1];
                 ecz -= s_c0[0] * X[2] + s_c0[1] * Y[2] + s_c0[2] * Z[2];
-                // THE CAMERA'S LEASH ("leashMin" / "leashMax"): how far your HEAD may move from the camera's
-                // point, on the offset's own axes (LF / LR / LU), in cm -- for seats tuned to tight
+                // THE CAMERA'S LEASH ("leashMin" / "leashMax"): a box your HEAD stays inside, in the OFFSET'S
+                // space -- cm from the origin on the offset's own axes (LF / LR / LU), so a limit is a place
+                // (a max of 360 up on a camera 360 up = already at its ceiling) -- for seats tuned to tight
                 // tolerances, where a 6DoF lean would put your eyes through the canopy or into the gun. Past a
                 // limit the view stops following your head that way (the world moves with you), so you
-                // cannot clip into what surrounds the seat. The head's displacement from the point is exactly
-                // what UEVR adds to this base: R(view) . (swizzle(ro . (hmd - so)) x scale - c0), c0 being
-                // where it stood at the last camera change (0 with the head leash on, which keeps the head
-                // on the standing origin). Clamped HERE, before the base is written or published, so the
-                // hands, the aim ray and the reticle stamp all stand on the same base as the view.
+                // cannot clip into what surrounds the seat. The head's displacement from the camera's point
+                // is exactly what UEVR adds to this base: R(view) . (swizzle(ro . (hmd - so)) x scale - c0),
+                // c0 being where it stood at the last camera change (0 with the head leash on, which keeps
+                // the head on the standing origin). Clamped HERE, before the base is written or published, so
+                // the hands, the aim ray and the reticle stamp all stand on the same base as the view.
                 if (ac.leashed) {
                     Vec3 lp{}; Quat lq{};
                     const auto li = API::VR::get_hmd_index();
@@ -3663,7 +3664,13 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                                               (double)rel.y * rs - s_c0[2] };
                         double hd[3], sh[3];
                         for (int k = 0; k < 3; ++k) hd[k] = u[0] * X[k] + u[1] * Y[k] + u[2] * Z[k];
-                        vehcammath::leash_shift(hd, LF, LR, LU, ac.leash_min, ac.leash_max, sh);
+                        // The box is in the OFFSET'S space (measured from the origin, like "offset"): shift
+                        // it by where the camera's point sits in that frame -- the offset, pulled in by any
+                        // collision -- so it limits the head relative to that point.
+                        const double cam[3] = { bf * cfrac, bl * cfrac, bu * cfrac };
+                        float rlo[3], rhi[3];
+                        vehcammath::leash_relative(ac.leash_min, ac.leash_max, cam, rlo, rhi);
+                        vehcammath::leash_shift(hd, LF, LR, LU, rlo, rhi, sh);
                         ecx -= sh[0]; ecy -= sh[1]; ecz -= sh[2];
                     }
                 }

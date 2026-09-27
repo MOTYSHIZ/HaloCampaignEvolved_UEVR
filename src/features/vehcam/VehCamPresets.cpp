@@ -123,13 +123,14 @@ struct Apply {
         view = false;
         return axes(x, w, yaw, pitch, roll);
     }
-    // "leashMin" / "leashMax" as the file wrote them: per axis [forward, right, up] a limit in cm, null (no
-    // limit that way) or "inherit" (the level above's value on that axis -- the seat's for a camera, the
-    // camera's for a mode). The whole key may be null (no limits: how a camera or mode drops the leash above
-    // it) or "inherit" (the same as leaving it out); a shorter list = no limit on the axes it leaves out.
-    // Kept as written until the level above is known, then resolve()d -- a mode's list may come before its
-    // camera's own leash in the file. A min is 0 or less and a max 0 or more: the camera's point stays
-    // inside the box, so a leash only ever stops you, never moves you.
+    // "leashMin" / "leashMax" as the file wrote them: per axis [forward, right, up] a limit in cm FROM THE
+    // ORIGIN, like "offset" (a place, so any sign), null (no limit that way) or "inherit" (the level above's
+    // value on that axis -- the seat's for a camera, the camera's for a mode). The whole key may be null (no
+    // limits: how a camera or mode drops the leash above it) or "inherit" (the same as leaving it out); a
+    // shorter list = no limit on the axes it leaves out. Kept as written until the level above is known, then
+    // resolve()d -- a mode's list may come before its camera's own leash in the file. Nothing here keeps the
+    // camera's point inside the box: vehcammath::leash_relative does, where it is applied, so a leash only
+    // ever stops you, never moves you.
     struct LeashSide { float v[3]; bool inherit[3]; };
     static LeashSide leash_inherited() { return LeashSide{{0.0f, 0.0f, 0.0f}, {true, true, true}}; }
     static void resolve(const LeashSide& s, const float parent[3], float dst[3]) {
@@ -138,8 +139,7 @@ struct Apply {
     bool leash(const Value& x, const std::string& w, bool is_min, LeashSide& out) {
         const float none = is_min ? -kUnleashed : kUnleashed;
         for (int k = 0; k < 3; ++k) { out.v[k] = none; out.inherit[k] = false; }
-        const char* want = is_min ? "[forward, right, up] in cm, each 0 or less, null (no limit) or \"inherit\""
-                                  : "[forward, right, up] in cm, each 0 or more, null (no limit) or \"inherit\"";
+        const char* want = "[forward, right, up] in cm from the origin, each a number, null (no limit) or \"inherit\"";
         if (x.is_null()) return true;
         if (x.is_str()) {
             if (!ieq(x.s, "inherit")) return type_error(x, w, want);
@@ -158,7 +158,6 @@ struct Apply {
             }
             float f = none;
             if (!num(e, we, f)) return false;
-            if (is_min ? f > 0.0f : f < 0.0f) return type_error(e, we, want);
             out.v[i] = f;
         }
         return true;
@@ -504,13 +503,18 @@ std::string rotation_tracking_text(const Tether& t) { return axes_text(t.rot_yaw
 std::string location_tracking_text(const Tether& t) {
     return t.loc_view ? std::string("Your view (orbit)") : axes_text(t.loc_yaw, t.loc_pitch, t.loc_roll);
 }
+// In the file's own terms, places from the origin like the Offset line above it: "up at most 360 cm",
+// "forward -30 to 15, up 40 to 65 cm".
 std::string leash_text(const float leash_min[3], const float leash_max[3]) {
-    static const char* const kPos[3] = {"forward", "right", "up"};
-    static const char* const kNeg[3] = {"back", "left", "down"};
+    static const char* const kAxis[3] = {"forward", "right", "up"};
     std::string s;
     for (int k = 0; k < 3; ++k) {
-        if (leash_max[k] < kUnleashed)  s += std::string(s.empty() ? "" : ", ") + kPos[k] + " " + fmt_num(leash_max[k]);
-        if (leash_min[k] > -kUnleashed) s += std::string(s.empty() ? "" : ", ") + kNeg[k] + " " + fmt_num(-leash_min[k]);
+        const bool lo = leash_min[k] > -kUnleashed, hi = leash_max[k] < kUnleashed;
+        if (!lo && !hi) continue;
+        s += std::string(s.empty() ? "" : ", ") + kAxis[k] + " ";
+        if (lo && hi)  s += fmt_num(leash_min[k]) + " to " + fmt_num(leash_max[k]);
+        else if (hi)   s += "at most " + fmt_num(leash_max[k]);
+        else           s += "at least " + fmt_num(leash_min[k]);
     }
     return s.empty() ? std::string("None") : s + " cm";
 }
@@ -626,21 +630,25 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  rotationTracking  which vehicle rotations turn your VIEW: any of yaw, pitch, roll ([] = the world\",\n";
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
-    s += "    \"  leashMin, leashMax  the LEASH: a box your HEAD stays inside, around the camera's point -- so a lean\",\n";
-    s += "    \"                    in a tight seat cannot take you through the canopy or into the gun. Both are\",\n";
-    s += "    \"                    [forward, right, up] in cm, on the offset's directions. leashMin = how far you may\",\n";
-    s += "    \"                    move back, left and down (each 0 or negative); leashMax = how far forward, right\",\n";
-    s += "    \"                    and up (each 0 or positive). Past a limit the view stops following your head that\",\n";
-    s += "    \"                    way (the world moves with you); coming back is free. Measured from where your head\",\n";
-    s += "    \"                    was put at the last camera change or reset.\",\n";
-    s += "    \"                    e.g. \\\"leashMin\\\": [-10, -15, -20], \\\"leashMax\\\": [15, 15, 5]\",\n";
-    s += "    \"                         = at most 10 back, 15 left, 20 down, 15 forward, 15 right and 5 up.\",\n";
+    s += "    \"  leashMin, leashMax  the LEASH: a box your HEAD stays inside, so a lean in a tight seat cannot take you\",\n";
+    s += "    \"                    through the canopy or into the gun. Both are [forward, right, up] in cm FROM THE\",\n";
+    s += "    \"                    ORIGIN, on the offset's directions -- the same space as offset, so each limit is a\",\n";
+    s += "    \"                    place: leashMin = the furthest back, left and down your head may go, leashMax = the\",\n";
+    s += "    \"                    furthest forward, right and up. A camera whose offset sits on a limit is already at\",\n";
+    s += "    \"                    it: \\\"offset\\\": [-220, 0, 360] with \\\"leashMax\\\": [null, null, 360] = duck, never rise.\",\n";
+    s += "    \"                    Past a limit the view stops following your head that way (the world moves with\",\n";
+    s += "    \"                    you); coming back is free. The camera itself never moves: a limit on the far side of\",\n";
+    s += "    \"                    its point counts as that point. Where your head was at the last camera change or\",\n";
+    s += "    \"                    reset counts as the camera's point.\",\n";
+    s += "    \"                    e.g. \\\"offset\\\": [0, 0, 60], \\\"leashMin\\\": [-10, -15, 40], \\\"leashMax\\\": [15, 15, 65]\",\n";
+    s += "    \"                         = from the camera's point: 10 back, 15 left, 20 down, 15 forward, 15 right, 5 up.\",\n";
     s += "    \"                    Set it for a whole seat (in the vehicle entry), for a camera, or for a tethering\",\n";
-    s += "    \"                    mode; each overrides the one above it. Per axis: a number = that limit, null = no\",\n";
-    s += "    \"                    limit that way, \\\"inherit\\\" = the level above's limit on that axis; a shorter list =\",\n";
-    s += "    \"                    no limit on the axes it leaves out. The whole key: null = no leash on that side,\",\n";
-    s += "    \"                    \\\"inherit\\\" (or leaving it out) = the level above's. e.g. under a seat's\",\n";
-    s += "    \"                    \\\"leashMax\\\": [8, 12, 4], a camera's [\\\"inherit\\\", \\\"inherit\\\", 2] = 8, 12 and 2.\",\n";
+    s += "    \"                    mode; each overrides the one above it, and is measured from the origin in use -- so\",\n";
+    s += "    \"                    a camera or mode with an origin of its own may want its own. Per axis: a number =\",\n";
+    s += "    \"                    that limit, null = no limit that way, \\\"inherit\\\" = the level above's limit on that\",\n";
+    s += "    \"                    axis; a shorter list = no limit on the axes it leaves out. The whole key: null = no\",\n";
+    s += "    \"                    leash on that side, \\\"inherit\\\" (or leaving it out) = the level above's. e.g. under a\",\n";
+    s += "    \"                    seat's \\\"leashMax\\\": [8, 12, 64], a camera's [\\\"inherit\\\", \\\"inherit\\\", 70] = 8, 12, 70.\",\n";
     s += "    \"  tethering         the camera's MODES, which left X steps through: a list of { name, origin, offset,\",\n";
     s += "    \"                    leashMin, leashMax, locationTracking, rotationTracking, aimMarker }, each taking\",\n";
     s += "    \"                    the camera's own for what it leaves out -- e.g. the same cockpit held still and\",\n";

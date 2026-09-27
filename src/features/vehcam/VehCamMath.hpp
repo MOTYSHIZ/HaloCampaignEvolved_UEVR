@@ -124,7 +124,22 @@ inline void tracked_frame(const double VF[3], const double VR[3], const double V
     }
 }
 
-// THE CAMERA'S LEASH (the camera file's "leashMin" / "leashMax"): how far to move the view base so a head
+// THE LEASH IN THE OFFSET'S OWN SPACE: the camera file's "leashMin" / "leashMax" are coordinates measured
+// from the camera's ORIGIN along the offset's directions -- exactly like "offset" -- so one box describes a
+// seat's surroundings (the canopy, the gun), whatever offset or tethering mode sits inside it. The head moves
+// relative to the camera's point, so the box is shifted by where that point is (`cam`: its coordinates in
+// the same frame -- the offset, times any collision pull-in) into [out_lo, out_hi] for leash_shift. The
+// camera's own point always stays inside: a limit set past it on some axis becomes the point itself, so a
+// leash never moves the view, it only stops it. An unlimited side (+-1e9 cm) stays far out of reach.
+inline void leash_relative(const float lo[3], const float hi[3], const double cam[3], float out_lo[3], float out_hi[3]) {
+    for (int a = 0; a < 3; ++a) {
+        const double l = (double)lo[a] - cam[a], h = (double)hi[a] - cam[a];
+        out_lo[a] = (float)(l < 0.0 ? l : 0.0);
+        out_hi[a] = (float)(h > 0.0 ? h : 0.0);
+    }
+}
+
+// THE CAMERA'S LEASH, RELATIVE (from leash_relative): how far to move the view base so a head
 // displaced `hd` (world, cm) from the camera's point stays within [lo, hi] on each of the axes F / R / U
 // (orthonormal: the frame the camera's offset is in). Written to `out` as the shift to SUBTRACT from the
 // view base -- zero inside the box, and on each axis exactly the overshoot, so past a limit the view stops
