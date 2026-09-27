@@ -83,9 +83,11 @@ struct Apply {
         r.error = buf;
         return false;
     }
+    // Offsets and margins, in cm. Bounded well inside float range: the reader refuses only a non-finite
+    // DOUBLE, and 1e39 narrowed to +inf here, then to a NaN view position.
     bool num(const Value& v, const std::string& where, float& dst) {
         if (v.is_null()) return true;
-        if (!v.is_num()) return type_error(v, where, "a number");
+        if (!v.is_num() || !(std::fabs(v.n) <= 1.0e6)) return type_error(v, where, "a number from -1000000 to 1000000");
         dst = static_cast<float>(v.n);
         return true;
     }
@@ -281,10 +283,14 @@ struct Apply {
                     if (!x.items[i].s.empty()) out.chassis.push_back(lower(x.items[i].s));
                 }
             } else if (fk == "defaultCamera") {
-                if (!x.is_num() || x.n < 0.0 || x.n != std::floor(x.n)) return type_error(x, w, "a camera index from 0");
+                // Bounded before the cast: 3000000000 used to become INT_MIN and index far outside the
+                // camera list -- a crash, and at startup UEVR then unloads the whole plugin every launch.
+                if (!x.is_num() || x.n < 0.0 || x.n > 1000.0 || x.n != std::floor(x.n))
+                    return type_error(x, w, "a camera index from 0");
                 out.default_camera = static_cast<int>(x.n);
             } else if (fk == "defaultMode") {
-                if (!x.is_num() || x.n < 0.0 || x.n != std::floor(x.n)) return type_error(x, w, "a tethering mode index from 0");
+                if (!x.is_num() || x.n < 0.0 || x.n > 1000.0 || x.n != std::floor(x.n))
+                    return type_error(x, w, "a tethering mode index from 0");
                 out.default_mode = static_cast<int>(x.n);
             } else if (fk == "hideHead") {
                 if (!x.is_bool()) return type_error(x, w, "true or false");
@@ -335,8 +341,9 @@ struct Apply {
         }
         if (!have_cams) return type_error(v, where, "an object with a \"cameras\" list");
         if (!have_match && !out.is_default) out.match.push_back(lower(key));
-        if (out.default_camera >= static_cast<int>(out.cameras.size())) out.default_camera = 0;
-        if (out.default_mode >= out.cameras[static_cast<size_t>(out.default_camera)].mode_count()) out.default_mode = 0;
+        if (out.default_camera < 0 || out.default_camera >= static_cast<int>(out.cameras.size())) out.default_camera = 0;
+        if (out.default_mode < 0 || out.default_mode >= out.cameras[static_cast<size_t>(out.default_camera)].mode_count())
+            out.default_mode = 0;
         return true;
     }
 };
