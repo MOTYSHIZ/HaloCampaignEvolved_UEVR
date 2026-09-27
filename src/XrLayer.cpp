@@ -3826,11 +3826,12 @@ void report_dark_reason(uint32_t tick) {
                 reason = 4;
                 text   = "CAPTURE STALE -- the cell holds art but it stopped being refreshed";
             } else if (!live) {
-                // REASON 5 MUST PERSIST BEFORE IT IS BELIEVED. g_live is recomputed once per
-                // watchdog window from `submitted`, which is read with exchange(0) -- so for the
-                // moment between that reset and the next appended frame, live reads false while
-                // nothing is wrong. Measured 2026-08-28: this fired twice in a healthy sim run and
-                // recovered in 40 ms both times.
+                // REASON 5 MUST PERSIST BEFORE IT IS BELIEVED. g_live used to be recomputed every
+                // TICK from the appends since the previous one, so it read false for single ticks
+                // while nothing was wrong -- measured 2026-08-28: this fired twice in a healthy sim
+                // run and recovered in 40 ms both times. xrlayer_tick() now holds live for
+                // kLiveHoldMs after the last append, which removes that dip at the source; the
+                // persistence stays because this line is for a SUSTAINED failure, not a hiccup.
                 //
                 // A false alarm here is worse than silence: this line exists so that a player's log
                 // already contains the answer, and a reason that cries wolf every window boundary
@@ -4109,7 +4110,29 @@ void xrlayer_tick() {
              "is built in apilayer/ and registered with Register-XrApiLayer.ps1. Layer marked "
              "not-live; the in-scene reticule is unaffected.");
     }
-    g_live.store(possible && submitted > 0, std::memory_order_relaxed);
+
+    // LIVE MEANS "APPENDED RECENTLY", NOT "APPENDED SINCE THE LAST TICK".
+    //
+    // `submitted` counts appends between two game ticks, and with the tick and the frame running at
+    // similar rates (~48 fps, measured 2026-09-27) jitter regularly leaves a tick with none. Live was
+    // `possible && submitted > 0`, so it read false for exactly one tick every ~0.1-0.5 s while
+    // nothing was wrong -- and every fallback keyed on it flapped: waypoint markers flashed their
+    // in-scene copy and jumped between their two distance clamps, the grab guide flipped to its
+    // in-scene mesh and back (GRABGUIDE lines ~20 ms apart), and the scope's display state flipped
+    // hundreds of times a session (573 "STOPPED presenting" in one log).
+    //
+    // So hold it for kLiveHoldMs after the last append: many frame periods of jitter at any playable
+    // frame rate, and still short enough that a layer which genuinely stops appending hands every
+    // fallback back within a quarter of a second. Not attached or not presenting drops it at once,
+    // with no grace to carry into the next bring-up. The watchdog above keeps the raw per-tick
+    // count, because its question -- has anything EVER arrived in ~3 s -- is a different one.
+    constexpr uint64_t kLiveHoldMs = 250;
+    static uint64_t s_last_append_ms = 0;
+    const uint64_t now_ms = GetTickCount64();
+    if (!possible)          s_last_append_ms = 0;
+    else if (submitted > 0) s_last_append_ms = now_ms;
+    g_live.store(s_last_append_ms != 0 && (now_ms - s_last_append_ms) <= kLiveHoldMs,
+                 std::memory_order_relaxed);
 
     if (m.verbose && (tick % 64) == 0) {
         // `src` says WHICH TEXTURE THE COMPOSITOR IS PRESENTING, not whether a key is on: `owned`

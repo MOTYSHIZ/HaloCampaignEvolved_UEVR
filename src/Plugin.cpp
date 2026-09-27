@@ -6563,10 +6563,10 @@ void update() {
     // ...BUT NOT ON A BARE xrlayer_live(), AND THAT IS THE FIX FOR A DOUBLE CROSSHAIR REPORTED
     // 2026-09-06 ("I still saw double after scoping out").
     //
-    // xrlayer_live() is `possible && submitted > 0` -- it means "a quad of ours reached the runtime
-    // in this window", NOT "our layer is attached". Those come apart the moment anything DELIBERATELY
-    // stops submitting a quad, and xrlayerhidescope does exactly that: it retires the reticule quad
-    // for the duration of the scope. So the chain ran:
+    // xrlayer_live() means "a quad of ours reached the runtime recently" (within ~250 ms since
+    // 2026-09-27; since the previous tick before that), NOT "our layer is attached". Those come
+    // apart the moment anything DELIBERATELY stops submitting a quad, and xrlayerhidescope does
+    // exactly that: it retires the reticule quad for the duration of the scope. So the chain ran:
     //
     //   hide the compositor reticule for the scope -> submitted drops to 0 -> xrlayer_live() false
     //     -> g_ws_scene_hidden false -> the WORLD reticule is restored to the main pass
@@ -6586,9 +6586,9 @@ void update() {
         // LATCH ON FIRST LIVENESS, THEN STAY HIDDEN. The world reticule has no reason to EVER draw
         // in the main view -- the compositor quad is the main-view crosshair -- so anything that can
         // put it back there is a bug surface, not a feature. Gating it on the INSTANTANEOUS
-        // xrlayer_live() did exactly that: that flag is `possible && submitted > 0`, i.e. "a quad
-        // reached the runtime this window", so a quiet window, or our own deliberate scope-hide
-        // retiring the reticule quad, read as a dead layer and handed the world reticule back.
+        // xrlayer_live() did exactly that: that flag means "a quad reached the runtime recently",
+        // so a quiet spell, or our own deliberate scope-hide retiring the reticule quad, read as a
+        // dead layer and handed the world reticule back.
         //
         // The safety property the original gate protected is real but narrower than it was written:
         // what must never happen is a player left with NO crosshair because our layer never worked.
