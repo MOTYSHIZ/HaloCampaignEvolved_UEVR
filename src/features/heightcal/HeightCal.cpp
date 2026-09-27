@@ -15,7 +15,9 @@
 #include "uevr/API.hpp"
 
 #include <Windows.h>
+#include <Xinput.h>                    // physical crouch: the pad the crouch button is held on
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -345,12 +347,23 @@ struct EFilt {
     bool  took = false;   // this tick's raw was accepted within the step (stable ground)
 };
 
+// Seconds left in which a jump in E_game is taken AT ONCE instead of held. Set by physical crouch on
+// every crouch/stand edge, because that jump is one WE caused and know is real: the game camera
+// moving to or from its crouch height. Held like a stair edge, it left the view up to the whole
+// crouch drop below your head for heightholdms on every crouch (and as far above it on every stand)
+// in absolute mode, since the origin was solved against the pre-crouch E. Predicted from this
+// filter, not measured: if the crouch camera moves under heightestep per tick it was never held.
+float g_e_follow_t = 0.0f;
+
 void efilt(EFilt& f, bool ok, float raw, float dt) {
     f.took = false;
     f.raw_ok = ok && std::isfinite(raw) && raw >= 20.0f && raw <= 400.0f;
     f.raw = ok ? raw : 0.0f;
     if (!f.raw_ok) return;
     if (!f.have) { f.E = raw; f.have = true; f.cand = raw; f.cand_t = 0.0f; f.took = true; return; }
+    // Our own crouch edge: follow the camera. Not marked `took` -- the offset learners below want
+    // stable ground, and a crouch transition is not that.
+    if (g_e_follow_t > 0.0f) { f.E = raw; f.cand = raw; f.cand_t = 0.0f; return; }
     if (std::fabs(raw - f.E) <= g_cfg.height_e_step) {
         f.E = raw; f.cand = raw; f.cand_t = 0.0f; f.took = true;
         return;
@@ -559,6 +572,31 @@ float g_log_t = 0.0f;
 std::string g_status;
 std::chrono::steady_clock::time_point g_last_call{};
 
+// ---- PHYSICAL CROUCH (heightcrouch) -- see the block in height_tick. Game thread, except the two
+// atomics, which the XInput hook reads.
+bool               g_pc_can = false;        // every gate open this tick, `active` included
+bool               g_pc_on = false;         // latched crouch state, with the band as hysteresis
+bool               g_pc_have_ref = false;
+float              g_pc_ref = 0.0f;         // standing head height above the real floor, metres
+std::vector<float> g_pc_win;                // still, standing head_abs samples for the reference
+float              g_pc_win_t = 0.0f;
+std::atomic<bool>      g_pc_want{false};    // tick -> XInput hook: hold crouch
+std::atomic<long long> g_pc_stamp_ms{0};    // when the tick last said so (a stale request is ignored)
+
+long long steady_ms() {
+    return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void pc_reset(const char* why) {
+    g_pc_have_ref = false;
+    g_pc_ref = 0.0f;
+    g_pc_win.clear();
+    g_pc_win_t = 0.0f;
+    hlog("HEIGHT CROUCH: standing height forgotten (%s) -- stand still for %.0f s to re-measure it",
+         why, g_cfg.height_window_s);
+}
+
 bool uevr_menu_open() {
     auto* p = API::get()->param();
     return p != nullptr && p->functions != nullptr && p->functions->is_drawing_ui != nullptr &&
@@ -689,6 +727,9 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
     if (req) {
         if (eff == MODE_SEATED)    start_capture(MODE_SEATED, "recalibrate");
         else if (eff == MODE_EYES) start_capture(MODE_EYES, "recalibrate");
+        // The view height needs no calibration here (the floor defines it), but physical crouch's
+        // line is a fraction of your STANDING height, and that is the one thing worth re-measuring.
+        else if (eff == MODE_ABSOLUTE && g_cfg.height_crouch != 0) pc_reset("recalibrate");
         else hlog("HEIGHT: recalibrate in %s mode -- nothing to calibrate (the floor defines the height)", mode_name(eff));
     }
     if (eff == MODE_SEATED && !g_have_O && g_cap_t < 0.0f) start_capture(MODE_SEATED, "entering seated");
@@ -761,6 +802,66 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
             }
         }
     }
+    // ---- PHYSICAL CROUCH (heightcrouch) ----------------------------------------------------------
+    //
+    // Crouching in this game is a BUTTON, and it moves the simulated player -- the hitbox, what you
+    // fit under, where you are shot from -- while ducking in the room only ever moved the camera
+    // (the leash note in Config.hpp makes exactly that point). This joins them: below
+    // heightcrouchfrac of your standing head height the crouch button is held for you, and it is let
+    // go once you rise heightcrouchband above that line. The band is what stops it chattering while
+    // your head hovers at the line.
+    //
+    // ABSOLUTE MODE WITH A KNOWN FLOOR ONLY. A fraction of your height needs the floor: in eyes mode
+    // the pose origin is not the floor, and seated there is nothing to crouch from. Any closed gate
+    // releases the button rather than guessing.
+    //
+    // THE STANDING REFERENCE IS LEARNED, and only ever RISES: the 90th percentile of still, on-foot
+    // head heights over heightwindow seconds, not sampled while crouched. So a session that starts
+    // crouched corrects itself the first time you stand still, and a long crouch cannot drag the
+    // line down after it. Calibrate height (or heightkey) forgets it and re-learns.
+    //
+    // Scale-free: head_abs and the reference are both real metres above the real floor, so the
+    // line is the same fraction of your height whatever VR_WorldScale is.
+    g_pc_can = g_cfg.height_crouch != 0 && active && eff == MODE_ABSOLUTE && g_floor_known && !pending;
+    if (g_pc_can && still && !g_pc_on) {
+        g_pc_win.push_back(head_abs);
+        g_pc_win_t += dt;
+        if (g_pc_win_t >= g_cfg.height_window_s && g_pc_win.size() >= 10) {
+            const float p90 = percentile(g_pc_win, 0.9f);
+            g_pc_win.clear();
+            g_pc_win_t = 0.0f;
+            // A standing head, not a seated or crouched one mistaken for the reference.
+            if (p90 >= 0.9f && p90 <= 2.4f && (!g_pc_have_ref || p90 > g_pc_ref + 0.005f)) {
+                g_pc_ref = p90;
+                g_pc_have_ref = true;
+                const float line = g_cfg.height_crouch_frac * g_pc_ref;
+                hlog("HEIGHT CROUCH: standing head %.3f m above the floor -> crouch below %.3f m, stand above %.3f m",
+                     g_pc_ref, line, line + g_cfg.height_crouch_band);
+            }
+        }
+        if (g_pc_win.size() > 4096) { g_pc_win.clear(); g_pc_win_t = 0.0f; }
+    }
+    const bool pc_was = g_pc_on;
+    if (g_pc_can && g_pc_have_ref) {
+        const float line = g_cfg.height_crouch_frac * g_pc_ref;
+        if (!g_pc_on && head_abs < line) {
+            g_pc_on = true;
+            hlog("HEIGHT CROUCH: head %.3f m < %.3f m -- crouching", head_abs, line);
+        } else if (g_pc_on && head_abs > line + g_cfg.height_crouch_band) {
+            g_pc_on = false;
+            hlog("HEIGHT CROUCH: head %.3f m > %.3f m -- standing", head_abs, line + g_cfg.height_crouch_band);
+        }
+    } else {
+        g_pc_on = false;   // any gate closed: never leave the button held
+    }
+    // Every edge -- a release forced by a menu or a vehicle included -- moves the game camera, so E
+    // follows it at once for a moment (see g_e_follow_t). Spent only while E is being measured, so a
+    // release that happens in a menu is still honoured on the first on-foot ticks after it.
+    if (g_pc_on != pc_was) g_e_follow_t = 0.6f;
+    if (active && g_e_follow_t > 0.0f) g_e_follow_t -= dt;
+    g_pc_want.store(g_pc_on, std::memory_order_relaxed);
+    g_pc_stamp_ms.store(steady_ms(), std::memory_order_relaxed);
+
     // ---- TARGET -----------------------------------------------------------------------------------
     bool have_target = false;
     float tgt = 0.0f, V_target = -1.0f;
@@ -801,9 +902,33 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         Vec3 c{};
         const bool have_c = eye_head_offset(&c);
         const float V_meas = (have_E && have_c) ? E + c.z : -1.0f;
-        char st[96];
-        if (have_E && eff >= 0) std::snprintf(st, sizeof(st), "height=%s %.2f m", mode_name(eff), (V_meas >= 0.0f ? V_meas : V_pred) * 0.01f);
-        else std::snprintf(st, sizeof(st), "height=%s --", mode_name(eff));
+        // YOUR HEAD ABOVE YOUR FLOOR FIRST -- that is the number a person reads as their height. This
+        // line used to print only the rendered eye above the character's feet, which is the same
+        // height times VR_WorldScale (K = S): 1.52 m of headset at a 1.312 world scale read
+        // "2.00 m", and a 5'7" player reasonably concluded the calibration was broken. It was not --
+        // that scale is what puts the virtual floor on the real one -- so both are shown, labelled.
+        char st[160];
+        int n = 0;
+        const float v_game = (V_meas >= 0.0f ? V_meas : V_pred) * 0.01f;
+        if (have_E && eff >= 0 && eff != MODE_EYES && g_floor_known) {
+            n = std::snprintf(st, sizeof(st), "height=%s head %.2f m (in game %.2f m)", mode_name(eff), head_abs, v_game);
+        } else if (have_E && eff >= 0) {
+            n = std::snprintf(st, sizeof(st), "height=%s %.2f m in game", mode_name(eff), v_game);
+        } else {
+            n = std::snprintf(st, sizeof(st), "height=%s --", mode_name(eff));
+        }
+        // The PERSISTENT conditions only, not `active`: this line is read in the menu, where active is
+        // always false, and "needs a floor" there would be a lie about a working setup.
+        if (g_cfg.height_crouch != 0 && n > 0 && n < (int)sizeof(st)) {
+            if (eff != MODE_ABSOLUTE || !g_floor_known) {
+                std::snprintf(st + n, sizeof(st) - n, " | crouch: needs absolute + a floor");
+            } else if (!g_pc_have_ref) {
+                std::snprintf(st + n, sizeof(st) - n, " | crouch: stand still to measure");
+            } else {
+                std::snprintf(st + n, sizeof(st) - n, " | crouch below %.2f m%s",
+                              g_cfg.height_crouch_frac * g_pc_ref, g_pc_on ? " -- CROUCHED" : "");
+            }
+        }
         g_status = st;
 
         if (g_cfg.height_log >= 2) {
@@ -855,6 +980,9 @@ bool heightcal_parse_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "heightseatdwell")  == 0) { g_cfg.height_seat_dwell  = clampf((float)v, 0.5f, 60.0f); return true; }
     if (_stricmp(key, "heightband")       == 0) { g_cfg.height_band     = clampf((float)v, 1.0f, 50.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightcal")        == 0) { g_cfg.height_cal      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heightcrouch")     == 0) { g_cfg.height_crouch      = (int)clampf((float)v, 0.0f, 1.0f); return true; }
+    if (_stricmp(key, "heightcrouchfrac") == 0) { g_cfg.height_crouch_frac = clampf((float)v, 0.2f, 0.9f); return true; }
+    if (_stricmp(key, "heightcrouchband") == 0) { g_cfg.height_crouch_band = clampf((float)v, 1.0f, 30.0f) * 0.01f; return true; }
     if (_stricmp(key, "heightkey")        == 0) {
         const int k = (int)strtol(val, nullptr, 0);
         g_cfg.height_key = (k == 0x2D) ? 0 : k;   // Insert opens UEVR's menu: never a height key
@@ -905,6 +1033,30 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
             return g_cfg.height_cal != 0;
 }
 
+// PHYSICAL CROUCH, the button half. Holds the crouch mask for as long as the tick says you are
+// ducked. It is map_rstick_down's mask, injected in the slot after the rebind (Plugin.cpp runs this
+// hook below it), so to the game it is exactly "the right stick held down" -- the same button, on
+// the same side of mapfrom, and treated the same way by whatever crouch behaviour the game uses.
+void heightcal_xinput_before_brake(_XINPUT_STATE* state) {
+    CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
+    if (g_cfg.height_cal == 0 || g_cfg.height_crouch == 0 || g_cfg.map_rstick_down == 0) return;
+    const auto& g_in_menu    = *host::g_plugin_state.in_menu;
+    const auto& g_stick_mode = *host::g_plugin_state.stick_mode;
+    // B is "back" in every menu and a vehicle may give it an action: never there, whatever the tick
+    // last said. The tick releases on these too; this is the half that cannot lag behind it.
+    if (g_in_menu.load() || g_stick_mode.load() || halo::g_unit_mounted.load(std::memory_order_relaxed)) return;
+    if (!g_pc_want.load(std::memory_order_relaxed)) return;
+    // A tick that stopped running -- the feature switched off mid-crouch, a long hitch -- must not
+    // leave the button held down forever. Honour the request only while it is fresh.
+    const long long age = steady_ms() - g_pc_stamp_ms.load(std::memory_order_relaxed);
+    if (age < 0 || age > 250) return;
+    const WORD m = (WORD)g_cfg.map_rstick_down;
+    if ((state->Gamepad.wButtons & m) != m) {
+        state->Gamepad.wButtons |= m;
+        state->dwPacketNumber++;
+    }
+}
+
 bool heightcal_menu_command(const std::string& line) {
             if (line == "calib:height")    { height_request_calibrate(); return true; }
             return false;
@@ -925,6 +1077,7 @@ constinit const FeatureHooks kHeightCalHooks{
     .parse_key          = &heightcal_parse_key,
     .leash_block_wanted = &heightcal_leash_block_wanted,
     .leash_vertical     = &heightcal_leash_vertical,
+    .xinput_before_brake = &heightcal_xinput_before_brake,
     .menu_command       = &heightcal_menu_command,
     .menu_status_line   = &heightcal_menu_status_line,
     .enabled                    = &height_cal_enabled,

@@ -593,6 +593,14 @@
 # Auto height: an optional keyboard key that re-measures your height. The Calibrate height button is
 # the intended way.
 #heightkey=0x00
+# Physical crouch: duck in the room and your character crouches, the same as holding the right
+# stick down -- so it fits under things and is harder to hit, not just a lower view. Your standing
+# height is measured while you stand still and only ever goes up; Calibrate height re-measures it.
+# Needs heightmode=absolute and a known floor. 0 off, 1 on.
+#heightcrouch=0
+# Physical crouch: where the line is, as a fraction of your standing head height (0.5 = half).
+# Raise it towards 0.7 for a shallower crouch.
+#heightcrouchfrac=0.5
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Head block: how far your head is kept from a surface, in centimetres.

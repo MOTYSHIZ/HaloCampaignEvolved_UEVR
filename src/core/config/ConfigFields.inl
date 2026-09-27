@@ -107,6 +107,12 @@
     float height_band     = 0.10f;   // heightband (eyes, cm): continuous mode, drops larger than this are crouches
     float height_slew     = 0.5f;    // heightslew (cm/s): how fast a mode switch or new calibration is walked in (0 = snap)
     int   height_log      = 0;       // heightlog: 0 silent, 1 events, 2+ events + a HEIGHT line once a second
+    // PHYSICAL CROUCH (HeightCal.cpp): duck below a fraction of your standing head height and the
+    // character crouches -- the crouch button is held for you, exactly as right-stick-down holds it.
+    // Absolute mode with a known floor only. Off by default: it changes what ducking DOES.
+    int   height_crouch      = 0;     // heightcrouch: 0 off, 1 on
+    float height_crouch_frac = 0.5f;  // heightcrouchfrac: the crouch line as a fraction of your standing head height
+    float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
     // ---- HEAD BLOCK (HeadBlock.hpp). Keeps the rendered head out of geometry. UE cm.
     int   head_block         = 0;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface
