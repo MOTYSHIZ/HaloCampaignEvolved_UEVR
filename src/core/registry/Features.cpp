@@ -248,9 +248,9 @@ const FeatureRow kFeatures[] = {
       "roomscalethrprobe,roomscalethrspeed",
       "blamangles", FEATURE_BOOL(roomscale) },
     { "heightcal",    1, Tier::Experimental, "Roomscale", "Auto height",
-      "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it.",
-      "heightkey,heightmode,heightsample,heightsrc,heighttrim",
-      "heightautoseat,heightband,heightbipedfeet,heightbipedscale,heightestep,heighteye,heightholdms,"
+      "Your view height above the game floor follows your head above the real floor, so a real crouch lowers it -- and, with Physical crouch on, crouches your character too.",
+      "heightcrouch,heightcrouchfrac,heightkey,heightmode,heightsample,heightsrc,heighttrim",
+      "heightautoseat,heightband,heightbipedfeet,heightbipedscale,heightcrouchband,heightestep,heighteye,heightholdms,"
       "heightlog,heightpawnfeet,heightscale,heightseatbelow,heightseatdwell,heightseattarget,heightslew,"
       "heighttracechannel,heighttracemax,heightwindow",
       "", FEATURE_INT(height_cal) },
