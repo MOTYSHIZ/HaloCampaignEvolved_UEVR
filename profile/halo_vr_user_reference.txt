@@ -600,10 +600,10 @@
 #handsmoothhands=0
 # Position steadiness while still. How much a still hand's position is steadied, in Hz: lower is
 # steadier but slower to follow a slow move. 0 turns position smoothing off.
-#handsmoothposmin=0.1
+#handsmoothposmin=1.0
 # Position follow speed. How quickly smoothing lets go as the hand moves faster (per metre per
 # second). Raise it if slow moves feel laggy, lower it if a moving hand still shakes.
-#handsmoothposbeta=1000
+#handsmoothposbeta=500
 # Rotation steadiness while still. How much a still hand's angle is steadied, in Hz: lower is
 # steadier but slower to follow a slow turn of the wrist -- and on your aiming hand, slower to
 # follow a slow aim. 0 turns rotation smoothing off.
