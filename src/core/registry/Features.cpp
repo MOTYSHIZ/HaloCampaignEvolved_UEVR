@@ -149,7 +149,7 @@ const FeatureRow kFeatures[] = {
       "Walk around your play space and your steps move the Spartan.",
       "roomscaledz,roomscalegain,roomscalemin,roomscalethrottle,roomscalethrottleysign",
       "roomscaledead,roomscaleff,roomscalelat,roomscaleleash,roomscalelog,roomscalemaxspeed,roomscalepulse,"
-      "roomscalespeed,roomscalestanddown,roomscalestick,roomscalethrottleoff,roomscalethrottleoff2,"
+      "roomscalespeed,roomscalestanddown,roomscalestick,roomscalethrguard,roomscalethrottleoff,roomscalethrottleoff2,"
       "roomscalethrprobe,roomscalethrspeed",
       "blamangles", FEATURE_BOOL(roomscale) },
     { "heightcal",    1, Tier::Stable, "", "Auto height",

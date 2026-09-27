@@ -2534,6 +2534,21 @@ struct Config {
     //                                                 timeout branches, which 0x100 does not: that
     //                                                 one advances the attempt count by REJECTING
     //                                                 candidates, a different path.
+    //   0x800  read the layout guard ONE FIELD LATE -> a member inserted before the yaw: the
+    //                                                 neighbour moves as much as the aim does, so
+    //                                                 only a value comparison catches it (BlamDrive)
+    //   0x1000 read roomscale's throttle one float  -> the throttle guard (features/roomscale/
+    //          late                                   ThrottleGuard) must refuse: WRONG OFFSETS,
+    //                                                 and roomscale stays on the left stick
+    //   0x2000 freeze roomscale's throttle read at  -> a dead field, and the worst case for a
+    //          FORWARD                                player who mostly walks forward: it must
+    //                                                 never confirm (its breadth rule), and refuses
+    //                                                 once you walk any other way
+    //
+    // The throttle bits act only while the guard is still measuring (you walk with the stick held
+    // past the deadzone), and the verdict is decided once per session: arm them before you first
+    // walk, or in a fresh session if it has already confirmed. A changed roomscalethrottleoff or
+    // roomscalethrottleysign also re-opens the verdict.
     //
     // Install-time bits (0x002..0x020) can be re-tested without rebooting: toggling `blamangles`
     // 1 -> 0 -> 1 unregisters the hook and re-runs the entire install path.
