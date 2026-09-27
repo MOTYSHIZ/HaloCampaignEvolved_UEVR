@@ -85,6 +85,11 @@ bool  s_pane_shown = false;
 // one scope-in. Reset to false whenever the capture component is (re)created; see the arm at the
 // cadence block and the disarm in the scope-inactive early-out.
 bool  s_capture_every_frame = false;
+// Bumped every time the capture COMPONENT is (re)created. The post-process levers in scope_apply
+// (exposure bias, gain, main-view family, blendables...) are applied ON CHANGE, and their trackers
+// follow the CONFIG VALUE -- so after a rebuild they see an unchanged config and would never touch
+// the new component. scope_apply compares this once per tick; see the note above its source block.
+uint32_t s_capture_gen = 0;
 // What the scope was opened holding -- the weapon-switch close compares against it.
 //
 // File scope, not a static inside the detector, because the detector only runs while the pane is
@@ -2138,6 +2143,7 @@ bool ensure_components(API::UObject* rig) {
         // the "doesn't feel like a child of my controller" lag the first headset pass reported.
         s_capture.set(comp);
         s_fov_applied = 0.0f;
+        ++s_capture_gen;   // a NEW component: every on-change lever in scope_apply must re-apply
         // READ BACK what was written, and prove the capture function exists in this build --
         // call_function on a missing name does nothing and returns cleanly, so without this a
         // dead capture is indistinguishable from a working one (the codebase's readback rule).
@@ -3593,6 +3599,35 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         }
     }
 
+    // ---- A NEW CAPTURE COMPONENT GETS THE WHOLE CONFIGURATION, NOT JUST THE PARTS THAT CHANGED ----
+    //
+    // Every lever below is applied ON CHANGE, and each tracker records the CONFIG VALUE it last
+    // wrote. That is correct for a live edit and wrong for a rebuild: a level change (and a pawn
+    // swap) destroys the capture and ensure_components() makes a new one with engine-default post-
+    // process settings -- but the config is unchanged, so every tracker still matches and NOTHING
+    // re-applies. The new capture ran with no exposure bias, no gain, no main-view family and no
+    // blendables for the rest of the session.
+    //
+    // MEASURED 2026-09-26 from two real sessions' logs, identical in both: the FIRST capture logs
+    // "autoexposure bias -> +2.50 EV", "gain -> 5.500", "bMainViewFamily -> 1" and "blendables
+    // from ...", then after the level teardown the SECOND capture logs "capture component created"
+    // and nothing else, ever. Reported from a headset as "scopegain=5.5 doesn't fix the dark scope
+    // sometimes; I have to change scopegain live for it to look right" -- because a live edit was
+    // the only thing that re-fired a lever, and it re-fired only that ONE lever. So the scope had
+    // three looks depending on history (first level: bias+gain; after a level change: neither;
+    // after a poke: gain only), and any tuning done in one of them was wrong for the other two.
+    //
+    // ensure_components() already resets s_fov_applied and s_capture_every_frame for exactly this
+    // reason; these levers are function-local statics it cannot reach, so the generation counter is
+    // how they learn about the new component. One re-apply per rebuild -- never per tick.
+    //
+    // CONSUMED AT THE END of the lever section, not here: the source block below can return early
+    // (an RT rebuild that fails), and consuming the generation first would let that one bad tick
+    // spend it with half the levers unapplied -- this same bug again, in miniature. Consumed last,
+    // an interrupted tick simply retries on the next one.
+    static uint32_t s_pp_gen = 0;
+    const bool fresh_capture = (s_pp_gen != s_capture_gen);
+
     // CAPTURE SOURCE, live. This used to be written ONLY at component creation, so changing
     // scopesrc did nothing to an existing capture: a session that had gone black on a
     // post-processed source stayed black no matter what the config said, and the key was
@@ -3601,7 +3636,8 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     static int s_src_applied = -1;
     static float s_exposure_applied = -1.0f;
     static int s_aa_applied = -2;   // -1 is a meaningful value here, so seed outside the range
-    if (s_src_applied != g_cfg.scope_capture_src ||
+    if (fresh_capture ||   // AA is NOT written at creation, so a new component needs this block
+        s_src_applied != g_cfg.scope_capture_src ||
         s_exposure_applied != g_cfg.scope_exposure ||
         s_aa_applied != g_cfg.scope_aa) {
         s_aa_applied = g_cfg.scope_aa;
@@ -3645,7 +3681,10 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // last touched it. Seeded at 0.0f so a config that never sets the key writes nothing at all
     // and the capture keeps whatever it would otherwise inherit -- the default has to be inert.
     static float s_bias_applied = 0.0f;
-    if (s_bias_applied != g_cfg.scope_autoexposure_bias) {
+    // A fresh component re-applies only a NON-ZERO bias, so 0 keeps meaning "inherit" on every
+    // component rather than being written as an explicit override on rebuilt ones.
+    if (s_bias_applied != g_cfg.scope_autoexposure_bias ||
+        (fresh_capture && g_cfg.scope_autoexposure_bias != 0.0f)) {
         s_bias_applied = g_cfg.scope_autoexposure_bias;
         apply_autoexposure_bias(cap, g_cfg.scope_autoexposure_bias);
     }
@@ -3654,7 +3693,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // capture keeps the engine's forced-off state -- the default must not change anyone's frame
     // time, since re-enabling it makes the capture run a second Lumen scene.
     static int s_lumen_applied = -1;
-    if (s_lumen_applied != g_cfg.scope_lumen) {
+    if (s_lumen_applied != g_cfg.scope_lumen || (fresh_capture && g_cfg.scope_lumen >= 0)) {
         s_lumen_applied = g_cfg.scope_lumen;
         if (g_cfg.scope_lumen >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
     }
@@ -3666,14 +3705,16 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // ColorGain alone", which is not the same as 1.0 (neutral), because writing 1.0 would set the
     // override bit and stop the capture inheriting a gain from anywhere else.
     static float s_gain_applied = 0.0f;
-    if (s_gain_applied != g_cfg.scope_gain) {
+    if (s_gain_applied != g_cfg.scope_gain || (fresh_capture && g_cfg.scope_gain > 0.0f)) {
         s_gain_applied = g_cfg.scope_gain;
         if (g_cfg.scope_gain > 0.0f) apply_capture_gain(cap, g_cfg.scope_gain);
     }
 
     static int s_grade_applied = -1;
     const int grade_want = g_cfg.scope_pp_grade ? 1 : 0;
-    if (s_grade_applied != grade_want) {
+    // Only re-fires on a fresh component when the grade is ON: the off branch just logs that earlier
+    // copies stay copied, which would be false for a component that never received one.
+    if (s_grade_applied != grade_want || (fresh_capture && grade_want != 0)) {
         s_grade_applied = grade_want;
         if (grade_want != 0) {
             copy_pp_grading_onto_capture(cap);
@@ -3702,7 +3743,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         };
         static int s_applied[3] = { -2, -2, -2 };
         for (int i = 0; i < 3; ++i) {
-            if (flags[i].want < 0 || s_applied[i] == flags[i].want) continue;
+            if (flags[i].want < 0 || (!fresh_capture && s_applied[i] == flags[i].want)) continue;
             s_applied[i] = flags[i].want;
             auto* c = cap->get_class();
             auto* prop = (c != nullptr) ? c->find_property(flags[i].name) : nullptr;
@@ -3722,20 +3763,25 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         }
     }
 
-    // POST-PROCESS LEVERS, applied on change and in a DELIBERATE ORDER.
+    // POST-PROCESS LEVERS, applied on change.
     //
-    // scopeppcopy overwrites the ENTIRE FPostProcessSettings struct, so it must run FIRST -- any
-    // bloom or exposure written before it would be silently wiped by the copy, and the result
-    // would read as "the lever did nothing". Everything we want to survive is re-applied after.
+    // CORRECTED 2026-09-26. This comment used to say scopeppcopy "overwrites the ENTIRE
+    // FPostProcessSettings struct, so it must run FIRST". That described the old raw memcpy, which
+    // was removed as a heap hazard (see copy_pp_settings_onto_capture). The copy now only ADDS the
+    // camera's blendables through AddOrUpdateBlendable, so it wipes nothing -- the exposure bias and
+    // gain written above survive it, and there is no ordering constraint here any more. The stale
+    // claim nearly sent a diagnosis of "scope brightness needs a live poke" after the wrong cause.
     static int   s_ppcopy_applied = -1;
     static float s_bloom_applied  = -1.0f;
-    if (s_ppcopy_applied != (int)g_cfg.scope_pp_copy || s_bloom_applied != g_cfg.scope_bloom) {
+    if (s_ppcopy_applied != (int)g_cfg.scope_pp_copy || s_bloom_applied != g_cfg.scope_bloom ||
+        (fresh_capture && (g_cfg.scope_pp_copy || g_cfg.scope_bloom > 0.0f))) {
         s_ppcopy_applied = (int)g_cfg.scope_pp_copy;
         s_bloom_applied  = g_cfg.scope_bloom;
         if (g_cfg.scope_pp_copy) copy_pp_settings_onto_capture(cap);
         if (g_cfg.scope_bloom > 0.0f) force_capture_bloom(cap, g_cfg.scope_bloom);
-        // Re-assert the exposure pin: the copy above may have replaced it, and a post-processed
-        // capture without a pinned exposure was the original cause of the fade-to-black.
+        // Re-assert the exposure pin. Defensive now rather than necessary -- the blendable copy
+        // above no longer touches exposure -- but a post-processed capture without a pinned
+        // exposure was the original cause of the fade-to-black, so it stays cheap insurance.
         if ((g_cfg.scope_capture_src == 8 || g_cfg.scope_capture_src == 9) &&
             g_cfg.scope_exposure > 0.0f) {
             pin_capture_exposure(cap, g_cfg.scope_exposure);
@@ -3746,7 +3792,8 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     dev_blendable_probe(cap);
 #endif
     static float s_dof_applied = -1.0f, s_dof_focus_applied = -1.0f;
-    if (s_dof_applied != g_cfg.scope_dof || s_dof_focus_applied != g_cfg.scope_dof_focus) {
+    if (s_dof_applied != g_cfg.scope_dof || s_dof_focus_applied != g_cfg.scope_dof_focus ||
+        (fresh_capture && g_cfg.scope_dof > 0.0f)) {
         s_dof_applied = g_cfg.scope_dof;
         s_dof_focus_applied = g_cfg.scope_dof_focus;
         if (g_cfg.scope_dof > 0.0f) enable_capture_dof(cap, g_cfg.scope_dof, g_cfg.scope_dof_focus);
@@ -3764,7 +3811,8 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         API::get()->log_info("[Halo-CampE-UEVR] scope: bAlwaysPersistRenderingState -> %d "
                              "(readback %d)", g_cfg.scope_persist, rb);
     }
-    if (s_ppw_applied != g_cfg.scope_pp_weight) {
+    if (s_ppw_applied != g_cfg.scope_pp_weight ||
+        (fresh_capture && g_cfg.scope_pp_weight >= 0.0f)) {
         s_ppw_applied = g_cfg.scope_pp_weight;
         if (g_cfg.scope_pp_weight >= 0.0f) {
             if (auto* p = cap->get_property_data<float>(L"PostProcessBlendWeight"))
@@ -3775,6 +3823,14 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         API::get()->log_info("[Halo-CampE-UEVR] scope: PostProcessBlendWeight -> %.2f "
                              "(readback %.2f)%s", g_cfg.scope_pp_weight, rb,
                              g_cfg.scope_pp_weight < 0.0f ? "  [left at engine default]" : "");
+    }
+    // Every lever has now run against this component, so the generation is spent. Logged AFTER the
+    // fact, so the line means "was re-applied" rather than "is about to be" -- and the lever lines
+    // above it (bias, gain, bMainViewFamily, blendables) are the evidence that it actually landed.
+    if (fresh_capture) {
+        s_pp_gen = s_capture_gen;
+        API::get()->log_info("[Halo-CampE-UEVR] scope: capture generation %u configured -- the full "
+                             "post-process set was re-applied to the new component", s_capture_gen);
     }
     // bCameraCutThisFrame is the exception to the on-change rule, and deliberately so: the
     // renderer clears it after every capture (SceneCaptureRendering.cpp:1410), so writing it once
