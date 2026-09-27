@@ -592,12 +592,12 @@
 #vehmarkerthick=0.008
 # Vehicle aim ring dot. A dot in the ring's centre, as a fraction of its picture; 0 draws none.
 #vehmarkerdot=0
-# Vehicle aim ring red. Red, from 0 to 1.
-#vehmarkercr=1.0
+# Vehicle aim ring red. Red, from 0 to 1 (the ring is light purple by default).
+#vehmarkercr=0.80
 # Vehicle aim ring green. Green, from 0 to 1.
-#vehmarkercg=0.75
+#vehmarkercg=0.60
 # Vehicle aim ring blue. Blue, from 0 to 1.
-#vehmarkercb=0.25
+#vehmarkercb=1.00
 # Vehicle aim ring opacity. From 0 (invisible) to 1.
 #vehmarkeralpha=0.9
 # Text notices. Short notes in front of you, such as the camera readout; 0 turns them all off.

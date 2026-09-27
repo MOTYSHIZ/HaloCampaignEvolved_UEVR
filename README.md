@@ -282,7 +282,7 @@ change. Because it is generated rather than shipped, an update can never reset i
 **deleting it resets every setting to the built-in defaults** (a fresh template regenerates on
 the next launch).
 
-**Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
+**Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press and hold both thumbsticks) and
 scroll to **Script UI** — four panels live there:
 
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
