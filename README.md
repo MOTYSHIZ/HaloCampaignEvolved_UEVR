@@ -66,9 +66,10 @@ appropriately.
   weapon to calibrate grip, record where a weapon's front handle is, and place the scope lens — all
   armed from the in-game menu and persisting across sessions, with per-weapon adjustments on top
   (see [Custom calibration](#custom-calibration)). The shipped defaults work without it.
-- **In-game settings, and settings that survive updates** — a settings menu in the UEVR overlay
-  (Script UI) edits your personal `halo_vr_user.cfg` live, no restart; updates never touch that
-  file. Calibration can be run from the menu too — no keyboard needed.
+- **In-game settings** — a settings menu in the UEVR overlay (Script UI) edits your personal
+  `halo_vr_user.cfg` live, no restart, and the mod never writes over your choices. Calibration can be
+  run from the menu too — no keyboard needed. (When a new release lands, install it fresh — see
+  [Updating](#updating-install-every-release-fresh).)
 
 ## Requirements
 
@@ -133,6 +134,36 @@ already in your `log.txt` — but please do not assume it is the cause and reins
 
 > **Inject at the main menu only.** Injecting mid-mission is more likely to result in rendering
 > issues or hangs.
+
+## Updating: install every release fresh
+
+**Delete `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` before you install a new release**, then
+follow the Install steps above as if it were your first time. Every release is built and tested as a
+fresh install, and that is how we recommend you run it.
+
+Why: installing over the top only *adds and overwrites* — it never removes anything. Files a later
+release retired, settings that changed meaning, and leftovers from older experiments all stay in the
+folder and keep applying. A profile that has been updated in place several times is not a profile
+anyone has tested.
+
+**You can try to keep your settings, but we can't guarantee they carry over.** If you want to try,
+copy these out of the folder before deleting it and put them back afterwards:
+
+| File | What it holds |
+|---|---|
+| `halo_vr_user.cfg` | every setting you have changed |
+| `halo_vr_calib.cfg`, `halo_vr_calib_left.cfg` | your calibration, per hand |
+| `halo_vr_weapons.cfg` | per-weapon adjustments |
+| `halo_vr_palette_calib.cfg` | the *weapon follows your hand* fit |
+| `halo_vr_handposes.json` | your edited hand poses |
+
+Settings get added, renamed and re-tuned between releases, and a value measured against an older
+build can leave you worse off than the new defaults. So treat restoring them as a convenience, not a
+guarantee: **if anything feels off after putting them back, delete them and use the shipped defaults**
+— that is always a valid state, and recalibrating takes under a minute.
+
+If you would rather not think about it: delete the folder, install fresh, restore nothing. Release
+notes still call out anything that specifically invalidates a setting or a calibration.
 
 ## Uninstall
 
@@ -257,8 +288,10 @@ stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented 
 Your settings file is `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_user.cfg` (created on
 first run). Every available setting — with comments and its default — is listed in
 `halo_vr_user_reference.txt` next to it: copy the keys you want into your file, remove the
-leading `#`, set your value, save. It applies live while you play (~2 s), and the file is yours:
-**updates never touch it**. The important knobs:
+leading `#`, set your value, save. It applies live while you play (~2 s), and the file is yours —
+nothing the mod does rewrites it. (When you install a new release you delete the whole folder, so
+keep a copy if you want to try carrying it over: see
+[Updating](#updating-install-every-release-fresh).) The important knobs:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -276,19 +309,19 @@ leading `#`, set your value, save. It applies live while you play (~2 s), and th
 | `cutscenesize` | 0.75 | Size of the cutscene screen (1.0 = edge to edge) |
 
 [`halo_vr_user_reference.txt`](profile/halo_vr_user_reference.txt) is the full player-facing
-catalog — organised by concern, safe to explore, and refreshed by every update, so newly added
+catalog — organised by concern, safe to explore, and refreshed by every release, so newly added
 settings always appear there. Your `halo_vr_user.cfg` stays short: just the keys you chose to
-change. Because it is generated rather than shipped, an update can never reset it — and
-**deleting it resets every setting to the built-in defaults** (a fresh template regenerates on
-the next launch).
+change — which is also what makes it the one file worth keeping a copy of across releases.
+**Deleting it resets every setting to the built-in defaults** (a fresh template regenerates on
+the next launch), and that is a perfectly good place to be.
 
 **Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
 scroll to **Script UI** — four panels live there:
 
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
   catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
-  Saves to `halo_vr_user.cfg` (so it survives updates like any hand edit) and applies live
-  within a couple of seconds.
+  Saves to `halo_vr_user.cfg`, exactly as a hand edit would, and applies live within a couple of
+  seconds.
 - **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
   scope, equipment, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
   press the button, and it records what your controller actually sends.
@@ -308,8 +341,8 @@ The defaults themselves are built into the plugin — there is no shipped settin
 or lose. Two other files do ship next to yours:
 
 - `halo_vr.cfg` now holds **only the shipped weapon calibration**. Don't edit it — recalibrate
-  instead (see [Custom calibration](#custom-calibration)); your results override it and survive
-  updates.
+  instead (see [Custom calibration](#custom-calibration)); your results go to separate files of your
+  own that override it.
 - [`halo_vr_dev.cfg`](profile/halo_vr_dev.cfg) is the catalog of internal tuning, research and
   diagnostic knobs — including the aim-drive tunables — every line commented out. **Leave it alone
   unless you know exactly what you are doing**: wrong values there can wreck performance or aim.
@@ -392,8 +425,9 @@ The third one only appears if you use *Weapon follows your hand* and calibrate i
 Up), weapon (Home) and aim (Page Down) captures are kept apart from the standard calibration so
 neither can overwrite the other, and either can be reset without touching the other.
 
-They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: updates
-refresh the shipped calibration freely while your measured fit is never touched.
+They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: a new
+release brings a fresh shipped calibration, and your measured fit stays a file of your own that you
+can keep, drop, or recapture.
 
 **To go back to the shipped calibration, delete `halo_vr_calib.cfg` — and `halo_vr_weapons.cfg` to
 clear every per-weapon adjustment, or `halo_vr_palette_calib.cfg` to clear the weapon-follows-your-hand
@@ -401,9 +435,12 @@ fit.** None is part of the download — each only exists once you've calibrated 
 copy to restore, and deleting one simply lets the shipped defaults apply again. The mod recreates them
 next time you calibrate.
 
-Once you have a calibration you like, it's worth copying those files somewhere safe, along with
-`halo_vr_user.cfg` if you've changed settings. They're small, plain text, and they're the only things
-in the profile that are specific to *you* — everything else can be re-downloaded.
+Once you have a calibration you like, copy those files somewhere safe, along with `halo_vr_user.cfg`
+if you've changed settings. They're small, plain text, and they're the only things in the profile
+that are specific to *you* — everything else can be re-downloaded. That copy is what lets you *try*
+carrying your fit into the next release, which we recommend installing fresh
+([Updating](#updating-install-every-release-fresh)); if the restored fit feels wrong on a new build,
+delete it and recapture rather than fighting it.
 
 ## Known issues
 

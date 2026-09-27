@@ -3,8 +3,12 @@
 #
 # THIS FILE IS NOT READ BY THE MOD. It is the reference, refreshed by every update.
 # To change a setting: COPY its line into halo_vr_user.cfg (next to this file), remove
-# the leading #, and set your value there. halo_vr_user.cfg is read live (~2 s), updates
-# never touch it, and deleting it resets everything to the defaults listed here.
+# the leading #, and set your value there. halo_vr_user.cfg is read live (~2 s), nothing the
+# mod does rewrites it, and deleting it resets everything to the defaults listed here.
+# NOTE ON UPDATES: install each release fresh -- delete the whole HaloCampaignEvolved folder
+# first (see the README's "Updating" section). You can copy halo_vr_user.cfg out and put it
+# back, but that is a convenience, not a guarantee: if anything feels wrong afterwards, delete
+# it and use the shipped defaults.
 # Easier still: the in-game menu (UEVR overlay > Script UI) edits the same settings with
 # sliders and dropdowns -- key and button values are stored as codes in the file, but the
 # menu shows them by name.
