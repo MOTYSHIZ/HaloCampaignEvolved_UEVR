@@ -680,6 +680,12 @@
 # Physical crouch: where the line is, as a fraction of your standing head height (0.5 = half).
 # Raise it towards 0.7 for a shallower crouch.
 #heightcrouchfrac=0.5
+# Auto height: how far your view may drop below Chief's own eyes, in game centimetres, before it
+# stops following your head down -- so ducking cannot put your view inside his body. It follows
+# Chief: when he crouches, his eyes and this limit drop together. With physical crouch on, your view
+# holds near his eyes until you cross the crouch line, then goes down with him.
+# -1 = off; 0 = never below his eyes; around 10 leaves a little give.
+#heightleash=-1
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Head block: how far your head is kept from a surface, in centimetres.
