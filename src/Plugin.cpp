@@ -13683,40 +13683,49 @@ public:
             state->dwPacketNumber++;
         }
 
+        // ---- SEATED PRESS EDGES, for the two vehicle bindings below: the buttons that went DOWN on this
+        // poll, taken off the physical snapshot whether or not you are seated. A binding acts only on a
+        // press that STARTS while seated. Edges computed on (seated && button) fired on every boarding:
+        // the button that boards the vehicle is still held when stick mode engages, so the camera
+        // stepped the moment you sat down (both rides in the 2026-09-25 log: "(entered)", then
+        // "(left X: next)" 6 ms later), and a sprint held into a seat would have flipped the controls
+        // on its release.
+        static WORD s_seat_prev_btn = 0;
+        const WORD seat_btn_down = (WORD)(raw_btn & ~s_seat_prev_btn);
+        s_seat_prev_btn = raw_btn;
+
         // ---- VEHICLE LEFT X / LEFT Y -> NEXT / PREVIOUS CAMERA. Each vehicle has its own list of
         // cameras in halo_vr_vehcams.json (VehCamSelect.cpp applies the step on the game tick). X and Y
         // are free for a driver in stick mode (the on-foot remaps stand down and the game has no seated
-        // use for them). Edges off the physical snapshot (raw_btn), like the trick above; !g_in_menu
-        // belt-and-braces. Additive: both still pass through to the game -- which does mean a PASSENGER
-        // with a weapon also reloads (X) or swaps weapons (Y) when stepping cameras.
+        // use for them). Press edges above; !g_in_menu belt-and-braces. Additive: both still pass
+        // through to the game -- which does mean a PASSENGER with a weapon also reloads (X) or swaps
+        // weapons (Y) when stepping cameras.
         {
-            static bool s_lx_was = false, s_ly_was = false;
             const bool seated = g_stick_mode.load() && !g_in_menu.load();
-            const bool lx_now = seated && (raw_btn & XINPUT_GAMEPAD_X) != 0;
-            const bool ly_now = seated && (raw_btn & XINPUT_GAMEPAD_Y) != 0;
-            if (lx_now && !s_lx_was) veh_cam_next_prev(+1);
-            if (ly_now && !s_ly_was) veh_cam_next_prev(-1);
-            s_lx_was = lx_now;
-            s_ly_was = ly_now;
+            if (seated && (seat_btn_down & XINPUT_GAMEPAD_X) != 0) veh_cam_next_prev(+1);
+            if (seated && (seat_btn_down & XINPUT_GAMEPAD_Y) != 0) veh_cam_next_prev(-1);
         }
 
         // ---- VEHICLE LEFT STICK CLICK -> MOTION / STICK CONTROLS (vehctrlclick). In any seat our vehicle
         // cameras run in, flips that vehicle between aiming with the controller and aiming with the right
         // stick; VehCamSelect.cpp applies it on the game tick and says which on the text panel. Fires on
-        // RELEASE, and not at all if the right stick click joined the press: L3 + R3 is UEVR's menu chord,
+        // RELEASE of a press that started seated (the press edges above -- a sprint held into the seat is
+        // not a click), and not at all if the right stick click joined it: L3 + R3 is UEVR's menu chord,
         // and UEVR reads the pad before this hook, so opening the menu must not also switch controls.
-        // Edges off the physical snapshot (raw_btn). Kept from the game while seated (vehctrlclick=1):
-        // what L3 does in a seat is unmeasured, and a click that also did it would be two actions at once.
-        // On foot L3 is sprint and none of this runs; with vehtp off the click is the game's, as before.
+        // Kept from the game while seated (vehctrlclick=1): what L3 does in a seat is unmeasured, and a
+        // click that also did it would be two actions at once. On foot L3 is sprint and none of this
+        // runs; with vehtp off the click is the game's, as before.
         {
-            static bool s_l3_was = false, s_l3_chord = false;
+            static bool s_l3_armed = false, s_l3_chord = false;
             const bool seated = g_cfg.veh_ctrl_click != 0 && g_cfg.veh_tp && g_stick_mode.load() && !g_in_menu.load();
-            const bool l3_now = seated && (raw_btn & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
-            if (l3_now && (raw_btn & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) s_l3_chord = true;
-            if (!l3_now && s_l3_was && !s_l3_chord && seated) veh_ctrl_toggle();
-            if (!l3_now) s_l3_chord = false;
-            s_l3_was = l3_now;
-            if (l3_now && g_cfg.veh_ctrl_click == 1) state->Gamepad.wButtons &= (WORD)~XINPUT_GAMEPAD_LEFT_THUMB;
+            const bool l3 = (raw_btn & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+            if (seated && (seat_btn_down & XINPUT_GAMEPAD_LEFT_THUMB) != 0) { s_l3_armed = true; s_l3_chord = false; }
+            if (s_l3_armed && (raw_btn & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) s_l3_chord = true;
+            if (s_l3_armed && !l3) {
+                if (seated && !s_l3_chord) veh_ctrl_toggle();
+                s_l3_armed = false;
+            }
+            if (seated && l3 && g_cfg.veh_ctrl_click == 1) state->Gamepad.wButtons &= (WORD)~XINPUT_GAMEPAD_LEFT_THUMB;
         }
 
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
