@@ -10,8 +10,9 @@
 //   - item         a bullet (also "* item")
 //   (blank line)   a gap
 //   anything else  body text
-// and inline, anywhere: **bold** and *italic*. Long lines wrap at word boundaries, and the whole block
-// shrinks to fit when it would not. UTF-8 in.
+// and inline, anywhere: **bold**, *italic* and ==caution== (yellow: the vehicle camera readout marks the
+// rotations your view is tethered to with it, the motion most likely to make a VR player sick). Long lines
+// wrap at word boundaries, and the whole block shrinks to fit when it would not. UTF-8 in.
 
 #include <cstdint>
 #include <string>

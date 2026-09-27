@@ -17,7 +17,7 @@ namespace {
 
 // ---- markup ---------------------------------------------------------------------------------------
 enum class Kind { Title, Heading, Bullet, Body, Gap };
-struct Run  { std::wstring text; bool bold = false; bool italic = false; };
+struct Run  { std::wstring text; bool bold = false; bool italic = false; bool caution = false; };
 struct Line { Kind kind = Kind::Body; std::vector<Run> runs; };
 
 std::wstring widen(const std::string& s) {
@@ -34,8 +34,8 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-// **bold** and *italic*, toggled as they are met. An unmatched marker simply styles the rest of the
-// line -- the forgiving reading of a hand-typed line, and never an error.
+// **bold**, *italic* and ==caution==, toggled as they are met. An unmatched marker simply styles the rest
+// of the line -- the forgiving reading of a hand-typed line, and never an error. A lone '=' is text.
 std::vector<Run> parse_inline(const std::wstring& s) {
     std::vector<Run> runs;
     Run cur;
@@ -44,6 +44,12 @@ std::vector<Run> parse_inline(const std::wstring& s) {
             const bool dbl = (i + 1 < s.size() && s[i + 1] == L'*');
             if (!cur.text.empty()) { runs.push_back(cur); cur.text.clear(); }
             if (dbl) { cur.bold = !cur.bold; ++i; } else { cur.italic = !cur.italic; }
+            continue;
+        }
+        if (s[i] == L'=' && i + 1 < s.size() && s[i + 1] == L'=') {
+            if (!cur.text.empty()) { runs.push_back(cur); cur.text.clear(); }
+            cur.caution = !cur.caution;
+            ++i;
             continue;
         }
         cur.text.push_back(s[i]);
@@ -82,7 +88,7 @@ std::vector<Line> parse_markup(const std::wstring& text) {
 
 // ---- layout ---------------------------------------------------------------------------------------
 struct TStyle { float size = 0.0f; int weight = FW_NORMAL; bool italic = false; };
-struct Frag   { int x = 0; std::wstring text; TStyle st; };
+struct Frag   { int x = 0; std::wstring text; TStyle st; bool caution = false; };
 struct VLine  { int top = 0; int height = 0; int ascent = 0; int text_h = 0; int width = 0; bool accent = false;
                 std::vector<Frag> frags; bool bullet = false; TStyle bullet_st; };
 
@@ -167,7 +173,7 @@ int layout(HDC dc, Fonts& fonts, const std::vector<Line>& lines, float base, int
                 GetTextExtentPoint32W(dc, bare.c_str(), (int)bare.size(), &bext);
                 if (x + bext.cx > max_w && x > indent) flush();
                 if (indent + bext.cx > max_w) *fits = false;
-                cur.frags.push_back(Frag{x, word, st});
+                cur.frags.push_back(Frag{x, word, st, r.caution});
                 cur.width = std::max(cur.width, x + (int)bext.cx);
                 x += ext.cx;
                 i = j;
@@ -231,20 +237,23 @@ bool rasterise(const std::string& markup, int w, int h, bool bgra, const Style& 
             if (base < 7.0f) { base = 7.0f; bh = layout(dc, fonts, lines, base, max_w, vl, &bw, &fits); break; }
         }
 
-        // The block, centred; its lines left-aligned within it.
+        // The block, centred; its lines left-aligned within it. ONE CHANNEL PER COLOUR: ordinary text is
+        // drawn in green, ==caution== text in red, and each channel read back is that colour's coverage
+        // (greyscale antialiasing, so a channel is an exact mask) -- two colours from one GDI pass.
         const int x0 = (w - bw) / 2, y0 = (h - bh) / 2;
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 255, 255));
         SetTextAlign(dc, TA_BASELINE | TA_LEFT);
         for (const VLine& v : vl) {
             const int base_y = y0 + v.top + (v.height - v.text_h) / 2 + v.ascent;
             if (v.bullet) {
                 SelectObject(dc, fonts.get(v.bullet_st));
+                SetTextColor(dc, RGB(0, 255, 0));
                 const int bx = x0 + (int)std::lround(v.bullet_st.size * 0.25f);
                 TextOutW(dc, bx, base_y, L"\x2022", 1);
             }
             for (const Frag& f : v.frags) {
                 SelectObject(dc, fonts.get(f.st));
+                SetTextColor(dc, f.caution ? RGB(255, 0, 0) : RGB(0, 255, 0));
                 TextOutW(dc, x0 + f.x, base_y, f.text.c_str(), (int)f.text.size());
             }
         }
@@ -264,22 +273,30 @@ bool rasterise(const std::string& markup, int w, int h, bool bgra, const Style& 
         const float bgc[3] = {0.035f, 0.045f, 0.065f};
         const float body[3] = {0.94f, 0.95f, 0.97f};
         const float accent[3] = {0.55f, 0.85f, 1.00f};
+        const float caution[3] = {1.00f, 0.86f, 0.22f};   // yellow
         out.assign((size_t)w * (size_t)h * 4, 0);
         const uint8_t* src = (const uint8_t*)bits;
         for (int y = 0; y < h; ++y) {
             const float* tc = row_accent[(size_t)y] ? accent : body;
             for (int x = 0; x < w; ++x) {
-                const uint8_t* s = src + ((size_t)y * (size_t)w + (size_t)x) * 4;
-                const float cov = (float)std::max(s[0], std::max(s[1], s[2])) / 255.0f;
+                const uint8_t* s = src + ((size_t)y * (size_t)w + (size_t)x) * 4;   // B, G, R, x
+                const float cn = (float)s[1] / 255.0f;   // ordinary text (green)
+                const float cc = (float)s[2] / 255.0f;   // caution text (red)
+                const float cov = std::max(cn, cc);
+                // The text's colour: the two masks' colours weighted by their coverage, so an edge where
+                // two neighbouring glyphs meet stays premultiplied (never brighter than its coverage).
+                float t[3] = {0.0f, 0.0f, 0.0f};
+                if (cn + cc > 0.0f)
+                    for (int k = 0; k < 3; ++k) t[k] = (tc[k] * cn + caution[k] * cc) / (cn + cc);
                 float ba = 0.0f;
                 if (bg_a > 0.0f && !vl.empty()) {
                     const float d = rounded_rect_sd((float)x + 0.5f, (float)y + 0.5f, bx0, by0, bx1, by1, rad);
                     ba = bg_a * std::clamp(0.5f - d, 0.0f, 1.0f);
                 }
                 const float a = cov + ba * (1.0f - cov);
-                const float r = tc[0] * cov + bgc[0] * ba * (1.0f - cov);
-                const float g = tc[1] * cov + bgc[1] * ba * (1.0f - cov);
-                const float b = tc[2] * cov + bgc[2] * ba * (1.0f - cov);
+                const float r = t[0] * cov + bgc[0] * ba * (1.0f - cov);
+                const float g = t[1] * cov + bgc[1] * ba * (1.0f - cov);
+                const float b = t[2] * cov + bgc[2] * ba * (1.0f - cov);
                 uint8_t* p = out.data() + ((size_t)y * (size_t)w + (size_t)x) * 4;
                 const uint8_t R = (uint8_t)std::lround(std::clamp(r, 0.0f, 1.0f) * 255.0f);
                 const uint8_t G = (uint8_t)std::lround(std::clamp(g, 0.0f, 1.0f) * 255.0f);
