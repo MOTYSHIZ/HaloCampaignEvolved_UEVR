@@ -82,11 +82,13 @@ void vehicle_body_update();
 void seat_direct_refresh();
 
 // vehaim: true when the motion controller should drive the aim IN A VEHICLE (owned TP camera on,
-// motion aim on for this vehicle -- its "motionAim" in halo_vr_vehcams.json, else vehaim -- and the
+// motion aim on for this vehicle -- its "motionAim" in halo_vr_vehcams.json, else vehaim -- the
 // chassis resolved so we know we are actually in a vehicle, not a cutscene or death, which also raise
-// stick mode). The Blam aim write consults this to lift its stick-mode hold-off. Any thread (reads
-// g_cfg + atomics); called from the sim orientation getter.
+// stick mode, AND our eye drew last frame). The Blam aim write consults this to lift its stick-mode
+// hold-off. Any thread (reads g_cfg + atomics); called from the sim orientation getter.
 bool veh_tp_motion_aim_active();
+// The same without the eye: what the selected camera asks for. Any thread.
+bool veh_tp_motion_aim_selected();
 
 // True while our HEAD-ANCHORED camera is actually drawing. With hmdleash=0 the leash block stands down
 // on it (it would slide the standing origin onto the head and cancel the free 6DoF lean off the

@@ -706,6 +706,7 @@ constexpr int kMaxDriverParts = 24;
 TrackedObject s_driver_parts[kMaxDriverParts];
 int           s_driver_part_count = 0;
 bool          s_driver_hidden = false;
+int           s_hide_applied = -1;   // the part count the hide was last applied to; -1 = apply at once
 int           s_driver_tries = 0; ULONGLONG s_driver_try_at = 0;
 uint32_t      s_driver_wait = 0;   // the ride scan serial the hider waits for; 0 = not waiting
 
@@ -721,7 +722,8 @@ int ride_scan_take_driver_parts() {
     double bx =  (double)g_unit_px.load(std::memory_order_relaxed) * S;
     double by = -(double)g_unit_py.load(std::memory_order_relaxed) * S;
     double bz =  (double)g_unit_pz.load(std::memory_order_relaxed) * S;
-    // No Blam rider position (it reads dead in some seats): the local pawn is the same body, and its
+    // No Blam rider position (not published yet -- the seat publish runs only while a vehicle-camera
+    // feature enables it -- or a build it cannot read): the local pawn is the same body, and its
     // UE position is always there -- otherwise "nearest to the Blam position" is nearest to the world
     // origin, which picks an arbitrary Spartan wherever there is more than one.
     if (!g_unit_pvalid.load(std::memory_order_relaxed)) {
@@ -956,16 +958,21 @@ int read_seats(API::UObject* unit, SeatRow* rows, int max) {
     return n;
 }
 
-// The last answer. The vehicle actor holding your seat, its unit, the seat, its role (vcp::SeatRole).
+// The last answer. The vehicle actor holding your seat, its unit, the seat, and its flags as the bits an
+// entry's "seat" is tested against (vcp::seat_bits).
 struct SeatFix {
     bool valid = false;
     API::UObject* actor = nullptr;
     API::UObject* unit = nullptr;
     int32_t unit_idx = -1;
     int seat = -1, nseats = 0;
-    int role = -1;
+    uint8_t bits = 0;
 };
 SeatFix s_seat;
+// Once the game's seats have named your seat this session, they are the authority: a ride they do not
+// back gets no vehicle camera (the Blam mount flag alone is not trusted to start one). Until then -- and
+// on a build where the seat query cannot bind -- the nearest mesh stands in, as it always did.
+bool s_seats_proven = false;
 // The OTHER vehicles near you that have seats of their own -- never your chassis, when yours has no mesh.
 API::UObject* s_seat_others[8];
 int s_seat_other_n = 0;
@@ -1011,9 +1018,8 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
         out->valid = true;
         out->actor = cand[k]->owner; out->unit = cand[k]->o; out->unit_idx = cand[k]->i;
         out->seat = mine; out->nseats = n;
-        out->role = rows[mine].driver ? static_cast<int>(vehcampresets::SeatRole::Driver)
-                  : rows[mine].gunner ? static_cast<int>(vehcampresets::SeatRole::Gunner)
-                                      : static_cast<int>(vehcampresets::SeatRole::Passenger);
+        out->bits = vehcampresets::seat_bits(rows[mine].driver, rows[mine].gunner);
+        s_seats_proven = true;
 #if HALO_VR_DEV
         for (int i = 0; i < n && i < 16; ++i)
             API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT   seat %d: %s%s%s occupant=%ls%s", i,
@@ -1028,9 +1034,8 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
 
 } // namespace
 
-// Reconciled EVERY TICK while mounted, not once on the transition: a component whose whole job
-// is to drive this mesh from the Blam simulation is exactly the kind of thing that reasserts
-// state underneath us, and re-applying every tick beats guessing.
+// Applied on every change while mounted, and re-asserted once a second in case something drives it
+// back (it was every tick: the readback since showed the hide holding, so that cost bought nothing).
 //
 // SCALE TO NOTHING, as well as hiding. The readback settled that SetHiddenInGame TAKES on this
 // component (hid=1, held, nothing reverting it) and the Spartan still drew -- the mesh is drawn
@@ -1051,11 +1056,19 @@ void driver_hide_update() {
     const bool tp_hide = g_cfg.veh_cam_hide_body != 0 && g_veh_tp_active.load(std::memory_order_relaxed)
                       && hide_cam.valid && hide_cam.hide_body
                       && halo::g_stick_mode_active.load(std::memory_order_relaxed);
+    // A FIRST-PERSON entry puts the view INSIDE the body, so it honours its own "hideBody" (left out =
+    // hidden) whatever vehcamhidebody says -- showing the Chief is for the cameras that look at him.
+    // Hidden and shrunk unless vehcamhidebody names a mode: hiding alone was measured not to take.
+    const bool fp_hide = veh_fp_selected() && hide_cam.valid && hide_cam.hide_body
+                      && halo::g_stick_mode_active.load(std::memory_order_relaxed);
     const bool seat_hide = g_cfg.veh_hide_body != 0 && veh_cam_mode(g_cfg.veh_cam) != 0
                         && (g_unit_mounted.load(std::memory_order_relaxed) || veh_fp_selected());
-    const bool want = g_cfg.enabled && (tp_hide || seat_hide);
-    // The mode is the switch that asked: the vehicle cameras' own, or bc24's seat camera's.
-    const int  hide_mode = tp_hide ? g_cfg.veh_cam_hide_body : g_cfg.veh_hide_body;
+    const bool want = g_cfg.enabled && (tp_hide || fp_hide || seat_hide);
+    // The mode is the switch that asked: the vehicle cameras' own, a first-person entry's, or bc24's
+    // seat camera's.
+    const int  hide_mode = tp_hide ? g_cfg.veh_cam_hide_body
+                         : fp_hide ? (g_cfg.veh_cam_hide_body != 0 ? g_cfg.veh_cam_hide_body : 2)
+                                   : g_cfg.veh_hide_body;
 
     // Still in the vehicle? Then the body we found is still the body: stepping between cameras shows
     // and hides it from the cached parts instead of walking the object array (twice) on every step.
@@ -1073,6 +1086,7 @@ void driver_hide_update() {
                                  s_driver_part_count);
             s_driver_hidden = false;
         }
+        s_hide_applied = -1;   // the next hide applies at once
         if (!still_seated) s_driver_part_count = 0;   // the next ride resolves afresh
         s_driver_tries = 0;
         s_driver_wait = 0;
@@ -1110,21 +1124,31 @@ void driver_hide_update() {
         if (ride_scan_take_driver_parts() == 0) return;    // none found: the next try, in 2 s
         s_driver_tries = 0;
         s_driver_hidden = true;
+        s_hide_applied = -1;                               // new parts: hide them this tick
         API::get()->log_info("[Halo-CampE-UEVR] VEHBODY: driver hidden (%d parts)",
                              s_driver_part_count);
     }
 
-    for (int i = 0; i < s_driver_part_count; ++i) {
-        auto* c = s_driver_parts[i].get();
-        if (c == nullptr) continue;
-        rig_set_always_tick_pose(c);
-        call_set_hidden(c, true);
-        call_set_visibility(c, false);
-        if (hide_mode == 2) call_set_scale(c, 0.001);
-    }
-    // Mode 2 -> 1 mid-ride: put the scale back once, or the parts stay shrunk under mode 1.
+    // APPLIED ON A CHANGE, THEN RE-ASSERTED ONCE A SECOND -- not every tick. The readback showed the hide
+    // HOLD with nothing reverting it, so the per-tick re-apply (3-4 reflection calls a part, every tick)
+    // bought nothing; the 1 Hz re-assert stays in case something ever puts it back. A change here = the
+    // parts were just found, the mode changed, or the hide just came back on.
     {
-        static int s_last_mode = 0;
+        static int      s_last_mode = 0;
+        static uint32_t s_reassert = 0;
+        const bool changed = hide_mode != s_last_mode || s_driver_part_count != s_hide_applied;
+        if (changed || (++s_reassert % 32u) == 0u) {
+            for (int i = 0; i < s_driver_part_count; ++i) {
+                auto* c = s_driver_parts[i].get();
+                if (c == nullptr) continue;
+                rig_set_always_tick_pose(c);
+                call_set_hidden(c, true);
+                call_set_visibility(c, false);
+                if (hide_mode == 2) call_set_scale(c, 0.001);
+            }
+            s_hide_applied = s_driver_part_count;
+        }
+        // Mode 2 -> 1 mid-ride: put the scale back once, or the parts stay shrunk under mode 1.
         if (s_last_mode == 2 && hide_mode != 2) {
             for (int i = 0; i < s_driver_part_count; ++i)
                 if (auto* c = s_driver_parts[i].get()) call_set_scale(c, 1.0);
@@ -1194,6 +1218,12 @@ std::atomic<uintptr_t> g_tp_rider_ptr{0};
 std::atomic<int32_t>   g_tp_rider_idx{-1};
 std::atomic<float>     g_tp_head_x{0.0f}, g_tp_head_y{0.0f}, g_tp_head_z{0.0f};
 std::atomic<bool>      g_tp_head_valid{false};
+// WHICH PATH OUR CAMERA TOOK THIS FRAME (bc24's VEHCAMPATH, release-safe): the eye cannot log, so it sets
+// these bits and the game tick names each change, the moment a fallback starts or ends.
+constexpr uint8_t kTpPathEngine = 1;      // the vehicle's transform could not be read: the game's own camera
+constexpr uint8_t kTpPathHeadToSeat = 2;  // a playerhead camera with no head measured: the seat stands in
+constexpr uint8_t kTpPathToOrigin = 4;    // a seat/head camera with no seat measured: the vehicle's origin
+std::atomic<uint8_t>   g_tp_path{0};
 // The VIEW BASE the eye handed UEVR last frame, as an offset from the chassis: the anchor, the spring
 // arm and the head-offset subtraction all included. The ray aim rebuilds the controller's world ray on
 // the tick from it plus the tick's own chassis read -- the same two-clocks split as the boom offset.
@@ -1239,6 +1269,15 @@ void veh_cam_next_prev(int dir) { veh_cam_step(dir); }
 // vehicle, not a cutscene/death, which also raise stick mode). POD reads + atomics, so it is safe on
 // the sim orientation getter's thread.
 bool veh_tp_motion_aim_active() {
+    // AND OUR EYE DREW LAST FRAME. The hand's ray is built from the view the eye publishes, and without
+    // our camera the game's own chase camera follows the aim -- hand aim would swing it round, which is
+    // the whole reason stick mode exists (BlamDrive.cpp). So the aim holds until our camera is up.
+    return veh_tp_motion_aim_selected() && g_tp_chassis_yaw_valid.load(std::memory_order_relaxed);
+}
+
+// What the selected camera ASKS for, whether or not the eye has drawn yet -- the recenter decides with it
+// on the very first frame of a camera, before the eye has published anything.
+bool veh_tp_motion_aim_selected() {
     if (!g_veh_tp_active.load(std::memory_order_relaxed)) return false;
     if (g_tp_chassis_ptr.load(std::memory_order_relaxed) == 0) return false;
     const VehActiveCam ac = veh_active_cam();
@@ -1471,9 +1510,12 @@ int seat_me(API::UObject** me, double p[3]) {
 // seat (seat_resolve) -- that actor's own mesh is the chassis, and that actor is what the camera file
 // matches. When the game does not say, or that actor has no mesh of its own, the nearest VehicleActor
 // SkeletalMeshComponent to the pawn stands in, skipping the meshes of OTHER vehicles near you that have
-// seats (from the Wraith's driver seat the anti-infantry turret's mesh is the nearer one). No name gate
-// (chassis naming varies: Banshee ".hull", Wraith "SK_WraithMortar"). The next two nearest are logged
-// beside it. `known` = a seat already resolved by the caller. True = resolved.
+// seats (from the Wraith's driver seat the anti-infantry turret's mesh is the nearer one).
+//
+// NAMES FIRST, distance second (bc24's hull rule): a mesh named in the entry's "chassis" -- or, with none
+// given, one named hull or body -- beats any unnamed mesh, however near; bc24 measured the Warthog's
+// chaingun (its own actor) nearer the driver than the hull. The next two candidates are logged beside the
+// choice. `known` = a seat already resolved by the caller. True = resolved.
 bool pick_tp_chassis(const SeatFix* known = nullptr) {
     API::UObject* me[2] = {};
     double pp[3] = {};
@@ -1481,17 +1523,46 @@ bool pick_tp_chassis(const SeatFix* known = nullptr) {
     const double px = pp[0], py = pp[1], pz = pp[2];
     if (known != nullptr) s_seat = *known;
     else seat_resolve(me, 2, pp, &s_seat);
+    // TWO WITNESSES. The Blam mount flag started this ride; once the game's own seats have named yours
+    // this session, they must agree. A ride they do not back -- a misread flag, or a scene that parks you
+    // beside a vehicle -- gets no camera rather than the nearest one. (The caller retries while the game
+    // catches up: a seat can be named a moment after the flag.)
+    if (s_seats_proven && !s_seat.valid) {
+        static ULONGLONG s_said = 0;
+        const ULONGLONG t = GetTickCount64();
+        if (t - s_said > 5000) {
+            s_said = t;
+            API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: the mount flag says seated but no vehicle within 15 m lists "
+                                 "you -- no vehicle camera until one does");
+        }
+        return false;
+    }
 
     auto other_seated = [](API::UObject* owner) {
         for (int i = 0; i < s_seat_other_n; ++i) if (s_seat_others[i] == owner) return true;
         return false;
     };
+    std::vector<std::wstring> hint;
+    if (s_seat.valid)
+        for (const std::string& s : vehcam_chassis_hint(s_seat.actor->get_full_name(), s_seat.bits))
+            hint.emplace_back(s.begin(), s.end());
+    auto preferred = [&hint](API::UObject* o) {
+        auto* f = o->get_fname();
+        std::wstring n = (f != nullptr) ? f->to_string() : std::wstring{};
+        for (auto& ch : n) ch = (wchar_t)towlower(ch);
+        if (!hint.empty()) {
+            for (const std::wstring& s : hint) if (n.find(s) != std::wstring::npos) return true;
+            return false;
+        }
+        return n == L"hull" || n == L"body";
+    };
     // pass 0: your seat's own vehicle (up to 30 m: it IS yours); 1: the nearest within 8 m, skipping other
-    // seated vehicles; 2: the nearest within 8 m.
+    // seated vehicles; 2: the nearest within 8 m. Within a pass a preferred name wins, then distance.
     static const wchar_t* const kWhy[] = { L"your seat's vehicle (the game)", L"nearest, skipping other seated vehicles",
                                            L"nearest" };
+    constexpr double kUnnamed = 100000.0;
     const ScanHit* cand[3] = {nullptr, nullptr, nullptr};
-    double nd[3] = {1e18, 1e18, 1e18};
+    double nd[3] = {1e18, 1e18, 1e18};   // score: the distance, plus kUnnamed for a mesh without a preferred name
     int used = -1;
     for (int pass = s_seat.valid ? 0 : 1; pass <= 2 && used < 0; ++pass) {
         cand[0] = cand[1] = cand[2] = nullptr;
@@ -1501,9 +1572,11 @@ bool pick_tp_chassis(const SeatFix* known = nullptr) {
             if (pass == 0 && h.owner != s_seat.actor) continue;
             if (pass == 1 && other_seated(h.owner)) continue;
             Vec3 w{}; if (!call_ret_vec3(h.o, L"K2_GetComponentLocation", &w)) continue;
-            const double d = std::sqrt(((double)w.x - px) * ((double)w.x - px)
-                                     + ((double)w.y - py) * ((double)w.y - py)
-                                     + ((double)w.z - pz) * ((double)w.z - pz));
+            const double dist = std::sqrt(((double)w.x - px) * ((double)w.x - px)
+                                        + ((double)w.y - py) * ((double)w.y - py)
+                                        + ((double)w.z - pz) * ((double)w.z - pz));
+            if (dist >= (pass == 0 ? 3000.0 : 800.0)) continue;   // within 8 m of the pawn = the vehicle it is in
+            const double d = dist + (preferred(h.o) ? 0.0 : kUnnamed);
             for (int k = 0; k < 3; ++k) {
                 if (d < nd[k]) {
                     for (int m = 2; m > k; --m) { nd[m] = nd[m - 1]; cand[m] = cand[m - 1]; }
@@ -1512,14 +1585,15 @@ bool pick_tp_chassis(const SeatFix* known = nullptr) {
                 }
             }
         }
-        if (cand[0] != nullptr && nd[0] < (pass == 0 ? 3000.0 : 800.0)) used = pass;
+        if (cand[0] != nullptr) used = pass;
     }
-    if (used < 0) {   // within 8 m of the pawn = the vehicle it is in
+    if (used < 0) {
         API::get()->log_info("[Halo-CampE-UEVR] VEHTP: no VehicleActor mesh within 8 m of pawn "
-                             "(best %.0f, pawn %.0f %.0f %.0f, %d candidates)",
-                             cand[0] != nullptr ? nd[0] : -1.0, px, py, pz, (int)s_res_chassis.size());
+                             "(pawn %.0f %.0f %.0f, %d candidates)", px, py, pz, (int)s_res_chassis.size());
         return false;
     }
+    const bool named = nd[0] < kUnnamed;
+    for (double& d : nd) if (d >= kUnnamed && d < 1e17) d -= kUnnamed;   // back to distances, for the log
     g_tp_chassis_ptr.store((uintptr_t)cand[0]->o, std::memory_order_relaxed);
     g_tp_chassis_idx.store(cand[0]->i, std::memory_order_relaxed);
     s_tp_chassis_name = cand[0]->o->get_full_name();
@@ -1535,12 +1609,14 @@ bool pick_tp_chassis(const SeatFix* known = nullptr) {
     if (s_seat.valid)
         API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: the game seats you in %ls, seat %d of %d (%s)",
                              s_tp_match_name.c_str(), s_seat.seat + 1, s_seat.nseats,
-                             vehcampresets::seat_role_name(static_cast<vehcampresets::SeatRole>(s_seat.role)));
+                             vehcampresets::seat_text(s_seat.bits).c_str());
     else if (seat_refl_ready())
         API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: no vehicle within 15 m lists you in a seat (%d nearby with "
                              "seats) -- the nearest mesh decides", s_seat_other_n);
-    API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f), %ls -- next nearest: %ls",
-                         s_tp_chassis_name.c_str(), nd[0], px, py, pz, kWhy[used], alt.empty() ? L"none" : alt.c_str() + 2);
+    API::get()->log_info("[Halo-CampE-UEVR] VEHTP chassis: %ls at %.0fcm from pawn(%.0f %.0f %.0f), %ls, %s -- next: %ls",
+                         s_tp_chassis_name.c_str(), nd[0], px, py, pz, kWhy[used],
+                         named ? (hint.empty() ? "named hull/body" : "named in the entry's chassis") : "no preferred name",
+                         alt.empty() ? L"none" : alt.c_str() + 2);
     return true;
 }
 
@@ -1998,7 +2074,8 @@ void vehcam_game_tick_vehicle() {
     {
         static bool s_sys_was = false;
         static bool s_tp_was = false;
-        static uint32_t s_ch_wait = 0, s_ch_tries = 0, s_ch_retry = 0;
+        static uint32_t s_ch_wait = 0, s_ch_tries = 0, s_ch_retry = 0, s_ch_seat_tries = 0;
+        static uint32_t s_far_ticks = 0, s_far_repicks = 0;   // the hull check, below
         const bool ride = veh_ride_update(stick_now);
         const bool sys = ride && g_cfg.veh_tp;
         // The live world scale: read at the ride's start (before the eye's first head capture uses it)
@@ -2009,7 +2086,8 @@ void vehcam_game_tick_vehicle() {
         if (sys && !s_sys_was) {
             g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
             g_tp_chassis_idx.store(-1, std::memory_order_relaxed);
-            s_ch_tries = 1; s_ch_retry = 0;
+            s_ch_tries = 1; s_ch_retry = 0; s_ch_seat_tries = 0;
+            s_far_ticks = 0; s_far_repicks = 0;
             s_ch_wait = ride_scan_request(/*force_new=*/false);
             g_veh_turn_yaw.store(0.0f, std::memory_order_relaxed);    // each ride starts facing its heading
         }
@@ -2018,10 +2096,16 @@ void vehcam_game_tick_vehicle() {
                 if (ride_scan_done() >= s_ch_wait) {
                     s_ch_wait = 0;
                     if (pick_tp_chassis()) resolved_now = true;
-                    else s_ch_retry = 90;                               // ~3 s
+                    else s_ch_retry = s_seats_proven ? 8 : 90;          // ~0.25 s to re-ask the seats; ~3 s to re-walk
                 }
             } else if (s_ch_retry > 0 && --s_ch_retry == 0) {
-                if (s_ch_tries < 10) {
+                if (s_seats_proven && s_ch_seat_tries < 12) {
+                    // The game has not named your seat yet: ask it again from this walk -- no new walk --
+                    // for about three seconds, then fall through to a fresh one.
+                    ++s_ch_seat_tries;
+                    if (pick_tp_chassis()) resolved_now = true;
+                    else s_ch_retry = 8;
+                } else if (s_ch_tries < 10) {
                     ++s_ch_tries;
                     s_ch_wait = ride_scan_request(/*force_new=*/true);
                 } else {
@@ -2050,7 +2134,7 @@ void vehcam_game_tick_vehicle() {
                 double pp[3] = {};
                 SeatFix now;
                 if (seat_me(me, pp) != 0 && seat_resolve(me, 2, pp, &now)
-                    && (!s_seat.valid || now.actor != s_seat.actor || now.seat != s_seat.seat || now.role != s_seat.role)) {
+                    && (!s_seat.valid || now.actor != s_seat.actor || now.seat != s_seat.seat || now.bits != s_seat.bits)) {
                     API::get()->log_info("[Halo-CampE-UEVR] VEHSEAT: your seat is %s now -- choosing the vehicle again",
                                          s_seat.valid ? "different" : "named");
                     pick_tp_chassis(&now);
@@ -2059,7 +2143,7 @@ void vehcam_game_tick_vehicle() {
         }
 
         const uintptr_t cp = g_tp_chassis_ptr.load(std::memory_order_relaxed);
-        vehcam_select_tick(sys, cp, s_tp_match_name, s_seat.valid ? s_seat.role : -1);
+        vehcam_select_tick(sys, cp, s_tp_match_name, s_seat.valid ? s_seat.bits : 0);
         // The tick the chassis resolved, the camera was selected just now -- AFTER this tick's body hide
         // ran. Run it again so a seat camera's first frames are not drawn from inside your own body.
         if (resolved_now) driver_hide_update();
@@ -2088,6 +2172,21 @@ void vehcam_game_tick_vehicle() {
                 g_tp_seat_y.store((float)(MY[0] * w[0] + MY[1] * w[1] + MY[2] * w[2]), std::memory_order_relaxed);
                 g_tp_seat_z.store((float)(MZ[0] * w[0] + MZ[1] * w[1] + MZ[2] * w[2]), std::memory_order_relaxed);
                 g_tp_seat_valid.store(true, std::memory_order_relaxed);
+                // THE HULL CHECK (bc24's anchor validation): you sit IN the vehicle, so you are never far from
+                // its mesh. More than 8 m for half a second means this mesh is not the one carrying you -- a
+                // wrong pick, or a vehicle swapped under you -- so the vehicle is chosen again, at most 5
+                // times a ride, and said.
+                const double apart = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);   // not `far`: a Windows.h macro
+                if (apart > 800.0) {
+                    if (++s_far_ticks == 16 && s_far_repicks < 5) {
+                        ++s_far_repicks;
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHTP: you are %.0f cm from the vehicle's mesh -- it is not "
+                                             "the one carrying you; choosing the vehicle again (%u of 5)", apart, s_far_repicks);
+                        pick_tp_chassis();
+                    }
+                } else {
+                    s_far_ticks = 0;
+                }
             }
         }
 
@@ -2210,6 +2309,30 @@ void vehcam_game_tick_vehicle() {
             xrlayer_retire_quad(XRLAYER_SLOT_VEHAIM);
         }
         s_tp_was = tp_on;
+
+        // VEHCAMPATH (release-safe, bc24's pattern): name each fallback the eye takes, when it starts and
+        // when it ends -- after 8 ticks (~0.25 s) of the new path, so a one-frame blip does not flood the log.
+        {
+            static uint8_t  s_path_said = 0, s_path_pending = 0;
+            static uint32_t s_path_ticks = 0;
+            if (!tp_on) {
+                s_path_said = s_path_pending = 0; s_path_ticks = 0;
+                g_tp_path.store(0, std::memory_order_relaxed);
+            } else {
+                const uint8_t p = g_tp_path.load(std::memory_order_relaxed);
+                if (p != s_path_pending) { s_path_pending = p; s_path_ticks = 0; }
+                if (p != s_path_said && ++s_path_ticks >= 8) {
+                    s_path_said = p;
+                    if (p == 0)
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH: back on the camera's own path");
+                    else
+                        API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH:%s%s%s",
+                                             (p & kTpPathEngine) ? " the vehicle's transform cannot be read -- the game's own camera shows;" : "",
+                                             (p & kTpPathHeadToSeat) ? " no head measured -- this playerhead camera sits at your seat;" : "",
+                                             (p & kTpPathToOrigin) ? " no seat measured -- this camera sits at the vehicle's origin;" : "");
+                }
+            }
+        }
     }
 
     // RIGHT-STICK TURN (vehstick=1): with motion aim freeing the stick (vehaim), the right stick X turns
@@ -2501,10 +2624,38 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
 
     // ---- ROUTE A P0: OWNED THIRD-PERSON CAMERA. Self-contained; bypasses bc24's first-person seat
     // machinery below, and independent of veh_cam. Boom BEHIND the chassis mesh (g_tp_chassis,
-    // resolved game-side off the player pawn), read at render rate so it tracks the moving vehicle;
-    // the view yaw is published here for the view override. Gated on stick mode (the mount flag is
-    // dead). Head free-look composes on top via UEVR.
+    // resolved game-side from the vehicle your seat belongs to), read at render rate so it tracks the
+    // moving vehicle; the view yaw is published here for the view override. g_veh_tp_active is set only
+    // during a RIDE (stick mode + the Blam mount flag + no cutscene, veh_ride_update). Head free-look
+    // composes on top via UEVR.
     if (g_veh_tp_active.load(std::memory_order_relaxed) && halo::g_stick_mode_active.load(std::memory_order_relaxed)) {
+        // ONE COMPUTATION PER FRAME (bc24's latch). Eye 0 builds the view base; eye 1 reuses it. The tick
+        // values it reads (the turn, the collision fraction, the seat and head offsets) can change between
+        // the two eye callbacks, and two bases built from different ticks are a disparity error -- bc24
+        // measured ~47 cm of it on his camera before he latched. Both eyes take the same base: UEVR adds
+        // the eye separation after this callback. Only when eye 1 follows within a few milliseconds: when
+        // the eyes render on different frames (AFR), a latched base would be a frame stale, so each
+        // computes its own.
+        static bool          s_latch_fresh = false;
+        static double        s_latch[3] = {0.0, 0.0, 0.0};
+        static LARGE_INTEGER s_latch_t{}, s_qpf{};
+        if (s_qpf.QuadPart == 0) QueryPerformanceFrequency(&s_qpf);
+        if (index != 0 && s_latch_fresh) {
+            s_latch_fresh = false;
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            if ((now.QuadPart - s_latch_t.QuadPart) * 1000 < s_qpf.QuadPart * 3) {   // within 3 ms
+                if (is_double) {
+                    auto* p = reinterpret_cast<UEVR_Vector3d*>(position);
+                    p->x = s_latch[0]; p->y = s_latch[1]; p->z = s_latch[2];
+                } else {
+                    position->x = (float)s_latch[0]; position->y = (float)s_latch[1]; position->z = (float)s_latch[2];
+                }
+                g_view_pos_x = (float)s_latch[0]; g_view_pos_y = (float)s_latch[1]; g_view_pos_z = (float)s_latch[2];
+                return;
+            }
+        }
+        s_latch_fresh = false;
         static TrackedObject s_tpc;
         static uintptr_t s_tpc_raw = 0;
         const uintptr_t cp = halo::g_tp_chassis_ptr.load(std::memory_order_relaxed);
@@ -2615,45 +2766,35 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // A PLAYERHEAD CAMERA RIDES THE CHIEF. His actor's frame, read now like the chassis, replaces the
             // vehicle's for everything this camera tracks -- so a turret that turns him but not its own mesh
             // turns this view -- and its origin is his head, rebuilt from the offset the tick measured in
-            // that same frame (two clocks: an offset crosses the boundary, never a position). Eye 0 reads it
-            // and eye 1 reuses it, so both eyes see one Chief. Until the head is known, the seat stands in.
+            // that same frame (two clocks: an offset crosses the boundary, never a position). Both eyes see
+            // one Chief through the frame latch above. Until the head is known, the seat stands in.
             bool   head_ok = false;
             double head_w[3] = { 0.0, 0.0, 0.0 };
-            {
-                static bool   s_hd_use = false;
-                static double s_hd_w[3] = {0, 0, 0}, s_hd_x[3] = {1, 0, 0}, s_hd_y[3] = {0, 1, 0}, s_hd_z[3] = {0, 0, 1};
-                if (index == 0) {
-                    s_hd_use = false;
-                    if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Head)
-                        && halo::g_tp_head_valid.load(std::memory_order_relaxed)) {
-                        static TrackedObject s_rb;
-                        static uintptr_t s_rb_raw = 0;
-                        const uintptr_t rp = halo::g_tp_rider_ptr.load(std::memory_order_relaxed);
-                        if (rp != s_rb_raw) {
-                            s_rb_raw = rp;
-                            s_rb.set_at(reinterpret_cast<API::UObject*>(rp), halo::g_tp_rider_idx.load(std::memory_order_relaxed));
-                        }
-                        auto* rb = (rp != 0) ? s_rb.get_checked(L"SkeletalMeshComponent") : nullptr;
-                        auto* ra = (rb != nullptr) ? rb->get_outer() : nullptr;
-                        Vec3 al{}, ar{};
-                        if (ra != nullptr && call_ret_vec3(ra, L"K2_GetActorLocation", &al)
-                            && call_ret_vec3(ra, L"K2_GetActorRotation", &ar)) {
-                            rot_axes(ar.x, ar.y, ar.z, s_hd_x, s_hd_y, s_hd_z);
-                            const double hx = halo::g_tp_head_x.load(std::memory_order_relaxed);
-                            const double hy = halo::g_tp_head_y.load(std::memory_order_relaxed);
-                            const double hz = halo::g_tp_head_z.load(std::memory_order_relaxed);
-                            const double a[3] = { (double)al.x, (double)al.y, (double)al.z };
-                            for (int k = 0; k < 3; ++k) s_hd_w[k] = a[k] + hx * s_hd_x[k] + hy * s_hd_y[k] + hz * s_hd_z[k];
-                            s_hd_use = true;
-                        }
-                    }
+            if (ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Head)
+                && halo::g_tp_head_valid.load(std::memory_order_relaxed)) {
+                static TrackedObject s_rb;
+                static uintptr_t s_rb_raw = 0;
+                const uintptr_t rp = halo::g_tp_rider_ptr.load(std::memory_order_relaxed);
+                if (rp != s_rb_raw) {
+                    s_rb_raw = rp;
+                    s_rb.set_at(reinterpret_cast<API::UObject*>(rp), halo::g_tp_rider_idx.load(std::memory_order_relaxed));
                 }
-                if (s_hd_use) {   // eye 1 takes eye 0's decision and values, whatever it would read now
-                    head_ok = true;
+                auto* rb = (rp != 0) ? s_rb.get_checked(L"SkeletalMeshComponent") : nullptr;
+                auto* ra = (rb != nullptr) ? rb->get_outer() : nullptr;
+                Vec3 al{}, ar{};
+                if (ra != nullptr && call_ret_vec3(ra, L"K2_GetActorLocation", &al)
+                    && call_ret_vec3(ra, L"K2_GetActorRotation", &ar)) {
+                    double HX[3], HY[3], HZ[3];
+                    rot_axes(ar.x, ar.y, ar.z, HX, HY, HZ);
+                    const double hx = halo::g_tp_head_x.load(std::memory_order_relaxed);
+                    const double hy = halo::g_tp_head_y.load(std::memory_order_relaxed);
+                    const double hz = halo::g_tp_head_z.load(std::memory_order_relaxed);
+                    const double a[3] = { (double)al.x, (double)al.y, (double)al.z };
                     for (int k = 0; k < 3; ++k) {
-                        head_w[k] = s_hd_w[k];
-                        VF[k] = s_hd_x[k]; VR[k] = s_hd_y[k]; VU[k] = s_hd_z[k];
+                        head_w[k] = a[k] + hx * HX[k] + hy * HY[k] + hz * HZ[k];
+                        VF[k] = HX[k]; VR[k] = HY[k]; VU[k] = HZ[k];
                     }
+                    head_ok = true;
                 }
             }
             const double heading = std::atan2(VF[1], VF[0]) * R2D;
@@ -2677,7 +2818,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 s_recenter_seen = ac.recenter_gen;
                 double F0[3], R0[3], U0[3];
                 tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, 0.0, F0, R0, U0);
-                const bool hand_aims = halo::veh_tp_motion_aim_active();
+                const bool hand_aims = halo::veh_tp_motion_aim_selected();   // this frame may be the eye's first
                 double tgt[3] = { VF[0], VF[1], VF[2] };
                 if (!ac.rot_yaw && hand_aims && halo::g_veh_aim_valid.load(std::memory_order_relaxed)) {
                     const double ay = (double)halo::g_veh_aim_yaw.load(std::memory_order_relaxed) * D2R;
@@ -2738,6 +2879,15 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 const double sz = halo::g_tp_seat_z.load(std::memory_order_relaxed);
                 for (int k = 0; k < 3; ++k) org[k] = sx * MX[k] + sy * MY[k] + sz * MZ[k];
             }
+            if (index == 0) {
+                const bool wants_head = ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Head);
+                const bool wants_seat = wants_head || ac.origin == static_cast<uint8_t>(vehcampresets::Origin::Seat);
+                uint8_t path = 0;
+                if (wants_head && !head_ok) path |= halo::kTpPathHeadToSeat;
+                if (wants_seat && !head_ok && !halo::g_tp_seat_valid.load(std::memory_order_relaxed))
+                    path |= halo::kTpPathToOrigin;
+                halo::g_tp_path.store(path, std::memory_order_relaxed);
+            }
             // THE OFFSET, in the frame its locationTracking describes -- the same builder, so "pitch" means
             // the same thing for where the camera sits as for where it looks. All three: rigid to the
             // vehicle, holding its place through yaw, pitch and bank. Yaw only: a level offset that turns
@@ -2771,6 +2921,11 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             if (is_double) { auto* p = reinterpret_cast<UEVR_Vector3d*>(position); p->x = ecx; p->y = ecy; p->z = ecz; }
             else { position->x = (float)ecx; position->y = (float)ecy; position->z = (float)ecz; }
             g_view_pos_x = (float)ecx; g_view_pos_y = (float)ecy; g_view_pos_z = (float)ecz;
+            if (index == 0) {   // the latch eye 1 takes (above)
+                s_latch[0] = ecx; s_latch[1] = ecy; s_latch[2] = ecz;
+                QueryPerformanceCounter(&s_latch_t);
+                s_latch_fresh = true;
+            }
             halo::g_cam_x.store((float)ecx, std::memory_order_relaxed);
             halo::g_cam_y.store((float)ecy, std::memory_order_relaxed);
             halo::g_cam_z.store((float)ecz, std::memory_order_relaxed);
@@ -2882,6 +3037,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             halo::g_tp_chassis_yaw_valid.store(false, std::memory_order_relaxed);
             halo::g_tp_eye_valid.store(false, std::memory_order_relaxed);
             halo::g_tp_ncam_valid.store(false, std::memory_order_relaxed);
+            halo::g_tp_path.store(halo::kTpPathEngine, std::memory_order_relaxed);   // fails closed: the game's camera
         }
         // vehprobe diagnostic: is the boom computed, and does it differ from the engine camera?
         // If game vs eye differ here but you see no change in-headset, the write is being ignored
@@ -2944,7 +3100,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // ---- CHASE-CAM ANCHOR PROBE (vehanchor = sample every N calls, 0 = off). READ-ONLY.
             // Records what the engine hands us before the seat camera touches it, with the rider
             // and vehicle Blam positions and the vehicle facing beside it, so the boom frame can be
-            // fitted from the log rather than assumed.
+            // fitted from the log rather than assumed. Render-thread logging: compiled into dev builds only
+            // (a config flag is not a sufficient guard, CLAUDE.md).
+#if HALO_VR_DEV
             if (g_cfg.veh_anchor > 0 && halo::g_unit_mounted.load(std::memory_order_relaxed)) {
                 static uint32_t an = 0;
                 if ((an++ % (uint32_t)g_cfg.veh_anchor) == 0u) {
@@ -2963,6 +3121,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                         (int)halo::g_veh_fvalid.load(std::memory_order_relaxed));
                 }
             }
+#endif
             // ---- FIRST PERSON IN A VEHICLE (vehcam).
             //
             // Halo's vehicle camera is a third-person chase cam, unusable in VR. There is no
@@ -2980,9 +3139,13 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // Runs only while mounted (or always with vehcam=2), so the on-foot view is untouched.
             if (index == 0) halo::seat_direct_refresh();   // vehseatdirect: render-rate rider read
             // A first-person entry selected in the camera file counts as mounted: the vehicle it was
-            // selected for is identified, and the Blam mount flag has read dead on this build.
+            // selected for is identified (during a ride, which already required the mount flag). The mount
+            // flag alone needs stick mode beside it -- a seat IS stick mode -- so a misread flag on some
+            // other build can never take over the on-foot view.
             const bool vc_gate = vcm != 0 && halo::g_unit_pvalid.load(std::memory_order_relaxed)
-                && (vcm == 2 || halo::g_unit_mounted.load(std::memory_order_relaxed) || veh_fp_selected());
+                && (vcm == 2 || veh_fp_selected()
+                    || (halo::g_unit_mounted.load(std::memory_order_relaxed)
+                        && halo::g_stick_mode_active.load(std::memory_order_relaxed)));
             // VEHSEAT (vehlog): once a second while seated or in stick mode, everything the "camera
             // stays behind the hog" question needs in one line -- the rider as published, the hull
             // as drawn, whether the publish is alive (calls/s, stale ms), what gated it (mounted,
@@ -3002,6 +3165,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                     const bool mounted_now = halo::g_unit_mounted.load(std::memory_order_relaxed);
                     const uint32_t fsum = g_vcd.frames[0] + g_vcd.frames[1] + g_vcd.frames[2]
                                         + g_vcd.frames[3] + g_vcd.frames[4];
+#if HALO_VR_DEV   // render-thread logging: dev builds only
                     if (g_cfg.veh_log && (mounted_now || stick_now || fsum != 0)) {
                         const double bx = halo::g_unit_px.load(std::memory_order_relaxed);
                         const double by = halo::g_unit_py.load(std::memory_order_relaxed);
@@ -3033,6 +3197,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                             g_vcd.post_frames, g_vcd.post_bad, g_vcd.post_max,
                             g_vcd.fc[0], g_vcd.fc[1], g_vcd.fc[2]);
                     }
+#else
+                    (void)mounted_now; (void)fsum;
+#endif
                     s_vs_t = vnow; s_c0 = c; s_n0 = n; s_r0 = r; s_d0 = d;
                     g_vcd.post_frames = 0; g_vcd.post_bad = 0; g_vcd.post_max = 0.0;
                     for (auto& f : g_vcd.frames) f = 0;
@@ -3205,6 +3372,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                             g_vcd.learning = learning;
                             if (learning) ++g_vcd.learn_frames;
                             g_vcd.snaps = s_snaps; g_vcd.snaps_refused = s_refused;
+#if HALO_VR_DEV   // render-thread logging: dev builds only
                             if (g_cfg.veh_log && rigid_done) {
                                 // HOGLEARN on every gate edge, so a learn that runs while moving is
                                 // named with the speed it saw rather than inferred from off= drift.
@@ -3227,6 +3395,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                                     s_learn_frames = 0;
                                 }
                             }
+#endif
                         }
                         // Unresolved or invalid: fall through to the chase-cam anchor below, so a
                         // vehicle with no hull degrades to the working camera instead of nothing.
@@ -3289,6 +3458,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                         const int path = rigid_done ? (vc_hold ? VCP_HOLD : VCP_RIGID)
                                        : (g_cfg.veh_cam_anchor != 0 ? VCP_CHASE : VCP_SYNTH);
                         ++g_vcd.frames[path];
+#if HALO_VR_DEV   // render-thread logging: dev builds only
                         if (g_cfg.veh_log && path != g_vcd.last_path) {
                             static const char* const kPath[] = {"none", "rigid", "rigid-hold", "chase", "synth"};
                             API::get()->log_info("[Halo-CampE-UEVR] VEHCAMPATH: %s -> %s (stale=%.0fms hullspeed=%.0fcm/s speed=%.2fwu/s)",
@@ -3296,6 +3466,7 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                                                  (double)g_vcd.stale_ms, g_vcd.hspeed,
                                                  (double)halo::g_veh_speed.load(std::memory_order_relaxed));
                         }
+#endif
                         g_vcd.last_path = path;
                     }
                 }
@@ -3428,7 +3599,8 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
                     if (g_cfg.veh_view_flat) { rotation->pitch = 0.0f; rotation->roll = 0.0f; }
                 }
                 // One line a second while seated: armed?, raw travel, chosen hemisphere, the eased
-                // output, and the untouched game yaw.
+                // output, and the untouched game yaw. Render-thread logging: dev builds only.
+#if HALO_VR_DEV
                 if (g_cfg.veh_log) {
                     static uint32_t n = 0;
                     if ((n++ % 90u) == 0u)
@@ -3437,6 +3609,7 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
                                              halo::g_unit_px.load(std::memory_order_relaxed),
                                              halo::g_unit_py.load(std::memory_order_relaxed));
                 }
+#endif
                 g_dbg_view_in = s_veh_cur; g_dbg_view_out = s_veh_cur;
                 halo::g_view_base_yaw.store(s_veh_cur, std::memory_order_relaxed);
                 g_lock_primed = false;   // re-prime the on-foot lock when you dismount
@@ -3448,9 +3621,13 @@ bool vehcam_stereo_view_override(UEVR_Rotatorf* rotation, bool is_double) {
 
 void vehcam_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
-            // WRITE SURVIVAL (vehlog): the rendered eye against the seat we wrote this frame. The
-            // gap is the HMD offset from the standing origin -- under 2 m in any real play space.
-            // More than 3 m means the camera was replaced between our write and the render.
+            // WRITE SURVIVAL (vehlog): the rendered eye against the seat -- or OUR camera's view base --
+            // written this frame. The gap is the head's offset from it -- under 2 m in any real play space.
+            // More than 3 m means the camera was replaced between our write and the render. A render-thread
+            // diagnostic: compiled into dev builds only.
+#if !HALO_VR_DEV
+            (void)index; (void)ex; (void)ey; (void)ez;
+#else
             if (index == 0 && g_vcd.wrote && g_cfg.veh_log) {
                 const double dx = (double)ex - g_vcd.fc[0], dy = (double)ey - g_vcd.fc[1],
                              dz = (double)ez - g_vcd.fc[2];
@@ -3465,6 +3642,7 @@ void vehcam_stereo_post_eye_rendered(int index, float ex, float ey, float ez) {
                                              (double)ex, (double)ey, (double)ez, dev, g_vcd.fc[0], g_vcd.fc[1], g_vcd.fc[2]);
                 }
             }
+#endif
 }
 
 }  // namespace
