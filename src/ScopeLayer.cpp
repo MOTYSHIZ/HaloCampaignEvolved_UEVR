@@ -7,6 +7,7 @@
 #include "ScopeLayer.hpp"
 #include "Config.hpp"
 #include "DevTools.hpp"
+#include "core/WorldScale.hpp"   // cm per metre, the shared collapse-proof reader
 
 // The other lane's modules. THESE TWO INCLUDES, AND THE ADAPTER BLOCK BELOW, ARE THE ONLY PLACE
 // this feature knows their names. Read-only from here: XrLayer.cpp / XrSource.cpp are owned
@@ -528,21 +529,12 @@ void say(uint32_t tick, const char* fmt, ...) {
 
 void forget_reason() { s_reason_seen = false; s_reason[0] = '\0'; }
 
-// UE centimetres per real-world metre, i.e. 100 x VR_WorldScale. Read the same way XrLayer reads it
-// (the raw C accessor, because the header's float path runs std::stof on an empty buffer when the
-// key is absent). Called only when something is being LOGGED -- never on the per-tick path.
+// UE centimetres per real-world metre, i.e. 100 x VR_WorldScale, through the shared reader
+// (core/WorldScale) -- the same value XrLayer, auto height, roomscale and the arms use, and one that
+// does not fall back to 1.0 while a cutscene's mono collapse has the scale at 0.01. Called only when
+// something is being LOGGED -- never on the per-tick path.
 float cm_per_m() {
-    float ws = 1.0f;
-    char buf[64]{};
-    if (auto* p = API::get()->param(); p != nullptr && p->vr != nullptr &&
-                                       p->vr->get_mod_value != nullptr) {
-        p->vr->get_mod_value("VR_WorldScale", buf, sizeof(buf));
-        if (buf[0] != 0) {
-            const float v = (float)std::atof(buf);
-            if (v > 0.01f && v < 100.0f) ws = v;
-        }
-    }
-    return 100.0f * ws;
+    return uevr_cm_per_metre();
 }
 
 // THE READBACK FOR THE GEOMETRY KEYS. Every offset here is a UE centimetre (the house unit, and the

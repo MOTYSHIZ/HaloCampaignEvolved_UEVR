@@ -3,10 +3,10 @@
 
 #include "Config.hpp"
 #include "Math.hpp"                    // clampf
+#include "core/WorldScale.hpp"         // the shared, collapse-proof VR_WorldScale reader
 #include "uevr/API.hpp"
 
 #include <cmath>
-#include <cstdlib>
 
 using namespace uevr;
 
@@ -19,23 +19,21 @@ bool worldscalefollow_parse_key(const char* key, const char* val, double v) {
 }
 
 namespace {
-float s_last_good = 0.0f;    // the last VR_WorldScale taken (0 = none yet)
 float s_logged    = -1.0f;   // the rig_scale last reported, so a reload that puts it back is silent
 }  // namespace
 
 void worldscalefollow_poll() {
     // Off: the reload that switched it off already put the cfg value back.
     if (g_cfg.world_scale_follow == 0) { s_logged = -1.0f; return; }
-    char buf[64]{};
-    if (auto* p = API::get()->param(); p != nullptr && p->vr != nullptr && p->vr->get_mod_value != nullptr)
-        p->vr->get_mod_value("VR_WorldScale", buf, sizeof(buf));
-    const float ws = buf[0] != 0 ? (float)atof(buf) : 0.0f;
-    if (ws >= 0.1f && ws < 100.0f) s_last_good = ws;
-    if (s_last_good <= 0.0f) return;
-    const float want = 100.0f * s_last_good;
+    // The shared reader (core/WorldScale). It carries the guard this file used to keep for itself --
+    // under 0.1 is the mono collapse, keep the last good value -- so the arms now read the SAME value
+    // as roomscale, auto height and the compositor layer, instead of each keeping its own.
+    if (!uevr_world_scale_known()) return;   // never write rig_scale from the 1.0 fallback
+    const float ws = uevr_world_scale();
+    const float want = 100.0f * ws;
     if (std::fabs(want - s_logged) > 0.05f) {
         API::get()->log_info("[Halo-CampE-UEVR] WORLDSCALE: rig_scale %.1f -> %.1f (100 x UEVR VR_WorldScale %.3f)",
-                             g_cfg.rig_scale, want, s_last_good);
+                             g_cfg.rig_scale, want, ws);
         s_logged = want;
     }
     g_cfg.rig_scale = want;
