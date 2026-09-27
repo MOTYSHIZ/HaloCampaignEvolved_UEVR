@@ -179,7 +179,16 @@ constexpr int XRLAYER_SLOT_GUIDE    = 10;
 // own laid under everything else at bring-up (xrlayertextw x xrlayertexth), so no existing cell moves.
 constexpr int XRLAYER_SLOT_TEXT     = 11;
 
-constexpr int XRLAYER_SLOTS         = 12;
+// SLOT 12 -- THE VEHICLE-FACING MARKER. In a vehicle camera, the generated ring (the reticule's own
+// fallback picture) placed where the VEHICLE points, beside the crosshair that shows where you point.
+// With a camera that turns with the vehicle the view only settles once the two meet, and this is how a
+// player sees where that is. Its own cell because the reticule's cell may hold the game's captured
+// crosshair, and this must always be the ring: generated once at bring-up (and on a colour/ring-shape
+// change), laid in spare atlas space like the guide, so no other cell moves. VehCam.cpp poses it every
+// rendered frame (the eye callback), on the vehicle's live frame.
+constexpr int XRLAYER_SLOT_VEHAIM   = 12;
+
+constexpr int XRLAYER_SLOTS         = 13;
 
 // ---- THE TEXT PANEL'S PIXELS (slot 11) ---------------------------------------------------------
 //

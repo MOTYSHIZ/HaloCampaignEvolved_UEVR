@@ -1239,6 +1239,14 @@ bool fill_upload(float r, float g, float b, float a) {
         generate_bitmap(tex.data() + ((size_t)c0.y * g_sc_w + c0.x) * 4, c0.dim,
                         (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
     }
+    // The vehicle-facing marker: the same ring, colour and shape, in its own cell -- so it is the ring
+    // even while cell 0 shows the game's captured crosshair. Regenerated with cell 0 on a colour or
+    // ring-shape change (g_regen), which is what keeps the two alike.
+    const Cell& cv = g_cell[XRLAYER_SLOT_VEHAIM];
+    if (cv.dim > 0) {
+        generate_bitmap(tex.data() + ((size_t)cv.y * g_sc_w + cv.x) * 4, cv.dim,
+                        (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
+    }
     // THE GUIDE'S CELL, filled from the same staging pass. It is a generated shape like the
     // fallback ring, not captured art, so it belongs here rather than anywhere near XrSource --
     // no widget, no render target, no capture, nothing to re-resolve. Filled ONCE with the rest of
@@ -1505,7 +1513,8 @@ constexpr D3D12_RESOURCE_STATES ENGINE_SRC_COLOR =
 //
 // Every upstream instrument said "healthy", because every upstream stage WAS healthy. The one
 // question none of them asked is whether the pixels the quad points at survived the frame.
-bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell, bool text_cell) {
+bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell, bool text_cell,
+               bool vehaim_cell) {
     if (dst == nullptr || g_list == nullptr || g_queue == nullptr) return false;
 
     // Pick this frame's allocator and wait ONLY if the GPU has not finished what that allocator
@@ -1564,8 +1573,9 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 
     // The staging-buffer path: either the WHOLE generated atlas (nothing captured yet), or the
     // GENERATED cells laid back over a captured atlas -- cell 0 for the reticule's stale fall-back,
-    // the guide's cell whenever the guide is being drawn, and the text panel's while a notice shows.
-    if (src == nullptr || ring_cell0 || guide_cell || text_cell) {
+    // the guide's cell whenever the guide is being drawn, the text panel's while a notice shows, and the
+    // vehicle-facing marker's while it is posed.
+    if (src == nullptr || ring_cell0 || guide_cell || text_cell || vehaim_cell) {
         const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
                                ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 
@@ -1616,6 +1626,8 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
             if (guide_cell)  lay_back(g_cell[XRLAYER_SLOT_GUIDE]);
             // The text panel, on the same terms: only while a notice is showing.
             if (text_cell)   lay_back(g_cell[XRLAYER_SLOT_TEXT]);
+            // The vehicle-facing marker's ring, likewise: only while it is posed.
+            if (vehaim_cell) lay_back(g_cell[XRLAYER_SLOT_VEHAIM]);
         }
     }
 
@@ -2286,6 +2298,17 @@ void build_atlas_layout() {
              GUIDE_DIM, g_ret_dim, w);
     }
 
+    // THE VEHICLE-FACING MARKER'S CELL (slot 12): spare space again, on the guide's terms -- beside the
+    // guide, else under it -- so no existing cell moves and the atlas does not grow. No room = no marker.
+    constexpr int VEHAIM_DIM = 128;
+    if (g_ret_dim + GUIDE_DIM + VEHAIM_DIM <= w && VEHAIM_DIM <= g_ret_dim) {
+        g_cell[XRLAYER_SLOT_VEHAIM] = Cell{(int32_t)(g_ret_dim + GUIDE_DIM), 0, (int32_t)VEHAIM_DIM};
+    } else if (g_ret_dim + VEHAIM_DIM <= w && GUIDE_DIM + VEHAIM_DIM <= g_ret_dim) {
+        g_cell[XRLAYER_SLOT_VEHAIM] = Cell{(int32_t)g_ret_dim, (int32_t)GUIDE_DIM, (int32_t)VEHAIM_DIM};
+    } else {
+        logf("no slack in the atlas for the vehicle-facing marker's cell -- it will not present.");
+    }
+
     // THE TEXT PANEL'S ROW (slot 11), laid UNDER everything above -- so every existing cell keeps its
     // exact rectangle -- and the one cell that is not square. Unlike the guide it cannot live in slack:
     // readable lines of text need a wide cell, and the slack is 128px tall. It is the FIRST thing to go
@@ -2315,12 +2338,14 @@ void build_atlas_layout() {
     // round of guessing when the guide did not appear.
     const Cell& gc = g_cell[XRLAYER_SLOT_GUIDE];
     const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    const Cell& vc = g_cell[XRLAYER_SLOT_VEHAIM];
     logf("atlas: %dx%d -- cell 0 reticule %dpx at (0,0), %d navpoint cells %dpx from y=%d, "
-         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s, text %dx%d at y=%d%s",
+         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s, text %dx%d at y=%d%s, vehicle marker %dpx at (%d,%d)%s",
          g_sc_w, g_sc_h, g_ret_dim, XRLAYER_NAV_COUNT, nd, g_ret_dim,
          pane, g_ret_dim + rows * nd, pane > 0 ? "" : " (none)",
          gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)",
-         tc.dim, cell_h(tc), tc.y, tc.dim > 0 ? "" : " (none)");
+         tc.dim, cell_h(tc), tc.y, tc.dim > 0 ? "" : " (none)",
+         vc.dim, vc.x, vc.y, vc.dim > 0 ? "" : " (none)");
 }
 
 // HOW MANY COMPOSITION LAYERS WILL THIS RUNTIME ACCEPT? Ask it. GAME THREAD, once.
@@ -2570,6 +2595,9 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
         } else if (s == XRLAYER_SLOT_TEXT) {
             // EXEMPT, like the guide below: generated art (XrText.cpp rasterises it), nothing to
             // capture, so the beat never moves. The pose's liveness above is the real gate.
+        } else if (s == XRLAYER_SLOT_VEHAIM) {
+            // EXEMPT, like the guide: the generated ring, nothing to capture. Posed every frame while
+            // wanted and retired when not, so the pose's liveness above is the whole gate.
         } else if (s == XRLAYER_SLOT_GUIDE) {
             // EXEMPT, for the same reason slot 0 is: its art is GENERATED, not captured.
             //
@@ -2765,9 +2793,14 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     const bool text_cell  = from_atlas &&
                             g_tgt_live[XRLAYER_SLOT_TEXT].load(std::memory_order_relaxed) &&
                             g_cell[XRLAYER_SLOT_TEXT].dim > 0;
+    // The vehicle-facing marker's ring cell, on the guide's terms: re-laid over captured art while posed.
+    const bool vehaim_cell = from_atlas &&
+                             g_tgt_live[XRLAYER_SLOT_VEHAIM].load(std::memory_order_relaxed) &&
+                             g_cell[XRLAYER_SLOT_VEHAIM].dim > 0;
     const bool need_copy  = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
     if (need_copy && idx < g_images.size()) {
-        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell, text_cell) && idx < g_image_dirty.size()) {
+        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell, text_cell, vehaim_cell) &&
+            idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
     }
