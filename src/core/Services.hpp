@@ -39,9 +39,10 @@ enum Service : uint32_t {
     SVC_POSE_INTENTS      = 1u << 16,  // a consumer wants the pose latch's stamped hand intents (the stamped reticle)
     // ALWAYS ON. Fixes to OUR OWN code paths, not to a feature's. See kAlwaysOnServices below.
     SVC_HOST_FIXES        = 1u << 17,  // core/fixes/HostFixes: the unconditional robustness fixes
+    SVC_HAND_SMOOTH       = 1u << 18,  // core/HandSmooth: the 1 Euro filter on the controllers, inside get_pose()
 };
 
-constexpr int kServiceCount = 18;
+constexpr int kServiceCount = 19;
 
 // SERVICES THAT ARE NOT OPT-IN (2026-09-20).
 //

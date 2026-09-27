@@ -62,6 +62,7 @@ extern const FeatureHooks kAimReticuleStampHooks;
 extern const FeatureHooks kStabilityFixesHooks;
 extern const FeatureHooks kWorldScaleFollowHooks;
 extern const FeatureHooks kGrenadeGunHoldHooks;
+extern const FeatureHooks kHandSmoothHooks;
 
 namespace {
 
@@ -87,6 +88,8 @@ const FeatureHooks* const kFeatureListStorage[] = {
     &kStabilityFixesHooks,
     &kWorldScaleFollowHooks,
     &kGrenadeGunHoldHooks,
+    // handsmooth after palettewpn: its pose_latched slot must answer only when the latch did not.
+    &kHandSmoothHooks,
     nullptr,   // end marker: keeps the array non-empty in a build with every feature folder removed
 };
 // The tables, without the end marker. A span, so a build with no feature at all still compiles and every
@@ -844,6 +847,7 @@ constexpr struct { uint32_t bit; const char* name; } kServiceNames[] = {
     { SVC_RACK_AVAILABLE,    "rackavailable" },
     { SVC_MANUAL_RELOAD_AVAILABLE, "manualreloadavailable" },
     { SVC_POSE_INTENTS,      "poseintents" },
+    { SVC_HAND_SMOOTH,       "handsmooth" },
 };
 
 uint32_t s_logged_mask = 0xFFFFFFFFu;   // the feature on/off mask the last log line showed
