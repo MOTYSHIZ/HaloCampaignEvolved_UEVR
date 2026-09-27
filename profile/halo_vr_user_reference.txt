@@ -609,8 +609,10 @@
 # holds near his eyes until you cross the crouch line, then goes down with him.
 # -1 = off; 0 = never below his eyes; around 10 leaves a little give.
 #heightleash=-1
-# Auto height: a crouch you ask for with the stick shows in your view -- it goes down with Chief and
-# comes back up with him. 0 = the old behaviour, where your view stays at your own height.
+# Auto height: a crouch you ask for with the stick shows in your view -- it goes down with Chief,
+# stays down for as long as he is crouched, and comes back up with him. That holds whether the
+# game's crouch is a toggle or a hold (its Hold to crouch setting). 0 = the old behaviour, where
+# your view stays at your own height.
 #heightstickcrouch=1
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)

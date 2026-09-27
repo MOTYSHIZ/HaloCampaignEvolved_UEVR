@@ -117,9 +117,11 @@
     // the one value that happened to land near the leash (~0.8 in the first headset test).
     float height_crouch_frac = 0.0f;
     float height_crouch_band = 0.05f; // heightcrouchband (cm): how far above the line you stand back up (hysteresis)
-    // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): while the stick holds a crouch, absolute mode lets
-    // the game camera's crouch through instead of pinning the view to your real head -- it popped back
-    // up ~0.4 s after every stick crouch. A player-facing fix, so ON; 0 restores the old behaviour.
+    // STICK CROUCH SHOWS IN THE VIEW (HeightCal.cpp): from a stick crouch press until the character is
+    // seen standing again, absolute mode lets the game camera's crouch through instead of pinning the
+    // view to your real head -- it popped back up ~0.4 s after every stick crouch. Until he is SEEN
+    // standing, not until the stick is let go: the game's controller crouch is a toggle by default.
+    // A player-facing fix, so ON; 0 restores the old behaviour.
     int   height_stick_crouch = 1;    // heightstickcrouch: 1 on, 0 off
     // THE LEASH BELOW THE CHARACTER'S EYE (HeightCal.cpp): the most the view may drop below the game
     // camera -- the character's own eye -- so ducking cannot take it inside his body. Game side, so UE
