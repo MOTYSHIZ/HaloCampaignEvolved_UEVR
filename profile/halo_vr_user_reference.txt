@@ -587,6 +587,10 @@
 # the stick, says which, and keeps the click from the game while seated; 2 does the same and the game
 # gets the click too; 0 leaves the click to the game.
 #vehctrlclick=1
+# Switch seat (the game's own) in a vehicle. Left X steps the camera's tethering mode there, so the
+# game's seat switch moves to a grip: 1 = the left grip (that grip then no longer brakes; the right grip
+# still does), 2 = the right grip, 0 = left X keeps it, as the game ships.
+#vehseatgrip=1
 # Vehicle aim ring. A ring where the vehicle itself is aiming, beside your crosshair; once the vehicle
 # has caught up with your hand it sits around the crosshair. 0 hides it everywhere (each vehicle can
 # also turn it off with "aimMarker" in halo_vr_vehcams.json).

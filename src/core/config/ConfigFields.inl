@@ -1381,6 +1381,17 @@
     // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
     // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
     int   veh_ctrl_click = 1;
+    // vehseatgrip: the game's own SWITCH SEAT, moved off left X. In a seat the pad is native, so left X
+    // reaches the game as vehseatmask and switches seats -- while our cameras read the same press as the
+    // next tethering mode: one press, two actions (the user, 2026-09-27). 1 = the LEFT grip sends it
+    // instead and left X no longer does (default); 2 = the right grip; 0 = left X keeps it, as the game
+    // ships. The grip that switches seats no longer hard-brakes (the other grip still does). Only while
+    // our vehicle cameras run (vehtp), since that is when left X is taken; a grip held as you sit down does
+    // nothing until it has been let go.
+    int   veh_seat_grip = 1;
+    // vehseatmask: the pad bit that switch seat is on, as the game sees left X in a seat -- 0x2000,
+    // XInput's B (measured: left X reports 0x2000; Config.hpp's button table). Dev key.
+    int   veh_seat_mask = 0x2000;
     // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X, the left stick click (what
     // aims changes), a seat switch -- turn the view so what aims the vehicle points where the vehicle is
     // aiming (yaw only, about your head, through the same turn the right stick uses). What aims it: your aim

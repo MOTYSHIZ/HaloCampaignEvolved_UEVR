@@ -7518,7 +7518,8 @@ void update() {
             }
         }
 
-        // ---- VEHICLE HARD BRAKE: either grip -> the brake key, while stick mode is engaged.
+        // ---- VEHICLE HARD BRAKE: either grip -> the brake key, while stick mode is engaged -- except the grip
+        // that switches seats while our vehicle cameras run (vehseatgrip).
         // Sits ABOVE the early-out gates on purpose: every path that stops this function must
         // release the key first, or a pose/HMD loss mid-brake would leave Ctrl logically stuck.
         // (A hard crash mid-brake can still strand the OS key state -- one real Ctrl press clears
@@ -7534,7 +7535,15 @@ void update() {
                     grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
                 }
                 if (grip_action != nullptr) {
-                    want_brake = API::VR::is_action_active_any_joystick(grip_action);
+                    // Not the grip that switches seats (vehseatgrip, the XInput hook): one grip, one job.
+                    const int seat_grip = (g_cfg.veh_seat_grip != 0 && g_cfg.veh_seat_mask != 0 && g_cfg.veh_tp)
+                                        ? g_cfg.veh_seat_grip : 0;
+                    if (seat_grip == 1)
+                        want_brake = API::VR::is_action_active(grip_action, API::VR::get_right_joystick_source());
+                    else if (seat_grip == 2)
+                        want_brake = API::VR::is_action_active(grip_action, API::VR::get_left_joystick_source());
+                    else
+                        want_brake = API::VR::is_action_active_any_joystick(grip_action);
                 }
             }
             // Pad-side delivery is the default: field testing showed synthesized keyboard never
@@ -13688,6 +13697,35 @@ public:
             && (raw_btn & XINPUT_GAMEPAD_A) != 0) {
             state->Gamepad.wButtons |= (WORD)g_cfg.veh_a_mask;
             state->dwPacketNumber++;
+        }
+
+        // ---- VEHICLE SWITCH SEAT ON A GRIP (vehseatgrip). Another vehicle-only lane beside the trick. In a
+        // seat the pad is native, so left X reaches the game as vehseatmask (0x2000, XInput B) -- the game's
+        // own switch seat -- while our cameras read the same press as the next tethering mode: one press,
+        // two actions (the user, 2026-09-27). So while our cameras run, that bit is kept from the game and
+        // the chosen grip sends it instead; the brake above then leaves that grip alone. The grip is read by
+        // UEVR ACTION on its own hand, like left X / Y below, and must be let go once after you sit down
+        // before it counts: a grip held while boarding must not switch you straight out of the seat.
+        {
+            static UEVR_ActionHandle s_seat_grip_action = nullptr;
+            static bool s_seat_grip_armed = false;
+            const bool on = g_cfg.veh_seat_grip != 0 && g_cfg.veh_seat_mask != 0 && g_cfg.veh_tp
+                         && g_stick_mode.load() && !g_in_menu.load();
+            if (!on) {
+                s_seat_grip_armed = false;
+            } else {
+                if (s_seat_grip_action == nullptr)
+                    s_seat_grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
+                const auto src = (g_cfg.veh_seat_grip == 2) ? API::VR::get_right_joystick_source()
+                                                            : API::VR::get_left_joystick_source();
+                const bool grip = s_seat_grip_action != nullptr && API::VR::is_action_active(s_seat_grip_action, src);
+                if (!grip) s_seat_grip_armed = true;
+                const WORD m = (WORD)g_cfg.veh_seat_mask;
+                const WORD before = state->Gamepad.wButtons;
+                state->Gamepad.wButtons &= (WORD)~m;                        // left X: the tethering mode only
+                if (grip && s_seat_grip_armed) state->Gamepad.wButtons |= m; // the grip: the game's switch seat
+                if (state->Gamepad.wButtons != before) state->dwPacketNumber++;
+            }
         }
 
         // ---- SEATED PRESS EDGES, for the stick-click binding below (left X / Y read their own action
