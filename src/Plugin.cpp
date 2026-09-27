@@ -7257,7 +7257,8 @@ void update() {
         // and the lane's own in-scene marker was left behind. Lane 2 (the objective's true world position,
         // the default) needs neither the aim nor the game's projection, so it runs as it does on foot and
         // hides the flat layer while it does. The projecting lanes (0/1) read the game camera, so not them.
-        const bool nav_ok = fixes_ok || (g_cfg.nav_world_src == 2 && veh_tp_anchor_active());
+        // And never past the kill switch: fixes_ok carries g_cfg.enabled, so this half must too.
+        const bool nav_ok = fixes_ok || (g_cfg.enabled && g_cfg.nav_world_src == 2 && veh_tp_anchor_active());
         if (!lane_cooling(PERF_NAVWORLD, tick)) {
             PerfScope _perf(PERF_NAVWORLD);
             if (!features_nav_world_guarded(nav_ok, tick)) nav_world_tick(nav_ok, tick);

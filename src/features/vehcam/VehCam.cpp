@@ -2589,7 +2589,9 @@ void vehcam_game_tick_vehicle() {
         static uint32_t s_ch_wait = 0, s_ch_tries = 0, s_ch_retry = 0, s_ch_seat_tries = 0;
         static uint32_t s_far_ticks = 0, s_far_repicks = 0;   // the hull check, below
         const bool ride = veh_ride_update(stick_now);
-        const bool sys = ride && g_cfg.veh_tp;
+        // The kill switch (Ctrl+HOME) ends the ride for the cameras too: the selection clears, and with it
+        // our eye, the view override, the aim write, the input lanes and the decoupled-pitch hold.
+        const bool sys = ride && g_cfg.veh_tp && g_cfg.enabled;
         bool resolved_now = false;
         if (sys && !s_sys_was) {
             g_tp_chassis_ptr.store(0, std::memory_order_relaxed);
