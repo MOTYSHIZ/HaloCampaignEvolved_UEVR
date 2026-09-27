@@ -1386,6 +1386,13 @@
     // turns with the vehicle and a controller that aims it want. Not on a camera-file reload (editing a
     // number must not spin you round) and not on the controls toggle. 0 = the view keeps its turn.
     bool  veh_cam_recenter = true;
+    // vehcamhidebody: your character's body in the vehicle cameras. 0 = never hidden (default -- you see
+    // the Chief in the seat, the user's call 2026-09-26); 1 = hidden in the cameras whose "hideBody" says
+    // so (left out = the seat cameras); 2 = hidden and shrunk, for a body that draws whatever its visibility
+    // says. Live. Only the player character's own mesh parts are found: in the Ghost and the Wraith turret
+    // that hid armour pieces and left the body drawn, so the seated body there is some other mesh.
+    // (bc24's seat camera has its own switch, vehhidebody.)
+    int   veh_cam_hide_body = 0;
     // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
     // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
     // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every

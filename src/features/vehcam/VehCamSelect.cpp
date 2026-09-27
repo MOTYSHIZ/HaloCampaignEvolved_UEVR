@@ -150,7 +150,7 @@ void select(int vi, int ci, const char* why, bool recenter) {
                          "controls %s",
                          v.name.c_str(), ci + 1, n, c.name.c_str(), why, vcp::type_name(c.type),
                          vcp::origin_name(c.origin), c.offset[0], c.offset[1], c.offset[2],
-                         loc.c_str(), rot.c_str(), a.hide_body ? "hidden" : "shown",
+                         loc.c_str(), rot.c_str(), (a.hide_body && g_cfg.veh_cam_hide_body != 0) ? "hidden" : "shown",
                          motion_on(a) ? "motion" : "stick");
 
     // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name

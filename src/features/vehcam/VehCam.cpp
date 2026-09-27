@@ -754,17 +754,19 @@ void driver_hide_update() {
     // The body is hidden because the SEAT CAMERA sits inside it. With vehcam off the view is the
     // stock chase camera, where hiding it just deletes the Spartan from the shot.
     //
-    // OUR CAMERAS decide per camera (the camera file's "hideBody"; by default hidden exactly when the
-    // camera sits at your seat): the Onboard and Cockpit views are inside the body, a chase view wants
-    // to see it. Stepping between cameras shows and hides it live. Scale-to-nothing when vehhidebody
-    // does not say otherwise -- mode 1 alone was measured insufficient (the body drew regardless).
+    // OUR CAMERAS hide it only while vehcamhidebody asks (off by default: you see the Chief in the seat),
+    // and then per camera (the camera file's "hideBody"; left out = hidden exactly when the camera sits at
+    // your seat). Stepping between cameras, or flipping the key, shows and hides it live. 2 shrinks it as
+    // well -- mode 1 alone was measured insufficient on the seat camera (the body drew regardless).
     const VehActiveCam hide_cam = veh_active_cam();
-    const bool tp_hide = g_veh_tp_active.load(std::memory_order_relaxed) && hide_cam.valid && hide_cam.hide_body
+    const bool tp_hide = g_cfg.veh_cam_hide_body != 0 && g_veh_tp_active.load(std::memory_order_relaxed)
+                      && hide_cam.valid && hide_cam.hide_body
                       && halo::g_stick_mode_active.load(std::memory_order_relaxed);
     const bool seat_hide = g_cfg.veh_hide_body != 0 && veh_cam_mode(g_cfg.veh_cam) != 0
                         && (g_unit_mounted.load(std::memory_order_relaxed) || veh_fp_selected());
     const bool want = g_cfg.enabled && (tp_hide || seat_hide);
-    const int  hide_mode = (g_cfg.veh_hide_body != 0) ? g_cfg.veh_hide_body : 2;
+    // The mode is the switch that asked: the vehicle cameras' own, or bc24's seat camera's.
+    const int  hide_mode = tp_hide ? g_cfg.veh_cam_hide_body : g_cfg.veh_hide_body;
 
     // Still in the vehicle? Then the body we found is still the body: stepping between cameras shows
     // and hides it from the cached parts instead of walking the object array (twice) on every step.
@@ -1553,6 +1555,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamreadout")  == 0) { g_cfg.veh_cam_readout = (v != 0.0); return true; }
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
     if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
+    if (_stricmp(key, "vehcamhidebody") == 0) { g_cfg.veh_cam_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehaimray")      == 0) { g_cfg.veh_aim_ray = (v != 0.0); return true; }
     if (_stricmp(key, "vehaimfar")      == 0) { g_cfg.veh_aim_far = (float)v; return true; }
     if (_stricmp(key, "vehaimpivotz")   == 0) { g_cfg.veh_aim_pivot_z = (float)v; return true; }

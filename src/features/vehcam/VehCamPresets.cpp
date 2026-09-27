@@ -317,7 +317,8 @@ std::string table_to_json(const Table& t) {
     s += "    \"                    holds still). Pitch and roll without yaw tilt your view with the vehicle's deck\",\n";
     s += "    \"                    while you keep your own heading.\",\n";
     s += "    \"  collide           pull the camera in when a wall is in the way; collideMargin = cm to stop short\",\n";
-    s += "    \"  hideBody          true | false: hide your character's body (left out = hidden for seat cameras)\",\n";
+    s += "    \"  hideBody          true | false: hide your character's body (left out = hidden for seat cameras);\",\n";
+    s += "    \"                    only while the vehcamhidebody setting is on, which it is not by default\",\n";
     s += "    \"Per vehicle: defaultCamera = the index (from 0) you start in; motionAim = true | false overrides vehaim;\",\n";
     s += "    \"  aimMarker = true | false: a ring where the VEHICLE points, beside the crosshair (left out = true).\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";

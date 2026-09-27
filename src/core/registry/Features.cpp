@@ -243,7 +243,7 @@ const FeatureRow kFeatures[] = {
     // keys sit under the cameras because the camera readout is, for now, the panel's only user.
     { "vehtp",        1, Tier::Experimental, "Vehicles", "Vehicle cameras",
       "Your own cameras in vehicles, listed per vehicle in halo_vr_vehcams.json: at your seat or behind the vehicle, level or turning and tilting with it. Left Y steps to the next camera, left X to the previous one, and a short note in front of you says which.",
-      "vehcamreadout,vehcamrecenter,vehctrlclick,xrtext,xrtextbg,xrtextdist,xrtextfadein,xrtextfadeout,"
+      "vehcamhidebody,vehcamreadout,vehcamrecenter,vehctrlclick,xrtext,xrtextbg,xrtextdist,xrtextfadein,xrtextfadeout,"
       "xrtexthold,xrtextright,xrtextscale,xrtextup,xrtextwidth",
       "vehprobe,xrlayertexth,xrlayertextw",
       "", FEATURE_BOOL(veh_tp) },

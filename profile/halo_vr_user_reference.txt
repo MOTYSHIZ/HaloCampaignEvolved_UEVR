@@ -570,6 +570,11 @@
 # Face the vehicle on a camera change. Getting in, or stepping cameras with left X or left Y, turns
 # your view so the way you are looking becomes the vehicle's forward.
 #vehcamrecenter=1
+# Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
+# that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
+# shrinks it, for a body that shows through the hide. In the Ghost and the Wraith turret only armour
+# pieces hide.
+#vehcamhidebody=0
 # Left stick click in a vehicle. 1 switches that vehicle between aiming with your hand and aiming with
 # the stick, says which, and keeps the click from the game while seated; 2 does the same and the game
 # gets the click too; 0 leaves the click to the game.

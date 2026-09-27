@@ -224,6 +224,7 @@ local HINTS = {
     vehcamguard    = { t = "bool" },
     vehcamhullcheck = { t = "bool" },
     -- The author's own vehicle cameras (vehtp) and hand aiming in them (vehaim).
+    vehcamhidebody = { t = "enum", items = { "never (you see the Chief)", "hide", "hide and shrink" }, values = { 0, 1, 2 } },
     vehcamreadout  = { t = "bool" },
     vehcamrecenter = { t = "bool" },
     vehctrlclick   = { t = "enum", items = { "off (the click is the game's)", "on", "on, and the game gets the click too" }, values = { 0, 1, 2 } },
@@ -305,6 +306,7 @@ local LABELS = {
     wristradar = "Radar dots on the motion tracker", wristhudplacement = "HUD placement", forcetubekick = "Kick strength",
     vehview = "View turns with the vehicle", vehhidebody = "Hide your body while seated",
     vehcamguard = "Hold the seat while the vehicle moves", vehcamhullcheck = "Check the vehicle body",
+    vehcamhidebody = "Hide your body in the seat cameras",
     vehcamreadout = "Camera readout", vehcamrecenter = "Face the vehicle when the camera changes",
     vehctrlclick = "Left stick click switches hand and stick aiming", xrtext = "Text notices",
     xrtextdist = "Notice distance", xrtextup = "Notice height", xrtextright = "Notice sideways",
