@@ -23,7 +23,7 @@
 // HALOVR API layer), 2 OpenVR standing universe, 3 UEVR pose only (floor unknown on OpenXR).
 
 //
-// FEATURE heightcal (Experimental). Hook slots: parse_key (height*), leash_block_wanted,
+// FEATURE heightcal (Stable since 2026-09-27: on by default, with physical crouch). Hook slots: parse_key (height*), leash_block_wanted,
 // leash_vertical (the origin's Y, where the author's vertical leash is), menu_command (calib:height)
 // and menu_status_line. Table: kHeightCalHooks.
 

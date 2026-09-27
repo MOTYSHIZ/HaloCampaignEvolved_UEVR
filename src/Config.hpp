@@ -369,7 +369,15 @@ struct Config {
     // Separate radii because the axes are not the same problem: lateral drift is what breaks aim,
     // while vertical is mostly crouching, which players do deliberately and often.
     //
-    // DEFAULTS: ON, with lat = 0 -- lateral translation fully negated, no leeway.
+    // DEFAULT OFF SINCE 2026-09-27 (the user's call, canonized from the author's headset settings when the
+    // Roomscale group went Stable). Roomscale, now on by default, answers the same problem from the
+    // other side: it keeps eye and camera together by walking the SPARTAN to wherever you stand,
+    // instead of moving the world. With roomscale on, this leash only ever acted beyond
+    // roomscale_leash (1 m) anyway; head block, also on by default, keeps the head out of a wall the
+    // body cannot follow it through; and auto height owns the vertical axis. hmdleash=1 still gives
+    // everything described below -- and it is the one to turn on with roomscale=0.
+    //
+    // THE ORIGINAL DEFAULT, ON with lat = 0 -- lateral translation fully negated, no leeway -- and why:
     //
     // The received wisdom is that pinning the view causes nausea, and the first version of this
     // defaulted off for that reason. It did not hold here, and the reason is worth writing down:
@@ -403,7 +411,7 @@ struct Config {
     // are stored in metres because every consumer works in VR pose space; the conversion happens once
     // at parse. A metres/cm mismatch here already cost a test -- hmdleashlat=50 was entered meaning
     // 50 cm, was obeyed as 50 METRES, and the setting looked broken while working perfectly.
-    bool  hmd_leash      = true;
+    bool  hmd_leash      = false;   // OFF since 2026-09-27: see the top of this note
     float hmd_leash_lat  = 0.0f;    // stored m; CONFIG KEY IS CM. 0 = fully negated
     float hmd_leash_vert = 0.0f;    // stored m; CONFIG KEY IS CM. 0 = fully negated
     // WHICH HAND AIMS. false = right (default), true = left.

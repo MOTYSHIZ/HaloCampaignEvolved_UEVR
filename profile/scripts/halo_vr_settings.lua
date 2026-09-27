@@ -172,18 +172,24 @@ local HINTS = {
     scopethresh    = { t = "slider", min = 0.05, max = 1 },
     -- Sub-settings of the switchable features (drawn nested under their feature, which greys them
     -- while it is off). `needs` = other settings that must be on for this one to do anything.
-    roomscalethrottle = { t = "enum", items = { "through the left stick", "through the Spartan's own movement" }, values = { 0, 3 } },
+    -- Roomscale, auto height and head block are released (Stable) since 2026-09-27, so they are drawn
+    -- in User Settings with their own switch first; `needs` greys their settings while it is off.
+    roomscale      = { t = "bool" },
+    roomscalethrottle = { t = "enum", items = { "through the left stick", "through the Spartan's own movement" }, values = { 0, 3 }, needs = { "roomscale" } },
     wristhudplacement   = { t = "enum", items = { "On the wrists", "On the weapon" }, values = { 0, 1 } },
-    heightmode     = { t = "choice", items = { "absolute", "seated", "eyes" } },
-    heightsrc      = { t = "enum", items = { "automatic", "OpenXR stage", "OpenVR standing", "headset pose only" }, values = { 0, 1, 2, 3 } },
-    heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 } },
-    heighttrim     = { t = "drag", min = -50, max = 50 },
-    heightkey      = { t = "key" },
-    heightcrouch     = { t = "bool" },
-    heightcrouchfrac = { t = "slider", min = 0, max = 0.9 },
-    heightleash      = { t = "drag", min = -1, max = 60 },
-    heightstickcrouch = { t = "bool" },
-    headblockradius = { t = "drag", min = 1, max = 50 },
+    heightcal      = { t = "bool" },
+    heightmode     = { t = "choice", items = { "absolute", "seated", "eyes" }, needs = { "heightcal" } },
+    heightsrc      = { t = "enum", items = { "automatic", "OpenXR stage", "OpenVR standing", "headset pose only" }, values = { 0, 1, 2, 3 }, needs = { "heightcal" } },
+    heightsample   = { t = "enum", items = { "one still window", "continuously", "only when asked" }, values = { 0, 1, 2 }, needs = { "heightcal" } },
+    heighttrim     = { t = "drag", min = -50, max = 50, needs = { "heightcal" } },
+    heightkey      = { t = "key", needs = { "heightcal" } },
+    heightcrouch     = { t = "bool", needs = { "heightcal" } },
+    heightcrouchfrac = { t = "slider", min = 0, max = 0.9, needs = { "heightcal", "heightcrouch" } },
+    heightleash      = { t = "drag", min = -1, max = 60, needs = { "heightcal" } },
+    heightstickcrouch = { t = "bool", needs = { "heightcal" } },
+    headblock      = { t = "bool" },
+    headblockradius = { t = "drag", min = 1, max = 50, needs = { "headblock" } },
+    stabilityfixes = { t = "bool" },
     handsmooth        = { t = "bool" },
     handsmoothhands   = { t = "enum", items = { "both hands", "the aim hand only", "the other hand only" }, values = { 0, 1, 2 } },
     handsmoothposmin  = { t = "drag", min = 0, max = 30 },
@@ -343,6 +349,8 @@ local LABELS = {
     xrtextwidth = "Notice width", xrtextfadein = "Notice fade in", xrtexthold = "Notice hold",
     xrtextfadeout = "Notice fade out", xrtextbg = "Notice backing", xrtextscale = "Notice text size",
     vehstick = "Right stick in a vehicle", vehorbitrate = "View turn speed", vehorbitreturn = "View turn return",
+    roomscale = "Roomscale: your steps move the Spartan", heightcal = "Auto height",
+    headblock = "Keep my head out of walls", stabilityfixes = "Stability fixes",
     roomscalethrottle = "How your steps move you", heightmode = "Height fit", heightsrc = "Height source",
     heightsample = "When your height is measured", heighttrim = "Height nudge",
     heightkey = "Height keyboard key", headblockradius = "Head clearance",
@@ -847,6 +855,25 @@ local function owned_by_tier_section(key)
     return f ~= nil and f.tier ~= "stable"
 end
 
+-- Auto height has a one-shot measurement, and this button is how a player takes one. Drawn beside
+-- the Auto height switch: in User Settings while heightcal is Stable (below), under the feature's
+-- group in its tier section otherwise. Only one of the two ever draws it -- the catalog skips the
+-- switch whenever a tier section owns it. Defined above draw_catalog so that call can see it.
+local function draw_height_calibration()
+    imgui.push_id("calheight")
+    if imgui.button("Calibrate height") then fire("calib:height") end
+    if imgui.is_item_hovered() then
+        imgui.set_tooltip("Measures your standing height. Press it, close this menu, then stand up\n" ..
+                          "straight and look ahead while it measures.")
+    end
+    if height_status ~= nil and height_status ~= "" then
+        imgui.text("Height: " .. height_status)
+    else
+        imgui.text("Height: no reading yet (this version of the mod may not support the button yet)")
+    end
+    imgui.pop_id()
+end
+
 local function draw_catalog(catalog, layer)
     for _, section in ipairs(catalog) do
         local visible = {}
@@ -858,6 +885,7 @@ local function draw_catalog(catalog, layer)
             print_text_block(section.text)
             for _, entry in ipairs(visible) do
                 draw_entry(entry, layer)
+                if layer == "user" and entry.key == "heightcal" then draw_height_calibration() end
             end
             imgui.unindent(8)
             imgui.spacing()
@@ -927,22 +955,6 @@ local function feature_source_text(f, on)
         return (on and "on" or "off") .. " with every " .. TIER_WORD[f.tier] .. " feature"
     end
     return on and "on by default" or "off by default"
-end
-
--- Auto height has a one-shot measurement, and this button is how a player takes one.
-local function draw_height_calibration()
-    imgui.push_id("calheight")
-    if imgui.button("Calibrate height") then fire("calib:height") end
-    if imgui.is_item_hovered() then
-        imgui.set_tooltip("Measures your standing height. Press it, close this menu, then stand up\n" ..
-                          "straight and look ahead while it measures.")
-    end
-    if height_status ~= nil and height_status ~= "" then
-        imgui.text("Height: " .. height_status)
-    else
-        imgui.text("Height: no reading yet (this version of the mod may not support the button yet)")
-    end
-    imgui.pop_id()
 end
 
 -- part: nil draws the checkbox and its settings; "master" only the checkbox line; "subs" only the

@@ -7,7 +7,9 @@
 // The sim thread (Blam hooks), the XInput hook, the render callbacks and the XR submit thread read g_cfg
 // concurrently, so a reload could hand them a frame of defaults: masters off, offsets zero.
 //
-// With stabilityfixes on, the reload is bracketed (cfg_reload_begin / cfg_reload_end). Just before the
+// With stabilityfixes on -- the default since 2026-09-27, when it went Stable; a player can still turn
+// it off, which is why core/WorldScale keeps its own guard -- the reload is bracketed
+// (cfg_reload_begin / cfg_reload_end). Just before the
 // reset, a copy of g_cfg is taken; while the reload runs, a reader on any other thread gets that copy.
 // Outside a reload, and on the reloading thread itself, readers get g_cfg as before, so values the game
 // thread changes between reloads are seen exactly as before.

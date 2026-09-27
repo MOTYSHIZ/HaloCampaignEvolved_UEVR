@@ -130,13 +130,14 @@
 # Your view stays put while you aim (only the gun moves), and head turning is always 1:1 --
 # that is what keeps this comfortable.
 #
-# THE LEASH keeps you and the game's camera together: the camera cannot follow your body, so
-# moving past the radius makes the world gently follow you, which keeps your aim honest.
-# Radii are cm of free 1:1 movement, sideways / vertically; 0 = follow immediately (default).
-# Try 30 for a small free-movement bubble. hmdleash=0 removes the leash entirely: full free
-# movement, but the further you get from where the game thinks you are, the more the game's
-# own flat crosshair lies -- keep the mod's reticule on.
-#hmdleash=1
+# THE LEASH keeps you and the game's camera together by making the world gently follow you once you
+# move past its radius. It is OFF by default: roomscale (under FEATURE SETTINGS) walks the Spartan to
+# wherever you stand instead, and head block keeps your head out of walls. Turn the leash on
+# (hmdleash=1) if you play with roomscale off -- without either, the further you get from where the
+# game thinks you are, the more the game's own flat crosshair lies, so keep the mod's reticule on.
+# Radii are cm of free 1:1 movement, sideways / vertically; 0 = follow immediately. With roomscale on
+# the sideways radius is roomscale's own, 1 metre, and auto height looks after the vertical one.
+#hmdleash=0
 #hmdleashlat=0
 #hmdleashvert=0
 
@@ -286,7 +287,8 @@
 
 # ===================================== FEATURE SETTINGS =========================================
 # Settings of the switchable features, grouped by the feature that owns them. The menu shows each
-# one under its feature, in the feature's tier section, and they only act while that feature is on.
+# one under its feature -- a released feature's here, with its own on/off switch first; a feature
+# still being tested under its tier section -- and they only act while that feature is on.
 #
 # Each feature also has DEV KEYS -- probes, dumps, logs and captured calibration. Those are not
 # here: they are in halo_vr_dev.cfg, under the same feature headings, and the menu never draws a
@@ -651,6 +653,12 @@
 #vehorbitreturn=0
 
 # --------------------------------------------------------------------------- ROOMSCALE (roomscale)
+# Walk around your play space and your steps move the Spartan: the mod walks him to wherever you
+# stand through the game's own movement, so he stays with you and the game's collision still holds
+# him. Pushing your own stick always wins while you push it.
+#
+# 1 = roomscale on, 0 = your steps move only your view (turn the leash on, hmdleash=1, if you do).
+#roomscale=1
 # Roomscale: how your steps move you (0 through the left stick, 3 through the Spartan's own movement).
 #roomscalethrottle=3
 # Sidestep direction. -1 or 1; flip it only if stepping sideways moves you the wrong way.
@@ -665,6 +673,12 @@
 #roomscaledz=0.30
 
 # ------------------------------------------------------------------------- AUTO HEIGHT (heightcal)
+# Your view height in the game follows your head's height above your real floor, so you see the
+# world from your own height and a real crouch lowers your view -- and, with physical crouch on (the
+# default), crouches your character too. The Calibrate height button re-measures you.
+#
+# 1 = auto height on, 0 = the view height UEVR gives you.
+#heightcal=1
 # Auto height: what the measured height is fitted to.
 #heightmode=absolute
 # Auto height: where the height comes from.
@@ -679,19 +693,19 @@
 # Physical crouch: duck in the room and your character crouches, the same as holding the right
 # stick down -- so it fits under things and is harder to hit, not just a lower view. Your standing
 # height is measured while you stand still and only ever goes up; Calibrate height re-measures it.
-# Needs heightmode=absolute and a known floor. 0 off, 1 on.
-#heightcrouch=0
-# Physical crouch: where the line is. 0 (the default) = automatic: Chief crouches when your view
-# would reach his standing eyes (less heightleash), so the change is smooth whatever the leash, and
-# it fits your height against his. Or a fraction of your standing head height: 0.5 = half, 0.8 is
-# shallower. Physical crouch pauses if you crouch with the stick; stand up to bring it back.
-#heightcrouchfrac=0
+# Needs heightmode=absolute and a known floor. 1 on (the default), 0 off.
+#heightcrouch=1
+# Physical crouch: where the line is, as a fraction of your standing head height. 0.8 (the default)
+# crouches Chief once your head drops below 80% of it; 0.5 = half, deeper. Or 0 = automatic: Chief
+# crouches when your view would reach his standing eyes (less heightleash), fitted to your height
+# against his. Physical crouch pauses if you crouch with the stick; stand up to bring it back.
+#heightcrouchfrac=0.8
 # Auto height: how far your view may drop below Chief's own eyes, in game centimetres, before it
 # stops following your head down -- so ducking cannot put your view inside his body. It follows
 # Chief: when he crouches, his eyes and this limit drop together. With physical crouch on, your view
 # holds near his eyes until you cross the crouch line, then goes down with him.
-# -1 = off; 0 = never below his eyes; around 10 leaves a little give.
-#heightleash=-1
+# -1 = off; 0 = never below his eyes; 10 (the default) leaves a little give.
+#heightleash=10
 # Auto height: a crouch you ask for with the stick shows in your view -- it goes down with Chief,
 # stays down for as long as he is crouched, and comes back up with him. That holds whether the
 # game's crouch is a toggle or a hold (its Hold to crouch setting). 0 = the old behaviour, where
@@ -699,6 +713,12 @@
 #heightstickcrouch=1
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
+# Keeps your head out of walls when you lean or step into them: your view stops short of the surface
+# instead of passing through it. It matters most with the leash off, which is the default.
+#
+# 1 = head block on, 0 = off. (2 feels for the wall with a sphere instead of a line; 3 only limits
+# how far your head may lean away from your body, without looking for walls at all.)
+#headblock=1
 # Head block: how far your head is kept from a surface, in centimetres.
 #headblockradius=12
 
@@ -731,6 +751,16 @@
 # Melee uses the steadied hands. 0 = swing melee reads your hands unsmoothed (how melee has always
 # felt), 1 = it reads the steadied hands like everything else.
 #handsmoothmelee=0
+
+# ------------------------------------------------------------ STABILITY FIXES (stabilityfixes)
+# While a changed settings file is read back in, the controller, render and game threads keep using
+# a copy of the old settings, so none of them ever sees a half-loaded one. It also silences a
+# reticule readback the base mod logged every few seconds, and tints the grenade pouch markers when
+# they are shown. Its diagnostic logs and extra button steals stay off until their own keys turn
+# them on.
+#
+# 1 = on, 0 = off (settings are read back in unguarded, as the base mod shipped it).
+#stabilityfixes=1
 
 # ================================ VR WEAPON HANDLING (gestures, arms, hands) ====================
 
