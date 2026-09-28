@@ -3753,6 +3753,15 @@ struct Config {
     // never on "we asked it to". That distinction is the reticule lane's expensive lesson: a
     // refused layer must never leave the player looking at nothing.
     int   scope_layer_hide_pane = 1;
+    // THE CLEARED-FRAME GUARD on the pane's atlas copy (ScopeGuard.hpp). 1 = on (default), 0 = off.
+    // A scene capture clears its target to BLACK before it writes each frame, and the atlas copy is
+    // not synchronised with that, so now and then it copied the clear -- the scope's one-frame
+    // "flicker to black" (found from the 5.5.4 source, 2026-09-27). The guard probes nine points and
+    // skips the copy (GPU predication) when the target still holds the clear, keeping the previous
+    // frame; a genuinely black view is still let through after three frames. Live, near-free, and
+    // fail-open: any setup failure disables it with one log line and leaves the plain copy. 0 is
+    // the A/B arm, and the way back if it ever misbehaves.
+    int   scope_clear_guard = 1;
 
     // ---- MELEE BY SWING --------------------------------------------------------------------
     // Swing the aim hand and the game melees. The detector runs on the GAME THREAD tick and

@@ -190,6 +190,7 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopelayerrolltrim")==0)
         g_cfg.scope_layer_roll_trim = clampf((float)v, -180.0f, 180.0f);
     else if (_stricmp(key, "scopelayerhidepane")==0) g_cfg.scope_layer_hide_pane = (int)clampf((float)v, 0.0f, 1.0f);
+    else if (_stricmp(key, "scopeclearguard")==0) g_cfg.scope_clear_guard = (int)clampf((float)v, 0.0f, 1.0f);
     // Lives in THIS helper rather than the main chain purely for the compiler: that chain already
     // hit MSVC's 128-level nesting limit (C1061) once, which is why the scope keys were hoisted
     // here in the first place. Adding to it is what breaks the build; adding here is free.
