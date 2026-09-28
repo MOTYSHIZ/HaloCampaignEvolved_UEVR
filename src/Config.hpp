@@ -785,6 +785,12 @@ struct Config {
     // a guess baked into the code.
     int   aim_reticule_trace_channel = 1;   // Camera -- the shipping choice (see above)
 
+    // LOOK PAST actors that block the trace channel but not a round or the eye (tracepassthrough;
+    // the list is in HitTrace.cpp: BP_AtmoArray_C, the Library's atmosphere cylinders). Every
+    // hit_trace() caller -- the aim ray and reticule, the scope's focus, the navpoint and vehicle
+    // traces -- re-traces with such an actor ignored. false = stop at them, as before (A/B).
+    bool  trace_pass_through = true;
+
     // CAP on how far the reticule is ever DRAWN, in cm. A marker on a hillside 80 m away is
     // technically correct and practically useless: it is small, it is washed out against the
     // distance, and it stops reading as your reticule. Past the cap the marker parks at the cap and

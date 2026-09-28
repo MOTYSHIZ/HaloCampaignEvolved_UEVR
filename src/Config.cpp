@@ -1905,6 +1905,7 @@ bool parse_config_file(const char* path) {
             g_cfg.aim_reticule_trace_max = clampf((float)v, 100.0f, 100000.0f);
         else if (_stricmp(key, "aimreticuletracechannel") == 0)
             g_cfg.aim_reticule_trace_channel = (int)v;
+        else if (_stricmp(key, "tracepassthrough") == 0) g_cfg.trace_pass_through = (v != 0.0);
         else if (_stricmp(key, "aimreticulemaxdist") == 0)
             g_cfg.aim_reticule_max_dist = clampf((float)v, 50.0f, 100000.0f);
         else if (_stricmp(key, "aimreticuleminscale") == 0)
