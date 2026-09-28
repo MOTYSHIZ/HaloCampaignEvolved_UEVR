@@ -2387,6 +2387,10 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehseatmask")    == 0) { g_cfg.veh_seat_mask = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamrecenterpos") == 0) { g_cfg.veh_cam_recenter_pos = (v != 0.0); return true; }
+    if (_stricmp(key, "vehcamresethold") == 0) {
+        g_cfg.veh_cam_reset_hold_ms = std::isfinite(v) ? (int)std::clamp(v, 0.0, 10000.0) : 1000;
+        return true;
+    }
     if (_stricmp(key, "vehcamhidebody") == 0) { g_cfg.veh_cam_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehmarker")      == 0) { g_cfg.veh_marker = (v != 0.0); return true; }
     if (_stricmp(key, "vehmarkerradius") == 0) { g_cfg.veh_marker_radius = (float)v; return true; }

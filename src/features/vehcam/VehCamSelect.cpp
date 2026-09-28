@@ -399,8 +399,9 @@ void apply_ctrl_toggle() {
     xrtext_show(md);
 }
 
-// LEFT X OR Y HELD FOR A SECOND: reset the view -- turned to line up with the vehicle's aim and your head
-// back on the camera's point -- in the camera and mode you are in (the user, 2026-09-27). Whatever the
+// LEFT X OR Y HELD (vehcamresethold, a second by default): reset the view -- turned to line up with the
+// vehicle's aim and your head back on the camera's point -- in the camera and mode you are in (the user,
+// 2026-09-27). Whatever the
 // vehcamrecenter / vehcamrecenterpos settings say: those govern what a camera CHANGE does, and this is you
 // asking. Said on the text panel, since it answers a press.
 void apply_view_reset() {
@@ -414,7 +415,10 @@ void apply_view_reset() {
                          v.name.c_str(), c.name.c_str(), s_mode + 1);
     const std::string cam = c.name.empty() ? "Camera " + std::to_string(s_camera + 1) : c.name;
     const std::string mode = c.mode_count() > 1 ? " \xC2\xB7 " + mode_label(c.mode(s_mode), s_mode) : std::string();
-    xrtext_show("# View reset\n## " + v.name + " \xC2\xB7 " + cam + mode + "\n*Hold left X or Y for a second to reset*\n");
+    char hold[32];   // the hold it took, as set (vehcamresethold)
+    if (g_cfg.veh_cam_reset_hold_ms == 1000) strcpy_s(hold, sizeof(hold), "for a second");
+    else std::snprintf(hold, sizeof(hold), "for %g s", g_cfg.veh_cam_reset_hold_ms / 1000.0);
+    xrtext_show("# View reset\n## " + v.name + " \xC2\xB7 " + cam + mode + "\n*Hold left X or Y " + hold + " to reset*\n");
 }
 
 // LEFT X: the current camera's next tethering mode (what turns your view, what carries the camera round,

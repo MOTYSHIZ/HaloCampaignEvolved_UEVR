@@ -585,9 +585,13 @@
 #vehcamrecenter=1
 # Put your head back on the camera's point on the same camera changes, wherever you had leaned or
 # walked to in your room. Matters most with the head leash (hmdleash) off. 0 keeps your head's offset
-# from one camera to the next. Either way, holding left X or left Y for a second resets the view
+# from one camera to the next. Either way, holding left X or left Y (vehcamresethold) resets the view
 # (lined up and your head back in place) without changing camera or mode.
 #vehcamrecenterpos=1
+# Hold to reset the view. How long left X or left Y must be held in a vehicle to reset the view, in
+# milliseconds; a shorter press steps the tethering mode (X) or camera (Y) when you let go. 0 = holding
+# never resets.
+#vehcamresethold=1000
 # Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
 # that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
 # shrinks it, for a body that shows through the hide. In the Ghost and the Wraith turret only armour

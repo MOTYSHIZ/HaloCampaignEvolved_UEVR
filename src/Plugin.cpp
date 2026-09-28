@@ -13792,10 +13792,10 @@ public:
         // state, so a button held while boarding never fires. Additive: both still reach the game as
         // whatever the pad calls them.
         //
-        // HOLD EITHER FOR A SECOND -> RESET THE VIEW (the user, 2026-09-27): lined up with the vehicle's aim
-        // and your head back on the camera's point, in the camera and mode you are in. So a press acts on
-        // RELEASE -- a tap steps, a hold resets and steps nothing -- and the reset fires the moment the hold
-        // reaches a second, not on release, so you know when to let go.
+        // HOLD EITHER -> RESET THE VIEW (the user, 2026-09-27): lined up with the vehicle's aim and your head
+        // back on the camera's point, in the camera and mode you are in. So a press acts on RELEASE -- a tap
+        // steps, a hold resets and steps nothing -- and the reset fires the moment the hold reaches
+        // vehcamresethold (a second by default; 0 = never), not on release, so you know when to let go.
         {
             static decltype(API::VR::get_action_handle("")) s_ax = nullptr, s_ay = nullptr;
             static bool s_tried = false, s_primed = false, s_x = false, s_y = false;
@@ -13823,10 +13823,15 @@ public:
                     const bool x = s_ax != nullptr && API::VR::is_action_active(s_ax, left);
                     const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
                     if (s_primed) {
-                        // One button: a press that started seated; a hold of a second resets; a tap acts on release.
-                        auto button = [t](bool now, bool was, ULONGLONG& down, bool& held, void (*tap)()) {
+                        // One button: a press that started seated; a hold of vehcamresethold resets; a tap acts
+                        // on release.
+                        const int hold_ms = g_cfg.veh_cam_reset_hold_ms;
+                        auto button = [t, hold_ms](bool now, bool was, ULONGLONG& down, bool& held, void (*tap)()) {
                             if (now && !was) { down = t; held = false; }
-                            if (now && down != 0 && !held && t - down >= 1000) { held = true; veh_cam_view_reset(); }
+                            if (now && down != 0 && !held && hold_ms > 0 && t - down >= (ULONGLONG)hold_ms) {
+                                held = true;
+                                veh_cam_view_reset();
+                            }
                             if (!now && was) {
                                 if (down != 0 && !held) tap();
                                 down = 0;

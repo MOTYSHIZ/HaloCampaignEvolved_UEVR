@@ -343,6 +343,7 @@ local LABELS = {
     vehmarkeralpha = "Vehicle aim ring opacity",
     vehcamreadout = "Camera readout", vehcamrecenter = "Line up with the vehicle when the camera changes",
     vehcamrecenterpos = "Put your head back when the camera changes",
+    vehcamresethold = "Hold left X or Y to reset the view (ms)",
     vehctrlclick = "Left stick click switches hand and stick aiming", xrtext = "Text notices",
     vehseatgrip = "Switch seat button",
     xrtextdist = "Notice distance", xrtextup = "Notice height", xrtextright = "Notice sideways",
