@@ -399,7 +399,7 @@ void palette_wpn_game_tick_after_vehicle(uint32_t tick) {
         // only the real hand against the real gun socket does.
         // Same anchor the palette uses -- the STANDING ORIGIN, not the head -- or the judge would
         // report head motion as placement error while the palette (correctly) ignores it.
-        const auto so_j = API::VR::get_standing_origin();
+        const Vec3 so_j = halo::rendered_standing_origin(have_hmd ? &hpos : nullptr);   // as the palette
         const Vec3 so_ue{-so_j.z, so_j.x, so_j.y};
         const Vec3 hh{hand_ue.x - so_ue.x, hand_ue.y - so_ue.y, hand_ue.z - so_ue.z};
         const Vec3 hh_world = quat_rotate(rotator_to_quat(0.0f, view_yaw, 0.0f),

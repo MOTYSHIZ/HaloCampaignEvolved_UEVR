@@ -6,6 +6,7 @@
 
 #include <Windows.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -71,6 +72,16 @@ int             g_tstate = -1;   // -1 unresolved, 0 failed, 1 at least one trac
 API::UObject*   g_cdo = nullptr;
 int32_t         g_hit_impact = -1, g_hit_location = -1;
 std::vector<uint8_t> g_buf;
+
+// ---- the head clamp as a fraction of the head offset (eye_clamped_standing_origin)
+std::atomic<float>     g_clamp_k{0.0f};
+std::atomic<bool>      g_clamp_horiz{false};
+std::atomic<long long> g_clamp_ms{0};
+
+long long steady_ms() {
+    return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 bool resolve_fn(API::UClass* cls, const wchar_t* name, TraceFn* t, bool want_radius) {
     t->name = name;
@@ -191,6 +202,16 @@ bool eye_head_offset(Vec3* out) {
     return true;
 }
 
+Vec3 eye_clamped_standing_origin(const Vec3& so, const Vec3& hmd) {
+    const long long age = steady_ms() - g_clamp_ms.load(std::memory_order_relaxed);
+    float k = g_clamp_k.load(std::memory_order_relaxed);
+    if (!(k > 0.0f) || age < 0 || age > 250) return so;
+    if (k > 1.0f) k = 1.0f;
+    Vec3 o{so.x + (hmd.x - so.x) * k, so.y + (hmd.y - so.y) * k, so.z + (hmd.z - so.z) * k};
+    if (g_clamp_horiz.load(std::memory_order_relaxed)) o.y = so.y;   // room Y is up
+    return o;
+}
+
 bool kismet_line_trace(const Vec3& a, const Vec3& b, API::UObject* const* ignore, int n_ignore,
                        int channel, Vec3* out_impact) {
     if (!traces_ready() || !g_line.ok) return false;
@@ -252,7 +273,13 @@ bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* 
         g_head_cz.store((float)c[2], std::memory_order_relaxed);
         g_have_head.store(true, std::memory_order_relaxed);
 
-        if (clamp != nullptr) clamp->shift(mode, c);
+        // The clamp's fraction, published with its time for eye_clamped_standing_origin -- 0 when
+        // nothing clamps, so a clamp that switches off stops moving the hands on the next frame.
+        bool horiz = false;
+        const float k = (clamp != nullptr) ? clamp->shift(mode, c, &horiz) : 0.0f;
+        g_clamp_k.store((std::isfinite(k) && k > 0.0f) ? k : 0.0f, std::memory_order_relaxed);
+        g_clamp_horiz.store(horiz, std::memory_order_relaxed);
+        g_clamp_ms.store(steady_ms(), std::memory_order_relaxed);
     }
     if (clamp != nullptr && clamp->apply(mode, raw, x, y, z)) moved = true;
 

@@ -40,6 +40,7 @@
 #include "AimDirect.hpp"
 #include "AimConverge.hpp"
 #include "DevTools.hpp"
+#include "core/EyeTrace.hpp"           // eye_clamped_standing_origin: rendered_standing_origin
 
 #include <atomic>
 #include <chrono>
@@ -1069,6 +1070,16 @@ bool aim_sightline_origin(Vec3* out) {
     const auto hidx = API::VR::get_hmd_index();
     if (hidx >= 0 && get_pose(hidx, &hpos, &hq, /*use_aim=*/false)) { *out = hpos; return true; }
     return false;
+}
+
+Vec3 rendered_standing_origin(const Vec3* hmd) {
+    const auto raw = API::VR::get_standing_origin();
+    const Vec3 so{raw.x, raw.y, raw.z};
+    if (hmd != nullptr) return eye_clamped_standing_origin(so, *hmd);
+    Vec3 hp{}; Quat hq{};
+    const auto hidx = API::VR::get_hmd_index();
+    if (hidx >= 0 && get_pose(hidx, &hp, &hq, /*use_aim=*/false)) return eye_clamped_standing_origin(so, hp);
+    return so;
 }
 
 static bool pose_out(const API::VR::Pose& pose, Vec3* pos, Quat* rot) {

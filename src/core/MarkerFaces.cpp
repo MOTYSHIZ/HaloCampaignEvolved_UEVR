@@ -32,10 +32,12 @@ namespace {
 // service off -- the wrist HUD on its own -- Markers.cpp mapped room->world from the HMD while this
 // file mapped world->room from the standing origin: a round trip off by (standing origin - HMD),
 // which with hmdleash=0 is as far as the player has walked. See Config.hpp room_anchor.
+// The standing origin the RENDERED eye is at: markers sit in the same body frame as the hands, and
+// the head block moves that frame with the eye (core/EyeTrace.hpp). Both directions use it, so the
+// round trip stays exact.
 Vec3 marker_anchor(const Vec3& hmd_room) {
     if (g_cfg.room_anchor == 1 && service_active(SVC_MARKER_ANCHOR)) {
-        const auto so = API::VR::get_standing_origin();
-        return Vec3{so.x, so.y, so.z};
+        return rendered_standing_origin(&hmd_room);
     }
     return hmd_room;
 }

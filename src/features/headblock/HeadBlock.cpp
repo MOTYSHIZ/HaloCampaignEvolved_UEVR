@@ -64,9 +64,14 @@ int headblock_clamp_mode() {
     return g_eff_mode.load(std::memory_order_relaxed);
 }
 
-void headblock_clamp_shift(int mode, const double c[3]) {
+// Returns the shift as a FRACTION of c -- the clamp is always "this much of the head offset, back
+// toward the body", which is what lets everything built from room positions follow it exactly
+// (eye_clamped_standing_origin, core/EyeTrace.hpp).
+float headblock_clamp_shift(int mode, const double c[3], bool* horizontal_only) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
         double s[3] = {0.0, 0.0, 0.0};
+        double frac = 0.0;
+        bool horiz = false;
         if (!head_plausible(std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]))) {
             // no clamp: see head_plausible
         } else if (mode == 3) {
@@ -76,6 +81,8 @@ void headblock_clamp_shift(int mode, const double c[3]) {
             if (lh > lean && lh > 1e-6) {
                 const double k = 1.0 - lean / lh;
                 s[0] = c[0] * k; s[1] = c[1] * k;
+                frac = k;
+                horiz = true;
             }
         } else if (mode == 1 || mode == 2) {
             const double L = g_allow.load(std::memory_order_relaxed);
@@ -83,10 +90,13 @@ void headblock_clamp_shift(int mode, const double c[3]) {
             if (L >= 0.0 && len > L && len > 1e-6) {
                 const double k = 1.0 - L / len;
                 for (int k2 = 0; k2 < 3; ++k2) s[k2] = c[k2] * k;
+                frac = k;
             }
         }
         for (int k = 0; k < 3; ++k) g_shift[k] = s[k];
         g_pushed.store((float)std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]), std::memory_order_relaxed);
+        if (horizontal_only != nullptr) *horizontal_only = horiz;
+        return (float)frac;
 }
 
 bool headblock_clamp_apply(int mode, const double raw[3], double* x, double* y, double* z) {

@@ -3053,8 +3053,11 @@ bool capture_tracking_into(TrackingSnapshot& snap) {
     // measures its hand from (rigbodyanchor). It is where the play area's origin sits; UEVR renders
     // the eye at the camera displaced by (hmd - standing_origin), so it is what "your body" is
     // anchored to when you physically walk. Zeroed and marked invalid if the runtime has none.
+    // The origin the RENDERED eye is at, not UEVR's: the head block moves the eye back out of a wall
+    // and the arms have to move with it, or the view stops at the wall while the hands carry on into
+    // it (core/EyeTrace.hpp). Everything below that reads standing_origin then follows the clamp.
     {
-        const auto so = API::VR::get_standing_origin();
+        const auto so = ::halo::rendered_standing_origin(&p);
         snap.standing_origin = pa::Vec3{so.x, so.y, so.z};
         snap.origin_valid = std::isfinite(so.x) && std::isfinite(so.y) && std::isfinite(so.z);
     }

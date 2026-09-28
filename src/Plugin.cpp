@@ -9239,8 +9239,11 @@ void update() {
             {
                 Vec3 hp{}; Quat hq{};
                 const auto hidx = API::VR::get_hmd_index();
-                const auto so = API::VR::get_standing_origin();
                 g_calib_have_delta = (hidx >= 0) && get_pose(hidx, &hp, &hq, /*use_aim=*/false);
+                // The rendered origin, as the rig block builds pose_off from -- the freeze, the hold
+                // ride and the live hand must all measure from the same point or the fit absorbs the
+                // difference.
+                const Vec3 so = halo::rendered_standing_origin(g_calib_have_delta ? &hp : nullptr);
                 g_calib_delta_room = g_calib_have_delta
                     ? Vec3{hp.x - so.x, hp.y - so.y, hp.z - so.z}
                     : Vec3{0.0f, 0.0f, 0.0f};
@@ -9835,7 +9838,10 @@ void update() {
                 // altogether rather than fixing which one is used.
                 Vec3 hand = rigpos;
                 if (g_cfg.rig_body_anchor) {
-                    const auto so = API::VR::get_standing_origin();
+                    // ...and the origin the RENDERED eye is at, not UEVR's: the head block moves the
+                    // eye back out of a wall, and the weapon has to move with it or the hands carry on
+                    // into the wall the view stopped at. See core/EyeTrace.hpp.
+                    const Vec3 so = halo::rendered_standing_origin();
                     hand = Vec3{rigpos.x - so.x, rigpos.y - so.y, rigpos.z - so.z};
                 }
 
@@ -10053,7 +10059,7 @@ void update() {
                     const auto hidx = API::VR::get_hmd_index();
                     if (g_calib_have_delta && hidx >= 0
                         && get_pose(hidx, &hp, &hq, /*use_aim=*/false)) {
-                        const auto so2 = API::VR::get_standing_origin();
+                        const Vec3 so2 = halo::rendered_standing_origin(&hp);   // as pose_off was built
                         // Linear, so the difference of the two mapped displacements is the mapping
                         // of their difference -- taken against the LIVE frame, which is the one
                         // this frame's pose_off was built in.
@@ -12512,7 +12518,7 @@ public:
                                                                   : API::VR::get_right_controller_index();
                             Vec3 gpos{}; Quat gq{};
                             if (get_pose(ridx, &gpos, &gq, false)) {
-                                const auto so = API::VR::get_standing_origin();
+                                const Vec3 so = halo::rendered_standing_origin();   // as the rig route
                                 const Vec3 hand{gpos.x - so.x, gpos.y - so.y, gpos.z - so.z};
                                 Quat q_ro{0.0f, 0.0f, 0.0f, 1.0f};
                                 if (g_cfg.rig_view_yaw != 0.0f) {

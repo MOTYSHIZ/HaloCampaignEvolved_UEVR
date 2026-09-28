@@ -34,11 +34,38 @@ bool kismet_line_trace(const Vec3& a, const Vec3& b, uevr::API::UObject* const* 
 // A feature that clamps the rendered eye supplies these. The post-callback measurement calls them at
 // the exact points the clamp has always run: mode first, shift when the frame's head offset is
 // computed (eye 0, or eye 1 before eye 0 was ever seen), apply after that.
+//
+// shift RETURNS THE CLAMP AS A FRACTION of the head offset it was given: the eye is moved by
+// fraction x c, back toward the body. *horizontal_only says it moved the horizontal part of c only
+// (UE Z is up). 0 = no clamp this frame. See eye_clamped_standing_origin, which is why it is returned.
 struct HeadClamp {
-    int  (*mode)();
-    void (*shift)(int mode, const double c[3]);
-    bool (*apply)(int mode, const double raw[3], double* x, double* y, double* z);
+    int   (*mode)();
+    float (*shift)(int mode, const double c[3], bool* horizontal_only);
+    bool  (*apply)(int mode, const double raw[3], double* x, double* y, double* z);
 };
+
+// ---- THE STANDING ORIGIN THE RENDERED EYE IS ACTUALLY AT.
+//
+// UEVR renders the eye at camera + gamespace(hmd - standing_origin), and everything this plugin
+// places from ROOM positions -- the weapon, the arms, holsters, the wrist HUD, reload zones -- is
+// built the same way from the same origin, so it agrees with the eye. A clamp breaks that: the head
+// block moves the rendered EYE back out of a wall and nothing else, so the view stopped at the wall
+// while the hands carried on into it by exactly the amount the head was held back ("my head is
+// blocked, but my arms are still free to move into the geo"). With roomscale walking the body after
+// the unclamped head it read as the arms moving double.
+//
+// The clamp is a fraction of the head offset c, and c is a linear image of (hmd - standing_origin),
+// so the SAME fraction of the room offset is exactly the room-space form of the clamp -- no rotation,
+// no scale, no frame to get wrong. This returns `so` pulled toward `hmd` by that fraction (vertical
+// untouched when the clamp was horizontal only). Building from it instead of `so` moves anything by
+// the same vector the eye moved. Room metres in and out, UEVR tracking space.
+//
+// Returns `so` unchanged when nothing clamps, or when the clamp is stale (no rendered frame for
+// 250 ms: menus, loads, the service off). ANY THREAD: reads atomics only.
+//
+// FOR PLACEMENT ONLY. Whatever WRITES the standing origin -- the leash, roomscale, auto height --
+// must keep reading the real one, or it would chase its own correction.
+Vec3 eye_clamped_standing_origin(const Vec3& so, const Vec3& hmd);
 
 // Stereo pre (render thread), inside the view position publish: note the body eye.
 void eye_note_pre_view(int index, UEVR_Vector3f* position, bool is_double);

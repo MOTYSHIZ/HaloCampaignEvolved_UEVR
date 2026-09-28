@@ -310,6 +310,15 @@ bool get_pose_raw(UEVR_TrackedDeviceIndex idx, Vec3* pos, Quat* rot, bool use_ai
 // sites call this; see the definition for why an unleashed head cannot use the standing origin.
 bool aim_sightline_origin(Vec3* out);
 
+// THE STANDING ORIGIN THE RENDERED EYE IS AT: UEVR's, moved by whatever clamp holds the eye (the head
+// block), so anything placed from room positions -- weapon, arms, holsters, zones -- moves with the eye
+// instead of carrying on into the wall the view stopped at. core/EyeTrace.hpp explains the maths.
+// `hmd` = the head position the clamp scales by (room metres); nullptr reads it now, and then this is
+// GAME THREAD. UEVR's origin unchanged when nothing clamps.
+// PLACEMENT ONLY: whatever WRITES the standing origin (the leash, roomscale, auto height) keeps
+// reading UEVR's, or it would chase its own correction.
+Vec3 rendered_standing_origin(const Vec3* hmd = nullptr);
+
 
 // ---- DIRECTIONAL MELEE AIM HOLD. Written by the melee detector (Gesture.cpp) and by the holster
 // veto; consumed inside MotionAimControl by substituting the CONTROLLER ANGLES. See the note at
