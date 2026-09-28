@@ -6,6 +6,7 @@
 
 #include <d3d12.h>
 #include <windows.h>
+#include <atomic>
 #include <cstdio>
 
 #include "uevr/API.hpp"
@@ -20,7 +21,12 @@ namespace {
 // into a per-frame stall nobody can see the cause of.
 bool                   s_dead     = false;
 bool                   s_ready    = false;
-bool                   s_applied  = false;   // did the LAST apply actually write alpha
+// Did the LAST apply actually write alpha. Written on the GAME thread, read on the XR SUBMIT thread
+// (slot 9's blend flag in produce_layers), so it is atomic -- and it is PUBLISHED ONCE, as
+// scopemask_apply() exits, never cleared at its start. Clearing it first opened a window of a few
+// tens of microseconds per capture in which the submit thread read "not applied" and sent the pane
+// OPAQUE for a frame: the feathered oval flashed as a square, rarely (user report, 2026-09-27).
+std::atomic<bool>      s_applied{false};
 ID3D12RootSignature*   s_rootsig  = nullptr;
 ID3D12PipelineState*   s_pso      = nullptr;
 ID3D12DescriptorHeap*  s_heap     = nullptr;
@@ -169,11 +175,16 @@ void scopemask_note_atlas(bool created_with_uav) {
     s_heap_for  = nullptr;    // any previous UAV described an atlas that no longer exists
     s_said_late = false;
 }
-bool scopemask_applied() { return s_applied; }
+bool scopemask_applied() { return s_applied.load(std::memory_order_acquire); }
 
 bool scopemask_apply(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3D12Resource* atlas,
                      int cell_x, int cell_y, int cell_dim) {
-    s_applied = false;
+    // The result goes out ONCE, on exit (see s_applied): every early return below publishes false
+    // through this, and only the success path sets ok first.
+    struct Publish {
+        bool ok = false;
+        ~Publish() { s_applied.store(ok, std::memory_order_release); }
+    } publish;
     if (!scopemask_wanted() || s_dead) return false;
     if (device == nullptr || list == nullptr || atlas == nullptr || cell_dim <= 0) return false;
     // THE GUARD WHOSE ABSENCE CRASHED THE GAME. The UAV flag is decided when the atlas is created,
@@ -259,7 +270,7 @@ bool scopemask_apply(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3D
               "re-enabled on frames this actually ran.",
               cell_x, cell_y, cell_dim, cell_dim, aspect, feather);
     }
-    s_applied = true;
+    publish.ok = true;
     return true;
 }
 
@@ -269,7 +280,7 @@ void scopemask_shutdown() {
     if (s_rootsig != nullptr) { s_rootsig->Release(); s_rootsig = nullptr; }
     s_heap_for = nullptr;
     s_ready    = false;
-    s_applied  = false;
+    s_applied.store(false, std::memory_order_release);
 }
 
 }   // namespace halo
