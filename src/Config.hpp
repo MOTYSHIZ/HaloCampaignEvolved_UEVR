@@ -2241,8 +2241,9 @@ struct Config {
     // unlike its native Escape. Shares the dpad_head_cm/hyst radius (one notion of "near the head");
     // no dwell, because the Y press is itself the deliberate trigger. Y is otherwise weapon-swap, so
     // a pausing press is eaten (it does not also switch weapons). Poses only -- no arms or rig -- and
-    // live EVERYWHERE BUT A MENU (2026-09-27): on foot, in a vehicle seat (where the pausing Y also
-    // steps no vehicle camera), dead, in a cutscene, loading.
+    // live EVERYWHERE BUT THE FRONTEND (2026-09-27): on foot, in a vehicle seat (where the pausing Y
+    // also steps no vehicle camera), dead, in a cutscene, loading -- and in the pause menu, where the
+    // same START resumes, so one gesture pauses and unpauses.
     bool  pause_head      = true;
     int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it

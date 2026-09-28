@@ -14287,15 +14287,16 @@ public:
             const bool y_now = (raw_btn & XINPUT_GAMEPAD_Y) != 0;   // Y = 0x8000 = left-hand upper face button
 
             // NEAR THE HEAD -- same test as the d-pad shift: nearest controller-to-HMD distance with
-            // arm/release hysteresis, from the tracked poses alone (no arms or rig involved). EVERYWHERE
-            // BUT A MENU (the user, 2026-09-27: "the pause near head input should essentially always
-            // work" -- on foot, in a vehicle seat, dead, in a cutscene, loading). It used to stand down
-            // in all of stick mode, which is every one of those but on foot, so a player holding the
-            // motion controllers had no way to pause there. A menu is already paused, or is the
-            // frontend, where START means something else. An empty (0,0,0) pose is a tracking dropout,
-            // not a hand at the head, and is skipped -- the same guard AimPoseGuard exists for.
+            // arm/release hysteresis, from the tracked poses alone (no arms or rig involved). ALWAYS BUT
+            // THE FRONTEND (the user, 2026-09-27: "the pause near head input should essentially always
+            // work" -- on foot, in a vehicle seat, dead, in a cutscene, loading -- "even while paused ...
+            // that's a natural seeming unpause button": in the pause menu the same START resumes). It
+            // used to stand down in all of stick mode and in every menu. Only the frontend's own
+            // PlayerController (g_frontend_active) keeps it out: there START means something else. An
+            // empty (0,0,0) pose is a tracking dropout, not a hand at the head, and is skipped -- the
+            // same guard AimPoseGuard exists for.
             bool near_now = false;
-            if (!g_in_menu.load()) {
+            if (!halo::g_frontend_active.load(std::memory_order_relaxed)) {
                 const auto hi = API::VR::get_hmd_index();
                 Vec3 hp{}; Quat hq{};
                 if (hi >= 0 && get_pose((int32_t)hi, &hp, &hq, /*use_aim=*/false)) {
@@ -14324,7 +14325,8 @@ public:
                 g_pause_head_at = GetTickCount64();   // the seated left Y lane leaves this press alone
                 if (g_cfg.map_btn_log)
                     API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START%s",
-                                         g_stick_mode.load() ? " (stick mode: a seat, a death, a cutscene or a load)" : "");
+                                         g_in_menu.load() ? " (a menu is up: resume)"
+                                         : (g_stick_mode.load() ? " (stick mode: a seat, a death, a cutscene or a load)" : ""));
             }
             if (!y_now) s_pau_ate_y = false;   // Y released: stop eating, so a later Y swaps normally
             s_pau_y_prev = y_now;
