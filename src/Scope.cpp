@@ -18,6 +18,7 @@
 #include <d3d12.h>   // ID3D12Resource::GetDesc, for the scene-RT probe only
 #include "features/hooks/ScopeHooks.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -2482,19 +2483,35 @@ bool ensure_components(API::UObject* rig) {
         // Round lens or square pane. The Cylinder squashed on its axis is uevrlib's ocular-lens
         // trick and gives a real circular edge with no alpha work; the Plane is the flat square.
         //
-        // MUST GO THROUGH load_asset_by_path, not find_uobject. find_uobject only sees what is
+        // MUST GO THROUGH load_asset_by_path, not find_uobject alone. find_uobject only sees what is
         // ALREADY LOADED: the Plane happens to be (the reticule uses it), the Cylinder is not, so
         // a find-only lookup returned null and built a pane with NO MESH -- which draws nothing
         // and is indistinguishable from the feature being broken. uevrlib force-loads this exact
         // asset for the same reason. Falls back to the Plane rather than shipping an empty pane.
-        // find_uobject FIRST (it wants the "StaticMesh <path>" form and is what has always found
-        // the Plane), then load_asset_by_path as the fallback for an asset that is not resident
-        // yet -- and note that one takes a BARE object path: passing the class prefix to it makes
-        // it reject the string at its first character, which is how a "fix" here managed to lose
-        // the Plane that had been working. Same shape as find_or_load_material just below it.
+        //
+        // load_asset_by_path FIRST, find_uobject only as the fallback (2026-09-27). The old order
+        // put find_uobject first, and a find_uobject MISS is a full walk of the ~294k-entry object
+        // array (Reticule.cpp, find_or_load_material: 150-180 ms mid-mission). The Cylinder is
+        // never resident at the first scope-in of a level, so EVERY first scope-in paid that walk
+        // before loading anyway: 189 ms and 228 ms of game thread measured between "capture
+        // component created" and the load, right before the capture's first frame. LoadAsset_Blocking
+        // resolves a resident asset through the engine's own name hash and reads the package only
+        // when it is not in memory. Note the path forms: it takes a BARE object path (a class
+        // prefix makes it reject the string at its first character, which is how a "fix" here once
+        // lost the Plane), while find_uobject wants the "StaticMesh <path>" form.
         auto find_or_load_mesh = [](const wchar_t* prefixed, const char* bare) -> API::UObject* {
-            if (auto* m = API::get()->find_uobject<API::UObject>(prefixed)) return m;
-            return load_asset_by_path(bare);
+            const auto t0 = std::chrono::steady_clock::now();
+            API::UObject* m = load_asset_by_path(bare);
+            if (m == nullptr) m = API::get()->find_uobject<API::UObject>(prefixed);
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (ms > 20.0) {
+                API::get()->log_info("[Halo-CampE-UEVR] PERF: scope pane mesh '%s' took %.1f ms of game "
+                                     "thread (%s) -- this runs once per pane creation, at the first "
+                                     "scope-in of a level", bare, ms,
+                                     m != nullptr ? "found" : "NOT found");
+            }
+            return m;
         };
         const char* want = (g_cfg.scope_shape == 1) ? "/Engine/BasicShapes/Cylinder.Cylinder"
                                                     : "/Engine/BasicShapes/Plane.Plane";
