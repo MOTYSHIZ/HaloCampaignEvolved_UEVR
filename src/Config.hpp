@@ -1709,6 +1709,20 @@ struct Config {
     // world scale against the widget's 61.4. A number that has to be dialled in until two things look
     // alike silently stops matching the moment either side moves.
     float xr_layer_size = 1.0f;
+    // THE RETICULE FRONT CLAMP (xrlayerreticlefront), in REAL centimetres from your head -- not UE
+    // units, because what it has to beat is UEVR's UI quad, which sits UI_Distance real metres away.
+    //   0   off: the reticule sits on the surface the shot will hit, at that surface's true depth.
+    //   -1  auto: just in front of UEVR's UI (UI_Distance - 30 cm, read live from UEVR).
+    //   >0  never further than this many real centimetres.
+    // Its size is scaled with the distance, so it covers the same angle either way.
+    //
+    // WHY IT EXISTS: our quads are appended after UEVR's layers, and OpenXR composites in list
+    // order, so by the spec the reticule is already drawn over UEVR's HUD quad. It was reported
+    // (2026-09-27, SteamVR's OpenXR runtime) that HUD elements still cover it -- which list order
+    // cannot produce, and which a compositor that draws quads NEAREST LAST would. UNPROVEN: this is
+    // the A/B for that model. THE COST, and why it is off by default: the reticule then sits at this
+    // depth instead of the target's, so it can read doubled when your eyes focus far past it.
+    float xr_layer_reticle_front = 0.0f;
     // UE centimetres per VR metre. 0 = derive from UEVR's VR_WorldScale.
     // RECON-NEEDED: the DIRECTION of the VR_WorldScale relationship is inferred, not measured, and
     // a wrong factor does not look broken -- it looks like a reticule at the wrong depth, which

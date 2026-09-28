@@ -1265,6 +1265,12 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayerspace")  == 0) { g_cfg.xr_layer_space = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "xrlayerhrel")   == 0) { g_cfg.xr_layer_head_rel = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "xrlayersize")   == 0) { g_cfg.xr_layer_size  = clampf((float)v, 0.05f, 20.0f); return true; }
+    // Real cm; 0 off, any negative = auto (UEVR's UI_Distance - 30 cm), else a cap of at least 20 cm
+    // -- nearer than that is inside arm's reach and no longer a reticule anyone could focus on.
+    if (_stricmp(key, "xrlayerreticlefront") == 0) {
+        g_cfg.xr_layer_reticle_front = (v < 0.0) ? -1.0f : (v == 0.0) ? 0.0f : clampf((float)v, 20.0f, 100000.0f);
+        return true;
+    }
     // No upper clamp worth guessing: the whole reason this key exists is that the right value is
     // unmeasured, and a clamp below the true value would look exactly like "the setting does
     // nothing" -- the failure mode aimwidgettint already taught us once.
