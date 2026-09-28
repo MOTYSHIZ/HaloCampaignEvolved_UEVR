@@ -3064,9 +3064,13 @@ struct Config {
     // exposure decision alone. Reach for bias first (it uses the curve's range properly) and this
     // only when you want a plain multiply on top.
     //
-    // CANON 5.5, and the value is BRACKETED rather than guessed: 4.0 read dim through the
-    // compositor quad (headset, 2026-09-07), 6.0 read too bright (headset, 0.4.0 release prep),
-    // so it sits between two judged-in-headset endpoints rather than at one.
+    // CANON 2.75 (the user's headset value, 2026-09-27), down from 5.5. The old number was
+    // bracketed in-headset -- 4.0 read dim (2026-09-07), 6.0 too bright (0.4.0 release prep) --
+    // but every one of those judgements was made while the capture's levers were applied
+    // INCONSISTENTLY: until 2026-09-26 a level change rebuilt the capture on engine defaults and
+    // no lever re-fired, so the same 5.5 produced three different looks depending on history
+    // (Scope.cpp, the CaptureLevers note). 2.75 is the first value judged on a build where the
+    // capture is configured the same in every level, so the old bracket does not carry over.
     //
     // This initialiser IS the shipped value -- no cfg file sets scopegain -- so changing it here
     // is the whole change, and the dev catalog's commented `#scopegain=` line is documentation
@@ -3078,7 +3082,7 @@ struct Config {
     // second problem and trades one half of the first for the other -- it lifts the dim case and
     // the blown case equally. If the too-bright report sharpens, the answer is likely
     // scopeautoexposurebias or the grade chain, not another move on this number.
-    float scope_gain = 5.5f;
+    float scope_gain = 2.75f;
     // scopelayerfollowpane: place the compositor quad AT the in-world pane's own world transform
     // instead of from scopelayerfwd/right/up/width. 1 = follow (default), 0 = use the offsets.
     //
