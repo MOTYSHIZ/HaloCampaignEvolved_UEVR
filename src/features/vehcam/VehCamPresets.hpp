@@ -142,6 +142,12 @@ struct Vehicle {
     std::string name;                 // the entry's key
     std::vector<std::string> match;   // lower-case substrings of the vehicle actor's name
     bool  is_default = false;         // the "default" entry: never matched by name
+    // "enabled": false -- NONE OF THIS in the seats this entry matches: the game's own camera and controls,
+    // exactly as with no entry at all (the user, 2026-09-27, for the Pelican ride at a level's start, which
+    // was fine before any of it). The entry still MATCHES, so it beats "default"; the selection then stands
+    // down, and with it the eye, the hand aim, the buttons and the readout. Its cameras may be left out, and
+    // any it lists are kept, so switching it back on brings them back.
+    bool  enabled = true;
     int   default_camera = 0;
     int   default_mode = 0;           // "defaultMode": the default camera's tethering mode to start in
     int   motion_aim = -1;            // -1 = the global vehaim key; 0 / 1 = off / on for this vehicle
@@ -230,7 +236,8 @@ std::string rotation_tracking_text(const Camera& c);
 std::string location_tracking_text(const Camera& c);
 std::string rotation_tracking_text(const Tether& t);
 std::string location_tracking_text(const Tether& t);
-// For readouts and logs: the limits in plain directions -- "forward 20, back 10, up 5 cm"; "None".
+// For readouts and logs: the limits as places from the origin, like the offset -- "up at most 360 cm",
+// "forward -30 to 15, up 40 to 65 cm"; "None".
 std::string leash_text(const float leash_min[3], const float leash_max[3]);
 
 // Left Y onto camera `to` from a view in mode `from`: the mode that keeps what you chose -- one of the same

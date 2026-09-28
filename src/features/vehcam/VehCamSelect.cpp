@@ -269,8 +269,8 @@ std::string mode_label(const vcp::Tether& m, int mi) {
     return m.name.empty() ? "Mode " + std::to_string(mi + 1) : m.name;
 }
 
-void clear_selection() {
-    if (s_vehicle >= 0) API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: out of the vehicle -- camera released");
+void clear_selection(const char* why = "out of the vehicle") {
+    if (s_vehicle >= 0) API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera released", why);
     s_vehicle = -1;
     s_vehicle_name.clear();
     publish(VehActiveCam{});
@@ -674,9 +674,17 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         const int vi = vcp::match_vehicle(s_table, actor, static_cast<uint8_t>(seat));
         const std::string seat_said = seat != 0 ? vcp::seat_text(static_cast<uint8_t>(seat)) : std::string("unknown");
         if (vi < 0) {
-            clear_selection();
+            clear_selection("no camera entry matches this vehicle");
             API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: no camera entry matches %s (seat %s) and there is no "
                                  "\"default\" entry -- the game's camera stays", actor.c_str(), seat_said.c_str());
+        } else if (!s_table.vehicles[vi].enabled) {
+            // "enabled": false -- the seat is left exactly as with no entry at all (the Pelican ride at a
+            // level's start, say): nothing selected, so our eye, the hand aim, the vehicle buttons and the
+            // readout all stand down, and the game's camera and controls are yours as before.
+            clear_selection("this seat's entry is set \"enabled\": false");
+            API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s (seat %s) matches \"%s\", which is set \"enabled\": false "
+                                 "-- the game's camera and controls stay", actor.c_str(), seat_said.c_str(),
+                                 s_table.vehicles[vi].name.c_str());
         } else {
             const vcp::Vehicle& v = s_table.vehicles[vi];
             const int kept = remembered_camera(v);   // this seat's last camera, from any earlier ride or session

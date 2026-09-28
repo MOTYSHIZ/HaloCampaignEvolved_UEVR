@@ -368,6 +368,9 @@ struct Apply {
             } else if (fk == "hideHead") {
                 if (!x.is_bool()) return type_error(x, w, "true or false");
                 out.hide_head = x.b;
+            } else if (fk == "enabled") {
+                if (!x.is_bool()) return type_error(x, w, "true or false (false = the game's own camera and controls here)");
+                out.enabled = x.b;
             } else if (fk == "motionAim") {
                 if (x.is_null()) { out.motion_aim = -1; continue; }
                 if (!x.is_bool()) return type_error(x, w, "true, false or null (null = the vehaim setting)");
@@ -415,8 +418,11 @@ struct Apply {
                 r.ignored.push_back(w);
             }
         }
-        if (!have_cams) return type_error(v, where, "an object with a \"cameras\" list");
+        // A seat set "enabled": false keeps the game's own camera, so it needs no cameras of its own.
+        if (!have_cams && out.enabled)
+            return type_error(v, where, "an object with a \"cameras\" list (or \"enabled\": false)");
         if (!have_match && !out.is_default) out.match.push_back(lower(key));
+        if (out.cameras.empty()) { out.default_camera = 0; out.default_mode = 0; return true; }
         if (out.default_camera < 0 || out.default_camera >= static_cast<int>(out.cameras.size())) out.default_camera = 0;
         if (out.default_mode < 0 || out.default_mode >= out.cameras[static_cast<size_t>(out.default_camera)].mode_count())
             out.default_mode = 0;
@@ -667,6 +673,9 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  seat = \\\"driver\\\" | \\\"gunner\\\" | \\\"passenger\\\" (or a list): this entry is only for that seat, as the\",\n";
     s += "    \"  game reports it (the readout's Seat line) -- how the Warthog's passenger gets cameras of its own. Left\",\n";
     s += "    \"  out: the driver's entry, and the one any other seat of the vehicle uses when it has none of its own;\",\n";
+    s += "    \"  enabled = false: none of this in this seat -- the game's own camera and controls, as before (the\",\n";
+    s += "    \"  Pelican ride at a level's start: \\\"Pelican\\\": { \\\"match\\\": [\\\"pelican\\\"], \\\"enabled\\\": false }); its\",\n";
+    s += "    \"  cameras may then be left out, and any it lists come back when it is switched on again;\",\n";
     s += "    \"  chassis = part of the name of the vehicle mesh the cameras follow, when it has several (left out =\",\n";
     s += "    \"  one named hull or body, else the nearest). Your last camera, mode and controls in each seat are kept.\",\n";
     s += "    \"Keys starting with _ are notes and are ignored: add your own anywhere (\\\"_why\\\": \\\"...\\\").\",\n";
@@ -684,6 +693,7 @@ std::string table_to_json(const Table& t, bool guide) {
             for (std::size_t m = 0; m < v.match.size(); ++m) s += (m ? ", " : "") + quoted(v.match[m]);
             s += "],\n";
         }
+        if (!v.enabled) s += "      \"enabled\": false,\n";
         s += "      \"defaultCamera\": " + std::to_string(v.default_camera) + ",\n";
         if (v.default_mode != 0) s += "      \"defaultMode\": " + std::to_string(v.default_mode) + ",\n";
         if (v.motion_aim >= 0) s += std::string("      \"motionAim\": ") + (v.motion_aim ? "true" : "false") + ",\n";
@@ -702,6 +712,12 @@ std::string table_to_json(const Table& t, bool guide) {
             s += "      \"chassis\": [";
             for (std::size_t m = 0; m < v.chassis.size(); ++m) s += (m ? ", " : "") + quoted(v.chassis[m]);
             s += "],\n";
+        }
+        if (v.cameras.empty()) {
+            // A seat set "enabled": false may list none: the entry ends on the key before, without its comma.
+            if (s.size() >= 2 && s.compare(s.size() - 2, 2, ",\n") == 0) s.erase(s.size() - 2, 1);
+            s += std::string("    }") + (vi + 1 < t.vehicles.size() ? ",\n" : "\n");
+            continue;
         }
         s += "      \"cameras\": [\n";
         for (std::size_t ci = 0; ci < v.cameras.size(); ++ci) {
