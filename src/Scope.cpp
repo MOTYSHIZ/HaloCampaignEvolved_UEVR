@@ -1023,6 +1023,26 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
     }
     auto* pps = reinterpret_cast<uint8_t*>(cap) + pps_prop->get_offset();
 
+    // mode < 0 = INHERIT: clear every override this function sets and withdraw the ray tracing, which
+    // puts the capture back in exactly the engine's forced-off state a fresh one starts in.
+    if (mode < 0) {
+        static const wchar_t* kOverrides[] = { L"bOverride_DynamicGlobalIlluminationMethod",
+                                               L"bOverride_ReflectionMethod",
+                                               L"bOverride_LumenSurfaceCacheResolution" };
+        int cleared = 0;
+        for (const wchar_t* name : kOverrides) {
+            if (auto* bp = static_cast<API::FBoolProperty*>(pps_struct->find_property(name))) {
+                auto* byte = pps + bp->get_offset();
+                *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+                ++cleared;
+            }
+        }
+        cap->set_bool_property(L"bUseRayTracingIfEnabled", false);
+        API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -> inherit (%d of 3 overrides cleared, "
+                             "ray tracing withdrawn) -- the engine's forced-off state again", cleared);
+        return;
+    }
+
     struct Field { const wchar_t* value; const wchar_t* over; };
     const Field fields[] = {
         { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod" },
@@ -3377,15 +3397,22 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig,
 // produce a stray "close" sound.
 static void scope_zoom_sound_tick() {
     static bool s_was_open = false;
+    // The weapon that zoomed IN, so the zoom-OUT is its sound too. By the time a weapon switch closes
+    // the scope, the reticle already points at the NEW weapon (review finding). A raw pointer checked
+    // with uobject_slot_valid() -- one indexed compare -- because TrackedObject::set() walks the whole
+    // object array, which on every scope-in would be the very hitch this plugin bans.
+    static API::UObject* s_zoom_owner = nullptr;
     const bool open = g_scope_active.load();
     if (open == s_was_open) return;
     s_was_open = open;
-    if (g_cfg.scope_eat_lt != 2) return;
+    if (g_cfg.scope_eat_lt != 2) { s_zoom_owner = nullptr; return; }
 
     const wchar_t* fn_name = open ? L"OnZoomIn" : L"OnZoomOut";
     const char* miss = nullptr;
     API::UObject* owner = nullptr;
-    if (auto* w = reticule_hosted_widget()) {
+    if (!open && s_zoom_owner != nullptr && uobject_slot_valid(s_zoom_owner)) {
+        owner = s_zoom_owner;
+    } else if (auto* w = reticule_hosted_widget()) {
         auto** pc = w->get_property_data<API::UObject*>(L"CurrentBlamWeaponComponent");
         API::UObject* comp = (pc != nullptr) ? *pc : nullptr;
         if (pc == nullptr) {
@@ -3402,27 +3429,31 @@ static void scope_zoom_sound_tick() {
         miss = "no hosted reticle (aimwidget off, or the HUD is mid-rebuild)";
     }
 
+    s_zoom_owner = open ? owner : nullptr;
+
     API::UFunction* fn = nullptr;
     if (owner != nullptr) {
         auto* cls = owner->get_class();
         fn = (cls != nullptr) ? cls->find_function(fn_name) : nullptr;
-        if (fn == nullptr) miss = "this weapon has no zoom sound (no OnZoomIn/OnZoomOut)";
+        if (fn == nullptr) miss = "this weapon has no zoom sound for this edge";
     }
     if (fn != nullptr) {
         alignas(16) uint8_t q[64] = {0};
         owner->process_event(fn, q);
     }
 
-    // One line per DISTINCT outcome, per weapon class, so a session that scopes in hundreds of times
-    // logs only when something changes. Edges are rare, so the class-name string costs nothing.
-    static std::string s_last;
-    std::string now = (owner != nullptr) ? narrow(class_name_of(owner)) : std::string();
-    now += miss != nullptr ? miss : "played";
-    if (now != s_last) {
-        s_last = now;
+    // One line per DISTINCT outcome, per weapon class and PER EDGE KIND, so a session that scopes in
+    // hundreds of times logs only when something changes -- including for a weapon that implements
+    // only one of the two functions, which would otherwise alternate and log on every edge. Edges
+    // are rare, so the class-name string costs nothing.
+    static std::string s_last[2];
+    const std::string cls_name = (owner != nullptr) ? narrow(class_name_of(owner)) : std::string("-");
+    const std::string now = cls_name + (miss != nullptr ? miss : "played");
+    std::string& last = s_last[open ? 1 : 0];
+    if (now != last) {
+        last = now;
         API::get()->log_info("[Halo-CampE-UEVR] scope zoom sound (scopeeat=2): %s on %s -- %s",
-                             narrow(std::wstring(fn_name)).c_str(),
-                             owner != nullptr ? narrow(class_name_of(owner)).c_str() : "-",
+                             narrow(std::wstring(fn_name)).c_str(), cls_name.c_str(),
                              miss != nullptr ? miss : "called; this is the weapon's own sound");
     }
 }
@@ -4017,8 +4048,12 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // time, since re-enabling it makes the capture run a second Lumen scene.
     int& s_lumen_applied = L.lumen;
     if (s_lumen_applied != g_cfg.scope_lumen) {
+        const int prev = s_lumen_applied;
         s_lumen_applied = g_cfg.scope_lumen;
-        if (g_cfg.scope_lumen >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
+        // -1 means the engine's own state: nothing to write for a capture that never had a mode, but
+        // a live change BACK to -1 must undo the last one. It used to write nothing, so the capture
+        // kept the Lumen overrides -- and now its ray tracing -- until it was rebuilt (review finding).
+        if (g_cfg.scope_lumen >= 0 || prev >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
     }
 
     // COLOUR GRADE. On change, and re-runnable: toggling the key off and on re-copies, which is how
