@@ -123,8 +123,16 @@ struct CaptureLevers {
     float    dof_focus  = -1.0f;
     int      persist    = -1;
     float    ppw        = -2.0f;
+    float    local_exp  = -2.0f;   // -1 is a meaningful value (inherit), so seed outside the range
 };
 CaptureLevers s_cap_levers;
+// The render target's TargetGamma lever (scopegamma). NOT in CaptureLevers: it lives on the TARGET,
+// which is rebuilt on its own schedule (a scoperes or format change) and not with the capture, so it
+// is reset where the target is created -- the same rule, applied to the other object.
+float s_gamma_applied = -1.0f;
+// scopecamcut=2: a camera cut owed to the capture because the scope just OPENED. Set on the open
+// edge in scope_notice_ray, spent by the cut block in scope_apply on its next pass.
+bool  s_cut_on_open = false;
 // The PANE's one on-change lever (scopefpdepth). Same bug class, same fix: a level change rebuilds
 // the pane too, and a tracker that still matched the config left the new pane out of the
 // first-person depth group, so the arms could draw over it. Reset where the pane is created.
@@ -906,6 +914,77 @@ void apply_capture_gain(API::UObject* cap, float gain) {
                          gain, back, sz);
 }
 
+// THE SCOPE TARGET'S DISPLAY GAMMA (scopegamma) -- see Config.hpp scope_gamma for the mismatch this
+// tests. TargetGamma is a plain float UPROPERTY on the render target, read each time the capture's
+// view family is built, so it applies live. 0 is the engine's own "unset" value (display gamma then
+// follows the format: 1.0 for our RGBA8 target), so writing 0 restores the default exactly.
+void apply_rt_gamma(API::UObject* rt, float gamma) {
+    if (rt == nullptr) return;
+    auto* p = rt->get_property_data<float>(L"TargetGamma");
+    if (p == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: TargetGamma NOT FOUND on the render target -- "
+                             "scopegamma cannot be applied on this build");
+        return;
+    }
+    *p = gamma;
+    API::get()->log_info("[Halo-CampE-UEVR] scope: render target TargetGamma -> %.2f (readback %.2f)"
+                         " -- %s", gamma, *p,
+                         gamma > 0.0f ? "display-encoded bytes, which is what the sRGB compositor "
+                                        "atlas decodes"
+                                      : "engine choice: display gamma 1.0 for this RGBA8 target, "
+                                        "i.e. LINEAR bytes, which the sRGB atlas decodes a second time");
+}
+
+// LOCAL EXPOSURE ON THE CAPTURE (scopelocalexp) -- see Config.hpp scope_local_exp. Both contrast
+// scales, each with its paired bOverride_ bit. Negative = INHERIT: clear both overrides, the state a
+// freshly built capture starts in (the bias/gain convention). 1.0 turns the pass off in the capture.
+void apply_capture_local_exposure(API::UObject* cap, float scale) {
+    auto* cls = cap->get_class();
+    auto* pps_prop = (cls != nullptr) ? cls->find_property(L"PostProcessSettings") : nullptr;
+    auto* pps_struct = API::get()->find_uobject<API::UStruct>(
+        L"ScriptStruct /Script/Engine.PostProcessSettings");
+    if (pps_prop == nullptr || pps_struct == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: local exposure -- PostProcessSettings "
+                             "unresolved, NOTHING WRITTEN");
+        return;
+    }
+    auto* pps = reinterpret_cast<uint8_t*>(cap) + pps_prop->get_offset();
+    struct Field { const wchar_t* value; const wchar_t* over; };
+    const Field fields[] = {
+        { L"LocalExposureHighlightContrastScale", L"bOverride_LocalExposureHighlightContrastScale" },
+        { L"LocalExposureShadowContrastScale",    L"bOverride_LocalExposureShadowContrastScale" },
+    };
+    int applied = 0;
+    float back = -1.0f;
+    for (const auto& f : fields) {
+        auto* vp = pps_struct->find_property(f.value);
+        auto* op = pps_struct->find_property(f.over);
+        if (vp == nullptr || op == nullptr) {
+            API::get()->log_info("[Halo-CampE-UEVR] scope: local exposure field NOT FOUND (%s / %s)",
+                                 narrow(f.value).c_str(), narrow(f.over).c_str());
+            continue;
+        }
+        auto* bp = static_cast<API::FBoolProperty*>(op);
+        auto* byte = pps + bp->get_offset();
+        if (scale < 0.0f) {
+            *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+        } else {
+            *reinterpret_cast<float*>(pps + vp->get_offset()) = scale;
+            *byte = (uint8_t)(*byte | bp->get_field_mask());
+        }
+        back = *reinterpret_cast<float*>(pps + vp->get_offset());
+        ++applied;
+    }
+    if (scale < 0.0f) {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: local exposure -> inherit (%d of 2 overrides "
+                             "cleared) -- the capture follows the game's own contrast scales", applied);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: local exposure contrast scales -> %.2f (%d of 2 "
+                             "applied, readback %.2f)%s", scale, applied, back,
+                             scale >= 1.0f ? " -- 1.0 turns the pass OFF in the capture" : "");
+    }
+}
+
 // RE-ENABLE LUMEN ON THE CAPTURE. THE ENGINE TURNS IT OFF FOR EVERY SCENE CAPTURE.
 //
 // SceneCaptureRendering.cpp:880-885, verbatim:
@@ -944,6 +1023,26 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
     }
     auto* pps = reinterpret_cast<uint8_t*>(cap) + pps_prop->get_offset();
 
+    // mode < 0 = INHERIT: clear every override this function sets and withdraw the ray tracing, which
+    // puts the capture back in exactly the engine's forced-off state a fresh one starts in.
+    if (mode < 0) {
+        static const wchar_t* kOverrides[] = { L"bOverride_DynamicGlobalIlluminationMethod",
+                                               L"bOverride_ReflectionMethod",
+                                               L"bOverride_LumenSurfaceCacheResolution" };
+        int cleared = 0;
+        for (const wchar_t* name : kOverrides) {
+            if (auto* bp = static_cast<API::FBoolProperty*>(pps_struct->find_property(name))) {
+                auto* byte = pps + bp->get_offset();
+                *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+                ++cleared;
+            }
+        }
+        cap->set_bool_property(L"bUseRayTracingIfEnabled", false);
+        API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -> inherit (%d of 3 overrides cleared, "
+                             "ray tracing withdrawn) -- the engine's forced-off state again", cleared);
+        return;
+    }
+
     struct Field { const wchar_t* value; const wchar_t* over; };
     const Field fields[] = {
         { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod" },
@@ -980,6 +1079,17 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
         }
     }
 
+    // AND LET THE CAPTURE RAY TRACE, or none of the above can run (found 2026-09-27; this is why the
+    // 09-07 headset test read back GI=1 refl=1 and "changed nothing"). Lumen needs ray tracing in the
+    // view: hardware RT is disallowed for a scene capture unless this flag is set (SceneView.h:1936,
+    // SceneCaptureRendering.cpp:865), and software Lumen is impossible on this title, which ships
+    // r.GenerateMeshDistanceFields=False. A plain bool UPROPERTY, read when the capture's renderer is
+    // built, so it applies live. Only Lumen mode wants it; every other mode clears it.
+    const bool want_rt = (mode == 1);
+    cap->set_bool_property(L"bUseRayTracingIfEnabled", want_rt);
+    int rt_back = -1;
+    if (auto* p = cap->get_property_data<bool>(L"bUseRayTracingIfEnabled")) rt_back = *p ? 1 : 0;
+
     // READ BACK both, because "wrote a byte" and "the renderer used it" are different claims and
     // this whole feature exists because one of them was assumed for weeks.
     int gi_back = -1, refl_back = -1;
@@ -989,11 +1099,12 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
         refl_back = (int)*(pps + p->get_offset());
     static const char* kName[] = { "None", "Lumen", "ScreenSpace", "Plugin" };
     API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -> mode %d (%s) -- %d of 2 fields applied, "
-                         "readback GI=%d refl=%d. The engine forces BOTH to None for every scene "
-                         "capture (SceneCaptureRendering.cpp:881); this overrides that, which is "
-                         "the documented way to re-enable it.",
+                         "readback GI=%d refl=%d, bUseRayTracingIfEnabled=%d (-1 = not found). The "
+                         "engine forces BOTH to None for every scene capture "
+                         "(SceneCaptureRendering.cpp:881); this overrides that, and Lumen mode also "
+                         "grants the capture ray tracing, without which it cannot run here.",
                          mode, (mode >= 0 && mode <= 3) ? kName[mode] : "?", applied,
-                         gi_back, refl_back);
+                         gi_back, refl_back, rt_back);
 }
 
 // ENABLE DEPTH OF FIELD ON THE CAPTURE. TRIED AS THE SHIELD-COLOUR FIX; IT IS NOT ONE.
@@ -1594,8 +1705,11 @@ API::UObject* make_scope_rt(int size) {
         cc[0] = 1.0f; cc[1] = 0.0f; cc[2] = 1.0f; cc[3] = 1.0f;
         krl->call_function(L"ClearRenderTarget2D", p);
     }
-    API::get()->log_info("[Halo-CampE-UEVR] scope: HDR render target created @%p (%dx%d RGBA16f)",
-                         (void*)rt, size, size);
+    // The format follows scopesrc (rt_format_for_source). This line used to say "HDR ... RGBA16f"
+    // whatever was allocated, so every shipped session logged the wrong format for its 8-bit target.
+    API::get()->log_info("[Halo-CampE-UEVR] scope: render target created @%p (%dx%d %s)",
+                         (void*)rt, size, size,
+                         rt_format_for_source(g_cfg.scope_capture_src) == 2 ? "RGBA8" : "RGBA16f");
     return rt;
 }
 
@@ -2179,6 +2293,8 @@ bool ensure_components(API::UObject* rig) {
         s_rt_format_applied = rt_format_for_source(g_cfg.scope_capture_src);
         // A new RT invalidates both bindings.
         s_fov_applied = 0.0f;
+        // ...and its gamma: a fresh target starts at the engine's TargetGamma, so re-apply scopegamma.
+        s_gamma_applied = -1.0f;
         if (auto* cap = s_capture.get_checked(L"SceneCaptureComponent2D")) {
             if (auto* p = cap->get_property_data<API::UObject*>(L"TextureTarget")) *p = rt;
         }
@@ -3123,8 +3239,9 @@ bool scope_handle_lt(uint8_t lt_raw, bool in_menu, bool stick_mode) {
     }
     // scopeeat=0 passes LT to the game only under HOLD. The game's own zoom is hold-to-zoom, so it
     // tracks ours only when ours is hold too; under toggle, every release would unzoom the game
-    // (viewmodel back, look speed restored) while the toggled pane stayed up.
-    return g_cfg.scope_eat_lt || !g_cfg.scope_hold;
+    // (viewmodel back, vignette gone) while the toggled pane stayed up. scopeeat=2 eats it too --
+    // its zoom sound is played from scope_zoom_sound_tick(), not by the game's zoom.
+    return g_cfg.scope_eat_lt != 0 || !g_cfg.scope_hold;
 }
 
 // The trigger is NOT reaching the scope this poll (gripzoom, no support grip latched). Keep the
@@ -3255,6 +3372,8 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig,
         }
         return;
     }
+    // THE OPEN EDGE: owe the capture one camera cut (scopecamcut=2), spent by scope_apply below.
+    if (!s_scope_was_open) s_cut_on_open = true;
     s_scope_was_open = true;
     // Apply IMMEDIATELY, on the same tick the ray was produced: the consume-on-the-next-tick
     // shape this replaced put a whole ~32 Hz tick between hand and pane, which the first
@@ -3262,11 +3381,91 @@ void scope_notice_ray(const Vec3& origin, const Vec3& target, API::UObject* rig,
     scope_apply(rig, tick);
 }
 
+// THE WEAPON'S OWN ZOOM SOUND, FOR scopeeat=2 -- the sound without the game's zoom.
+//
+// The game plays it from UMG, not from Blam: WBP_FirstPersonReticle's zoom handler casts the owner
+// of its CurrentBlamWeaponComponent to BPI_AudioUI and calls OnZoomIn()/OnZoomOut() on it, and the
+// weapon Blueprint (BP_<Weapon>_WeaponActor) posts its own Wwise event. The flat HUD's scope vignette
+// hangs off a DIFFERENT delegate of that reticle (OnAimDownSightsChanged), so calling the audio
+// interface directly gets the sound and none of the vignette, viewmodel hide or zoom state. Found
+// offline 2026-09-27 from the cooked name/export tables; not yet heard in a headset.
+//
+// Reached through the reticle we HOST (aimwidget) -- the game's own widget taken off the HUD, whose
+// CurrentBlamWeaponComponent follows weapon switches. Edge-triggered on g_scope_active, GAME THREAD
+// only (ProcessEvent). A missing link at any step is silence plus one log line per distinct outcome.
+// The edge tracker follows g_scope_active whatever scopeeat says, so switching to 2 mid-scope cannot
+// produce a stray "close" sound.
+static void scope_zoom_sound_tick() {
+    static bool s_was_open = false;
+    // The weapon that zoomed IN, so the zoom-OUT is its sound too. By the time a weapon switch closes
+    // the scope, the reticle already points at the NEW weapon (review finding). A raw pointer checked
+    // with uobject_slot_valid() -- one indexed compare -- because TrackedObject::set() walks the whole
+    // object array, which on every scope-in would be the very hitch this plugin bans.
+    static API::UObject* s_zoom_owner = nullptr;
+    const bool open = g_scope_active.load();
+    if (open == s_was_open) return;
+    s_was_open = open;
+    if (g_cfg.scope_eat_lt != 2) { s_zoom_owner = nullptr; return; }
+
+    const wchar_t* fn_name = open ? L"OnZoomIn" : L"OnZoomOut";
+    const char* miss = nullptr;
+    API::UObject* owner = nullptr;
+    if (!open && s_zoom_owner != nullptr && uobject_slot_valid(s_zoom_owner)) {
+        owner = s_zoom_owner;
+    } else if (auto* w = reticule_hosted_widget()) {
+        auto** pc = w->get_property_data<API::UObject*>(L"CurrentBlamWeaponComponent");
+        API::UObject* comp = (pc != nullptr) ? *pc : nullptr;
+        if (pc == nullptr) {
+            miss = "the hosted reticle has no CurrentBlamWeaponComponent (not the reticle expected)";
+        } else if (comp == nullptr) {
+            miss = "CurrentBlamWeaponComponent is empty (no weapon in hand)";
+        } else {
+            alignas(16) uint8_t p[64] = {0};
+            comp->call_function(L"GetOwner", p);
+            owner = *reinterpret_cast<API::UObject**>(p);
+            if (owner == nullptr) miss = "the weapon component has no owner actor";
+        }
+    } else {
+        miss = "no hosted reticle (aimwidget off, or the HUD is mid-rebuild)";
+    }
+
+    s_zoom_owner = open ? owner : nullptr;
+
+    API::UFunction* fn = nullptr;
+    if (owner != nullptr) {
+        auto* cls = owner->get_class();
+        fn = (cls != nullptr) ? cls->find_function(fn_name) : nullptr;
+        if (fn == nullptr) miss = "this weapon has no zoom sound for this edge";
+    }
+    if (fn != nullptr) {
+        alignas(16) uint8_t q[64] = {0};
+        owner->process_event(fn, q);
+    }
+
+    // One line per DISTINCT outcome, per weapon class and PER EDGE KIND, so a session that scopes in
+    // hundreds of times logs only when something changes -- including for a weapon that implements
+    // only one of the two functions, which would otherwise alternate and log on every edge. Edges
+    // are rare, so the class-name string costs nothing.
+    static std::string s_last[2];
+    const std::string cls_name = (owner != nullptr) ? narrow(class_name_of(owner)) : std::string("-");
+    const std::string now = cls_name + (miss != nullptr ? miss : "played");
+    std::string& last = s_last[open ? 1 : 0];
+    if (now != last) {
+        last = now;
+        API::get()->log_info("[Halo-CampE-UEVR] scope zoom sound (scopeeat=2): %s on %s -- %s",
+                             narrow(std::wstring(fn_name)).c_str(), cls_name.c_str(),
+                             miss != nullptr ? miss : "called; this is the weapon's own sound");
+    }
+}
+
 void scope_frame_end(uint32_t tick) {
     // The compositor quad's housekeeping: config edges, the atlas-cell request, retirement when no
     // ray arrived. Above the early-outs deliberately, exactly like xrlayer_tick() -- retirement has
     // to happen on precisely the ticks the scope is NOT feeding rays. One int test while off.
     scopelayer_tick(tick);
+    // scopeeat=2's zoom sound, on g_scope_active's edges. Here because this runs every tick whether
+    // or not a ray arrived, so a scope closed by a seat or a menu still gets its close edge.
+    scope_zoom_sound_tick();
 #if HALO_VR_DEV
     dev_blam_zoom_probe(tick);
     dev_scene_rt_probe(tick);
@@ -3849,8 +4048,12 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // time, since re-enabling it makes the capture run a second Lumen scene.
     int& s_lumen_applied = L.lumen;
     if (s_lumen_applied != g_cfg.scope_lumen) {
+        const int prev = s_lumen_applied;
         s_lumen_applied = g_cfg.scope_lumen;
-        if (g_cfg.scope_lumen >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
+        // -1 means the engine's own state: nothing to write for a capture that never had a mode, but
+        // a live change BACK to -1 must undo the last one. It used to write nothing, so the capture
+        // kept the Lumen overrides -- and now its ray tracing -- until it was rebuilt (review finding).
+        if (g_cfg.scope_lumen >= 0 || prev >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
     }
 
     // COLOUR GRADE. On change, and re-runnable: toggling the key off and on re-copies, which is how
@@ -3866,6 +4069,20 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         // Skipping it left the live capture on the old gain while a rebuilt one started neutral --
         // one config value, two images, depending on whether a level change had happened since.
         apply_capture_gain(cap, g_cfg.scope_gain);
+    }
+
+    // RENDER TARGET GAMMA (scopegamma). On change; s_gamma_applied is reset where the target is
+    // built, so a rebuilt target gets it again. Called for 0 too, which restores the engine's value.
+    if (s_gamma_applied != g_cfg.scope_gamma) {
+        s_gamma_applied = g_cfg.scope_gamma;
+        apply_rt_gamma(s_rt.ptr, g_cfg.scope_gamma);
+    }
+
+    // LOCAL EXPOSURE (scopelocalexp). On change, CaptureLevers-tracked; -1 clears the overrides.
+    float& s_lexp_applied = L.local_exp;
+    if (s_lexp_applied != g_cfg.scope_local_exp) {
+        s_lexp_applied = g_cfg.scope_local_exp;
+        apply_capture_local_exposure(cap, g_cfg.scope_local_exp);
     }
 
     int& s_grade_applied = L.grade;
@@ -4010,7 +4227,11 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // Written through the field mask rather than set_bool_property because this one is a
     // `uint32 : 1` bitfield sharing its byte with neighbouring flags -- the same reason the
     // exposure pin above resolves its bOverride_ masks by hand.
-    if (g_cfg.scope_cam_cut != 0) {
+    // scopecamcut=2 writes it only on the pass after the scope OPENED: the capture's persistent eye
+    // adaptation would otherwise resume from wherever the last scope session left it and ramp.
+    const bool cut_now = (g_cfg.scope_cam_cut == 1) || (g_cfg.scope_cam_cut == 2 && s_cut_on_open);
+    s_cut_on_open = false;   // spent whether or not this mode wanted it
+    if (cut_now) {
         static int s_cut_state = -1;   // -1 unknown, 0 property missing, 1 writing
         if (s_cut_state != 0) {
             auto* c = cap->get_class();
@@ -4023,12 +4244,21 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
                 auto* bp = static_cast<API::FBoolProperty*>(prop);
                 auto* byte = reinterpret_cast<uint8_t*>(cap) + bp->get_offset();
                 *byte = (uint8_t)(*byte | bp->get_field_mask());
-                if (s_cut_state != 1) {
+                // Said once per MODE, so switching between 1 and 2 live is visible in the log.
+                static int s_cut_said_mode = 0;
+                if (s_cut_state != 1 || s_cut_said_mode != g_cfg.scope_cam_cut) {
                     s_cut_state = 1;
-                    API::get()->log_info("[Halo-CampE-UEVR] scope: bCameraCutThisFrame forced every "
-                                         "tick (mask=0x%02X, readback %d) -- temporal history reset "
-                                         "each capture", (unsigned)bp->get_field_mask(),
-                                         (*byte & bp->get_field_mask()) != 0);
+                    s_cut_said_mode = g_cfg.scope_cam_cut;
+                    API::get()->log_info("[Halo-CampE-UEVR] scope: bCameraCutThisFrame written %s "
+                                         "(mask=0x%02X, readback %d) -- %s",
+                                         g_cfg.scope_cam_cut == 2 ? "on the scope-open edge"
+                                                                  : "every tick",
+                                         (unsigned)bp->get_field_mask(),
+                                         (*byte & bp->get_field_mask()) != 0,
+                                         g_cfg.scope_cam_cut == 2
+                                             ? "exposure snaps to this scene instead of ramping "
+                                               "from the last scope session"
+                                             : "temporal history reset each capture");
                 }
             }
         }

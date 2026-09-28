@@ -3,9 +3,10 @@
 // Halo's native zoom is deliberately NOT used. The game's own zoom state exists and is even
 // reflected (BlamUnitComponent.GetZoomLevelAbsolute / GetZoomMagnification), but engaging it has
 // flat-screen side effects that are hostile in VR: weapon tags carry bHideWeaponOnZoom (the
-// viewmodel vanishes), the HUD overlays a fullscreen zoom mask, and the sim halves look speed
-// while zoomed ("zoomed look speed" in the tag data) -- which would bend the measured aim plant
-// this driver's control law is tuned against. Halo-MCC-VR reached the same conclusion on the
+// viewmodel vanishes) and the flat HUD draws its scope vignette (WBP_HUD_Main's
+// ScopeDamageVignette), which blocks the compositor pane -- both MEASURED in headset 2026-08-23.
+// The tag data's "zoomed look speed" was expected to halve aim speed too; the same test showed it
+// does NOT on this title, so only the first two stand. Halo-MCC-VR reached the same conclusion on the
 // original engine and ships a synthetic gun-mounted zoom screen with native zoom suppressed at
 // the input layer; this module is that shape, built from parts this plugin already proves in-game:
 //

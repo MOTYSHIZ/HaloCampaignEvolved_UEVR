@@ -3033,8 +3033,15 @@ struct Config {
     // cast for hours, and it is not one: this is BASE-PASS lighting, upstream of exposure, bloom,
     // tone curve and tint, which is why none of those could ever reach it.
     //
-    // 1 (Lumen) is the value that matches the main view on this title. Costs real GPU time -- the
-    // capture then runs a second Lumen scene -- so it is opt-in rather than defaulted on.
+    // 1 (Lumen) is the value that matches the main view on this title -- BUT UNTIL 2026-09-27 IT
+    // COULD NOT RUN, which is why the 09-07 headset test ("readback GI=1 refl=1, changed nothing")
+    // was a null result. Lumen in a view also needs ray tracing: hardware RT is disallowed for a scene
+    // capture unless the component sets bUseRayTracingIfEnabled (SceneView.h:1936-1939,
+    // SceneCaptureRendering.cpp:865), and software Lumen is impossible here because the game ships
+    // r.GenerateMeshDistanceFields=False (its BaseEngine.ini:30). So mode 1 now also grants the
+    // capture ray tracing -- which also lets MegaLights and RT shadows run in it, if the main view
+    // uses them. The capture gets its OWN Lumen scene, cold on every scope session's first frames.
+    // Costs real GPU time (a second RT scene and surface cache), so it is opt-in: measure it.
     int   scope_lumen = -1;
     // scopeppgrade: copy the game's COLOUR GRADE from its camera onto the capture -- the LUT, white
     // balance, the saturation/contrast/gamma/gain/offset sets, and the film curve, each with its
@@ -3182,13 +3189,52 @@ struct Config {
                                      // exposure-free -- pairs with the HDR RT + emissive lens;
                                      // 2 = FinalColorLDR was measured orders-of-magnitude dark
                                      // here, the capture's own eye adaptation never converging)
-    // 0 = pass LT through to Blam while SCOPING, so the game's native zoom engages underneath (its
-    // per-weapon zoom sound -- and, per the dev catalog, its viewmodel hide, HUD mask and halved
-    // look speed). Scope path only: the gripzoom grenade path eats LT regardless, because a throw
-    // is not a zoom. HOLD MODE ONLY: under scopehold=0 LT is eaten whatever this says, because the
-    // game's zoom is hold-to-zoom and would drop on every release while a toggled pane stayed up.
-    // Under trial 2026-09-27, not canonized.
-    bool  scope_eat_lt      = true;
+    // What the left trigger does to the GAME while our scope is up:
+    //   1 = eat it (default): the game never zooms.
+    //   0 = pass it through, so the game's native zoom engages underneath. That brings each
+    //       weapon's zoom SOUND, and also -- measured in headset 2026-08-23 -- the viewmodel hide
+    //       (bHideWeaponOnZoom) and the flat HUD's scope vignette, which blocks the compositor pane.
+    //       (Look speed is NOT halved on this title; that was inherited from tag data and measured
+    //       false the same day.) HOLD MODE ONLY: under scopehold=0 LT is eaten whatever this says,
+    //       because the game's zoom is hold-to-zoom and would drop on every release while a toggled
+    //       pane stayed up.
+    //   2 = eat it, and play the weapon's own zoom-in / zoom-out sound ourselves on the scope's
+    //       open / close edges -- the sound without the vignette or the viewmodel hide. The sound is
+    //       the weapon Blueprint's own: the game's reticle widget calls OnZoomIn()/OnZoomOut() on the
+    //       owner of its CurrentBlamWeaponComponent (BPI_AudioUI), and so do we, by name. Weapons
+    //       with no zoom sound simply play nothing. Reached through the hosted reticle, so it needs
+    //       aimwidget on.
+    // Scope path only either way: the gripzoom grenade path eats LT regardless (a throw is not a
+    // zoom). 0 and 2 are under trial 2026-09-27, not canonized.
+    int   scope_eat_lt      = 1;
+    // The scope render target's DISPLAY GAMMA (UTextureRenderTarget::TargetGamma). 0 = leave the
+    // engine's choice (default), which for our RTF_RGBA8 target is 1.0, i.e. LINEAR: the tonemapper
+    // pre-raises colour to the 2.2 power before its sRGB encode (PostProcessTonemap.cpp:268,
+    // PostProcessCombineLUTs.usf:318), so the bytes hold roughly linear values.
+    //
+    // THE MISMATCH THIS EXISTS TO TEST (read from the 5.5.4 source and a live log, 2026-09-27): the
+    // compositor atlas swapchain is B8G8R8A8_UNORM_SRGB (0x5b -- this runtime offers no 8-bit UNORM
+    // colour format), our copy into it is raw, so the compositor DECODES those linear bytes as sRGB
+    // a second time. The scope then shows roughly main^2.2: mid-grey ~3 EV dark, deep shadows ~5 EV,
+    // highlights nearly untouched. That is crushed shadow and bounce light -- the "lighting is
+    // different in the scope" report -- and no flat gain or bias can straighten a curve, which is
+    // why scopegain kept trading dim scenes for blown ones.
+    //
+    // 2.2 makes the tonemapper write display-encoded bytes, which is what the sRGB atlas expects
+    // (the widget slots already do). Zero cost, live. Test with scopegain=1 (or 0) and
+    // scopeautoexposurebias=0, because the current gain/bias were tuned to lift the crushed image.
+    // The in-world pane samples the same target, so it reads brighter under 2.2 -- it is only the
+    // fallback while the compositor quad presents. Matters for scopesrc=2 (the shipped source) only.
+    float scope_gamma       = 0.0f;
+    // LOCAL EXPOSURE on the capture: both LocalExposureHighlightContrastScale and ...Shadow...
+    // written with their overrides. -1 = leave (default; the capture inherits the game's 0.8/0.8).
+    // 1.0 = local exposure OFF in the capture (the pass is skipped, saving GPU); 0..1 = explicit.
+    //
+    // Why: local exposure's grid and blur are fractions of the SCREEN. A patch that sits inside one
+    // cell of the eye view fills the whole grid once magnified, so the capture compresses contrast
+    // across what the eye sees as a single region -- a flatter image than the main view shows for
+    // the same spot. Unmeasured in headset when written.
+    float scope_local_exp   = -1.0f;
     // Where the CAPTURE CAMERA gets its motion from, once attached to the rig:
     //   0 = re-anchor to the live aim ray every tick (default). The image looks exactly down the
     //       shot line, so the in-pane reticle stays truthful; any residual aim-signal jitter is
@@ -3559,10 +3605,17 @@ struct Config {
     // complete black" -- is the signature of a history converging to black, not of a frame that
     // renders black. 0 drops it. Costs the steady image: a diagnosis knob, not a comfort one.
     int   scope_persist    = 1;
-    // bCameraCutThisFrame, written EVERY tick. The renderer resets it to false after each capture
-    // (SceneCaptureRendering.cpp:1410), so a one-shot write measures nothing. A camera cut
-    // invalidates the temporal history every frame -- the same hypothesis as scopepersist from the
-    // other side, and the side that KEEPS the persistent state the exposure pin needs.
+    // bCameraCutThisFrame. The renderer resets it to false after each capture
+    // (SceneCaptureRendering.cpp:1410), so a one-shot write measures nothing.
+    //   0 = never (default).
+    //   1 = EVERY tick: invalidates the temporal history every frame -- the same hypothesis as
+    //       scopepersist from the other side, and the side that KEEPS the persistent state the
+    //       exposure pin needs.
+    //   2 = once, on the scope's OPEN edge. The capture's eye adaptation lives in its own persistent
+    //       view state and only advances while the scope renders, so a scope-in resumes the exposure
+    //       it had when last closed -- possibly in a different room -- and ramps from there. A cut
+    //       makes it jump straight to this scene's target (PostProcessEyeAdaptation.cpp:517). A
+    //       likely cause of "sometimes dark on scope-in"; unmeasured in headset when written.
     int   scope_cam_cut    = 0;
     // PostProcessBlendWeight. At 0 the capture's own PostProcessSettings do not blend in at all,
     // so if the black survives, nothing WE wrote into those settings caused it -- which is the

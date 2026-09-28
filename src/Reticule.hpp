@@ -177,4 +177,9 @@ void reticle_collapse_strays();              // hide every scanned reticle that 
 // proves samples correctly.
 uevr::API::UObject* make_color_rt(float r, float g, float b, float a, int size);
 
+// The game's own crosshair widget we are hosting (taken off the HUD, not a copy), or nullptr when
+// none is hosted or it has died with a HUD rebuild -- liveness-checked. GAME THREAD. Read by the
+// scope's zoom sound (scopeeat=2) for the widget's CurrentBlamWeaponComponent.
+uevr::API::UObject* reticule_hosted_widget();
+
 } // namespace halo
