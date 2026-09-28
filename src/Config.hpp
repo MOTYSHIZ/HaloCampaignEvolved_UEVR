@@ -1994,6 +1994,18 @@ struct Config {
     // 1500 sits between the two with room on both sides. It was a hardcoded 250 ms, which is BELOW
     // this title's worst hitch, so every hitch flashed the ring. Lower it only to reproduce that.
     int   xr_layer_hold_ms = 1500;
+    // WHEN IN THE GAME FRAME THE COMPOSITOR ATLAS IS COPIED (xrsrcphase). 1 = at the END of the
+    // engine tick (on_post_engine_tick), 0 = at its START (inside update(), the old place).
+    // WHY IT MATTERS: a scene capture clears its target and writes the image at the end of its own
+    // render work, and our copy is not ordered against that. At the START of a tick UE has just
+    // synced with the render thread, which is then STARTING the next frame -- scene captures first
+    // -- so the copy lands on the capture's clear far more often than chance: the pane's clear guard
+    // refused 16-44% of copies (2026-09-27 dev log), and every refusal repeats the previous image,
+    // which the player sees as the scope's frame rate dropping while the main view is fine. At the
+    // END of the tick the render thread has had the whole game frame to get past the capture, so
+    // the copy should find it finished -- and one frame fresher. The guard stays as the backstop;
+    // its "refused N more" line is the measurement for this key. Live.
+    int   xr_src_phase = 1;
 
     // ---- WORLD NAVPOINT MARKERS ON THE COMPOSITOR LAYER (xrlayernav) -----------------------
     //

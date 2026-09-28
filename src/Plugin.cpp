@@ -417,6 +417,14 @@ std::atomic<uint32_t> g_trace_faults{0};
 // take a parameter and must not call anything that could itself fault.
 std::atomic<uint32_t> g_tick_now{0};
 
+// THE ATLAS CAPTURE DUE AT THE END OF THIS TICK (xrsrcphase=1). update() stores its tick here where
+// it used to call xrsource_tick(); on_post_engine_tick takes it and runs xrsource_tick with it. So
+// XrSource still runs exactly once per update(), with that update's tick number -- which its
+// throttles are keyed on -- and never on a frame whose update() did not run. kNoXrsrcDue = nothing
+// due. Game thread only (both engine-tick callbacks); atomic only for the SEH-guarded hand-off.
+constexpr uint32_t    kNoXrsrcDue = 0xFFFFFFFFu;
+std::atomic<uint32_t> g_xrsrc_due{kNoXrsrcDue};
+
 // ---- THE REFLECTION SETTLE GATE ---------------------------------------------------------
 //
 // SYMBOLIZED 2026-09-06, which is what makes this a fix rather than a guess:
@@ -6637,7 +6645,19 @@ void update() {
     // inside, which submits a command list on the game's own D3D12 queue. Both are cheap in theory
     // and neither was measured, which is exactly the combination this project keeps getting caught
     // by. Now it is one line in the perf window.
-    if (features_xrsource_wanted()) { PerfScope _perf(PERF_XRSRC); xrsource_tick(tick); }
+    //
+    // WHEN, not just whether (xrsrcphase, Config.hpp): 1 defers it to the END of this engine tick,
+    // where the render thread has had the whole game frame to finish the scene captures it began
+    // when this tick started. 0 runs it here, as it always did.
+    if (features_xrsource_wanted()) {
+        if (g_cfg.xr_src_phase == 1) {
+            g_xrsrc_due.store(tick, std::memory_order_relaxed);
+        } else {
+            g_xrsrc_due.store(kNoXrsrcDue, std::memory_order_relaxed);   // a live 1 -> 0 switch
+            PerfScope _perf(PERF_XRSRC);
+            xrsource_tick(tick);
+        }
+    }
 
     // THE SCOPE, also above every early-out: it must HIDE the pane on ticks where the aim stack
     // is parked (menus, seats, invalid pose -- the paths that return early below), and the
@@ -12635,6 +12655,24 @@ public:
     void on_post_engine_tick(API::UGameEngine* engine, float delta) override {
         (void)engine; (void)delta;
         features_post_engine_tick();
+        // Same SEH shape as on_pre_engine_tick: no unwinding objects in the __try function, and the
+        // filter attributes a fault to its lane (PERF_XRSRC, set by the PerfScope in the body) and
+        // starts that lane's cooldown, exactly as when XrSource ran inside update().
+        __try {
+            post_tick_xrsource();
+        } __except (report_tick_fault(GetExceptionInformation()), EXCEPTION_CONTINUE_SEARCH) {
+        }
+    }
+
+    // THE ATLAS CAPTURE AT THE END OF THE TICK (xrsrcphase=1; see g_xrsrc_due and Config.hpp).
+    // Runs only when this tick's update() reached the XrSource point and deferred it, with that
+    // update's tick number. With xrsrcphase=0 nothing is ever due and this returns at once.
+    static void post_tick_xrsource() {
+        if (g_shutting_down.load(std::memory_order_acquire)) return;
+        const uint32_t due = g_xrsrc_due.exchange(kNoXrsrcDue, std::memory_order_relaxed);
+        if (due == kNoXrsrcDue) return;
+        PerfScope _perf(PERF_XRSRC);
+        xrsource_tick(due);
     }
 
     // VIEW LOCK -- the enforcement point. This callback owns the rotation that is actually used
