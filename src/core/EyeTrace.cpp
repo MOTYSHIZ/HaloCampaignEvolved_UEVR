@@ -1,6 +1,7 @@
 #include "core/EyeTrace.hpp"
 
 #include "Config.hpp"
+#include "UeObject.hpp"                // narrow, class_name_of: naming what a trace started inside
 #include "core/WorldScale.hpp"
 #include "uevr/API.hpp"
 
@@ -71,6 +72,10 @@ int32_t off_of(API::UStruct* s, const wchar_t* want) {
 int             g_tstate = -1;   // -1 unresolved, 0 failed, 1 at least one trace usable
 API::UObject*   g_cdo = nullptr;
 int32_t         g_hit_impact = -1, g_hit_location = -1;
+// OPTIONAL HitResult fields, for looking past a start-inside hit (run_trace). Absent = the trace
+// behaves exactly as it always did. Time is read as whatever the reflection says it is.
+int32_t         g_hit_time = -1, g_hit_comp = -1;
+bool            g_hit_time_double = false;
 std::vector<uint8_t> g_buf;
 
 // ---- the head clamp as a fraction of the head offset (eye_clamped_standing_origin)
@@ -130,20 +135,34 @@ bool traces_ready() {
     if (hit != nullptr) {
         g_hit_impact   = off_of(hit, L"ImpactPoint");
         g_hit_location = off_of(hit, L"Location");
+        // FHitResult::Component is a TWeakObjectPtr { int32 ObjectIndex; int32 SerialNumber } --
+        // resolved through the object array, as HitTrace.cpp does, never dereferenced as a pointer.
+        g_hit_comp     = off_of(hit, L"Component");
+        if (auto* tp = prop_of(hit, L"Time")) {
+            auto* fc = tp->get_class();
+            auto* fnm = (fc != nullptr) ? fc->get_fname() : nullptr;
+            const std::wstring tclass = (fnm != nullptr) ? fnm->to_string() : L"";
+            if (tclass == L"FloatProperty" || tclass == L"DoubleProperty") {
+                g_hit_time = tp->get_offset();
+                g_hit_time_double = (tclass == L"DoubleProperty");
+            }
+        }
     }
-    hblog("HEADBLOCK: HitResult ImpactPoint=%d Location=%d", g_hit_impact, g_hit_location);
+    hblog("HEADBLOCK: HitResult ImpactPoint=%d Location=%d Time=%d%s Component=%d", g_hit_impact,
+          g_hit_location, g_hit_time, g_hit_time_double ? "(double)" : "", g_hit_comp);
     const bool a = resolve_fn(cls, L"LineTraceSingle", &g_line, false);
     const bool b = resolve_fn(cls, L"SphereTraceSingle", &g_sphere, true);
     g_tstate = (g_cdo != nullptr && (a || b)) ? 1 : 0;
     return g_tstate == 1;
 }
 
-bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int channel,
-               API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact) {
-    if (!t.ok || g_cdo == nullptr) return false;
-    auto* world = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
-    if (world == nullptr) return false;
+namespace {
 
+// ONE call of the reflected trace. Fills the hit's location, impact point, Time (1 when the field did
+// not resolve, so a missing field never reads as "started inside") and component.
+bool trace_once(const TraceFn& t, API::UObject* world, const Vec3& a, const Vec3& b, float radius,
+                int channel, API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact,
+                float* out_time, API::UObject** out_comp) {
     g_buf.assign((size_t)t.size, 0);
     uint8_t* p = g_buf.data();
     if (t.ctx >= 0) *reinterpret_cast<API::UObject**>(p + t.ctx) = world;
@@ -181,7 +200,104 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int
         !std::isfinite(i.x) || !std::isfinite(i.y) || !std::isfinite(i.z)) return false;
     *out_loc = l;
     *out_impact = i;
+
+    *out_time = 1.0f;
+    if (g_hit_time >= 0 && t.out_hit + g_hit_time + (g_hit_time_double ? 8 : 4) <= t.size) {
+        *out_time = g_hit_time_double ? (float)*reinterpret_cast<const double*>(p + t.out_hit + g_hit_time)
+                                      : *reinterpret_cast<const float*>(p + t.out_hit + g_hit_time);
+    }
+    *out_comp = nullptr;
+    if (g_hit_comp >= 0 && t.out_hit + g_hit_comp + (int32_t)sizeof(int32_t) * 2 <= t.size) {
+        // A stale index yields nothing, which is the right failure -- the same rule as HitTrace.cpp.
+        const int32_t idx = *reinterpret_cast<const int32_t*>(p + t.out_hit + g_hit_comp);
+        auto* arr = API::get()->get_uobject_array();
+        if (arr != nullptr && idx >= 0 && idx < arr->get_object_count()) {
+            *out_comp = reinterpret_cast<API::UObject*>(arr->get_object(idx));
+        }
+    }
     return true;
+}
+
+// A BODY, not a wall: a skeletal mesh (the player's biped, a marine standing in him). Everything the
+// camera can clip into and must stay stopped by -- walls, rocks, the landscape, instanced foliage --
+// is a static mesh of some kind. Remembered for the last component AND its class -- an address can be
+// reused by a different object -- so a start-inside hit that repeats every tick costs two compares.
+bool is_body_component(API::UObject* comp) {
+    static const void* s_comp = nullptr;
+    static const void* s_cls  = nullptr;
+    static bool        s_body = false;
+    if (comp == nullptr) return false;
+    const void* cls = comp->get_class();
+    if (comp != s_comp || cls != s_cls) {
+        s_comp = comp;
+        s_cls  = cls;
+        s_body = class_name_of(comp).find(L"SkeletalMeshComponent") != std::wstring::npos;
+    }
+    return s_body;
+}
+
+// WHAT THE CAMERA IS INSIDE, by name -- the question the look-past exists to answer (is it the
+// player's own biped, a marine, something else?). With headblocklog or heightlog only, once per
+// actor and then every 30 s while it persists, never more than once in 2 s.
+void note_started_inside(const TraceFn& t, API::UObject* actor) {
+    if (g_cfg.head_block_log <= 0 && g_cfg.height_log <= 0) return;
+    static const void* s_last = nullptr;
+    static ULONGLONG   s_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_at < 2000) return;
+    if (actor == s_last && now - s_at < 30000) return;
+    s_last = actor;
+    s_at = now;
+    std::string name = "?";
+    if (const auto* fn = actor->get_fname()) name = narrow(fn->to_string());
+    hblog("HEADBLOCK: %ls started INSIDE %s '%s' -- looked past it: the camera is inside it, so it is "
+          "not a surface ahead", t.name, narrow(class_name_of(actor)).c_str(), name.c_str());
+}
+
+} // namespace
+
+bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int channel,
+               API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact,
+               TraceHit* out_hit) {
+    if (out_hit != nullptr) *out_hit = TraceHit{};
+    if (!t.ok || g_cdo == nullptr) return false;
+    auto* world = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
+    if (world == nullptr) return false;
+
+    // The caller's list, plus each actor the trace started inside, looked past one at a time (see
+    // the header). Room for the two retries is kept whatever the caller passed.
+    constexpr int kExtra = 2;
+    constexpr int kMax = 16;
+    API::UObject* ig[kMax];
+    int n = 0;
+    for (int i = 0; i < n_ignore && n < kMax - kExtra; ++i) ig[n++] = ignore[i];
+
+    for (int attempt = 0; attempt <= kExtra; ++attempt) {
+        Vec3 loc{}, imp{};
+        float time = 1.0f;
+        API::UObject* comp = nullptr;
+        if (!trace_once(t, world, a, b, radius, channel, ig, n, &loc, &imp, &time, &comp)) return false;
+        // LINE TRACES ONLY (t.radius < 0: the line function has no Radius). A line starts inside
+        // something only when the camera POINT is inside it. A sphere starts inside anything within
+        // its radius -- a real wall the body stands close to -- and that start hit is the correct
+        // answer for a sweep: looking past it would let the head into the wall.
+        // BODIES ONLY: a static mesh the camera is inside is a wall it clipped into, and there the
+        // start hit is right too -- looking past it would put the head through to the far side.
+        if (time > 0.0f || t.radius >= 0 || !is_body_component(comp)) {
+            *out_loc = loc;
+            *out_impact = imp;
+            if (out_hit != nullptr) out_hit->component = comp;
+            return true;
+        }
+        // Started inside a body. Look past its actor; a third start-inside is no hit -- it is
+        // still not a surface ahead.
+        API::UObject* actor = comp->get_outer();
+        if (out_hit != nullptr) { out_hit->inside = actor; out_hit->retries = attempt + 1; }
+        if (actor == nullptr || attempt == kExtra) return false;
+        note_started_inside(t, actor);
+        ig[n++] = actor;
+    }
+    return false;
 }
 
 } // namespace eyetrace

@@ -95,8 +95,33 @@ struct TraceFn {
 extern TraceFn g_line, g_sphere;
 
 bool traces_ready();
+
+// run_trace's report of WHAT it hit, for a caller's log. Pointers are valid for the calling tick only
+// (resolved through the object array just now) -- never keep them.
+struct TraceHit {
+    uevr::API::UObject* component = nullptr;   // the blocking hit's component, if it resolved
+    uevr::API::UObject* inside    = nullptr;   // an actor the trace STARTED inside and looked past
+    int                 retries   = 0;         // how many start-inside hits were looked past
+};
+
+// A trace that STARTS INSIDE A BODY reports it as a hit at the start (Time 0, the engine's
+// bStartPenetrating case), and a body around the camera is not a surface in front of the head or a
+// floor under the eye. The candidate is the player's own: his biped (BP_SpartansBipedActor_C) is a
+// separate actor from the camera pawn (BP_MeteoritePawn_C), so the pawn in ActorsToIgnore does not
+// cover it, and VehCam found the camera inside it in a seat ("your head is inside it, so it clips
+// constantly"). Whether that is what held the view on T&R is NOT measured -- the aim trace, which
+// ignores the same two actors, never once logged a hit on the biped -- so the log names what every
+// look-past was inside (headblocklog / heightlog). A start-inside hit on a body is looked past: the
+// trace runs again with that actor ignored, up to twice, and a trace that only ever starts inside
+// bodies reports no hit. Per trace, never remembered.
+//
+// ONLY bodies (skeletal meshes) and ONLY line traces. A static mesh the camera is inside is a wall it
+// clipped into, and a sphere sweep starts inside a real wall whenever the body stands within its
+// radius of one: in both the start hit is the right answer, and looking past it would put the head
+// through. If the engine does not report start-inside hits for a line trace at all, none of this runs.
 bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int channel,
-               uevr::API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact);
+               uevr::API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact,
+               TraceHit* out_hit = nullptr);
 
 // The HEADBLOCK log line, enabled by headblocklog or heightlog.
 void hblog(const char* fmt, ...);
