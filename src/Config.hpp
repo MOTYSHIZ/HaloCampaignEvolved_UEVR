@@ -3044,7 +3044,29 @@ struct Config {
     // capture ray tracing -- which also lets MegaLights and RT shadows run in it, if the main view
     // uses them. The capture gets its OWN Lumen scene, cold on every scope session's first frames.
     // Costs real GPU time (a second RT scene and surface cache), so it is opt-in: measure it.
+    //
+    // MEASURED 2026-09-27 (PresentMon, every-frame capture at 512, one spot): scope closed 13.7 ms
+    // GPU / 72 fps; scope open without Lumen 16.7 ms / 57 fps; with Lumen 19.2 ms / 45 fps. So Lumen
+    // adds ~2.6 ms GPU but ~4.6 ms of FRAME time: the capture's second Lumen scene also costs
+    // render-thread CPU. UE 5.5 always gives a Lumen capture its own Lumen scene
+    // (SceneCaptureRendering.cpp:1397-1403), so there is no sharing the main one -- the three keys
+    // below trim what that second scene does instead.
     int   scope_lumen = -1;
+    // The capture's REFLECTION method while scopelumen is on. -1 = follow scopelumen (Lumen
+    // reflections with scopelumen=1, the default); 0 = none; 1 = Lumen; 2 = screen-space. Lumen GI is
+    // what fixed the scope's lighting; ray-traced reflections are usually the costlier half, and a
+    // magnified view shows few mirror surfaces. Only acts while scopelumen >= 0.
+    int   scope_lumen_refl = -1;
+    // LumenSurfaceCacheResolution for the capture while Lumen is on. 1.0 (default) is what scopelumen
+    // has always forced; 0.5 is the engine's own default for captures (SceneCaptureRendering.cpp:885).
+    // Lower = a smaller surface cache for the capture's second Lumen scene. Clamped 0.5..1.
+    float scope_lumen_cache = 1.0f;
+    // One quality scale for the capture's Lumen: LumenFinalGatherQuality, LumenSceneLightingQuality,
+    // LumenReflectionQuality and LumenSceneDetail, each with its override. -1 = leave (default, the
+    // game's own values). 1.0 = the engine's default quality; 0.5 = cheaper; below ~0.25 gets noisy.
+    // LumenSceneDetail also trims the small objects the capture's Lumen scene tracks, which is
+    // render-thread work as well as GPU. Only matters while scopelumen is on.
+    float scope_lumen_quality = -1.0f;
     // scopeppgrade: copy the game's COLOUR GRADE from its camera onto the capture -- the LUT, white
     // balance, the saturation/contrast/gamma/gain/offset sets, and the film curve, each with its
     // paired bOverride_ bit.
@@ -3433,13 +3455,12 @@ struct Config {
     // But these three carry NO capture-source restriction and have never been tried:
     //
     // scopemainfamily -> bMainViewFamily. "Render with main view family (bIsMainViewFamily ==
-    //   true)". Rendering features that skip non-main families would then run for our capture.
-    //   The cheapest of the three and the one to try first.
+    //   true)". CORRECTED 2026-09-27 from the 5.5.4 source: in this engine version it only changes
+    //   WHEN a colour capture renders (SceneCaptureComponent.cpp:561-599), not how it is lit -- the
+    //   hoped-for "main-family-only features would then run" does not happen.
     int   scope_main_family = 1;   // -1 = leave alone, 0/1 = force
-    // scopemainres -> bMainViewResolution. Renders at the MAIN VIEW's resolution, ignoring the
-    //   render target's own dimensions, and implies main view family. Costs more, but would also
-    //   hand the pane a far sharper image than scoperes ever could.
-    int   scope_main_res    = -1;
+    // (scopemainres / bMainViewResolution was REMOVED 2026-09-27 at the user's call: rendering the
+    // scope at the eye resolution costs far more than any use it would get.)
     // scopemaincam -> bMainViewCamera. Renders from the MAIN CAMERA, which DESTROYS the whole
     //   point of the scope (it would show where the head looks, not where the gun points). It is
     //   here purely as a CONTROL: if the capture suddenly renders correctly with the main camera,
