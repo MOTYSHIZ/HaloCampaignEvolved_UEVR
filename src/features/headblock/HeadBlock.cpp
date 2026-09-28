@@ -130,7 +130,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     if (eff != s_eff) {
         if ((s_eff != -1 || eff != 0) && g_cfg.head_block_log > 0) {
             hblog("HEADBLOCK: running %s (requested %s, %s)", mode_name(eff), mode_name(cfg_mode),
-                  active ? "on foot" : "standing down: menu, vehicle or cutscene");
+                  active ? "on foot" : "standing down: menu, vehicle, stick mode or cutscene");
         }
         s_eff = eff;
         s_L = -1.0f;
@@ -246,14 +246,19 @@ void headblock_game_tick_after_leash() {
     const auto& g_in_menu       = *host::g_plugin_state.in_menu;
     const auto& g_cut2d_engaged = *host::g_plugin_state.cut2d_engaged;
     const auto& g_last_dt       = *host::g_plugin_state.last_dt;
+    const auto& g_stick_mode    = *host::g_plugin_state.stick_mode;
 
     // ---- HEAD BLOCK: trace the body-eye -> head offset the view callbacks publish and hand back
     // how far the head may extend. Stands down in menus, vehicles and the 2D cutscene screen, where
-    // the engine camera is not the body's eye.
+    // the engine camera is not the body's eye -- and in STICK MODE, which is every state where the
+    // game camera owns the view: an unmounted ride (the Pelican has no mount flag), a cutscene shown
+    // in VR, the death camera, the post-load window. Tracing from a chase or cinematic camera clamps
+    // the view against geometry near that camera, pulling it toward a body the head is not on.
     {
         const bool hb_active = (g_cfg.head_block != 0) && !g_in_menu.load() && !g_cut2d_engaged.load()
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
-                            && !g_view_seat_always.load(std::memory_order_relaxed);
+                            && !g_view_seat_always.load(std::memory_order_relaxed)
+                            && !g_stick_mode.load();
         API::UObject* hb_ignore[2] = {};
         int hb_n = 0;
         if (hb_active && (g_cfg.head_block == 1 || g_cfg.head_block == 2)) {
