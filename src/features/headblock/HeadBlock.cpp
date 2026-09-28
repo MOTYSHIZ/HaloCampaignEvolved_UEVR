@@ -9,6 +9,7 @@
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores
 #include "core/EyeTrace.hpp"
+#include "core/WorldScale.hpp"         // uevr_cm_per_metre_cached: the plausible head's reach
 #include "core/host/PluginState.hpp"
 #include "uevr/API.hpp"
 
@@ -33,6 +34,16 @@ std::atomic<float> g_pushed{0.0f};    // last applied pull-back, UE cm, for the 
 // ---- view-callback side (one thread)
 double g_shift[3]{};
 
+// A HEAD THIS FAR FROM ITS BODY IS NOT A HEAD. The measurement is broken -- the stale eye pair
+// core/EyeTrace.cpp now refuses was one way -- and clamping to it moves the rendered eye by the whole
+// error: 416 m into the sky on 2026-09-27, the trace having found the ground 2.6 m along a 419 m
+// "head offset". Ten real metres is past any play space, at any world scale. Such a reading is not
+// traced and not clamped: the eye stays where UEVR put it.
+constexpr double kHeadMaxMetres = 10.0;
+bool head_plausible(double len_cm) {
+    return len_cm <= kHeadMaxMetres * (double)uevr_cm_per_metre_cached();
+}
+
 float dist(const Vec3& a, const Vec3& b) {
     const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -56,7 +67,9 @@ int headblock_clamp_mode() {
 void headblock_clamp_shift(int mode, const double c[3]) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
         double s[3] = {0.0, 0.0, 0.0};
-        if (mode == 3) {
+        if (!head_plausible(std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]))) {
+            // no clamp: see head_plausible
+        } else if (mode == 3) {
             // Horizontal only (UE Z is up): a crouch is not a lean.
             const double lean = g_cfg.head_block_lean;
             const double lh = std::sqrt(c[0] * c[0] + c[1] * c[1]);
@@ -142,6 +155,26 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     const float len = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
     const float r = g_cfg.head_block_radius;
     const int ch = g_cfg.head_block_channel;
+
+    // A broken head measurement is neither traced nor clamped (head_plausible), and says so once.
+    static bool s_bad_prev = false;
+    const bool bad = !head_plausible((double)len);
+    if (bad != s_bad_prev) {
+        s_bad_prev = bad;
+        if (bad) {
+            API::get()->log_info("[Halo-CampE-UEVR] HEADBLOCK: the head measured %.0f cm from the body -- no head "
+                                 "gets that far from its body, so the measurement is wrong; nothing is clamped "
+                                 "until it is back in range", (double)len);
+        } else {
+            API::get()->log_info("[Halo-CampE-UEVR] HEADBLOCK: the head measurement is back in range (%.0f cm) -- "
+                                 "clamping again", (double)len);
+        }
+    }
+    if (bad) {
+        s_L = -1.0f;
+        g_allow.store(-1.0f, std::memory_order_relaxed);
+        return;
+    }
 
     float L_raw = -1.0f;
     bool hit = false;
