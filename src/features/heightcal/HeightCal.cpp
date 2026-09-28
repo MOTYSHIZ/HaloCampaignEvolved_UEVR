@@ -1088,7 +1088,7 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         }
         own = true;
     } else if (g_have_out && eff != -1) {
-        own = true;   // hold the last origin Y (menu, vehicle, cutscene, E_game not yet measured)
+        own = true;   // hold the last origin Y (menu, a seat or ride in stick mode, cutscene, E_game not yet measured)
     }
     if (own) *out_y = g_out;
 
@@ -1228,6 +1228,7 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
     const auto& g_in_menu       = *host::g_plugin_state.in_menu;
     const auto& g_cut2d_engaged = *host::g_plugin_state.cut2d_engaged;
     const auto& g_last_dt       = *host::g_plugin_state.last_dt;
+    const auto& g_stick_mode    = *host::g_plugin_state.stick_mode;
 
             // AUTO HEIGHT owns the origin's Y. While it is on, the vertical leash never acts: it
             // would drag Y back onto the head and break the floor-to-floor mapping.
@@ -1240,8 +1241,24 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
                 if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
                     if (auto* wep = rigc->get_outer()) hc_ignore[hc_n++] = wep;
                 }
+                // STICK MODE HOLDS, like a mounted seat. Absolute mode puts your real head height on
+                // the floor under the game camera, which is only right while he STANDS on it. A scripted
+                // ride is not always a mounted seat: the T&R opening Pelican ran stick mode with no Blam
+                // mount flag, so the floor trace could find the deck under a SEATED camera and lift the
+                // view by your height minus his seated eye -- reported as "sitting high in the Pelican".
+                // Stick mode is the seat signal VehCam already trusts, and it also covers a cutscene
+                // played in VR, death and the post-load window: no floor he stands on in any of them.
+                // The unarmed on-foot opening never enters it.
+                const bool stick = g_stick_mode.load();
                 const bool hc_active = !g_in_menu.load() && !g_cut2d_engaged.load()
-                                    && !halo::g_unit_mounted.load(std::memory_order_relaxed);
+                                    && !halo::g_unit_mounted.load(std::memory_order_relaxed)
+                                    && !stick;
+                static bool s_stick_logged = false;
+                if (stick != s_stick_logged) {
+                    s_stick_logged = stick;
+                    hlog(stick ? "HEIGHT: stick mode (a seat, a ride, a cutscene, death or a load) -- holding the view height"
+                               : "HEIGHT: stick mode ended -- the view height follows the floor again");
+                }
                 hc_own = halo::height_tick(hp, so.y, hc_active, game_window_focused(), g_last_dt.load(),
                                            hc_ignore, hc_n, &hc_y);
             }

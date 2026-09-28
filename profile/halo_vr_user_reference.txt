@@ -596,7 +596,9 @@
 # ------------------------------------------------------------------------- AUTO HEIGHT (heightcal)
 # Your view height in the game follows your head's height above your real floor, so you see the
 # world from your own height and a real crouch lowers your view -- and, with physical crouch on (the
-# default), crouches your character too. The Calibrate height button re-measures you.
+# default), crouches your character too. The Calibrate height button re-measures you. In a vehicle
+# seat, a ride such as a Pelican, a cutscene or after death it keeps the height it had on foot,
+# because Chief is not standing on a floor there; it picks up again when you are back on your feet.
 #
 # 1 = auto height on, 0 = the view height UEVR gives you.
 #heightcal=1
