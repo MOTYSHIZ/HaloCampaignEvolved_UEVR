@@ -35,6 +35,7 @@
 
 #include "XrLayer.hpp"
 #include "ScopeMask.hpp"
+#include "ScopeGuard.hpp"
 
 #include "Config.hpp"
 #include "ViewMode.hpp"   // which eyes UEVR renders per frame -- decides what `head` is below
@@ -641,6 +642,9 @@ bool slot_cell_coherent(int slot) {
 // purpose -- submitting both copies to the same queue is what orders capture-then-present without
 // any cross-queue fence of our own.
 constexpr int              GT_RING = 2;
+// ScopeGuard keeps one descriptor pair per ring slot and rewrites a slot's pair only once
+// xrlayer_capture_begin() has proven that slot's last list complete -- grow one, grow the other.
+static_assert(GT_RING == kScopeGuardSlots, "ScopeGuard's descriptor ring must match GT_RING");
 ID3D12CommandAllocator*    g_gt_alloc[GT_RING] = {};
 UINT64                     g_gt_alloc_fence[GT_RING] = {};
 int                        g_gt_ring  = 0;
@@ -4438,6 +4442,15 @@ bool xrlayer_capture_record(int slot) {
     // driver reached from a ResourceBarrier on an engine-owned resource whose GPU backing had gone.
     // It is recorded here, IMMEDIATELY after the caller re-validated this slot's chain end to end,
     // and that adjacency is the safety argument -- do not move validation away from it.
+    //
+    // THE PANE'S CLEARED-FRAME GUARD (scopeclearguard) comes first, while the target is still in
+    // ENGINE_SRC_COLOR: a scene capture CLEARS its target to black before writing each frame, and
+    // this copy is not synchronised with that, so it could land in between and put a black frame on
+    // the compositor. The guard probes the target and leaves predication ON, so only the copy below
+    // is skipped when the target still holds the clear. Barriers are not predicated. ScopeGuard.hpp.
+    const bool guarded = (slot == XRLAYER_SLOT_PANE) &&
+                         scopeguard_begin(g_device, g_gt_list, src, c.dim, g_gt_open_slot);
+
     D3D12_RESOURCE_BARRIER to_src{};
     to_src.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     to_src.Transition.pResource   = src;
@@ -4462,6 +4475,7 @@ bool xrlayer_capture_record(int slot) {
     src_back.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     src_back.Transition.StateAfter  = ENGINE_SRC_COLOR;
     g_gt_list->ResourceBarrier(1, &src_back);
+    if (guarded) scopeguard_end(g_gt_list);   // predication OFF before anything else is recorded
 
     // THE SCOPE PANE'S FEATHERED OVAL, immediately after its scene copy and while the atlas is
     // still COPY_DEST (capture_begin put it there; capture_submit takes it out). The call makes and
