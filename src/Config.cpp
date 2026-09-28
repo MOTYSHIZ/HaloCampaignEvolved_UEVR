@@ -131,7 +131,9 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopehold")   == 0) g_cfg.scope_hold     = (v != 0.0);
     else if (_stricmp(key, "scopebase")   == 0) g_cfg.scope_base_fov = clampf((float)v, 5.0f, 120.0f);
     else if (_stricmp(key, "scopesrc")    == 0) g_cfg.scope_capture_src = (int)clampf((float)v, 0.0f, 9.0f);
-    else if (_stricmp(key, "scopeeat")    == 0) g_cfg.scope_eat_lt   = (v != 0.0);
+    else if (_stricmp(key, "scopeeat")    == 0) g_cfg.scope_eat_lt   = (int)clampf((float)v, 0.0f, 2.0f);
+    else if (_stricmp(key, "scopegamma")  == 0) g_cfg.scope_gamma    = clampf((float)v, 0.0f, 4.0f);
+    else if (_stricmp(key, "scopelocalexp")==0) g_cfg.scope_local_exp = clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopedevray") == 0) g_cfg.scope_dev_ray  = (v != 0.0);
     else if (_stricmp(key, "scopeforce")  == 0) g_cfg.scope_force    = (v != 0.0);
     else if (_stricmp(key, "scopefpdepth")== 0) g_cfg.scope_fp_depth = (v != 0.0);
@@ -162,7 +164,7 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopeblitx")   == 0) g_cfg.scope_blit_x    = clampf((float)v, 0.0f, 1.0f);
     else if (_stricmp(key, "scopeblity")   == 0) g_cfg.scope_blit_y    = clampf((float)v, 0.0f, 1.0f);
     else if (_stricmp(key, "scopepersist") == 0) g_cfg.scope_persist   = (int)clampf((float)v, 0.0f, 1.0f);
-    else if (_stricmp(key, "scopecamcut")  == 0) g_cfg.scope_cam_cut   = (int)clampf((float)v, 0.0f, 1.0f);
+    else if (_stricmp(key, "scopecamcut")  == 0) g_cfg.scope_cam_cut   = (int)clampf((float)v, 0.0f, 2.0f);
     else if (_stricmp(key, "scopeppweight")== 0) g_cfg.scope_pp_weight = clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopedof")     == 0) g_cfg.scope_dof       = clampf((float)v, 0.0f, 64.0f);
     else if (_stricmp(key, "scopedoffocus")== 0) g_cfg.scope_dof_focus = clampf((float)v, 10.0f, 1000000.0f);

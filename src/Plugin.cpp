@@ -13633,7 +13633,7 @@ public:
         }
 
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
-        // keeps Blam's native zoom (viewmodel hide, zoomed look speed) from ever engaging under
+        // keeps Blam's native zoom (viewmodel hide, HUD scope vignette) from ever engaging under
         // the VR presentation. Menus and vehicle seats are excluded inside, so LT still means
         // whatever the game says it means there.
         //
@@ -13715,7 +13715,7 @@ public:
                 // NOT gated on scopeeat (changed 2026-09-27): that key now means "let the game zoom
                 // WHILE SCOPING" -- for its per-weapon zoom sound -- and a grenade throw is not a
                 // zoom. Gated on it, scopeeat=0 made every throw also fire the game's zoom, with its
-                // viewmodel hide and halved look speed. Menus and seats keep the game's own meaning.
+                // viewmodel hide and HUD vignette. Menus and seats keep the game's own meaning.
                 if (!blocked) state->Gamepad.bLeftTrigger = 0;
             }
         }
