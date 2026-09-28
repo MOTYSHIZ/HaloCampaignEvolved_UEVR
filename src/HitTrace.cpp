@@ -212,8 +212,9 @@ bool hit_trace_ready() {
     return g_state == 1;
 }
 
-bool hit_trace(const Vec3& start, const Vec3& end,
-               API::UObject* const* ignore, int ignore_count, Vec3* out_hit) {
+// One LineTraceSingle. hit_trace() below wraps it with the pass-through.
+static bool trace_once(const Vec3& start, const Vec3& end,
+                       API::UObject* const* ignore, int ignore_count, Vec3* out_hit) {
     if (!hit_trace_ready() || out_hit == nullptr) return false;
 
     auto* world = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
@@ -305,6 +306,75 @@ bool hit_trace(const Vec3& start, const Vec3& end,
         }
     }
     return true;
+}
+
+namespace {
+
+// ---- LOOKING PAST WHAT NEITHER A ROUND NOR AN EYE STOPS AT (tracepassthrough) -----------------
+//
+// Some level actors block the trace channel without being anything a player can see or shoot. The
+// Library (C20) is full of BP_AtmoArray_C, an atmosphere effect whose InnerRadiusCyl cylinder
+// blocks the Camera channel. On 2026-09-28 every surface the aim ray reported there for five
+// minutes was one of three of those cylinders. With one about a metre out, the reticule sat on it,
+// scaled for a 1 m hit, which near the 70 cm anchor is a fraction of its size, so in Mono it read
+// as tiny and far away. The scope converged its capture on that point (z=99 cm), which swung the
+// pane's view off the gun's line: "the zoom is wrong". Rounds collide with the Blam BSP and never
+// meet it.
+//
+// A hit whose ACTOR is one of these classes is looked past: the trace runs again with that actor
+// ignored. Matched on the class FName (two integer compares per hit, no string), resolved lazily.
+struct PassClass {
+    const wchar_t* name;
+    API::FName     fname{};
+    bool           resolved = false;
+    bool           logged   = false;
+};
+PassClass g_pass[] = {
+    { L"BP_AtmoArray_C" },
+};
+
+} // namespace
+
+bool hit_trace_passable(API::UObject* comp, API::UObject** out_owner) {
+    if (comp == nullptr || !g_cfg.trace_pass_through) return false;
+    API::UObject* owner = comp->get_outer();
+    if (owner == nullptr) return false;
+    API::UClass* cls = owner->get_class();
+    const API::FName* fn = (cls != nullptr) ? cls->get_fname() : nullptr;
+    if (fn == nullptr) return false;
+    for (PassClass& pc : g_pass) {
+        if (!pc.resolved) { pc.fname = make_fname(pc.name); pc.resolved = true; }
+        if (pc.fname.comparison_index == 0) continue;
+        if (fn->comparison_index != pc.fname.comparison_index || fn->number != pc.fname.number) continue;
+        if (!pc.logged) {
+            pc.logged = true;
+            const API::FName* cn = comp->get_fname();
+            API::get()->log_info("[Halo-CampE-UEVR] TRACE: looking past %ls (component '%ls') -- it blocks the "
+                                 "trace channel but not a round or the eye. The aim ray, reticule, scope focus, "
+                                 "navpoint and vehicle traces skip it; tracepassthrough=0 turns this off.",
+                                 pc.name, cn != nullptr ? cn->to_string().c_str() : L"?");
+        }
+        if (out_owner != nullptr) *out_owner = owner;
+        return true;
+    }
+    return false;
+}
+
+bool hit_trace(const Vec3& start, const Vec3& end,
+               API::UObject* const* ignore, int ignore_count, Vec3* out_hit) {
+    constexpr int kCallerMax = 12;   // today's callers pass at most 3
+    constexpr int kPassMax   = 4;    // actors looked past per trace
+    if (ignore == nullptr || ignore_count < 0) ignore_count = 0;
+    if (ignore_count > kCallerMax) return trace_once(start, end, ignore, ignore_count, out_hit);
+    API::UObject* ig[kCallerMax + kPassMax];
+    int n = 0;
+    for (int i = 0; i < ignore_count; ++i) ig[n++] = ignore[i];
+    for (int pass = 0;; ++pass) {
+        if (!trace_once(start, end, ig, n, out_hit)) return false;
+        API::UObject* owner = nullptr;
+        if (pass >= kPassMax || !hit_trace_passable(g_last_hit_component, &owner)) return true;
+        ig[n++] = owner;
+    }
 }
 
 // The component the last successful trace hit, or nullptr. Valid only until the next trace; the
