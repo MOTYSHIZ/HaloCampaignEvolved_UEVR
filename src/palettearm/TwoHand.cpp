@@ -9,6 +9,7 @@ void TwoHandHold::reset() {
     m_state = {};
     m_last_forward = {};
     m_has_last_forward = false;
+    m_far_s = 0.0f;
 }
 
 TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning& tuning) {
@@ -16,6 +17,7 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
 
     bool in_zone = false;
     bool latched = false;
+    bool broke_away = false;
     m_state.measured = false;   // set true only if the geometry below is actually computed
 
     if (input.gameplay_active && input.support_tracked && valid_basis(input.aim_basis)) {
@@ -70,8 +72,27 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
                   along < tuning.zone_max_along_m &&
                   lateral < tuning.zone_radius_m;
 
-        // Acquisition needs the zone; RETENTION needs only the button. See the header.
-        latched = input.support_grip_held && (was_latched || (in_zone && !features_two_hand_support_blocked()));
+        // THE BREAK-AWAY (TwoHandTuning::release_radius_m): a latched hand that has LEFT the gun --
+        // this far off the barrel line, or this far past either end of the zone -- for
+        // release_seconds lets go, grip or no grip. Drift inside that distance keeps the hold.
+        // Never below the grab radius itself, or a hand still in the zone could count as gone.
+        // Each frame counts at most 50 ms toward the window, so one hitched frame on a glitched
+        // pose can never fill it alone: at the 0.25 s default it takes five samples.
+        const float release_m = (tuning.release_radius_m > tuning.zone_radius_m) ? tuning.release_radius_m : 0.0f;
+        if (was_latched && release_m > 0.0f && m_state.measured) {
+            const bool far = lateral > release_m ||
+                             along < tuning.zone_min_along_m - release_m ||
+                             along > tuning.zone_max_along_m + release_m;
+            m_far_s = far ? m_far_s + std::clamp(input.delta_seconds, 0.0f, 0.05f) : 0.0f;
+            broke_away = far && m_far_s >= tuning.release_seconds;
+        } else {
+            m_far_s = 0.0f;
+        }
+
+        // Acquisition needs the zone; retention needs the button -- and the hand still near the gun.
+        latched = input.support_grip_held &&
+                  ((was_latched && !broke_away) || (in_zone && !features_two_hand_support_blocked()));
+        if (!latched) m_far_s = 0.0f;
 
         // Remember the line while it is good, so a tracking drop mid-hold can ease out along it
         // instead of snapping the weapon back to one-handed aim.
@@ -87,6 +108,7 @@ TwoHandState TwoHandHold::update(const TwoHandInput& input, const TwoHandTuning&
     m_state.in_zone       = in_zone;
     m_state.latched       = latched;
     m_state.latch_changed = (latched != was_latched);
+    m_state.broke_away    = broke_away && was_latched && !latched;
     if (!latched && m_state.blend <= 0.0f) m_has_last_forward = false;
 
     // Ease the influence rather than switching it. delta is clamped so a hitch or a debugger pause

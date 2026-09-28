@@ -4,6 +4,9 @@
 // feeds it poses and a button, it returns a latch and an aim basis. That is what lets
 // Scripts\Verify-PaletteArm.ps1 drive a whole grab-and-release sequence deterministically with no
 // game attached, which is the only way the hysteresis below can be tested at all.
+// ONE EXCEPTION: update() asks features_two_hand_support_blocked() (features/hooks/TwoHandHooks.hpp,
+// the reload engine's rack zone) before taking a NEW hold. The harness stages that header and
+// defines the hook itself -- a new dependency here needs the same, or the suite stops compiling.
 //
 // Ported from elliotttate's HaloCampaignEvolved-UEVR (main.cpp @ 62ee34f) with permission; the
 // mechanism is credited there to Halo-MCC-VR's headset-tuned barrel grab.
@@ -58,6 +61,26 @@ struct TwoHandTuning {
 
     // Seconds for the influence to fade fully in or out.
     float blend_seconds = 0.15f;
+
+    // ---- THE BREAK-AWAY. A latched hold survives the hand DRIFTING off the barrel (see update()),
+    // but not the hand LEAVING the gun: once it has been this far outside the grab zone -- off the
+    // barrel line, or past either end of it -- for release_seconds, the hold lets go even with the
+    // grip still down. Bringing the hand back to the zone takes it again.
+    //
+    // Field report, 2026-09-27: "sometimes my left hand just isn't offset appropriately to my
+    // controller", fixed by a tracking loss. The log had the support grip reading HELD for minutes
+    // at a stretch (20:53:16 -> 20:59:12 among others) with the hold latched throughout, so the drawn
+    // hand rode the forestock wherever the real one went -- and it let go only at a tracking drop,
+    // where the grip finally read released. A grip that reads held without the player meaning to
+    // hold the gun (a finger resting on it, or an action state that stuck) never ends the hold,
+    // whatever "the player has an unambiguous way to end it" assumed.
+    //
+    // 0.30 m is over three times the grab radius: no drift inside a real two-handed hold reaches it,
+    // and a hand at your side or on your chest is well past it. 0 = never (the old rule), and so is
+    // anything not above zone_radius_m. release_seconds must be CONTINUOUS -- coming back inside the
+    // distance restarts it -- and each frame counts at most 50 ms of it, so one hitch cannot fill it.
+    float release_radius_m = 0.30f;
+    float release_seconds  = 0.25f;
 
     // How many METRES one unit of the positions you pass in represents.
     //
@@ -122,6 +145,7 @@ struct TwoHandState {
     bool  in_zone = false;      // the support hand is on the barrel (whether or not it is latched)
     float blend   = 0.0f;       // 0..1, eased; the actual authority the hand-to-hand line has
     bool  latch_changed = false; // this frame -- the caller's cue to fire a haptic buzz
+    bool  broke_away = false;   // this frame's release was the break-away, not the grip (for the log)
 
     // THE MEASURED GEOMETRY, in metres, always -- even when the zone test fails.
     //
@@ -152,10 +176,12 @@ class TwoHandHold {
 public:
     // Advance one frame. Returns the new state.
     //
-    // THE ZONE ONLY GATES ACQUISITION, NEVER RETENTION. Once the grip button latches the hold, it
-    // persists until the button releases, even if the hand wanders outside the cylinder. That is
-    // deliberate: a hold that drops when your support hand drifts 10 cm is worse than no hold,
-    // and the player has an unambiguous way to end it.
+    // THE ZONE GATES ACQUISITION; RETENTION SURVIVES DRIFT. Once the grip button latches the hold,
+    // it persists while the button is held, even if the hand wanders outside the cylinder. That is
+    // deliberate: a hold that drops when your support hand drifts 10 cm is worse than no hold.
+    // What it does NOT survive is the hand leaving the gun: release_radius_m outside the zone for
+    // release_seconds lets go (see TwoHandTuning). "The player has an unambiguous way to end it"
+    // turned out false when the grip reads held without the player meaning it.
     TwoHandState update(const TwoHandInput& input, const TwoHandTuning& tuning);
 
     // The aim basis to actually use: the one-handed basis eased onto the hand-to-hand line.
@@ -183,6 +209,8 @@ private:
     // Last usable hand-to-hand direction, for the ease-out when support tracking drops.
     Vec3 m_last_forward{};
     bool m_has_last_forward = false;
+    // Seconds the latched hand has been past the break-away distance (see TwoHandTuning).
+    float m_far_s = 0.0f;
 };
 
 } // namespace halo::palettearm

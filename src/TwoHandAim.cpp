@@ -283,6 +283,13 @@ bool two_hand_parse_key(const char* key, double v) {
     // reachable: it is the A/B that says whether a report of "the weapon spins" is this or not.
     else if (_stricmp(key, "twohandminbase") == 0)
         s_tuning.min_baseline_m = (float)v;
+    // THE BREAK-AWAY, metres outside the grab zone (see TwoHandTuning::release_radius_m); 0 = never,
+    // the old "only the grip ends it" rule, kept reachable as the A/B for a report of a hand that
+    // lets go too easily.
+    else if (_stricmp(key, "twohandrelease") == 0)
+        s_tuning.release_radius_m = (v > 0.0) ? (float)v : 0.0f;
+    else if (_stricmp(key, "twohandreleasetime") == 0)
+        s_tuning.release_seconds = (v > 0.0) ? (float)v : 0.0f;
     else return false;
     return true;
 }
@@ -578,6 +585,12 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
     if (in.support_grip_held) s_grip_ever = true;
     s_support_grip.store(in.support_grip_held, std::memory_order_relaxed);
     s_hold_denied.store(deny_aim, std::memory_order_relaxed);
+#if HALO_VR_DEV
+    // How long the grip has read held without a break, for the break-away line below. Minutes
+    // point at a finger resting on the grip or a stuck action, not at a hold anyone meant.
+    static float s_grip_held_s = 0.0f;
+    s_grip_held_s = in.support_grip_held ? s_grip_held_s + delta_seconds : 0.0f;
+#endif
 
     // THE ZONE IS MEASURED IN THE GUN'S FRAME, by the rig block earlier in this same tick. Along =
     // down the barrel, lateral = off it. Handing the hold these two scalars is what moves the grab
@@ -793,6 +806,18 @@ void two_hand_update(float delta_seconds, bool gameplay_active, uint32_t tick) {
                 API::get()->log_info("[Halo-CampE-UEVR] TWOHAND: %s (zone=%d blend=%.2f)",
                                      st.latched ? "GRABBED" : "released",
                                      st.in_zone ? 1 : 0, st.blend);
+            });
+        // THE BREAK-AWAY, said without twohandlog: it is the release a player does not ask for, so
+        // a report of "my hand let go of the gun" or "it still sticks" is answered by this line.
+        HALO_VR_DEV_ONLY(
+            if (st.broke_away) {
+                API::get()->log_info("[Halo-CampE-UEVR] TWOHAND: released by BREAK-AWAY -- the support hand "
+                                     "left the gun (%.0f cm along, %.0f cm off the barrel; lets go past %.0f cm "
+                                     "outside the zone for %.2f s) with the grip still held, and held for "
+                                     "%.0f s without a break. twohandrelease=0 restores grip-only release.",
+                                     st.along_m * 100.0f, st.lateral_m * 100.0f,
+                                     tuning.release_radius_m * 100.0f, tuning.release_seconds,
+                                     s_grip_held_s);
             });
     }
 
