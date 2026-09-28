@@ -105,6 +105,12 @@ static bool parse_scope_key(const char* key, double v) {
     // -1 = leave the engine's forced-off state alone; 0..3 = force a method. See Config.hpp.
     else if (_stricmp(key, "scopelumen")==0)
         g_cfg.scope_lumen = (int)clampf((float)v, -1.0f, 3.0f);
+    else if (_stricmp(key, "scopelumenrefl")==0)
+        g_cfg.scope_lumen_refl = (int)clampf((float)v, -1.0f, 2.0f);
+    else if (_stricmp(key, "scopelumencache")==0)
+        g_cfg.scope_lumen_cache = clampf((float)v, 0.5f, 1.0f);
+    else if (_stricmp(key, "scopelumenquality")==0)
+        g_cfg.scope_lumen_quality = clampf((float)v, -1.0f, 4.0f);
     else if (_stricmp(key, "scopeppgrade")==0) g_cfg.scope_pp_grade = (v != 0.0);
     else if (_stricmp(key, "scopegain")==0) g_cfg.scope_gain = clampf((float)v, 0.0f, 256.0f);
     else if (_stricmp(key, "scopelayerfollowpane")==0)
@@ -148,7 +154,6 @@ static bool parse_scope_key(const char* key, double v) {
     else if (_stricmp(key, "scopeblit")    == 0) g_cfg.scope_blit      = (v != 0.0);
     else if (_stricmp(key, "scopebloom")   == 0) g_cfg.scope_bloom     = clampf((float)v, 0.0f, 32.0f);
     else if (_stricmp(key, "scopemainfamily")==0) g_cfg.scope_main_family = (int)clampf((float)v, -1.0f, 1.0f);
-    else if (_stricmp(key, "scopemainres") == 0) g_cfg.scope_main_res   = (int)clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopemaincam") == 0) g_cfg.scope_main_cam   = (int)clampf((float)v, -1.0f, 1.0f);
     else if (_stricmp(key, "scopeppcopy")  == 0) g_cfg.scope_pp_copy   = (v != 0.0);
     else if (_stricmp(key, "cutsceneblit") == 0) g_cfg.cutscene_blit   = (v != 0.0);
