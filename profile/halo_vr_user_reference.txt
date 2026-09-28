@@ -188,7 +188,8 @@
 #aimreticuledist=500
 # In vehicles: pushed further out to clear the vehicle. 0 = same as on foot.
 #aimreticuledistveh=2200
-# Reticule size in vehicles, as a fraction of the on-foot size.
+# Reticule size in vehicles, as a fraction of the on-foot size. The vehicle aim ring (vehmarkersize)
+# is sized from it too, so the two grow and shrink together.
 #aimreticulescaleveh=0.5
 
 # ---- Steadiness (visual only -- never changes where shots land). Milliseconds of smoothing:
@@ -609,15 +610,20 @@
 #vehseatgrip=1
 # Vehicle aim ring. A ring where the vehicle itself is aiming, beside your crosshair; once the vehicle
 # has caught up with your hand it sits around the crosshair. 0 hides it everywhere (each vehicle can
-# also turn it off with "aimMarker" in halo_vr_vehcams.json).
+# also turn it off with "aimMarker" in halo_vr_vehcams.json, and so can each camera and tethering
+# mode there).
 #vehmarker=1
-# Vehicle aim ring size. Its size against the crosshair's.
+# Vehicle aim ring size. Against the vehicle crosshair's: 1.0 draws the ring on a square the size of
+# the crosshair's, 1.5 half again as big -- the whole ring, line and all. From 0.05 to 10.
 #vehmarkersize=1.0
-# Vehicle aim ring radius. The ring's radius within its picture, from 0.02 to 0.48.
+# Vehicle aim ring radius. How far out the ring sits within its square, from 0.02 to 0.48 (0.48
+# reaches the edge). Raising it widens the ring without thickening its line.
 #vehmarkerradius=0.40
-# Vehicle aim ring thickness. Half the ring's thickness, as a fraction of its picture.
+# Vehicle aim ring thickness. Half the width of the ring's line, as a fraction of its square, from
+# 0.004 to 0.2.
 #vehmarkerthick=0.008
-# Vehicle aim ring dot. A dot in the ring's centre, as a fraction of its picture; 0 draws none.
+# Vehicle aim ring dot. A dot in the ring's centre, its radius as a fraction of the square, up to
+# 0.2; 0 draws none.
 #vehmarkerdot=0
 # Vehicle aim ring red. Red, from 0 to 1 (the ring is light purple by default).
 #vehmarkercr=0.80

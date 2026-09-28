@@ -2393,10 +2393,13 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     }
     if (_stricmp(key, "vehcamhidebody") == 0) { g_cfg.veh_cam_hide_body = (int)v; return true; }
     if (_stricmp(key, "vehmarker")      == 0) { g_cfg.veh_marker = (v != 0.0); return true; }
-    if (_stricmp(key, "vehmarkerradius") == 0) { g_cfg.veh_marker_radius = (float)v; return true; }
-    if (_stricmp(key, "vehmarkerthick") == 0) { g_cfg.veh_marker_thick = (float)v; return true; }
-    if (_stricmp(key, "vehmarkerdot")   == 0) { g_cfg.veh_marker_dot = (float)v; return true; }
-    if (_stricmp(key, "vehmarkersize")  == 0) { g_cfg.veh_marker_size = (float)v; return true; }
+    // The ring's geometry, clamped HERE to the ranges the catalog gives (generate_ring clamps the first
+    // three again as it draws, but a NaN passes both of its comparisons) -- and the size, which fed the
+    // quad unbounded above.
+    if (_stricmp(key, "vehmarkerradius") == 0) { if (std::isfinite(v)) g_cfg.veh_marker_radius = clampf((float)v, 0.02f, 0.48f); return true; }
+    if (_stricmp(key, "vehmarkerthick") == 0) { if (std::isfinite(v)) g_cfg.veh_marker_thick = clampf((float)v, 0.004f, 0.2f); return true; }
+    if (_stricmp(key, "vehmarkerdot")   == 0) { if (std::isfinite(v)) g_cfg.veh_marker_dot = clampf((float)v, 0.0f, 0.2f); return true; }
+    if (_stricmp(key, "vehmarkersize")  == 0) { if (std::isfinite(v)) g_cfg.veh_marker_size = clampf((float)v, 0.05f, 10.0f); return true; }
     if (_stricmp(key, "vehmarkercr")    == 0) { g_cfg.veh_marker_cr = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "vehmarkercg")    == 0) { g_cfg.veh_marker_cg = clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "vehmarkercb")    == 0) { g_cfg.veh_marker_cb = clampf((float)v, 0.0f, 1.0f); return true; }
