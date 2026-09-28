@@ -1232,6 +1232,8 @@ bool reticle_stray_check_due(uint32_t tick) {
 TrackedObject g_ret_hosted_widget;
 TrackedObject g_ret_widget_parent;
 
+uevr::API::UObject* reticule_hosted_widget() { return g_ret_hosted_widget.get(); }
+
 // Collapse every scanned reticle widget that is not the one we host. ESlateVisibility::Collapsed
 // is 1. Called from the end of the scan, so it costs nothing of its own -- it reuses the list the
 // sweep just built rather than looking again.
