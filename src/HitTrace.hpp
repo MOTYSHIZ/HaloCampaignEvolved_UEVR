@@ -46,8 +46,17 @@ bool hit_trace_ready();
 // nullptr/0 for none. This is not optional in practice: the player's own weapon is a separate actor
 // attached to the rig, so a trace from the eye hits it the moment an animation swings it across the
 // camera, and the reticule lands on the gun instead of on the world.
+//
+// A hit on an actor that blocks the channel but not a round or the eye (hit_trace_passable) is
+// looked past: the trace runs again with that actor ignored, up to 4 times.
 bool hit_trace(const Vec3& start, const Vec3& end,
                uevr::API::UObject* const* ignore, int ignore_count, Vec3* out_hit);
+
+// True when `hit_component` belongs to an actor a trace should look past -- one that blocks the
+// trace channel without being anything a player can see or shoot (BP_AtmoArray_C, the Library's
+// atmosphere cylinders). Fills `out_owner` with that actor, to add to the ignore list and trace
+// again. False for nullptr, or with tracepassthrough=0. GAME THREAD; logs once per class.
+bool hit_trace_passable(uevr::API::UObject* hit_component, uevr::API::UObject** out_owner);
 
 // The COMPONENT the last successful hit_trace() struck, or nullptr if it could not be resolved.
 //
