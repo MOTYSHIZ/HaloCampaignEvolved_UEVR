@@ -1050,7 +1050,31 @@ void apply_capture_lumen(API::UObject* cap, int mode, int refl, float cache) {
     // THE REFLECTION METHOD CAN DIFFER FROM THE GI METHOD (scopelumenrefl). Following `mode` is the
     // old behaviour -- except that EReflectionMethod has no value 3, so "Plugin GI" (mode 3) used to
     // write an out-of-range reflection method; following it now means None there.
-    const int refl_eff = (refl >= 0) ? refl : ((mode <= 2) ? mode : 0);
+    int refl_eff = (refl >= 0) ? refl : ((mode <= 2) ? mode : 0);
+
+    // LUMEN GI TAKES LUMEN REFLECTIONS, OR THE ENGINE CRASHES (2026-09-27, Steam AND Game Pass, on
+    // the first capture frame). UE 5.5.4 IndirectLightRendering.cpp: with Lumen async compute on,
+    // DispatchAsyncLumenIndirectLightingWork fills the specular slot (Textures[3]) only for LUMEN
+    // reflections (:949), and the composite pass then REPLACES its outputs with those async ones
+    // (:1131) -- discarding the black stand-in that the None (:1121) and SSR (:1115) branches wrote.
+    // FDiffuseIndirectCompositePS binds DiffuseIndirect_Lumen_3 = null, and a shipping build reads
+    // straight through it (EXCEPTION_ACCESS_VIOLATION reading 0x10 in the shader-binding walk). The
+    // async gate reads only cvars, never the view's reflection method, and the game's main view
+    // always runs Lumen reflections, which is why only our capture can reach it. So with Lumen GI
+    // the reflection method is Lumen, whatever was asked; None and ScreenSpace stay available with
+    // any other GI method.
+    if (mode == 1 && refl_eff != 1) {
+        static int s_said_for = -1;
+        if (s_said_for != refl_eff) {
+            s_said_for = refl_eff;
+            API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -- scopelumenrefl=%d (%s) REFUSED while "
+                                 "the capture's GI is Lumen: this engine build crashes on the first "
+                                 "capture frame with any non-Lumen reflection method under Lumen GI "
+                                 "(its async Lumen composite leaves the specular input null). Using "
+                                 "Lumen reflections.", refl_eff, refl_eff == 0 ? "None" : "ScreenSpace");
+        }
+        refl_eff = 1;
+    }
     struct Field { const wchar_t* value; const wchar_t* over; int v; };
     const Field fields[] = {
         { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod", mode },

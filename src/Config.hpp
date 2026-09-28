@@ -3068,6 +3068,8 @@ struct Config {
     // reflections with scopelumen=1, the default); 0 = none; 1 = Lumen; 2 = screen-space. Lumen GI is
     // what fixed the scope's lighting; ray-traced reflections are usually the costlier half, and a
     // magnified view shows few mirror surfaces. Only acts while scopelumen >= 0.
+    // UNDER LUMEN GI (scopelumen=1) ONLY 1 IS HONOURED: 0 and 2 crash the engine on the first capture
+    // frame, so apply_capture_lumen() refuses them and says why (Scope.cpp has the engine trace).
     int   scope_lumen_refl = -1;
     // LumenSurfaceCacheResolution for the capture while Lumen is on. 1.0 (default) is what scopelumen
     // has always forced; 0.5 is the engine's own default for captures (SceneCaptureRendering.cpp:885).
