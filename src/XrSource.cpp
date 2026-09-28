@@ -1536,6 +1536,80 @@ uint32_t probe_backoff_ticks(uint32_t attempts) {
     return step < kProbeCapTicks ? step : kProbeCapTicks;
 }
 
+// A NEW PROBE SUBJECT SETTLES BEFORE IT IS WALKED (2026-09-28). A render target's own resource
+// (rt+0x110 -> res+0x10, FTextureResource::TextureRHI, the same on both store binaries) is created
+// on the RENDER thread after the object exists, so a subject walked on the tick it appears can offer
+// only its transient pointers. On 2026-09-28 (Steam, dev build) the made-up probe target was walked
+// in the same millisecond it was created, and the walk latched rt+0x190 -- a path that reached this
+// target's texture while it was being built, and reaches nothing on a finished target. Every real
+// slot then failed to resolve for the whole session: the generated ring, and a black scope. The
+// night before, the Game Pass session hit the same race and got lucky (its first candidate was
+// refused; the re-walk ~0.8 s later found rt+0x110). ~0.4 s of settle is that much longer on the
+// ring at a level start; walking an unsettled subject can cost the whole session.
+constexpr uint32_t kProbeSettleTicks = 24;
+
+// A LATCHED CHAIN MUST PROVE ITSELF ON REAL TARGETS (2026-09-28). probe() validates the chain on ONE
+// subject; nothing checked it against the targets it is then used for. So: while no real slot has
+// resolved through the current chain, count the real resolves that fail; after enough of them, and
+// long enough after the latch that ordinary start-up churn is over, the CHAIN is the suspect, not
+// the slots -- drop it, say so, and re-probe. A chain that has resolved even ONE real target is
+// PROVEN and is never dropped for later failures: those are target churn (a re-host, a marker
+// mid-rebuild), and re-probing for them would reinstate the probe's hitch.
+//
+// AT MOST ONE EXTRA PROBE. If the re-probe latches the very offsets that were just dropped, that is
+// a second measurement on a settled subject agreeing with the first, and it is trusted outright --
+// so a session where no real target can resolve for some other reason pays one re-walk, never a
+// periodic one.
+bool     g_chain_proven     = false;
+uint32_t g_chain_fails      = 0;
+uint32_t g_chain_latch_tick = 0;
+uint32_t g_chain_drops      = 0;
+int32_t  g_dropped_res = -1, g_dropped_rhi = -1, g_dropped_ext = -1;   // the last chain dropped
+constexpr uint32_t kChainUnprovenFails    = 6;    // failed real resolves, none succeeding...
+constexpr uint32_t kChainUnprovenMinTicks = 96;   // ...and at least this long (~2-3 s) after the latch
+// AND A HARD CAP. If re-probes kept latching DIFFERENT wrong chains, dropping each one would make
+// the probe's walk periodic -- a stutter. After this many drops the current chain is kept, whatever
+// it resolves, and the log says so once.
+constexpr uint32_t kChainMaxDrops         = 3;
+
+// A real slot resolved through the current chain.
+void chain_note_success() {
+    g_chain_proven = true;
+    g_chain_fails  = 0;
+}
+
+// A real slot failed to resolve through the current chain.
+void chain_note_failure(uint32_t tick) {
+    if (g_chain_proven || !g_chain.valid()) return;
+    if (++g_chain_fails < kChainUnprovenFails) return;
+    if ((int32_t)(tick - g_chain_latch_tick) < (int32_t)kChainUnprovenMinTicks) return;
+    if (g_chain_drops >= kChainMaxDrops) {
+        g_chain_proven = true;   // stop counting; never drop this one
+        logf("the latched chain rt+0x%X / res+0x%X / rhi+0x%X still resolves no real target, but %u "
+             "chains have already been dropped this session -- keeping it rather than re-probing "
+             "periodically (that would stutter). Restart the game to measure afresh.",
+             (unsigned)g_chain.off_res, (unsigned)g_chain.off_rhi, (unsigned)g_chain.off_ext,
+             g_chain_drops);
+        return;
+    }
+    ++g_chain_drops;
+    logf("DROPPING the latched chain rt+0x%X / res+0x%X / rhi+0x%X: it has not resolved a single real "
+         "target (%u failed resolves in %u ticks). It was proven only on the probe subject -- most "
+         "likely walked before that target's own resource existed. Re-probing once the subject settles.",
+         (unsigned)g_chain.off_res, (unsigned)g_chain.off_rhi, (unsigned)g_chain.off_ext,
+         g_chain_fails, tick - g_chain_latch_tick);
+    g_dropped_res = g_chain.off_res;
+    g_dropped_rhi = g_chain.off_rhi;
+    g_dropped_ext = g_chain.off_ext;
+    g_chain = Chain{};
+    g_chain_fails = 0;
+    // The next walk treats its subject as NEW: the settle delay applies again, and the backoff starts
+    // from the fast cadence rather than from whatever it had decayed to.
+    g_probe_subject  = nullptr;
+    g_probe_attempts = 0;
+    g_next_poll      = tick;
+}
+
 void reset_slot(int s) {
     Target& t = g_t[s];
     if (t.fed != nullptr) { xrlayer_set_slot_source(s, nullptr); t.fed = nullptr; }
@@ -1640,8 +1714,10 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
                  "written through a stale address.", s);
             reset_slot(s);
         }
+        chain_note_failure(tick);   // an unproven chain that keeps failing real targets is dropped
         return;
     }
+    chain_note_success();
 
     const bool changed = (native != t.native);
     t.native = native;
@@ -1902,13 +1978,14 @@ void xrsource_tick(uint32_t tick) {
         if (subject == nullptr && want >= 16 && want <= 4096) subject = probe_render_target(want);
 #endif
 
-        // A new/changed subject re-arms the walk THIS tick: the previous subject's failures and its
-        // decayed interval must never delay a fresh target's first probe. Identity compare only --
-        // g_probe_subject is never dereferenced.
+        // A new/changed subject re-arms the walk after a short SETTLE: the previous subject's
+        // failures and its decayed interval must never delay a fresh target's first probe, but a
+        // target walked on the tick it appears has no resource of its own yet (kProbeSettleTicks).
+        // Identity compare only -- g_probe_subject is never dereferenced.
         if (subject != g_probe_subject) {
             g_probe_subject  = subject;
             g_probe_attempts = 0;
-            g_probe_ready    = tick;   // due immediately
+            g_probe_ready    = tick + kProbeSettleTicks;
             g_subject_empty  = false;  // a different target is a different question
         }
 
@@ -1939,6 +2016,17 @@ void xrsource_tick(uint32_t tick) {
             probe(subject, want, probe_mode, &g_chain);
             if (g_chain.valid()) {
                 for (auto& t : g_t) t.next_resolve = tick;   // resolve through it next tick
+                // A fresh latch starts UNPROVEN -- unless it is the very chain just dropped, which
+                // makes this a second measurement on a settled subject agreeing with the first.
+                g_chain_fails      = 0;
+                g_chain_latch_tick = tick;
+                g_chain_proven     = (g_chain.off_res == g_dropped_res &&
+                                      g_chain.off_rhi == g_dropped_rhi &&
+                                      g_chain.off_ext == g_dropped_ext);
+                if (g_chain_proven) {
+                    logf("the re-probe latched the chain that was just dropped -- two walks agree, so "
+                         "it is kept this time whatever the real targets do (no further re-probes).");
+                }
                 logf("LATCHED %s chain rt+0x%X / res+0x%X / rhi+0x%X. Re-validated on every resolve.",
                      g_chain.by_path ? "structural (learned resource path; no extent offset)"
                                      : "extent-matched",
@@ -2047,9 +2135,11 @@ void xrsource_tick(uint32_t tick) {
             if (t.native != nullptr) ++n_res;
             if (t.fed != nullptr) ++n_fed;
         }
-        logf("state: probe=%d feed=%d chain=%s xcheck=%d comps=%d resolved=%d fed=%d | %s",
-             probe_mode, (int)feed, g_chain.valid() ? "latched" : "none", g_crosscheck,
-             n_comp, n_res, n_fed, g_status);
+        // proven=0 with comps>0 and resolved=0 for long is the 2026-09-28 failure: a chain that
+        // validated on the probe subject and resolves no real target (chain_note_failure drops it).
+        logf("state: probe=%d feed=%d chain=%s proven=%d xcheck=%d comps=%d resolved=%d fed=%d | %s",
+             probe_mode, (int)feed, g_chain.valid() ? "latched" : "none", (int)g_chain_proven,
+             g_crosscheck, n_comp, n_res, n_fed, g_status);
 #if HALO_VR_DEV
         // THE SPLIT, for this one tick, so "the per-slot cost is X" is a measurement. cache=on/off
         // (xrlayersrccache) decides whether native/desc are paid every tick or only on a miss.
