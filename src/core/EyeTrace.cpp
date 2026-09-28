@@ -1,6 +1,7 @@
 #include "core/EyeTrace.hpp"
 
 #include "Config.hpp"
+#include "core/WorldScale.hpp"
 #include "uevr/API.hpp"
 
 #include <Windows.h>
@@ -38,10 +39,12 @@ TraceFn g_line, g_sphere;
 namespace {
 
 // ---- view-callback side (one thread)
-double g_pre[2][3]{};
-bool   g_have_pre[2]{};
-double g_raw_prev[2][3]{};
-bool   g_have_raw[2]{};
+double   g_pre[2][3]{};
+bool     g_have_pre[2]{};
+double   g_raw_prev[2][3]{};
+bool     g_have_raw[2]{};
+uint64_t g_raw_seq[2]{};   // the post sample count when each slot was last written
+uint64_t g_post_seq = 0;   // post samples so far, either eye
 
 // ---- reflection-resolved Kismet traces. Every offset comes from the UFunction and the HitResult
 // script struct, never from a written-down layout (the same discipline as HitTrace.cpp).
@@ -221,9 +224,25 @@ bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* 
     if (index == 0 || !g_have_raw[0]) {
         // The head CENTRE's offset from the body: this eye's offset, corrected by half of last
         // frame's eye-to-eye vector (eye 0 sits half a separation to one side of the centre).
+        //
+        // ONLY FROM A REAL PAIR: the two eyes rendered back to back. A slot that stops being fed keeps
+        // its last value forever, so "both slots ever seen" pairs a live eye with a frozen one once
+        // the rendering method changes under a running game -- Native Stereo -> Mono stops eye 1 --
+        // and half of the gap between them lands in the head offset, growing with every metre walked
+        // since the switch. 2026-09-27, Truth and Reconciliation: a level load put ~840 m between the
+        // eye frozen at the switch and the live one, the head offset read 419 m, and the head block's
+        // trace, hitting the ground 2.6 m along it, pushed the rendered eye 416 m into the sky.
+        // AimConverge learned the same lesson (its CYCLOPEAN EYE note). And a separation no head can
+        // have is not one: half a real metre is several times any IPD, at any world scale.
         double e[3] = {0.0, 0.0, 0.0};
-        if (g_have_raw[0] && g_have_raw[1]) {
-            for (int k = 0; k < 3; ++k) e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
+        if (g_have_raw[0] && g_have_raw[1] && g_raw_seq[1] == g_raw_seq[0] + 1) {
+            double m2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
+                m2 += e[k] * e[k];
+            }
+            const double cap = 0.5 * (double)uevr_cm_per_metre_cached();
+            if (!(m2 <= cap * cap)) e[0] = e[1] = e[2] = 0.0;
         }
         const double half = (index == 0) ? 0.5 : -0.5;
         double c[3];
@@ -239,6 +258,7 @@ bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* 
 
     for (int k = 0; k < 3; ++k) g_raw_prev[index][k] = raw[k];
     g_have_raw[index] = true;
+    g_raw_seq[index] = ++g_post_seq;
     return moved;
 }
 
