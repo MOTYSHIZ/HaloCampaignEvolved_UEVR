@@ -1,6 +1,7 @@
 #include "core/EyeTrace.hpp"
 
 #include "Config.hpp"
+#include "HitTrace.hpp"                // hit_trace_passable: the aim ray's look-past rule, shared
 #include "UeObject.hpp"                // narrow, class_name_of: naming what a trace started inside
 #include "core/WorldScale.hpp"
 #include "uevr/API.hpp"
@@ -264,9 +265,15 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int
     auto* world = reinterpret_cast<API::UObject*>(API::get()->get_local_pawn(0));
     if (world == nullptr) return false;
 
-    // The caller's list, plus each actor the trace started inside, looked past one at a time (see
-    // the header). Room for the two retries is kept whatever the caller passed.
-    constexpr int kExtra = 2;
+    // The caller's list, plus each actor looked past, one at a time. Two reasons to look past a hit:
+    //   * PASSABLE (hit_trace_passable, HitTrace.hpp): an actor that blocks the channel without being
+    //     anything a round or an eye stops at -- the Library's BP_AtmoArray_C cylinders, which blocked
+    //     the aim ray there for five minutes (2026-09-28) and block the Camera channel the head block
+    //     shares with it. Any trace, start-inside or not: standing INSIDE a cylinder must not pin the
+    //     head. The aim ray's own rule and switch (tracepassthrough), not a second list.
+    //   * A BODY the trace started inside (see the header).
+    // Room for the extra entries is kept whatever the caller passed.
+    constexpr int kExtra = 4;
     constexpr int kMax = 16;
     API::UObject* ig[kMax];
     int n = 0;
@@ -277,24 +284,29 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int
         float time = 1.0f;
         API::UObject* comp = nullptr;
         if (!trace_once(t, world, a, b, radius, channel, ig, n, &loc, &imp, &time, &comp)) return false;
+        API::UObject* owner = nullptr;
+        const bool passable = hit_trace_passable(comp, &owner);
         // LINE TRACES ONLY (t.radius < 0: the line function has no Radius). A line starts inside
         // something only when the camera POINT is inside it. A sphere starts inside anything within
         // its radius -- a real wall the body stands close to -- and that start hit is the correct
         // answer for a sweep: looking past it would let the head into the wall.
         // BODIES ONLY: a static mesh the camera is inside is a wall it clipped into, and there the
         // start hit is right too -- looking past it would put the head through to the far side.
-        if (time > 0.0f || t.radius >= 0 || !is_body_component(comp)) {
+        const bool inside_body = !(time > 0.0f) && t.radius < 0 && is_body_component(comp);
+        if (!passable && !inside_body) {
             *out_loc = loc;
             *out_impact = imp;
             if (out_hit != nullptr) out_hit->component = comp;
             return true;
         }
-        // Started inside a body. Look past its actor; a third start-inside is no hit -- it is
-        // still not a surface ahead.
-        API::UObject* actor = comp->get_outer();
-        if (out_hit != nullptr) { out_hit->inside = actor; out_hit->retries = attempt + 1; }
+        // Look past it. Out of attempts, it is no hit -- still not a surface ahead.
+        API::UObject* actor = passable ? owner : comp->get_outer();
+        if (out_hit != nullptr) {
+            if (inside_body) out_hit->inside = actor;
+            out_hit->retries = attempt + 1;
+        }
         if (actor == nullptr || attempt == kExtra) return false;
-        note_started_inside(t, actor);
+        if (!passable) note_started_inside(t, actor);   // a passable class logs itself, once
         ig[n++] = actor;
     }
     return false;

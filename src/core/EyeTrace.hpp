@@ -119,6 +119,11 @@ struct TraceHit {
 // clipped into, and a sphere sweep starts inside a real wall whenever the body stands within its
 // radius of one: in both the start hit is the right answer, and looking past it would put the head
 // through. If the engine does not report start-inside hits for a line trace at all, none of this runs.
+//
+// AND ANY TRACE LOOKS PAST A PASSABLE ACTOR (hit_trace_passable, HitTrace.hpp): one that blocks the
+// channel without being anything a round or an eye stops at -- the Library's atmosphere cylinders.
+// The aim ray's own rule and switch (tracepassthrough), so the two can never disagree about it; up to
+// four actors per trace, bodies included.
 bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int channel,
                uevr::API::UObject* const* ignore, int n_ignore, Vec3* out_loc, Vec3* out_impact,
                TraceHit* out_hit = nullptr);
