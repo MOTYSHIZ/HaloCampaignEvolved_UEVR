@@ -1265,10 +1265,15 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayerspace")  == 0) { g_cfg.xr_layer_space = (int)clampf((float)v, 0.0f, 2.0f); return true; }
     if (_stricmp(key, "xrlayerhrel")   == 0) { g_cfg.xr_layer_head_rel = (int)clampf((float)v, 0.0f, 1.0f); return true; }
     if (_stricmp(key, "xrlayersize")   == 0) { g_cfg.xr_layer_size  = clampf((float)v, 0.05f, 20.0f); return true; }
-    // Real cm; 0 off, any negative = auto (UEVR's UI_Distance - 30 cm), else a cap of at least 20 cm
-    // -- nearer than that is inside arm's reach and no longer a reticule anyone could focus on.
+    // Real cm; 0 off, a negative OR anything under 50 = auto (UEVR's UI_Distance - 30 cm), else a cap
+    // in cm. UNDER 50 IS AUTO ON PURPOSE (2026-09-27): "=1" is what anyone types for "on", and it used
+    // to clamp to a 20 cm reticule, a hand's width from the face -- split ~18 deg between the eyes
+    // when looking at anything past it, which the user reported as "a separately placed one per
+    // eye". No reticule nearer than half a metre is one anybody could focus on anyway.
     if (_stricmp(key, "xrlayerreticlefront") == 0) {
-        g_cfg.xr_layer_reticle_front = (v < 0.0) ? -1.0f : (v == 0.0) ? 0.0f : clampf((float)v, 20.0f, 100000.0f);
+        g_cfg.xr_layer_reticle_front = (v == 0.0) ? 0.0f
+                                     : (v < 50.0) ? -1.0f
+                                                  : clampf((float)v, 50.0f, 100000.0f);
         return true;
     }
     // No upper clamp worth guessing: the whole reason this key exists is that the right value is
