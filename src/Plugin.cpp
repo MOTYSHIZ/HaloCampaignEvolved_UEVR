@@ -6898,9 +6898,17 @@ void update() {
                 static uint32_t last = 0;
                 if (tick - last >= 60) {
                     last = tick;
-                    API::get()->log_info("[Halo-CampE-UEVR] HMDLEASH: absorbed drift lat=%.1fcm vert=%.1fcm "
-                                         "(limits %.0f/%.0f cm) origin -> (%.3f,%.3f,%.3f)",
-                                         lat * 100.0f, dy * 100.0f, g_cfg.hmd_leash_lat * 100.0f, g_cfg.hmd_leash_vert * 100.0f, nx, ny, nz);
+                    // WHAT MOVED vs WHAT WAS MEASURED. This used to print the head's drift as "absorbed",
+                    // which is only true when the leash itself did the moving. Auto height moves Y alone
+                    // and roomscale credits the body's travel, so the drift figure read as a lateral
+                    // absorption that never happened (a roomscale=0 partition, 2026-09-27).
+                    const float mx = nx - so.x, my = ny - so.y, mz = nz - so.z;
+                    API::get()->log_info("[Halo-CampE-UEVR] HMDLEASH: origin moved lat=%.1fcm vert=%.1fcm "
+                                         "(head was lat=%.1fcm vert=%.1fcm from it; hmdleash=%d limits %.0f/%.0f cm) "
+                                         "origin -> (%.3f,%.3f,%.3f)",
+                                         std::sqrt(mx * mx + mz * mz) * 100.0f, my * 100.0f, lat * 100.0f, dy * 100.0f,
+                                         (int)g_cfg.hmd_leash, g_cfg.hmd_leash_lat * 100.0f, g_cfg.hmd_leash_vert * 100.0f,
+                                         nx, ny, nz);
                 }
 #endif
             }
