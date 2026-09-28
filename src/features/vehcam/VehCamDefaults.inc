@@ -10,17 +10,17 @@ R"vehcams({
       "cameras": [
         { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [150, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
         { "name": "Over the Shoulder", "type": "chase", "origin": "vehicle", "offset": [-300, 300, 400], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] },
         { "name": "HangGlider", "type": "chase", "origin": "vehicle", "offset": [-10, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered Yaw", "rotationTracking": ["yaw"] },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] }
@@ -33,17 +33,17 @@ R"vehcams({
       "cameras": [
         { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [15, 0, 100], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
         { "name": "Follow", "type": "chase", "origin": "vehicle", "offset": [-450, 0, 220], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] },
         { "name": "OTS", "type": "chase", "origin": "vehicle", "offset": [-10, 60, 135], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
@@ -54,12 +54,12 @@ R"vehcams({
       "aimMarker": true,
       "seat": ["gunner"],
       "cameras": [
-        { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [0, 0, 150], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Cockpit", "type": "chase", "origin": "playerhead", "offset": [0, 0, 20], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30, "hideHead": true,
           "tethering": [
             { "name": "Untethered", "aimMarker": false },
-            { "name": "Tethered", "offset": [0, 0, 0], "rotationTracking": ["yaw", "pitch", "roll"] }
+            { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
-        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-450, 0, 180], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-450, 0, 350], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
             { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
@@ -71,14 +71,14 @@ R"vehcams({
       "defaultCamera": 0,
       "aimMarker": true,
       "cameras": [
-        { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [10, 0, 90], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Cockpit", "type": "chase", "origin": "playerhead", "offset": [0, 0, 20], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30, "hideHead": true,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
         { "name": "Third Person", "type": "chase", "origin": "seat", "offset": [-500, 0, 400], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
@@ -89,14 +89,14 @@ R"vehcams({
       "aimMarker": true,
       "seat": ["passenger"],
       "cameras": [
-        { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [10, 0, 90], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "First Person", "type": "chase", "origin": "playerhead", "offset": [0, 0, 20], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30, "hideHead": true,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
         { "name": "Third Person", "type": "chase", "origin": "seat", "offset": [-500, 0, 400], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
@@ -106,14 +106,19 @@ R"vehcams({
       "defaultCamera": 0,
       "aimMarker": true,
       "cameras": [
-        { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [0, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Cockpit", "type": "chase", "origin": "playerhead", "offset": [140, 0, 30], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
-        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-450, 0, 180], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-700, 0, 700], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
+            { "name": "Tethered", "rotationTracking": ["yaw"] }
+          ] },
+        { "name": "Cannon", "type": "chase", "origin": "MainTurret_M", "offset": [0, 0, 100], "leashMin": [-30, null, 100], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+          "tethering": [
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
@@ -124,7 +129,7 @@ R"vehcams({
       "aimMarker": true,
       "seat": ["gunner"],
       "cameras": [
-        { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [0, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Cockpit", "type": "chase", "origin": "playerhead", "offset": [0, 0, 20], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30, "hideHead": true,
           "tethering": [
             { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
@@ -143,17 +148,17 @@ R"vehcams({
       "cameras": [
         { "name": "Cockpit", "type": "chase", "origin": "seat", "offset": [40, 0, 130], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] },
-        { "name": "Cannon", "type": "chase", "origin": "vehicle", "offset": [-220, 0, 350], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Cannon", "type": "chase", "origin": "vehicle", "offset": [-240, 0, 350], "leashMin": [-280, -60, null], "leashMax": [-190, 60, 350], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
-            { "name": "Tethered", "offset": [-220, 0, 185], "rotationTracking": ["yaw"] }
+            { "name": "Untethered", "aimMarker": false },
+            { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] },
         { "name": "Follow", "type": "chase", "origin": "vehicle", "offset": [-700, 100, 700], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
@@ -169,12 +174,12 @@ R"vehcams({
             { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "offset": [25, 0, 30], "rotationTracking": ["yaw"] }
           ] },
-        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-220, 0, 185], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
+        { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-220, 0, 300], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
             { "name": "Untethered", "aimMarker": false },
-            { "name": "Tethered", "rotationTracking": ["yaw"] }
+            { "name": "Tethered", "origin": "playerhead", "offset": [-220, 0, 185], "rotationTracking": ["yaw"] }
           ] },
-        { "name": "Head", "type": "chase", "origin": "playerhead", "offset": [10, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": false, "collideMargin": 30,
+        { "name": "Head", "type": "chase", "origin": "playerhead", "offset": [10, 0, 0], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": false, "collideMargin": 30, "hideHead": true,
           "tethering": [
             { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw"] }
@@ -198,19 +203,26 @@ R"vehcams({
           ] }
       ]
     },
+    "Pelican": {
+      "match": ["pelican"],
+      "enabled": false,
+      "defaultCamera": 0,
+      "aimMarker": true
+    },
     "default": {
       "defaultCamera": 0,
       "aimMarker": true,
       "cameras": [
         { "name": "Cockpit", "type": "chase", "origin": "playerhead", "offset": [35, 0, 20], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
+            { "name": "Untethered", "aimMarker": false },
             { "name": "Tethered", "rotationTracking": ["yaw", "pitch", "roll"] }
           ] },
         { "name": "Third Person", "type": "chase", "origin": "vehicle", "offset": [-500, 0, 350], "locationTracking": ["yaw", "pitch", "roll"], "rotationTracking": [], "collide": true, "collideMargin": 30,
           "tethering": [
-            { "name": "Untethered" },
-            { "name": "Tethered", "rotationTracking": ["yaw"] }
+            { "name": "Untethered", "aimMarker": false },
+)vehcams"
+R"vehcams(            { "name": "Tethered", "rotationTracking": ["yaw"] }
           ] }
       ]
     }
