@@ -40,6 +40,10 @@ struct ID3D12Resource;
 
 namespace halo {
 
+// One descriptor pair per capture ring slot. MUST equal XrLayer's GT_RING (static_asserted there):
+// the "rewrite only after capture_begin proved the slot's last list complete" argument is per slot.
+constexpr int kScopeGuardSlots = 2;
+
 // Record the probe and turn predication ON for what follows. `ring_slot` is the capture ring slot
 // (0/1) whose previous GPU work xrlayer_capture_begin() has already proven complete -- the guard
 // keeps one descriptor pair per slot, so rewriting them can never race a list still in flight.

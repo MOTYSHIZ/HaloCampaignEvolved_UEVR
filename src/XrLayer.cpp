@@ -642,6 +642,9 @@ bool slot_cell_coherent(int slot) {
 // purpose -- submitting both copies to the same queue is what orders capture-then-present without
 // any cross-queue fence of our own.
 constexpr int              GT_RING = 2;
+// ScopeGuard keeps one descriptor pair per ring slot and rewrites a slot's pair only once
+// xrlayer_capture_begin() has proven that slot's last list complete -- grow one, grow the other.
+static_assert(GT_RING == kScopeGuardSlots, "ScopeGuard's descriptor ring must match GT_RING");
 ID3D12CommandAllocator*    g_gt_alloc[GT_RING] = {};
 UINT64                     g_gt_alloc_fence[GT_RING] = {};
 int                        g_gt_ring  = 0;

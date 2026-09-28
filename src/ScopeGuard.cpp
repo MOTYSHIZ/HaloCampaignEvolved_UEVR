@@ -18,7 +18,7 @@ namespace {
 
 constexpr uint32_t kMaxHold  = 3;     // consecutive cleared frames refused before one is let through
 constexpr UINT     kBufBytes = 256;   // predicate (8 B) + held count (4 B) + refused total (4 B), padded
-constexpr int      kSlots    = 2;     // one descriptor pair per capture ring slot (XrLayer's GT_RING)
+constexpr int      kSlots    = kScopeGuardSlots;   // XrLayer static_asserts GT_RING matches
 
 // ---- state, all latching (the ScopeMask rule: a failing device call is never retried per frame) ----
 bool                   s_dead     = false;
@@ -27,6 +27,9 @@ ID3D12RootSignature*   s_rootsig  = nullptr;
 ID3D12PipelineState*   s_pso      = nullptr;
 ID3D12DescriptorHeap*  s_heap     = nullptr;   // kSlots x { SRV of the target, UAV of the buffer }
 ID3D12Resource*        s_pred     = nullptr;   // the predicate buffer -- ours, never the engine's
+// Tracked in recording order. A BUFFER DECAYS TO COMMON when its ExecuteCommandLists completes, so
+// every guarded sequence ends by returning it to COMMON explicitly: the tracker then agrees with the
+// real state at the start of the next list (the guard runs at most once per capture list).
 D3D12_RESOURCE_STATES  s_pred_state = D3D12_RESOURCE_STATE_COMMON;
 UINT                   s_inc      = 0;
 #if HALO_VR_DEV
@@ -218,16 +221,19 @@ bool build(ID3D12Device* device) {
     return true;
 }
 
-// The UNORM view of the target's family. The engine's target is typeless here (DXGI 90), and an
-// SRV needs a concrete format of the same family; anything else is refused rather than guessed.
+// The SRV format for the target. A TYPELESS resource (the engine's target is DXGI 90 here) is viewed
+// as its UNORM member; a FULLY-TYPED one can only be viewed in its OWN format -- reinterpreting it
+// (say UNORM_SRGB as UNORM) is invalid without the relaxed-casting feature, and invalid view usage
+// can remove the device. An sRGB view decodes, but a zero still reads as exactly zero, so the probe
+// works the same. Anything outside the two 8-bit families is refused rather than guessed.
 DXGI_FORMAT view_format(DXGI_FORMAT f) {
     switch (f) {
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:   return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:   return DXGI_FORMAT_R8G8B8A8_UNORM;
         case DXGI_FORMAT_B8G8R8A8_UNORM:
-        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         case DXGI_FORMAT_R8G8B8A8_UNORM:
-        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return f;
         default:                              return DXGI_FORMAT_UNKNOWN;
     }
 }
@@ -338,6 +344,9 @@ void scopeguard_end(ID3D12GraphicsCommandList* list) {
         list->CopyBufferRegion(s_readback, 0, s_pred, 0, 16);
     }
 #endif
+
+    // Back to COMMON, which is where decay leaves it once this list completes (see s_pred_state).
+    transition(list, D3D12_RESOURCE_STATE_COMMON);
 }
 
 }  // namespace halo
