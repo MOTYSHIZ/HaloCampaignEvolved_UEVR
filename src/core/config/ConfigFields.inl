@@ -1500,8 +1500,10 @@
     float veh_marker_thick = 0.008f;    // vehmarkerthick: ring half-thickness, a fraction of its picture
     float veh_marker_dot = 0.0f;        // vehmarkerdot: centre dot radius; 0 = none -- it frames the crosshair
     float veh_marker_size = 1.0f;       // vehmarkersize: its size against the vehicle reticule's
-    float veh_marker_cr = 0.80f, veh_marker_cg = 0.60f, veh_marker_cb = 1.00f;   // vehmarkercr/cg/cb: light purple
-                                                                                // (the user's call, 2026-09-26)
+    float veh_marker_cr = 0.80f, veh_marker_cg = 0.55f, veh_marker_cb = 1.00f;   // vehmarkercr/cg/cb: light purple
+                                                                                // (the user's call, 2026-09-26;
+                                                                                // green canonized from their
+                                                                                // 0.55, 2026-09-27 -- was 0.60)
     float veh_marker_alpha = 0.9f;      // vehmarkeralpha
     // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
     // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
