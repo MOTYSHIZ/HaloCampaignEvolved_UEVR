@@ -254,7 +254,14 @@ bool resolve_openxr() {
     // dispatch table. Nothing here is added to `all` -- see the struct.
     g_xr.get_system         = (PFN_xrGetSystem)          get("xrGetSystem");
     g_xr.get_system_props   = (PFN_xrGetSystemProperties)get("xrGetSystemProperties");
-    g_xr.locate_space       = (PFN_xrLocateSpace)        get("xrLocateSpace");
+    // xrLocateSpace is NOT resolved through get(): get() marks the whole set MIXED when any one
+    // answer comes from another tier, and an optional helper must never be able to refuse this rung.
+    // It is taken only from the tier everything else came from, and dropped otherwise.
+    {
+        XrAttachTier lt = XrAttachTier::None;
+        void* const  lp = xrattach_resolve("xrLocateSpace", &lt);
+        g_xr.locate_space = (lp != nullptr && lt == first_tier) ? (PFN_xrLocateSpace)lp : nullptr;
+    }
 
     const bool all = g_xr.end_frame && g_xr.enumerate_formats && g_xr.create_swapchain &&
                      g_xr.destroy_swapchain && g_xr.enumerate_images && g_xr.acquire_image &&
@@ -2388,11 +2395,18 @@ XrCompositionLayerQuad g_scope_ret_quad{};
 // distance; nearer than the HUD, the reticule wins under either rule. UNPROVEN until the headset A/B.
 //
 // The head is located at the frame's own display time, in the quads' space; in view space (space
-// mode 2) it is the origin and needs no call. Anything missing leaves the quad where it was -- the
-// reticule at its true depth is the fail-safe answer, never a guessed head.
+// mode 2) it is the origin and needs no call. A frame whose locate fails reuses the last good head
+// for up to kHeadHoldFrames (so a tracking blip does not snap the reticule's depth and draw order
+// back and forth); with nothing recent the quad is left where it was -- the reticule at its true
+// depth is the fail-safe answer, never a guessed head.
 void reticule_front_clamp(XrCompositionLayerQuad& q, XrSpace space, XrTime when) {
     const float front = g_m_ret_front_m.load(std::memory_order_relaxed);
     if (!(front > 0.0f)) return;
+
+    constexpr uint32_t kHeadHoldFrames = 45;   // ~0.5 s at 90 Hz
+    static XrVector3f  s_last_head{};
+    static XrSpace     s_last_space = XR_NULL_HANDLE;
+    static uint32_t    s_stale      = kHeadHoldFrames + 1;   // nothing held yet
 
     XrVector3f head{0.0f, 0.0f, 0.0f};
     if (space != g_view_space) {
@@ -2407,17 +2421,24 @@ void reticule_front_clamp(XrCompositionLayerQuad& q, XrSpace space, XrTime when)
         }
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
         const XrResult r = g_xr.locate_space(g_view_space, space, when, &loc);
-        if (XR_FAILED(r) || (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) == 0) {
+        if (XR_SUCCEEDED(r) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0) {
+            head         = loc.pose.position;
+            s_last_head  = head;
+            s_last_space = space;
+            s_stale      = 0;
+        } else {
             static uint32_t s_says = 0;
             if (s_says < 3) {
                 ++s_says;
                 logf("reticule front clamp: the head could not be located this frame (XrResult %d, "
-                     "flags 0x%llx) -- left at the target's depth for the frame. CAPPED AT 3 PRINTS.",
-                     (int)r, (unsigned long long)loc.locationFlags);
+                     "flags 0x%llx) -- using the last good head for up to %u frames, then the target's "
+                     "own depth. CAPPED AT 3 PRINTS.",
+                     (int)r, (unsigned long long)loc.locationFlags, kHeadHoldFrames);
             }
-            return;
+            if (s_last_space != space || s_stale >= kHeadHoldFrames) return;
+            ++s_stale;
+            head = s_last_head;
         }
-        head = loc.pose.position;
     }
 
     const float dx = q.pose.position.x - head.x;
