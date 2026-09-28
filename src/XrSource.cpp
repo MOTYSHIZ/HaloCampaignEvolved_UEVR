@@ -1563,9 +1563,14 @@ constexpr uint32_t kProbeSettleTicks = 24;
 bool     g_chain_proven     = false;
 uint32_t g_chain_fails      = 0;
 uint32_t g_chain_latch_tick = 0;
+uint32_t g_chain_drops      = 0;
 int32_t  g_dropped_res = -1, g_dropped_rhi = -1, g_dropped_ext = -1;   // the last chain dropped
 constexpr uint32_t kChainUnprovenFails    = 6;    // failed real resolves, none succeeding...
 constexpr uint32_t kChainUnprovenMinTicks = 96;   // ...and at least this long (~2-3 s) after the latch
+// AND A HARD CAP. If re-probes kept latching DIFFERENT wrong chains, dropping each one would make
+// the probe's walk periodic -- a stutter. After this many drops the current chain is kept, whatever
+// it resolves, and the log says so once.
+constexpr uint32_t kChainMaxDrops         = 3;
 
 // A real slot resolved through the current chain.
 void chain_note_success() {
@@ -1578,6 +1583,16 @@ void chain_note_failure(uint32_t tick) {
     if (g_chain_proven || !g_chain.valid()) return;
     if (++g_chain_fails < kChainUnprovenFails) return;
     if ((int32_t)(tick - g_chain_latch_tick) < (int32_t)kChainUnprovenMinTicks) return;
+    if (g_chain_drops >= kChainMaxDrops) {
+        g_chain_proven = true;   // stop counting; never drop this one
+        logf("the latched chain rt+0x%X / res+0x%X / rhi+0x%X still resolves no real target, but %u "
+             "chains have already been dropped this session -- keeping it rather than re-probing "
+             "periodically (that would stutter). Restart the game to measure afresh.",
+             (unsigned)g_chain.off_res, (unsigned)g_chain.off_rhi, (unsigned)g_chain.off_ext,
+             g_chain_drops);
+        return;
+    }
+    ++g_chain_drops;
     logf("DROPPING the latched chain rt+0x%X / res+0x%X / rhi+0x%X: it has not resolved a single real "
          "target (%u failed resolves in %u ticks). It was proven only on the probe subject -- most "
          "likely walked before that target's own resource existed. Re-probing once the subject settles.",
