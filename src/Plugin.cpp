@@ -576,6 +576,11 @@ int veh_seat_grip_now(bool in_menu) {
     return veh_controls_live(in_menu) ? g_cfg.veh_seat_grip : 0;
 }
 
+// When the head-tap pause last fired (GetTickCount64; 0 = never). XInput hook thread only: written by the
+// pause block and read by the seated left X / Y lane, both in on_xinput_get_state, so that a left Y which
+// paused does not also step the vehicle camera on its release.
+ULONGLONG g_pause_head_at = 0;
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -13824,10 +13829,13 @@ public:
                     const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
                     if (s_primed) {
                         // One button: a press that started seated; a hold of vehcamresethold resets; a tap acts
-                        // on release.
+                        // on release. A left Y that PAUSED (the head-tap pause, below, fired within a quarter
+                        // second of this press -- the two read Y from different sources, a poll apart) is the
+                        // pause's alone: it steps no camera and resets nothing.
                         const int hold_ms = g_cfg.veh_cam_reset_hold_ms;
                         auto button = [t, hold_ms](bool now, bool was, ULONGLONG& down, bool& held, void (*tap)()) {
                             if (now && !was) { down = t; held = false; }
+                            if (down != 0 && !held && g_pause_head_at != 0 && g_pause_head_at + 250 >= down) held = true;
                             if (now && down != 0 && !held && hold_ms > 0 && t - down >= (ULONGLONG)hold_ms) {
                                 held = true;
                                 veh_cam_view_reset();
@@ -14279,11 +14287,16 @@ public:
             const bool y_now = (raw_btn & XINPUT_GAMEPAD_Y) != 0;   // Y = 0x8000 = left-hand upper face button
 
             // NEAR THE HEAD -- same test as the d-pad shift: nearest controller-to-HMD distance with
-            // arm/release hysteresis. Gated out in a menu or stick mode (vehicle/cutscene/death), so
-            // a pause can only be initiated from live gameplay. An empty (0,0,0) pose is a tracking
-            // dropout, not a hand at the head, and is skipped -- the same guard AimPoseGuard exists for.
+            // arm/release hysteresis, from the tracked poses alone (no arms or rig involved). Gated out
+            // in a menu, and in stick mode EXCEPT in a vehicle seat: stick mode is also every cutscene,
+            // death and load window, where a pause stays the pad's, but in a seat the player has nothing
+            // else to pause with while holding the motion controllers (the user, 2026-09-27: "I can't
+            // pause with motion controllers while in a vehicle"). A seat = the game's own mount flag
+            // with no cutscene up. An empty (0,0,0) pose is a tracking dropout, not a hand at the head,
+            // and is skipped -- the same guard AimPoseGuard exists for.
+            const bool seated_pause = g_stick_mode.load() && features_unit_mounted() && !g_cut2d_engaged.load();
             bool near_now = false;
-            if (!g_stick_mode.load() && !g_in_menu.load()) {
+            if ((!g_stick_mode.load() || seated_pause) && !g_in_menu.load()) {
                 const auto hi = API::VR::get_hmd_index();
                 Vec3 hp{}; Quat hq{};
                 if (hi >= 0 && get_pose((int32_t)hi, &hp, &hq, /*use_aim=*/false)) {
@@ -14309,8 +14322,10 @@ public:
             if (y_now && !s_pau_y_prev && near_now) {
                 s_pau_pulse = 3;
                 s_pau_ate_y = true;
+                g_pause_head_at = GetTickCount64();   // the seated left Y lane leaves this press alone
                 if (g_cfg.map_btn_log)
-                    API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START");
+                    API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START%s",
+                                         seated_pause ? " (in a vehicle seat)" : "");
             }
             if (!y_now) s_pau_ate_y = false;   // Y released: stop eating, so a later Y swaps normally
             s_pau_y_prev = y_now;

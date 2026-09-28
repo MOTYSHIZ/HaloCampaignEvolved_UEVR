@@ -49,6 +49,9 @@ unsigned short features_steal_dead_mask();
 // mounted in a vehicle or turret, so the steal stands down. Only the fork's unit-state service
 // knows this, and only while it is publishing, so with our features off it is always false.
 bool features_holster_steal_mounted();
+// The same answer for any caller on any thread: the player is mounted in a vehicle or turret seat
+// (the game's own mount flag), false whenever the unit-state service is not publishing.
+bool features_unit_mounted();
 
 // update() (game thread), right after scope_frame_end(tick).
 void features_game_tick_late();

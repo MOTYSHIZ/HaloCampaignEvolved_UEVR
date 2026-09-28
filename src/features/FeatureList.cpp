@@ -432,9 +432,10 @@ unsigned short features_steal_dead_mask() { return stability_steal_dead_mask(); 
 // so a cfg reload that switches the last consumer off WHILE MOUNTED would otherwise latch a stale
 // "mounted" for the rest of the session and stand the steal down for good. Inactive service = not
 // mounted = his line behaves exactly as it does with every feature of ours off.
-bool features_holster_steal_mounted() {
+bool features_unit_mounted() {
     return service_active(SVC_UNIT_STATE) && g_unit_mounted.load(std::memory_order_relaxed);
 }
+bool features_holster_steal_mounted() { return features_unit_mounted(); }
 void features_stick_mode_want(bool want) { stability_stick_mode_want(want); }
 bool features_stick_exit_after_death() { return stability_stick_exit_after_death(); }
 void features_turn_gate_note(bool fp_control_now) { stability_turn_gate_note(fp_control_now); }
