@@ -8,6 +8,7 @@
 #include "core/ViewState.hpp"
 #include "Math.hpp"                    // clampf
 #include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores
+#include "UeObject.hpp"                // narrow, class_name_of: the contact line names what it hit
 #include "core/EyeTrace.hpp"
 #include "core/WorldScale.hpp"         // uevr_cm_per_metre_cached: the plausible head's reach
 #include "core/host/PluginState.hpp"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 
 using namespace uevr;
 
@@ -64,9 +66,14 @@ int headblock_clamp_mode() {
     return g_eff_mode.load(std::memory_order_relaxed);
 }
 
-void headblock_clamp_shift(int mode, const double c[3]) {
+// Returns the shift as a FRACTION of c -- the clamp is always "this much of the head offset, back
+// toward the body", which is what lets everything built from room positions follow it exactly
+// (eye_clamped_standing_origin, core/EyeTrace.hpp).
+float headblock_clamp_shift(int mode, const double c[3], bool* horizontal_only) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
         double s[3] = {0.0, 0.0, 0.0};
+        double frac = 0.0;
+        bool horiz = false;
         if (!head_plausible(std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]))) {
             // no clamp: see head_plausible
         } else if (mode == 3) {
@@ -76,6 +83,8 @@ void headblock_clamp_shift(int mode, const double c[3]) {
             if (lh > lean && lh > 1e-6) {
                 const double k = 1.0 - lean / lh;
                 s[0] = c[0] * k; s[1] = c[1] * k;
+                frac = k;
+                horiz = true;
             }
         } else if (mode == 1 || mode == 2) {
             const double L = g_allow.load(std::memory_order_relaxed);
@@ -83,10 +92,13 @@ void headblock_clamp_shift(int mode, const double c[3]) {
             if (L >= 0.0 && len > L && len > 1e-6) {
                 const double k = 1.0 - L / len;
                 for (int k2 = 0; k2 < 3; ++k2) s[k2] = c[k2] * k;
+                frac = k;
             }
         }
         for (int k = 0; k < 3; ++k) g_shift[k] = s[k];
         g_pushed.store((float)std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]), std::memory_order_relaxed);
+        if (horizontal_only != nullptr) *horizontal_only = horiz;
+        return (float)frac;
 }
 
 bool headblock_clamp_apply(int mode, const double raw[3], double* x, double* y, double* z) {
@@ -179,11 +191,12 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     float L_raw = -1.0f;
     bool hit = false;
     Vec3 loc{}, imp{};
+    TraceHit th{};   // what was hit, for the contact line; this tick's pointers only
     if (len > 0.5f) {
         if (eff == 2) {
             // The sphere centre where the sweep stopped is the furthest the head centre can go.
             const Vec3 end{B.x + c.x, B.y + c.y, B.z + c.z};
-            if (run_trace(g_sphere, B, end, r, ch, ignore, n_ignore, &loc, &imp)) {
+            if (run_trace(g_sphere, B, end, r, ch, ignore, n_ignore, &loc, &imp, &th)) {
                 hit = true;
                 L_raw = dist(loc, B);
             }
@@ -191,7 +204,7 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
             // A ray to the head plus the radius; stop the head a radius short of the surface.
             const float k = (len + r) / len;
             const Vec3 end{B.x + c.x * k, B.y + c.y * k, B.z + c.z * k};
-            if (run_trace(g_line, B, end, 0.0f, ch, ignore, n_ignore, &loc, &imp)) {
+            if (run_trace(g_line, B, end, 0.0f, ch, ignore, n_ignore, &loc, &imp, &th)) {
                 hit = true;
                 L_raw = (std::max)(0.0f, dist(imp, B) - r);
             }
@@ -213,8 +226,23 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     if (hit != s_hit_prev) {
         s_hit_prev = hit;
         if (g_cfg.head_block_log > 0) {
-            if (hit) hblog("HEADBLOCK: contact (%s) head |%.1f| cm from body, allowed %.1f cm", mode_name(eff), len, L_raw);
-            else     hblog("HEADBLOCK: clear (%s), releasing from %.1f cm", mode_name(eff), s_L);
+            if (hit) {
+                // WHAT holds the head, by name: a wall reads as world geometry; anything on the
+                // player (a body part, a held thing) is a bug in what the trace ignores.
+                std::string what = "an unnamed component";
+                if (API::UObject* comp = th.component) {
+                    std::string cn = "?", on = "?";
+                    if (const auto* fn = comp->get_fname()) cn = narrow(fn->to_string());
+                    if (API::UObject* owner = comp->get_outer()) {
+                        if (const auto* fn = owner->get_fname()) on = narrow(fn->to_string());
+                    }
+                    what = narrow(class_name_of(comp)) + " '" + cn + "' of '" + on + "'";
+                }
+                hblog("HEADBLOCK: contact (%s) head |%.1f| cm from body, allowed %.1f cm, on %s",
+                      mode_name(eff), len, L_raw, what.c_str());
+            } else {
+                hblog("HEADBLOCK: clear (%s), releasing from %.1f cm", mode_name(eff), s_L);
+            }
         }
     }
     if (g_cfg.head_block_log > 1) {

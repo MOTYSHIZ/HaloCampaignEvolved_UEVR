@@ -728,7 +728,8 @@
 
 # -------------------------------------------------------------------------- HEAD BLOCK (headblock)
 # Keeps your head out of walls when you lean or step into them: your view stops short of the surface
-# instead of passing through it. It matters most with the leash off, which is the default.
+# instead of passing through it, and your hands and weapon stop with it. It matters most with the
+# leash off, which is the default.
 #
 # 1 = head block on, 0 = off. (2 feels for the wall with a sphere instead of a line; 3 only limits
 # how far your head may lean away from your body, without looking for walls at all.)

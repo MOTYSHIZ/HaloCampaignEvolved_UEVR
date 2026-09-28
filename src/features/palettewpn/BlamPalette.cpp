@@ -4851,8 +4851,9 @@ void blam_palette_publish_poses() {
     // anchor here (it was the original palette design on 8/14, removed chasing 0.5-parity -- the
     // wrong call for a hand-driven camera). Head motion now moves the view freely; the gun stays
     // where the hand is.
-    const auto so = API::VR::get_standing_origin();
-    const Vec3 anchor{so.x, so.y, so.z};
+    // The origin the RENDERED eye is at, so the gun moves with the eye when the head block holds it
+    // out of a wall (core/EyeTrace.hpp). hpos is this function's head read, above.
+    const Vec3 anchor = halo::rendered_standing_origin(&hpos);
     const Vec3 d_vr = quat_rotate(q_ro, Vec3{gpos.x - anchor.x, gpos.y - anchor.y, gpos.z - anchor.z});
     Vec3 d_xr{-d_vr.z, d_vr.x, d_vr.y};                                     // UE axes, metres
 
@@ -6583,8 +6584,9 @@ void blam_palette_republish_frame() {
         q_ro = Quat{ro.x, ro.y, ro.z, ro.w};
         if (g_cfg.rig_view_yaw < 0.0f) q_ro = quat_conj(q_ro);
     }
-    const auto so = API::VR::get_standing_origin();
-    const Vec3 anchor{so.x, so.y, so.z};
+    // The origin the RENDERED eye is at, so the gun moves with the eye when the head block holds it
+    // out of a wall (core/EyeTrace.hpp). hpos is this function's head read, above.
+    const Vec3 anchor = halo::rendered_standing_origin(&hpos);
     const Vec3 d_vr = quat_rotate(q_ro, Vec3{gpos.x - anchor.x, gpos.y - anchor.y, gpos.z - anchor.z});
     Vec3 d_xr{-d_vr.z, d_vr.x, d_vr.y};
     const Quat aim_ro = quat_mul(q_ro, aq);
