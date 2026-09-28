@@ -1512,11 +1512,12 @@
     int   xr_text_cell_w = 512;       // xrlayertextw: the panel's pixels, width  (next start)
     int   xr_text_cell_h = 320;       // xrlayertexth: the panel's pixels, height (next start)
     float xr_text_dist_cm = 130.0f;   // xrtextdist: how far in front of your eyes
-    float xr_text_up_cm = -20.0f;     // xrtextup: above (+) / below (-) your eye line
+    float xr_text_up_cm = -50.0f;     // xrtextup: above (+) / below (-) your eye line -- was -20, moved down by
+                                      //   the panel's own height (48 x 320/512 = 30 cm; the user, 2026-09-27)
     float xr_text_right_cm = 0.0f;    // xrtextright: right (+) / left (-) of where you look
     float xr_text_width_cm = 48.0f;   // xrtextwidth: the panel's width; its height follows its shape
     int   xr_text_fade_in_ms = 150;   // xrtextfadein
-    int   xr_text_hold_ms = 1500;     // xrtexthold
+    int   xr_text_hold_ms = 3000;     // xrtexthold: fully visible this long -- was 1500 (the user, 2026-09-27)
     int   xr_text_fade_out_ms = 1500; // xrtextfadeout
     float xr_text_bg = 0.55f;         // xrtextbg: the backing panel's opacity, 0 = text only
     float xr_text_scale = 1.0f;       // xrtextscale: text size within the panel (shrinks to fit)

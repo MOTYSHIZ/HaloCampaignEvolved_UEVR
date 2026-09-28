@@ -626,7 +626,7 @@
 # Notice distance. How far in front of your eyes a notice appears, in centimetres.
 #xrtextdist=130
 # Notice height. How far above (+) or below (-) your eye line a notice appears, in centimetres.
-#xrtextup=-20
+#xrtextup=-50
 # Notice sideways. How far right (+) or left (-) of where you look a notice appears, in centimetres.
 #xrtextright=0
 # Notice width. How wide a notice is, in centimetres; its height follows its shape.
@@ -634,7 +634,7 @@
 # Notice fade in. How long a notice takes to appear, in milliseconds.
 #xrtextfadein=150
 # Notice hold. How long a notice stays fully visible, in milliseconds.
-#xrtexthold=1500
+#xrtexthold=3000
 # Notice fade out. How long a notice takes to fade away, in milliseconds.
 #xrtextfadeout=1500
 # Notice backing. How solid the dark panel behind the writing is, from 0 (none) to 1.
