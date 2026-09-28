@@ -200,6 +200,16 @@ API::UObject* fp_weapon_actor() {
     return g_fp_weapon.get_checked(L"WeaponActor");
 }
 
+int player_trace_ignore(API::UObject** out, int cap) {
+    if (out == nullptr || cap <= 0) return 0;
+    int n = 0;
+    if (auto* pawn = API::get()->get_local_pawn(0)) out[n++] = reinterpret_cast<API::UObject*>(pawn);
+    if (n < cap) {
+        if (auto* wa = fp_weapon_actor()) out[n++] = wa;
+    }
+    return n;
+}
+
 API::UObject* fp_weapon_root() {
     // Same walk resolve_rig() uses in reverse (weapon -> RootComponent -> AttachParent == rig),
     // stopping one step earlier. get_checked, not get: actors on this title are pooled.

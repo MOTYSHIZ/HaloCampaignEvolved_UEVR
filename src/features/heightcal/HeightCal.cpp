@@ -6,7 +6,7 @@
 #include "Config.hpp"
 #include "core/Services.hpp"
 #include "Math.hpp"                    // clampf
-#include "Rig.hpp"                     // g_rig_component: the weapon the floor trace ignores
+#include "Rig.hpp"                     // player_trace_ignore: the pawn and the gun the floor trace ignores
 #include "core/EyeTrace.hpp"
 #include "core/WorldScale.hpp"         // S: UE cm per real metre, at the player's own scale
 #include "core/XrDisplayTime.hpp"
@@ -1235,12 +1235,11 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
             float hc_y = 0.0f;
             bool hc_own = false;
             if (g_cfg.height_cal != 0) {
+                // The aim ray's own list (player_trace_ignore): the pawn and the gun. This used the
+                // arms rig's OUTER, which is the pawn again, so a gun held under the eye was never
+                // ignored and the floor trace could measure the eye's height above the weapon.
                 API::UObject* hc_ignore[2] = {};
-                int hc_n = 0;
-                if (auto* pawn = API::get()->get_local_pawn(0)) hc_ignore[hc_n++] = pawn;
-                if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
-                    if (auto* wep = rigc->get_outer()) hc_ignore[hc_n++] = wep;
-                }
+                const int hc_n = player_trace_ignore(hc_ignore, 2);
                 // STICK MODE HOLDS, like a mounted seat. Absolute mode puts your real head height on
                 // the floor under the game camera, which is only right while he STANDS on it. A scripted
                 // ride is not always a mounted seat: the T&R opening Pelican ran stick mode with no Blam
