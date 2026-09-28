@@ -3096,7 +3096,17 @@ void vehcam_game_tick_vehicle() {
                     g_veh_aim_tx.store(t.x, std::memory_order_relaxed);
                     g_veh_aim_ty.store(t.y, std::memory_order_relaxed);
                     g_veh_aim_tz.store(t.z, std::memory_order_relaxed);
-                    const float ax = t.x - c.x, ay = t.y - c.y, az = t.z - c.z;
+                    // ON A MISS THE AIM IS NOT THE RETICLE'S HELD POINT. The held range is a DISPLAY rule
+                    // (a reticle that snaps to the sky on every upward sweep is worse than one that lags);
+                    // fed to the aim it puts the game camera's line -- metres behind and above the hand --
+                    // through a point floating at the last hit's distance, and that line dips away from
+                    // where the hand points: ~atan(offset / range), degrees at tens of metres, and the
+                    // round lands short of anything past it. On foot the same rule is harmless because
+                    // the offset is only head-to-hand. So with no surface the aim runs PARALLEL to the
+                    // hand's ray (a point 10 km out along it); with one, through the impact point as ever.
+                    const float aim_r = hitok ? range : 1000000.0f;
+                    const Vec3 ta{o.x + d.x * aim_r, o.y + d.y * aim_r, o.z + d.z * aim_r};
+                    const float ax = ta.x - c.x, ay = ta.y - c.y, az = ta.z - c.z;
                     const float al = std::sqrt(ax * ax + ay * ay + az * az);
                     const float aim_y = std::atan2(ay, ax) * RAD2DEG;
                     const float aim_p = std::asin(clampf(az / al, -1.0f, 1.0f)) * RAD2DEG;

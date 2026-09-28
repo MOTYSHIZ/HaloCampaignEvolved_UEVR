@@ -1440,8 +1440,11 @@
     // pitch -85..-95 deg and a 70-90 deg yaw offset from the on-foot calibration frame). The reticule
     // follows the same rule as on foot: drawn every frame on the pointing ray at the traced depth.
     bool  veh_aim_ray = true;
-    // vehaimfar: cm, how far the pointing ray is traced; also the range used before anything is hit.
-    float veh_aim_far = 10000.0f;
+    // vehaimfar: cm, how far the pointing ray is traced; also the range the reticle uses before anything
+    // is hit. 1 km (was 100 m until 2026-09-27): a surface beyond it counts as a MISS, and on a miss the
+    // aim can only run parallel to the hand -- right at infinity, off by the game camera's offset over the
+    // range at any real distance. A tank engages well past 100 m, so reach them as hits.
+    float veh_aim_far = 100000.0f;
     // vehcamreadout: 1 = a short readout on the text panel whenever the vehicle camera changes (you get
     // in, step with left Y / X, or the camera file is saved): the vehicle, the camera's number and name,
     // its tethering mode, and its settings -- the rotation tracking in yellow. Placed and timed by the xrtext* defaults below.
