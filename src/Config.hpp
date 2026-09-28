@@ -1712,8 +1712,9 @@ struct Config {
     // THE RETICULE FRONT CLAMP (xrlayerreticlefront), in REAL centimetres from your head -- not UE
     // units, because what it has to beat is UEVR's UI quad, which sits UI_Distance real metres away.
     //   0   off: the reticule sits on the surface the shot will hit, at that surface's true depth.
-    //   -1  auto: just in front of UEVR's UI (UI_Distance - 30 cm, read live from UEVR).
-    //   >0  never further than this many real centimetres.
+    //   -1  auto: just in front of UEVR's UI (UI_Distance - 30 cm, read live from UEVR). Any value
+    //       under 50 means auto too, so "=1" is "on" rather than a reticule 20 cm from the face.
+    //   >=50  never further than this many real centimetres.
     // Its size is scaled with the distance, so it covers the same angle either way.
     //
     // WHY IT EXISTS: our quads are appended after UEVR's layers, and OpenXR composites in list
