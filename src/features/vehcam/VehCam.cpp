@@ -3424,6 +3424,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             // THE VEHICLE'S FRAME NOW: R_mesh . C -- its forward, right and up as world directions.
             double VF[3], VR[3], VU[3];
             vehicle_axes(s_C, MX, MY, MZ, VF, VR, VU);
+            // ...and its forward kept apart: a playerhead or socket camera swaps its own frame in below,
+            // and getting in lines the view up with the VEHICLE's nose, not with the part the camera rides.
+            const double CF[3] = { VF[0], VF[1], VF[2] };
             // A PLAYERHEAD CAMERA RIDES THE CHIEF. His actor's frame, read now like the chassis, replaces the
             // vehicle's for everything this camera tracks -- so a turret that turns him but not its own mesh
             // turns this view -- and its origin is his head, rebuilt from the offset the tick measured in
@@ -3514,7 +3517,12 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
             //    so stepping cameras swings nothing -- a turret stays where it points. Until the ray aim has a
             //    solution (stick controls, or the frame the left stick click hands the aim to your hand), the
             //    GAME's own camera stands for it: it follows the aim within 1-2 deg (measured 2026-09-26);
-            //  - on getting in (the ride's first frame): the vehicle's forward.
+            //  - on getting in (the ride's first frame), a camera that holds its heading: the VEHICLE's
+            //    forward (CF, the chassis) -- NOT the frame of the part it rides. A checkpoint can leave a
+            //    turret turned far off the nose: loaded into a Scorpion on its turret camera with the cannon
+            //    ~140 deg round (2026-09-27 log: aim 38.7 against a hull at 179.7), the view lined up with the
+            //    cannon, the hand aimed from there, and every later camera -- which keeps where the vehicle
+            //    aims -- faced behind the tank until a tethered mode lined things up with the hull again.
             // Worked out here, where the view's own frame is, on the new camera's first frame (eye 0), with
             // this camera's frame before any turn; the tick adopts it into the turn it owns. Yaw only, about
             // your head, through the right stick's own turn.
@@ -3525,7 +3533,9 @@ void vehcam_stereo_pre_eye_seat(int index, UEVR_Vector3f* position, UEVR_Rotator
                 tracked_frame(VF, VR, VU, ac.rot_yaw, ac.rot_pitch, ac.rot_roll, (double)s_frozen_yaw, 0.0, F0, R0, U0);
                 const bool hand_aims = halo::veh_tp_motion_aim_selected();   // this frame may be the eye's first
                 double tgt[3] = { VF[0], VF[1], VF[2] };
-                if (!ac.rot_yaw && !rearm) {
+                if (!ac.rot_yaw && rearm) {
+                    for (int k = 0; k < 3; ++k) tgt[k] = CF[k];
+                } else if (!ac.rot_yaw) {
                     double ay = 0.0, ap = 0.0;
                     bool have_aim = false;
                     if (hand_aims && halo::g_veh_aim_valid.load(std::memory_order_relaxed)) {
