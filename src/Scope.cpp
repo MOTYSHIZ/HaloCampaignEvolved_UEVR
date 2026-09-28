@@ -113,8 +113,11 @@ struct CaptureLevers {
     float    bias       = 0.0f;    // 0 = "inherit": a config that never sets it writes nothing
     int      lumen      = -1;
     float    gain       = 0.0f;    // same convention as bias
+    int      lumen_refl = -2;      // -1 is meaningful (follow scopelumen), so seed outside the range
+    float    lumen_cache = -1.0f;
+    float    lumen_quality = -1.0f;   // -1 = inherit, the fresh state: nothing to write at creation
     int      grade      = -1;
-    int      main_view[3] = { -2, -2, -2 };
+    int      main_view[2] = { -2, -2 };   // bMainViewFamily, bMainViewCamera
     int      ppcopy     = -1;
     float    bloom      = -1.0f;
     int      ppcopy_tries = 0;     // failed blendable copies on THIS component (bounded retry)
@@ -1010,7 +1013,8 @@ void apply_capture_local_exposure(API::UObject* cap, float scale) {
 // EDynamicGlobalIlluminationMethod: 0 None, 1 Lumen, 2 ScreenSpace, 3 Plugin  (EngineTypes.h:438)
 // EReflectionMethod:                0 None, 1 Lumen, 2 ScreenSpace            (EngineTypes.h:459)
 // Both are byte-sized on this build, so one uint8 write covers TEnumAsByte and enum-class alike.
-void apply_capture_lumen(API::UObject* cap, int mode) {
+// `refl` is scopelumenrefl (-1 = follow `mode`) and `cache` is scopelumencache; see Config.hpp.
+void apply_capture_lumen(API::UObject* cap, int mode, int refl, float cache) {
     auto* cls = cap->get_class();
     auto* pps_prop = (cls != nullptr) ? cls->find_property(L"PostProcessSettings") : nullptr;
     auto* pps_struct = API::get()->find_uobject<API::UStruct>(
@@ -1043,10 +1047,14 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
         return;
     }
 
-    struct Field { const wchar_t* value; const wchar_t* over; };
+    // THE REFLECTION METHOD CAN DIFFER FROM THE GI METHOD (scopelumenrefl). Following `mode` is the
+    // old behaviour -- except that EReflectionMethod has no value 3, so "Plugin GI" (mode 3) used to
+    // write an out-of-range reflection method; following it now means None there.
+    const int refl_eff = (refl >= 0) ? refl : ((mode <= 2) ? mode : 0);
+    struct Field { const wchar_t* value; const wchar_t* over; int v; };
     const Field fields[] = {
-        { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod" },
-        { L"ReflectionMethod",                L"bOverride_ReflectionMethod" },
+        { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod", mode },
+        { L"ReflectionMethod",                L"bOverride_ReflectionMethod",                refl_eff },
     };
     int applied = 0;
     for (const auto& f : fields) {
@@ -1057,7 +1065,7 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
                                  narrow(f.value).c_str(), narrow(f.over).c_str());
             continue;
         }
-        *(pps + vp->get_offset()) = (uint8_t)mode;
+        *(pps + vp->get_offset()) = (uint8_t)f.v;
         if (auto* bp = static_cast<API::FBoolProperty*>(op)) {
             auto* byte = pps + bp->get_offset();
             *byte = (uint8_t)(*byte | bp->get_field_mask());
@@ -1065,17 +1073,22 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
         ++applied;
     }
 
-    // The surface cache is halved for captures too (:885). Restoring it only matters once Lumen is
-    // actually on, so it rides along rather than getting a key of its own.
-    if (mode > 0) {
+    // THE SURFACE CACHE (scopelumencache). The engine halves it for captures (:885); scopelumen used
+    // to force it back to 1.0, which is now the default of the key rather than a hardcoded value, so
+    // 0.5 -- the engine's own capture choice -- can be tried for cost. Only matters while either
+    // method is Lumen.
+    const bool lumen_used = (mode == 1) || (refl_eff == 1);
+    float cache_back = -1.0f;
+    if (lumen_used) {
         auto* vp = pps_struct->find_property(L"LumenSurfaceCacheResolution");
         auto* op = pps_struct->find_property(L"bOverride_LumenSurfaceCacheResolution");
         if (vp != nullptr && op != nullptr) {
-            *reinterpret_cast<float*>(pps + vp->get_offset()) = 1.0f;
+            *reinterpret_cast<float*>(pps + vp->get_offset()) = cache;
             if (auto* bp = static_cast<API::FBoolProperty*>(op)) {
                 auto* byte = pps + bp->get_offset();
                 *byte = (uint8_t)(*byte | bp->get_field_mask());
             }
+            cache_back = *reinterpret_cast<float*>(pps + vp->get_offset());
         }
     }
 
@@ -1084,9 +1097,8 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
     // view: hardware RT is disallowed for a scene capture unless this flag is set (SceneView.h:1936,
     // SceneCaptureRendering.cpp:865), and software Lumen is impossible on this title, which ships
     // r.GenerateMeshDistanceFields=False. A plain bool UPROPERTY, read when the capture's renderer is
-    // built, so it applies live. Only Lumen mode wants it; every other mode clears it.
-    const bool want_rt = (mode == 1);
-    cap->set_bool_property(L"bUseRayTracingIfEnabled", want_rt);
+    // built, so it applies live. Wanted whenever EITHER method is Lumen; cleared otherwise.
+    cap->set_bool_property(L"bUseRayTracingIfEnabled", lumen_used);
     int rt_back = -1;
     if (auto* p = cap->get_property_data<bool>(L"bUseRayTracingIfEnabled")) rt_back = *p ? 1 : 0;
 
@@ -1098,13 +1110,64 @@ void apply_capture_lumen(API::UObject* cap, int mode) {
     if (auto* p = pps_struct->find_property(L"ReflectionMethod"))
         refl_back = (int)*(pps + p->get_offset());
     static const char* kName[] = { "None", "Lumen", "ScreenSpace", "Plugin" };
-    API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -> mode %d (%s) -- %d of 2 fields applied, "
-                         "readback GI=%d refl=%d, bUseRayTracingIfEnabled=%d (-1 = not found). The "
-                         "engine forces BOTH to None for every scene capture "
-                         "(SceneCaptureRendering.cpp:881); this overrides that, and Lumen mode also "
-                         "grants the capture ray tracing, without which it cannot run here.",
-                         mode, (mode >= 0 && mode <= 3) ? kName[mode] : "?", applied,
-                         gi_back, refl_back, rt_back);
+    API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -> GI %d (%s), reflections %d (%s) -- %d of "
+                         "2 fields applied, readback GI=%d refl=%d, surface cache %.2f, "
+                         "bUseRayTracingIfEnabled=%d (-1 = not found). The engine forces both methods "
+                         "to None for every scene capture (SceneCaptureRendering.cpp:881); this "
+                         "overrides that, and any Lumen method also grants the capture ray tracing, "
+                         "without which it cannot run here.",
+                         mode, (mode >= 0 && mode <= 3) ? kName[mode] : "?",
+                         refl_eff, (refl_eff >= 0 && refl_eff <= 2) ? kName[refl_eff] : "?",
+                         applied, gi_back, refl_back, cache_back, rt_back);
+}
+
+// ONE QUALITY SCALE FOR THE CAPTURE'S LUMEN (scopelumenquality) -- see Config.hpp. Four per-view
+// FPostProcessSettings floats, each with its bOverride_ bit; negative = INHERIT (clear the four
+// overrides, the state a fresh capture starts in), like the bias/gain convention.
+void apply_capture_lumen_quality(API::UObject* cap, float q) {
+    auto* cls = cap->get_class();
+    auto* pps_prop = (cls != nullptr) ? cls->find_property(L"PostProcessSettings") : nullptr;
+    auto* pps_struct = API::get()->find_uobject<API::UStruct>(
+        L"ScriptStruct /Script/Engine.PostProcessSettings");
+    if (pps_prop == nullptr || pps_struct == nullptr) {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: lumen quality -- PostProcessSettings "
+                             "unresolved, NOTHING WRITTEN");
+        return;
+    }
+    auto* pps = reinterpret_cast<uint8_t*>(cap) + pps_prop->get_offset();
+    static const wchar_t* kFields[][2] = {
+        { L"LumenFinalGatherQuality",   L"bOverride_LumenFinalGatherQuality" },
+        { L"LumenSceneLightingQuality", L"bOverride_LumenSceneLightingQuality" },
+        { L"LumenReflectionQuality",    L"bOverride_LumenReflectionQuality" },
+        { L"LumenSceneDetail",          L"bOverride_LumenSceneDetail" },
+    };
+    int applied = 0;
+    for (const auto& f : kFields) {
+        auto* vp = pps_struct->find_property(f[0]);
+        auto* op = pps_struct->find_property(f[1]);
+        if (vp == nullptr || op == nullptr) {
+            API::get()->log_info("[Halo-CampE-UEVR] scope: lumen quality field NOT FOUND (%s / %s)",
+                                 narrow(f[0]).c_str(), narrow(f[1]).c_str());
+            continue;
+        }
+        auto* bp = static_cast<API::FBoolProperty*>(op);
+        auto* byte = pps + bp->get_offset();
+        if (q < 0.0f) {
+            *byte = (uint8_t)(*byte & ~bp->get_field_mask());
+        } else {
+            *reinterpret_cast<float*>(pps + vp->get_offset()) = q;
+            *byte = (uint8_t)(*byte | bp->get_field_mask());
+        }
+        ++applied;
+    }
+    if (q < 0.0f) {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: lumen quality -> inherit (%d of 4 overrides "
+                             "cleared) -- the game's own Lumen quality", applied);
+    } else {
+        API::get()->log_info("[Halo-CampE-UEVR] scope: lumen quality -> %.2f on final gather, scene "
+                             "lighting, reflections and scene detail (%d of 4 applied). 1.0 = engine "
+                             "default; lower is cheaper and noisier.", q, applied);
+    }
 }
 
 // ENABLE DEPTH OF FIELD ON THE CAPTURE. TRIED AS THE SHIELD-COLOUR FIX; IT IS NOT ONE.
@@ -4046,14 +4109,28 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // LUMEN. On change, seeded at -1 so a config that never sets the key writes nothing and the
     // capture keeps the engine's forced-off state -- the default must not change anyone's frame
     // time, since re-enabling it makes the capture run a second Lumen scene.
+    // Re-applied when ANY of scopelumen / scopelumenrefl / scopelumencache moves: the three are one
+    // configuration of the capture's Lumen, written together.
     int& s_lumen_applied = L.lumen;
-    if (s_lumen_applied != g_cfg.scope_lumen) {
+    if (s_lumen_applied != g_cfg.scope_lumen || L.lumen_refl != g_cfg.scope_lumen_refl ||
+        L.lumen_cache != g_cfg.scope_lumen_cache) {
         const int prev = s_lumen_applied;
         s_lumen_applied = g_cfg.scope_lumen;
+        L.lumen_refl    = g_cfg.scope_lumen_refl;
+        L.lumen_cache   = g_cfg.scope_lumen_cache;
         // -1 means the engine's own state: nothing to write for a capture that never had a mode, but
         // a live change BACK to -1 must undo the last one. It used to write nothing, so the capture
         // kept the Lumen overrides -- and now its ray tracing -- until it was rebuilt (review finding).
-        if (g_cfg.scope_lumen >= 0 || prev >= 0) apply_capture_lumen(cap, g_cfg.scope_lumen);
+        if (g_cfg.scope_lumen >= 0 || prev >= 0)
+            apply_capture_lumen(cap, g_cfg.scope_lumen, g_cfg.scope_lumen_refl, g_cfg.scope_lumen_cache);
+    }
+    // LUMEN QUALITY (scopelumenquality). On change; -1 is the fresh state, so a capture that never
+    // had a value writes nothing, and a live change back to -1 clears the overrides.
+    if (L.lumen_quality != g_cfg.scope_lumen_quality) {
+        const float prev = L.lumen_quality;
+        L.lumen_quality = g_cfg.scope_lumen_quality;
+        if (g_cfg.scope_lumen_quality >= 0.0f || prev >= 0.0f)
+            apply_capture_lumen_quality(cap, g_cfg.scope_lumen_quality);
     }
 
     // COLOUR GRADE. On change, and re-runnable: toggling the key off and on re-copies, which is how
@@ -4106,7 +4183,7 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
     // Applied on change, with a READBACK, because the whole point is that a null result has to
     // mean "not the cause" rather than "the write went nowhere" -- the mistake that put three
     // false conclusions in the findings doc when the console channel turned out to be inert.
-    // MAIN-VIEW-FAMILY LEVERS. All three are uint32:1 bitfields, so they are written through the
+    // MAIN-VIEW-FAMILY LEVERS. Both are uint32:1 bitfields, so they are written through the
     // FBoolProperty mask rather than a raw byte -- writing the byte would clobber the neighbouring
     // flags packed beside them. Each logs a readback, because "set a bool and nothing changed" is
     // the exact shape of a write that never landed.
@@ -4114,11 +4191,10 @@ static void scope_apply(API::UObject* rig, uint32_t tick) {
         struct MV { const wchar_t* name; int want; };
         const MV flags[] = {
             { L"bMainViewFamily",     g_cfg.scope_main_family },
-            { L"bMainViewResolution", g_cfg.scope_main_res },
             { L"bMainViewCamera",     g_cfg.scope_main_cam },
         };
         int* s_applied = L.main_view;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
             if (flags[i].want < 0 || s_applied[i] == flags[i].want) continue;
             s_applied[i] = flags[i].want;
             auto* c = cap->get_class();
