@@ -112,6 +112,9 @@ struct XrFns {
     // own guaranteed minimum rather than a guess.
     PFN_xrGetSystem                get_system             = nullptr;
     PFN_xrGetSystemProperties      get_system_props       = nullptr;
+    // OPTIONAL -- where the head is at the frame's display time, for the reticule front clamp
+    // (xrlayerreticlefront). Without it the clamp stays off and says so once; nothing else uses it.
+    PFN_xrLocateSpace              locate_space           = nullptr;
     bool ok = false;
 };
 XrFns g_xr;
@@ -204,6 +207,7 @@ bool resolve_openxr() {
             // budget and nothing else.
             f.get_system        = (PFN_xrGetSystem)                lget("xrGetSystem");
             f.get_system_props  = (PFN_xrGetSystemProperties)      lget("xrGetSystemProperties");
+            f.locate_space      = (PFN_xrLocateSpace)              lget("xrLocateSpace");
 
             // NOTE WHAT IS DELIBERATELY NOT REQUIRED: xrEndFrame. On this rung the LAYER owns that
             // call and we never make it, so demanding it would fail the shipping route over a
@@ -251,6 +255,14 @@ bool resolve_openxr() {
     // dispatch table. Nothing here is added to `all` -- see the struct.
     g_xr.get_system         = (PFN_xrGetSystem)          get("xrGetSystem");
     g_xr.get_system_props   = (PFN_xrGetSystemProperties)get("xrGetSystemProperties");
+    // xrLocateSpace is NOT resolved through get(): get() marks the whole set MIXED when any one
+    // answer comes from another tier, and an optional helper must never be able to refuse this rung.
+    // It is taken only from the tier everything else came from, and dropped otherwise.
+    {
+        XrAttachTier lt = XrAttachTier::None;
+        void* const  lp = xrattach_resolve("xrLocateSpace", &lt);
+        g_xr.locate_space = (lp != nullptr && lt == first_tier) ? (PFN_xrLocateSpace)lp : nullptr;
+    }
 
     const bool all = g_xr.end_frame && g_xr.enumerate_formats && g_xr.create_swapchain &&
                      g_xr.destroy_swapchain && g_xr.enumerate_images && g_xr.acquire_image &&
@@ -727,6 +739,11 @@ std::atomic<uint64_t> g_src_beat{0};
 // capturing the moment the source is dropped. This does not widen any check-then-use gap.
 constexpr uint32_t SOURCE_HOLD_MS_DEFAULT = 1500;
 std::atomic<uint32_t> g_m_hold_ms{SOURCE_HOLD_MS_DEFAULT};
+
+// THE RETICULE FRONT CLAMP (xrlayerreticlefront), resolved on the game thread to REAL METRES from
+// the head, 0 = off. Its own atomic, like the hold above, because auto mode reads UEVR's
+// UI_Distance -- a UEVR call the submit thread must never make. See reticule_front_clamp().
+std::atomic<float> g_m_ret_front_m{0.0f};
 
 // HOW MANY TIMES THE COMPOSITOR HAS ACTUALLY FALLEN BACK TO THE RING after presenting real art.
 //
@@ -2507,9 +2524,80 @@ bool bring_up(const Mirror& m) {
 // outlive this function's call into the runtime -- XrFrameEndInfo holds POINTERS to them.
 XrCompositionLayerQuad g_quads[XRLAYER_SLOTS]{};
 // The scope-pane reticule's quad. Its own storage rather than an eleventh g_quads entry, because
-// g_quads is indexed by DRAW ORDER within the slot budget and this quad is outside that accounting
+// g_quads is indexed by DROP ORDER within the slot budget and this quad is outside that accounting
 // -- it is derived from another slot's pose rather than owning a slot of its own.
 XrCompositionLayerQuad g_scope_ret_quad{};
+
+// THE RETICULE FRONT CLAMP (xrlayerreticlefront). SUBMIT THREAD, once per frame, only while on.
+//
+// Pulls the reticule quad along the line from the head to it until it is no further than the
+// resolved distance, and shrinks it by the same factor. Every point of the quad keeps its direction
+// from the head, so it covers exactly the same part of the view; only its stereo depth changes.
+//
+// WHY: by the OpenXR spec the list order already puts the reticule over UEVR's HUD quad, yet on
+// SteamVR's OpenXR runtime HUD elements were reported covering it (2026-09-27). A compositor that
+// draws quads NEAREST LAST does exactly that to a reticule sitting on the target, beyond UEVR's UI
+// distance; nearer than the HUD, the reticule wins under either rule. UNPROVEN until the headset A/B.
+//
+// The head is located at the frame's own display time, in the quads' space; in view space (space
+// mode 2) it is the origin and needs no call. A frame whose locate fails reuses the last good head
+// for up to kHeadHoldFrames (so a tracking blip does not snap the reticule's depth and draw order
+// back and forth); with nothing recent the quad is left where it was -- the reticule at its true
+// depth is the fail-safe answer, never a guessed head.
+void reticule_front_clamp(XrCompositionLayerQuad& q, XrSpace space, XrTime when) {
+    const float front = g_m_ret_front_m.load(std::memory_order_relaxed);
+    if (!(front > 0.0f)) return;
+
+    constexpr uint32_t kHeadHoldFrames = 45;   // ~0.5 s at 90 Hz
+    static XrVector3f  s_last_head{};
+    static XrSpace     s_last_space = XR_NULL_HANDLE;
+    static uint32_t    s_stale      = kHeadHoldFrames + 1;   // nothing held yet
+
+    XrVector3f head{0.0f, 0.0f, 0.0f};
+    if (space != g_view_space) {
+        if (g_xr.locate_space == nullptr || g_view_space == XR_NULL_HANDLE) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                logf("reticule front clamp: xrLocateSpace is not available on this route, so the clamp "
+                     "cannot apply -- the reticule stays at the target's depth");
+            }
+            return;
+        }
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        const XrResult r = g_xr.locate_space(g_view_space, space, when, &loc);
+        if (XR_SUCCEEDED(r) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0) {
+            head         = loc.pose.position;
+            s_last_head  = head;
+            s_last_space = space;
+            s_stale      = 0;
+        } else {
+            static uint32_t s_says = 0;
+            if (s_says < 3) {
+                ++s_says;
+                logf("reticule front clamp: the head could not be located this frame (XrResult %d, "
+                     "flags 0x%llx) -- using the last good head for up to %u frames, then the target's "
+                     "own depth. CAPPED AT 3 PRINTS.",
+                     (int)r, (unsigned long long)loc.locationFlags, kHeadHoldFrames);
+            }
+            if (s_last_space != space || s_stale >= kHeadHoldFrames) return;
+            ++s_stale;
+            head = s_last_head;
+        }
+    }
+
+    const float dx = q.pose.position.x - head.x;
+    const float dy = q.pose.position.y - head.y;
+    const float dz = q.pose.position.z - head.z;
+    const float d  = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(d > front)) return;   // already this close, or not a number: leave it alone
+    const float s = front / d;
+    q.pose.position.x = head.x + dx * s;
+    q.pose.position.y = head.y + dy * s;
+    q.pose.position.z = head.z + dz * s;
+    q.size.width  *= s;
+    q.size.height *= s;
+}
 
 // PRODUCE OUR LAYERS FOR THIS FRAME. SUBMIT THREAD. Returns how many pointers it wrote into
 // `out`, at most `out_capacity`; 0 means "nothing to add" and is the fail-open answer at every
@@ -2833,10 +2921,21 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     // caller knows whether it or the API layer is going to do the appending.
     uint32_t n_ours = 0;
 
-    // APPENDED IN REVERSE OF THE DROP ORDER, so the thing least willing to be dropped ends up LAST
-    // -- and last is topmost. The reticule therefore draws over the markers, which is the right way
-    // round: it is the only one of the nine that is aimed with.
-    for (int k = (int)n_use - 1; k >= 0; --k) {
+    // THE STACKING ORDER. OpenXR composites the list first to last, so LAST IS TOPMOST. Bottom to
+    // top: the markers and the grab guide (reverse drop order among themselves, so an objective sits
+    // over a floor weapon), then the scope pane, then the pane's own crosshair, then the reticule --
+    // the user's order, 2026-09-27: "reticle draws over other XR layer elements ... second under
+    // that would be the scope pane". Plain reverse drop order put the pane BELOW the markers, since
+    // it is shed before them when layers run short. How early a quad is DROPPED and how high it is
+    // DRAWN are separate decisions, and this is where the second one is made.
+    //
+    // With xrlayerhidescope on (the default) the reticule is retired while the pane is up, so in
+    // practice the pane tops the stack while scoped and the reticule does the rest of the time. And
+    // order is only half of it on SteamVR -- see reticule_front_clamp().
+    //
+    // g_quads stays indexed by DROP position k, so each quad keeps its own storage whatever order
+    // the pointers go out in.
+    auto emit_slot = [&](int k) -> XrCompositionLayerQuad& {
         const int s = draw[k].slot;
         const Cell& c = g_cell[s];
         XrCompositionLayerQuad& q = g_quads[k];
@@ -2873,21 +2972,31 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
         q.size = {fr.slot[s].size_m,
                   fr.slot[s].size_h_m > 0.0f ? fr.slot[s].size_h_m : fr.slot[s].size_m};
         out[n_ours++] = (const XrCompositionLayerBaseHeader*)&q;
+        return q;
+    };
+    int k_ret = -1, k_pane = -1;
+    for (int k = (int)n_use - 1; k >= 0; --k) {
+        const int s = draw[k].slot;
+        if (s == XRLAYER_SLOT_RETICULE) { k_ret  = k; continue; }
+        if (s == XRLAYER_SLOT_PANE)     { k_pane = k; continue; }
+        emit_slot(k);
     }
+    if (k_pane >= 0) emit_slot(k_pane);
 
     // ---- SCOPE PANE RETICULE -------------------------------------------------------------------
     //
-    // One extra quad, drawn LAST so it composites over the pane. Everything it needs already exists:
+    // One extra quad, drawn right after the pane so it composites over it (only the reticule goes
+    // above it, and that is retired while scoped by default). Everything it needs already exists:
     // the reticule's atlas cell (captured every frame anyway) and the pane's finished pose. No new
     // capture, no GPU copy, no blend code -- the compositor blends layers by itself.
     //
     // Guarded on every precondition rather than assumed, because this runs on the submit thread:
-    // feature on, pane actually drawn this frame, reticule cell exists, and room in the array.
-    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 && n_ours < out_capacity) {
-        bool pane_drawn = false;
-        for (uint32_t k = 0; k < n_use; ++k) {
-            if (draw[k].slot == XRLAYER_SLOT_PANE) { pane_drawn = true; break; }
-        }
+    // feature on, pane actually drawn this frame, reticule cell exists, and room in the array. The
+    // room test keeps a place for the reticule, which is appended after this quad: the reticule
+    // was counted in the slot budget and this quad never was, so it must not take the reticule's.
+    if (g_m_scope_ret.load(std::memory_order_relaxed) != 0 &&
+        n_ours + (k_ret >= 0 ? 1u : 0u) < out_capacity) {
+        const bool pane_drawn = (k_pane >= 0);
         const Cell& rc = g_cell[XRLAYER_SLOT_RETICULE];
         // WHY THE SCOPE RETICULE IS NOT THERE -- edge-triggered on the reason, so a steady state
         // costs nothing and every transition is recorded (including the transition INTO working).
@@ -3089,6 +3198,11 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
             out[n_ours++] = (const XrCompositionLayerBaseHeader*)&g_scope_ret_quad;
         }
     }
+
+    // THE RETICULE, LAST: the top of the stack. Its place is certain -- it was counted in n_use,
+    // which never exceeds the capacity, and the scope crosshair above only took a place while one
+    // was left for it.
+    if (k_ret >= 0) reticule_front_clamp(emit_slot(k_ret), space, info->displayTime);
 
     return n_ours;
 }
@@ -4132,6 +4246,55 @@ void xrlayer_tick() {
     // which runs before the Mirror is even loaded, and a torn value here is one frame of a slightly
     // different hold window -- harmless. Live-tunable like everything else in the mirror.
     g_m_hold_ms.store((uint32_t)g_cfg.xr_layer_hold_ms, std::memory_order_relaxed);
+
+    // THE RETICULE FRONT CLAMP -> real metres for the submit thread. Auto (-1) sits 30 cm inside
+    // UEVR's UI quad. UI_Distance is a UEVR setting the player moves by hand, so it is re-read every
+    // 64 ticks (~2 s) rather than per frame, and a read that fails keeps the last good value.
+    {
+        const float key = g_cfg.xr_layer_reticle_front;
+        float       front_m = 0.0f;
+        const char* from    = "xrlayerreticlefront";
+        if (key > 0.0f) {
+            front_m = key * 0.01f;
+        } else if (key < 0.0f) {
+            static float    s_ui_m    = 0.0f;
+            static uint32_t s_ui_next = 0;
+            if ((int32_t)(tick - s_ui_next) >= 0) {
+                s_ui_next = tick + 64;
+                auto* p = API::get()->param();
+                if (p != nullptr && p->vr != nullptr && p->vr->get_mod_value != nullptr) {
+                    char cur[32]{};
+                    p->vr->get_mod_value("UI_Distance", cur, sizeof(cur));
+                    const float ui = (float)std::atof(cur);
+                    if (ui > 0.0f && ui < 1000.0f) s_ui_m = ui;
+                }
+            }
+            if (s_ui_m > 0.0f) {
+                front_m = (s_ui_m - 0.30f > 0.20f) ? (s_ui_m - 0.30f) : 0.20f;
+                from    = "auto: UEVR UI_Distance - 30 cm";
+            } else {
+                static bool s_said = false;
+                if (!s_said) {
+                    s_said = true;
+                    logf("reticule front clamp: auto asked for, but UEVR's UI_Distance could not be read "
+                         "-- leaving the reticule at the target's depth. Set xrlayerreticlefront to a "
+                         "distance in real cm instead.");
+                }
+            }
+        }
+        const float was = g_m_ret_front_m.exchange(front_m, std::memory_order_relaxed);
+        if (std::fabs(was - front_m) > 0.001f) {
+            if (front_m > 0.0f) {
+                logf("reticule front clamp: ON -- never further than %.2f m from your head (%s), scaled "
+                     "to keep its size on screen. Its stereo depth is now that distance, not the "
+                     "target's.%s", front_m, from,
+                     g_xr.locate_space != nullptr ? "" : " xrLocateSpace is NOT resolved yet, so it "
+                     "cannot apply until it is (the next line says if it never does).");
+            } else {
+                logf("reticule front clamp: OFF -- the reticule sits at the target's own depth");
+            }
+        }
+    }
 
     // Resolve the UE-cm-per-VR-metre factor HERE, on the game thread, and cache it for the submit
     // thread. Only when it could have changed: the override key moving, or the first tick after the
