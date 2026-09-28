@@ -18,6 +18,7 @@
 #include <d3d12.h>   // ID3D12Resource::GetDesc, for the scene-RT probe only
 #include "features/hooks/ScopeHooks.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -1050,7 +1051,31 @@ void apply_capture_lumen(API::UObject* cap, int mode, int refl, float cache) {
     // THE REFLECTION METHOD CAN DIFFER FROM THE GI METHOD (scopelumenrefl). Following `mode` is the
     // old behaviour -- except that EReflectionMethod has no value 3, so "Plugin GI" (mode 3) used to
     // write an out-of-range reflection method; following it now means None there.
-    const int refl_eff = (refl >= 0) ? refl : ((mode <= 2) ? mode : 0);
+    int refl_eff = (refl >= 0) ? refl : ((mode <= 2) ? mode : 0);
+
+    // LUMEN GI TAKES LUMEN REFLECTIONS, OR THE ENGINE CRASHES (2026-09-27, Steam AND Game Pass, on
+    // the first capture frame). UE 5.5.4 IndirectLightRendering.cpp: with Lumen async compute on,
+    // DispatchAsyncLumenIndirectLightingWork fills the specular slot (Textures[3]) only for LUMEN
+    // reflections (:949), and the composite pass then REPLACES its outputs with those async ones
+    // (:1131) -- discarding the black stand-in that the None (:1121) and SSR (:1115) branches wrote.
+    // FDiffuseIndirectCompositePS binds DiffuseIndirect_Lumen_3 = null, and a shipping build reads
+    // straight through it (EXCEPTION_ACCESS_VIOLATION reading 0x10 in the shader-binding walk). The
+    // async gate reads only cvars, never the view's reflection method, and the game's main view
+    // always runs Lumen reflections, which is why only our capture can reach it. So with Lumen GI
+    // the reflection method is Lumen, whatever was asked; None and ScreenSpace stay available with
+    // any other GI method.
+    if (mode == 1 && refl_eff != 1) {
+        static int s_said_for = -1;
+        if (s_said_for != refl_eff) {
+            s_said_for = refl_eff;
+            API::get()->log_info("[Halo-CampE-UEVR] scope: lumen -- scopelumenrefl=%d (%s) REFUSED while "
+                                 "the capture's GI is Lumen: this engine build crashes on the first "
+                                 "capture frame with any non-Lumen reflection method under Lumen GI "
+                                 "(its async Lumen composite leaves the specular input null). Using "
+                                 "Lumen reflections.", refl_eff, refl_eff == 0 ? "None" : "ScreenSpace");
+        }
+        refl_eff = 1;
+    }
     struct Field { const wchar_t* value; const wchar_t* over; int v; };
     const Field fields[] = {
         { L"DynamicGlobalIlluminationMethod", L"bOverride_DynamicGlobalIlluminationMethod", mode },
@@ -2458,19 +2483,35 @@ bool ensure_components(API::UObject* rig) {
         // Round lens or square pane. The Cylinder squashed on its axis is uevrlib's ocular-lens
         // trick and gives a real circular edge with no alpha work; the Plane is the flat square.
         //
-        // MUST GO THROUGH load_asset_by_path, not find_uobject. find_uobject only sees what is
+        // MUST GO THROUGH load_asset_by_path, not find_uobject alone. find_uobject only sees what is
         // ALREADY LOADED: the Plane happens to be (the reticule uses it), the Cylinder is not, so
         // a find-only lookup returned null and built a pane with NO MESH -- which draws nothing
         // and is indistinguishable from the feature being broken. uevrlib force-loads this exact
         // asset for the same reason. Falls back to the Plane rather than shipping an empty pane.
-        // find_uobject FIRST (it wants the "StaticMesh <path>" form and is what has always found
-        // the Plane), then load_asset_by_path as the fallback for an asset that is not resident
-        // yet -- and note that one takes a BARE object path: passing the class prefix to it makes
-        // it reject the string at its first character, which is how a "fix" here managed to lose
-        // the Plane that had been working. Same shape as find_or_load_material just below it.
+        //
+        // load_asset_by_path FIRST, find_uobject only as the fallback (2026-09-27). The old order
+        // put find_uobject first, and a find_uobject MISS is a full walk of the ~294k-entry object
+        // array (Reticule.cpp, find_or_load_material: 150-180 ms mid-mission). The Cylinder is
+        // never resident at the first scope-in of a level, so EVERY first scope-in paid that walk
+        // before loading anyway: 189 ms and 228 ms of game thread measured between "capture
+        // component created" and the load, right before the capture's first frame. LoadAsset_Blocking
+        // resolves a resident asset through the engine's own name hash and reads the package only
+        // when it is not in memory. Note the path forms: it takes a BARE object path (a class
+        // prefix makes it reject the string at its first character, which is how a "fix" here once
+        // lost the Plane), while find_uobject wants the "StaticMesh <path>" form.
         auto find_or_load_mesh = [](const wchar_t* prefixed, const char* bare) -> API::UObject* {
-            if (auto* m = API::get()->find_uobject<API::UObject>(prefixed)) return m;
-            return load_asset_by_path(bare);
+            const auto t0 = std::chrono::steady_clock::now();
+            API::UObject* m = load_asset_by_path(bare);
+            if (m == nullptr) m = API::get()->find_uobject<API::UObject>(prefixed);
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (ms > 20.0) {
+                API::get()->log_info("[Halo-CampE-UEVR] PERF: scope pane mesh '%s' took %.1f ms of game "
+                                     "thread (%s) -- this runs once per pane creation, at the first "
+                                     "scope-in of a level", bare, ms,
+                                     m != nullptr ? "found" : "NOT found");
+            }
+            return m;
         };
         const char* want = (g_cfg.scope_shape == 1) ? "/Engine/BasicShapes/Cylinder.Cylinder"
                                                     : "/Engine/BasicShapes/Plane.Plane";
