@@ -7,7 +7,7 @@
 #include "core/Services.hpp"
 #include "core/ViewState.hpp"
 #include "Math.hpp"                    // clampf
-#include "Rig.hpp"                     // g_rig_component: the weapon the trace ignores
+#include "Rig.hpp"                     // player_trace_ignore: the pawn and the gun the trace ignores
 #include "UeObject.hpp"                // narrow, class_name_of: the contact line names what it hit
 #include "core/EyeTrace.hpp"
 #include "core/WorldScale.hpp"         // uevr_cm_per_metre_cached: the plausible head's reach
@@ -166,7 +166,8 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
     const Vec3 c{g_head_cx.load(), g_head_cy.load(), g_head_cz.load()};
     const float len = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
     const float r = g_cfg.head_block_radius;
-    const int ch = g_cfg.head_block_channel;
+    // The aim ray's channel unless set explicitly: one collision answer for "what is in front of you".
+    const int ch = (g_cfg.head_block_channel >= 0) ? g_cfg.head_block_channel : g_cfg.aim_reticule_trace_channel;
 
     // A broken head measurement is neither traced nor clamped (head_plausible), and says so once.
     static bool s_bad_prev = false;
@@ -259,7 +260,8 @@ void headblock_tick(bool active, API::UObject* const* ignore, int n_ignore, floa
 bool headblock_parse_key(const char* key, const char* val, double v) {
     (void)val;
     if (_stricmp(key, "headblock")        == 0) { g_cfg.head_block         = (int)clampf((float)v, 0.0f, 3.0f); return true; }
-    if (_stricmp(key, "headblockchannel") == 0) { g_cfg.head_block_channel = (int)clampf((float)v, 0.0f, 32.0f); return true; }
+    // -1 (any negative) = follow aimreticuletracechannel, the default.
+    if (_stricmp(key, "headblockchannel") == 0) { g_cfg.head_block_channel = (v < 0.0) ? -1 : (int)clampf((float)v, 0.0f, 32.0f); return true; }
     if (_stricmp(key, "headblocklean")    == 0) { g_cfg.head_block_lean    = clampf((float)v, 0.0f, 200.0f); return true; }
     if (_stricmp(key, "headblocklog")     == 0) { g_cfg.head_block_log     = (int)clampf((float)v, 0.0f, 100000.0f); return true; }
     if (_stricmp(key, "headblockradius")  == 0) { g_cfg.head_block_radius  = clampf((float)v, 0.0f, 50.0f); return true; }
@@ -287,13 +289,15 @@ void headblock_game_tick_after_leash() {
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && !g_view_seat_always.load(std::memory_order_relaxed)
                             && !g_stick_mode.load();
+        // THE AIM RAY'S OWN LIST (player_trace_ignore): the pawn and the gun. This ignored the arms
+        // rig's OUTER instead, which is the pawn again -- so the gun was never ignored. The gun does
+        // block this channel (it is why the aim ray ignores it), so a scope held to the eye or a lean
+        // toward the gun could put it on the body-eye -> head segment and clamp the head against
+        // your own weapon. Not measured; the contact line names what it holds on.
         API::UObject* hb_ignore[2] = {};
         int hb_n = 0;
         if (hb_active && (g_cfg.head_block == 1 || g_cfg.head_block == 2)) {
-            if (auto* pawn = API::get()->get_local_pawn(0)) hb_ignore[hb_n++] = pawn;
-            if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
-                if (auto* wep = rigc->get_outer()) hb_ignore[hb_n++] = wep;
-            }
+            hb_n = player_trace_ignore(hb_ignore, 2);
         }
         halo::headblock_tick(hb_active, hb_ignore, hb_n, g_last_dt.load());
     }

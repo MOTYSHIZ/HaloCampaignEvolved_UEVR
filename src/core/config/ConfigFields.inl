@@ -155,7 +155,10 @@
     int   head_block         = 1;      // headblock: 0 off, 1 line trace, 2 sphere sweep, 3 lean limit (no trace)
     float head_block_radius  = 12.0f;  // headblockradius: clearance kept from the surface
     float head_block_lean    = 25.0f;  // headblocklean: mode 3, max horizontal head offset from the body
-    int   head_block_channel = 1;      // headblockchannel: ETraceTypeQuery index (0 Visibility, 1 Camera)
+    // headblockchannel: ETraceTypeQuery index (0 Visibility, 1 Camera). -1 (default) = the aim ray's
+    // (aimreticuletracechannel, Camera by default), so the head block and the aim ray agree on what is
+    // in front of you -- the user's call 2026-09-28, since the aim ray has proven good in most cases.
+    int   head_block_channel = -1;
     float head_block_release = 150.0f; // headblockrelease: cm/s the allowed distance grows back after a hit clears
     int   head_block_log     = 0;      // headblocklog: 0 silent, 1 events, N>1 events + a line every N ticks
 
