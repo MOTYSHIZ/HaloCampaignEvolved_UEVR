@@ -4765,33 +4765,16 @@ void nav_world_tick(bool engaged, uint32_t tick) {
                 const Vec3 tend{vo.x + dir.x * draw_dist, vo.y + dir.y * draw_dist,
                                 vo.z + dir.z * draw_dist};
                 Vec3 hit{};
+                // THE AIM RAY'S OWN LIST (player_trace_ignore): the pawn and the gun. This used to
+                // read the raw g_rig_component and ignore its OUTER -- which is the pawn again, so
+                // the gun was never ignored and could pull a marker in whenever it crossed the
+                // eye -> objective line. That raw read also needed a liveness guard (a teardown frees
+                // the component, and the sweep that drops it runs far below here); the shared list
+                // takes the gun from a tracked, class-checked handle and never touches the raw one.
+                // (The 2026-09-07 stutter once blamed on this site was a PerfScope labelling
+                // artifact, not this read -- see the PerfScope comment.)
                 API::UObject* ignore[2] = {};
-                int n_ignore = 0;
-                if (auto* pawn = API::get()->get_local_pawn(0)) ignore[n_ignore++] = pawn;
-                // LIVENESS BEFORE DEREFERENCE. Defensive, and correct on its own terms --
-                // g_rig_component is a RAW pointer that a level teardown frees, and the sweep that
-                // notices and drops it runs near the END of update(), thousands of lines below
-                // here, so on the teardown tick this site could read a freed component and hand
-                // its garbage outer to hit_trace's ignore list.
-                //
-                // BUT IT IS NOT THE FIX FOR THE 2026-09-07 STUTTER, and the record should say so.
-                // That fault was labelled `last lane entered 'navworld_tick'` and it SURVIVED this
-                // guard unchanged: same instruction, same address. The label was an artifact --
-                // PerfScope only set the lane on entry and never restored it, so navworld_tick's
-                // name stayed in the field for the ~900 unscoped lines that follow it. See the
-                // PerfScope comment; the restore landed in the same change as this note.
-                //
-                // Kept because a missing liveness check on a pointer we KNOW a teardown frees is
-                // worth closing regardless of which bug is open, and it costs an indexed array
-                // compare that never dereferences. Skipping the ignore entry costs nothing worth
-                // having: the trace may clip the player's own weapon for the one tick before the
-                // sweep drops the handle.
-                static int32_t s_navw_rigcomp_idx = -1;
-                if (auto* rigc = reinterpret_cast<API::UObject*>(g_rig_component.load())) {
-                    if (uobject_live(rigc, &s_navw_rigcomp_idx)) {
-                        if (auto* wep = rigc->get_outer()) ignore[n_ignore++] = wep;
-                    }
-                }
+                const int n_ignore = player_trace_ignore(ignore, 2);
                 NAVW_MARK("hit_trace@4543");
                 if (hit_trace(tstart, tend, ignore, n_ignore, &hit)) {
                     const float hx = hit.x - vo.x, hy = hit.y - vo.y, hz = hit.z - vo.z;
@@ -6014,12 +5997,9 @@ static void onfoot_reticule_tick(API::UObject* rig, const Vec3& comp_world, doub
                     // actor and the weapon is another, attached to the rig --
                     // ignoring only the pawn leaves the gun to catch the ray
                     // every time an animation swings it across the camera.
+                    // The SAME list the head block and the floor trace use.
                     API::UObject* ignore[2] = {nullptr, nullptr};
-                    int nignore = 0;
-                    if (auto* pw = API::get()->get_local_pawn(0)) {
-                        ignore[nignore++] = reinterpret_cast<API::UObject*>(pw);
-                    }
-                    if (auto* wa = fp_weapon_actor()) ignore[nignore++] = wa;
+                    const int nignore = player_trace_ignore(ignore, 2);
 
                     Vec3 hit{};
                     bool got = false;
@@ -6718,9 +6698,7 @@ void update() {
         // headlessly at all. Throttled -- this is a full line trace, not a free read.
         if (hit_trace_ready() && (tick % 8) == 0) {
             API::UObject* ig[2] = {nullptr, nullptr};
-            int nig = 0;
-            if (dev_pawn != nullptr) ig[nig++] = reinterpret_cast<API::UObject*>(dev_pawn);
-            if (auto* wa = fp_weapon_actor()) ig[nig++] = wa;
+            const int nig = player_trace_ignore(ig, 2);   // the aim ray's own list
             // A SEPARATE, LONG end point. devt is only 500 cm out -- fine for defining a
             // direction, useless as a trace: looking level across open ground there is nothing
             // within five metres, so the trace correctly returned nothing and the readout looked

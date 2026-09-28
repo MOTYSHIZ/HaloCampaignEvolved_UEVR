@@ -145,6 +145,15 @@ uevr::API::UObject* rig_tracked_component();
 // is a separate actor, so ignoring the pawn does not cover it.
 uevr::API::UObject* fp_weapon_actor();
 
+// THE PLAYER'S OWN ACTORS, for a trace's ActorsToIgnore: the local pawn and the first-person weapon
+// actor. ONE list for every trace that must not hit the player -- the aim ray, the head block, the
+// auto-height floor trace -- because separate lists drifted: the aim ray ignored the gun, while the
+// head block and the floor trace ignored the arms rig's OUTER, which is the pawn again, and never the
+// gun. Chief's biped is a separate actor as well and is NOT in here (not cheaply resolvable -- see
+// CLAUDE.md game facts); EyeTrace's run_trace looks past a body a line trace starts inside.
+// Fills up to `cap` entries of `out`, returns how many. GAME THREAD (tracked-object reads).
+int player_trace_ignore(uevr::API::UObject** out, int cap);
+
 // The weapon's own root component -- the thing to pin when attaching the GUN rather than the arms.
 // Null whenever no weapon is in hand, which the caller must treat as "release, do not fall back".
 uevr::API::UObject* fp_weapon_root();
