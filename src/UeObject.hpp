@@ -59,6 +59,8 @@ bool fname_is_sane(const std::string& n);
 // so it is safe on a per-element, per-tick path where uobject_live()'s array walk is not.
 // Fails CLOSED (false) when the array is unavailable: the caller is about to dereference.
 bool uobject_slot_valid(const uevr::API::UObject* p);
+// The same check, returning the verified slot index, or -1.
+int32_t uobject_slot_index(const uevr::API::UObject* p);
 
 // A pointer PLUS its slot in the global object array, so a recycled slot can be detected instead of
 // silently followed. Prefer this to a raw pointer for anything kept across frames.
@@ -66,10 +68,16 @@ struct TrackedObject {
     uevr::API::UObject* ptr = nullptr;
     int32_t             index = -1;
 
-    // Adopt a pointer, locating its slot in the object array (one O(n) scan at acquisition).
+    // Adopt a pointer, locating its slot in the object array. The object's own InternalIndex,
+    // verified against that slot, finds it in one compare; the O(n) walk of the ~296k-entry array is
+    // only the fallback for a pointer whose index does not check out. Before 2026-09-28 every set()
+    // walked -- a rig re-acquired at each level load, respawn and tick fault, and five times per
+    // manual reload -- 1-3 ms apiece on the game thread. Same answer either way: an object has one slot.
     void set(uevr::API::UObject* p) {
         ptr = p; index = -1;
         if (p == nullptr) return;
+        const int32_t fast = uobject_slot_index(p);
+        if (fast >= 0) { index = fast; return; }
         auto* arr = uevr::API::get()->get_uobject_array();
         if (arr == nullptr) { ptr = nullptr; return; }
         const int32_t n = arr->get_object_count();
