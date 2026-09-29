@@ -171,6 +171,15 @@ local HINTS = {
     scopebright    = { t = "drag", min = 0, max = 10 },
     scopethresh    = { t = "slider", min = 0.05, max = 1 },
     scopehold      = { t = "bool" },
+    -- Rows the generic widget got wrong: armdriver drew as a raw integer over +-1,000,000 (a drag
+    -- could swap the arms out), and these floats drew as integer drags because their catalog default
+    -- is spelled without a decimal point ("#roomscalegain=4").
+    armdriver      = { t = "enum", items = { "the game's own arms", "the older rig route", "Player IK" }, values = { 0, 1, 2 } },
+    twohand        = { t = "bool" },
+    roomscalegain  = { t = "drag", min = 0.1, max = 50 },
+    slidezoneback  = { t = "drag", min = -0.2, max = 0.2 },
+    slidefireentry = { t = "drag", min = 0, max = 1 },
+    reloadanimrate = { t = "drag", min = 0, max = 200 },
     -- Sub-settings of the switchable features (drawn nested under their feature, which greys them
     -- while it is off). `needs` = other settings that must be on for this one to do anything.
     -- Roomscale, auto height and head block are released (Stable) since 2026-09-27, so they are drawn
@@ -247,7 +256,9 @@ local HINTS = {
     -- The author's released features in his own sections.
     xrlayer        = { t = "bool", needs = { "aimreticule" } },
     cullfix        = { t = "bool" },
-    culldist       = { t = "drag", min = 1000, max = 200000, int = true, needs = { "cullfix" } },
+    -- The parser's own range (10000..1e8, Config.cpp): below 10000 it clamped silently while the row
+    -- kept showing the written value, and a documented 9999999 was pulled down to the old 200000 cap.
+    culldist       = { t = "drag", min = 10000, max = 10000000, int = true, needs = { "cullfix" } },
     perflog        = { t = "bool" },
     rigfast        = { t = "bool" },
 }
@@ -322,6 +333,21 @@ local LABELS = {
     handsmoothposbeta = "Position follow speed", handsmoothrotmin = "Still-hand angle steadiness",
     handsmoothrotbeta = "Angle follow speed", handsmoothdcut = "Speed estimate smoothing",
     handsmoothmelee = "Melee uses the steadied hands",
+    -- Rows whose first comment line is a sub-heading or another key's orphaned paragraph (blank lines
+    -- never reach the parser), so the fallback in label_for would name them wrongly.
+    armdriver = "Arms", twohand = "Two-handed aiming", meleeswing = "Melee by swinging",
+    holster = "Holsters (reach over a shoulder or to your chest)", armhide = "Hide the stock arms",
+    grabguide = "Show where to grab the barrel", gripoffsets = "Use recorded front-handle positions",
+    handsvr = "Draw VR hands (placeholder mesh)", wpnoffsets = "Use per-weapon adjustments",
+    magshow = "Show the magazine in your hand", magmesh = "Magazine mesh", magscale = "Magazine size",
+    magoffx = "Magazine offset X", magoffy = "Magazine offset Y", magoffz = "Magazine offset Z",
+    reloadstate = "Reload state kept per weapon", reloadstatesave = "When a weapon's reload state is saved",
+    reloadstatehide = "How a magazine that is out stays hidden",
+    reloadstatewaitms = "Wait for the weapon's identity (ms)",
+    reloadstatedrop = "When a swapped-out weapon's state is forgotten",
+    reloadstatedeath = "Forget every weapon's state at death",
+    reloadstatelevel = "What a level load does to weapon states",
+    slideradius = "Rack grab reach (m)", vehwheelsteersign = "Steering direction",
 }
 -- Prerequisites that are not player features.
 local NEED_TEXT = { blamangles = "the aim hook (a developer setting)" }
@@ -369,12 +395,21 @@ end
 local function label_for(entry)
     local l = LABELS[entry.key]
     if l ~= nil then return l end
+    -- The first line collected since the previous key -- USUALLY this key's own first sentence. Blank
+    -- lines never reach parse_file, so a sub-heading ("# ---- NAME ----") or a paragraph belonging to
+    -- something else can come first: strip every heading dash, and when what is left is a value list
+    -- ("0 = ...") or nothing, show the key itself rather than a stranger's sentence as this row's name.
     local d = (entry.desc or ""):gsub("\n.*", "")
-    d = d:gsub("^%-%-%-%-%s*", "")
+    d = d:gsub("^[%-%s]+", ""):gsub("[%-%s]+$", "")
+    -- "Feature: what this one does". Many sub-settings open with their feature's name, which gave
+    -- every row under a feature the same label; take what follows when it reads as a description
+    -- (a value list after the colon, "Lens shape: 1 = round", keeps the name before it).
+    local head, rest = d:match("^([^:]+):%s*(.+)$")
+    if head ~= nil and #head <= 24 and rest:match("^%a") then d = rest:sub(1, 1):upper() .. rest:sub(2) end
     local cut = d:find("[%.:%(]")
     if cut ~= nil then d = d:sub(1, cut - 1) end
     d = trim(d)
-    if d == "" then return "Setting" end
+    if d == "" or d:match("^%d") then return entry.key end
     return d
 end
 
