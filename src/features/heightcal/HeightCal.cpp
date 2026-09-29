@@ -95,7 +95,8 @@ void xr_refuse(const char* fmt, ...) {
     hlog("HEIGHT: OpenXR source unavailable -- %s", g_xr.why);
 }
 
-bool xr_probe(float hmd_y, float* out_off, float* out_resid) {
+bool xr_probe(float hmd_y, float* out_off, float* out_resid, bool* out_exact) {
+    *out_exact = false;
     if (g_xr.state < 0) return false;
     if (!API::VR::is_openxr()) { xr_refuse("the runtime is not OpenXR"); return false; }
     const HaloVrLayerApi* api = xrbridge_api();
@@ -173,6 +174,7 @@ bool xr_probe(float hmd_y, float* out_off, float* out_resid) {
             if (XR_SUCCEEDED(r2) && (org.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0) {
                 off = org.pose.position.y;
                 how = "origin";
+                *out_exact = true;   // a space relation, not two head reads at different times
             }
         }
     }
@@ -240,6 +242,25 @@ float g_resid       = 0.0f;
 float g_probe_timer = 0.0f;
 float g_since_ok    = 1.0e9f;
 
+// ---- A RE-BASED TRACKING SPACE (a system recenter).
+//
+// On the runtime's REFERENCE_SPACE_CHANGE_PENDING, UEVR puts the standing origin on your head, and
+// the runtime re-bases UEVR's eye-level pose space wherever that head was -- so the floor's height in
+// it, which the probes above measure, STEPS by however far this recenter's head was from the last
+// one's. Anything held in the old frame is off by that step. Above all the origin Y this feature
+// keeps re-imposing while it HOLDS (a menu, a load, a scripted ride): after a recenter pressed while
+// bent or seated, the opening Pelican put the view that far up -- "I feel like I am standing on the
+// pelican seat", most reliably after a space reset and a mission restart (2026-09-28). The median
+// below would re-converge in ~2.5 s, but a HELD value is never re-solved, so it stayed wrong.
+//
+// Two probes in a row off the median by more than kRebaseStepM = a re-base. A pure space relation
+// does not jitter by 5 cm, and a recenter at the same head height needs nothing. The step goes to
+// height_tick, which moves what it holds by it, and the median restarts from the new value.
+constexpr float kRebaseStepM = 0.05f;
+int   g_off_step_n    = 0;       // consecutive probes off the median by more than the step
+float g_frame_shift   = 0.0f;    // m: the floor's step in UEVR's frame, pending for height_tick
+bool  g_frame_shifted = false;
+
 float median9() {
     float tmp[9];
     for (int i = 0; i < g_off_n; ++i) tmp[i] = g_off_hist[i];
@@ -277,14 +298,29 @@ void update_source(float hmd_y, float dt) {
         g_probe_timer = 0.5f;
         const int want = g_cfg.height_src;
         float off = 0.0f, resid = 0.0f;
+        bool exact = false;   // the offset is a space relation (OpenXR "origin" method) -- steps are real
         int got = SRC_UEVR;
         if (want == SRC_OPENXR || want == SRC_AUTO) {
-            if (xr_probe(hmd_y, &off, &resid)) got = SRC_OPENXR;
+            if (xr_probe(hmd_y, &off, &resid, &exact)) got = SRC_OPENXR;
         }
         if (got == SRC_UEVR && (want == SRC_OPENVR || (want == SRC_AUTO && !(g_xr.state >= 0 && API::VR::is_openxr())))) {
             if (vr_probe(hmd_y, &off, &resid)) got = SRC_OPENVR;
         }
         if (got != SRC_UEVR) {
+            // EXACT READINGS ONLY: the fallback (head in STAGE minus UEVR's head, two reads at
+            // different times) can differ by a few cm in a fast squat, and a false re-base would hop
+            // the view twice. It keeps the median alone, as before.
+            if (exact && g_floor_known && g_off_n > 0 && got == g_active_src &&
+                std::fabs(off - g_floor_off) > kRebaseStepM) {
+                if (++g_off_step_n >= 2) {
+                    g_frame_shift  += off - g_floor_off;
+                    g_frame_shifted = true;
+                    g_off_n = 0; g_off_i = 0;    // the median restarts in the new frame
+                    g_off_step_n = 0;
+                }
+            } else {
+                g_off_step_n = 0;
+            }
             g_off_hist[g_off_i] = off;
             g_off_i = (g_off_i + 1) % 9;
             if (g_off_n < 9) ++g_off_n;
@@ -667,6 +703,26 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
 
     update_source(hmd.y, dt);
 
+    // A RE-BASED TRACKING SPACE (see update_source): move everything held in UEVR's pose frame by the
+    // step, so the same physical height keeps the same view height. A physical height is
+    // y + floor_off, so when floor_off (UEVR's pose origin above the floor) grows by d, every held y
+    // must shrink by d -- the held origin above all, which is what the Pelican showed.
+    if (g_frame_shifted) {
+        const float d = g_frame_shift;
+        g_frame_shifted = false;
+        g_frame_shift = 0.0f;
+        if (g_have_out) g_out -= d;
+        if (g_have_H) g_H -= d;
+        // Eyes-mode samples and an eyes capture were taken in the old frame: drop them to re-learn.
+        g_win.clear(); g_win_t = 0.0f; g_ring.clear(); g_low_persist = 0.0f;
+        if (g_cap_t >= 0.0f && g_cap_mode == MODE_EYES) { g_cap_t = -1.0f; g_cap_s.clear(); }
+        g_have_prev = false;   // the head's y jumped with the frame, not with the head
+        API::get()->log_info("[Halo-CampE-UEVR] HEIGHT: the tracking space was re-based (a recenter) -- "
+                             "UEVR's pose origin is now %+.3f m from where it was above the floor, and the "
+                             "%s view height moved with it",
+                             d, g_have_out ? "held" : "calibrated");
+    }
+
     // Every tick: the shared reader caches for 2 s on its own, so the 2 s timer that used to sit here
     // only stacked a second delay on a scale change. One atomic load and a time check.
     {
@@ -877,7 +933,10 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         hlog("HEIGHT STICK: released -- his crouch stays in the view until he is seen standing (E %.1f cm)",
              have_E ? E : -1.0f);
 
-    g_pc_can = g_cfg.height_crouch != 0 && active && eff == MODE_ABSOLUTE && g_floor_known && !pending;
+    // Not while a floor step is unconfirmed (g_off_step_n): until it is, head_abs is off by the step,
+    // and a recenter pressed higher than the last would read as a crouch for a second.
+    g_pc_can = g_cfg.height_crouch != 0 && active && eff == MODE_ABSOLUTE && g_floor_known && !pending &&
+               g_off_step_n == 0;
     if (g_pc_can && still && !g_pc_on) {
         g_pc_win.push_back(head_abs);
         g_pc_win_t += dt;
