@@ -170,6 +170,7 @@ local HINTS = {
     scopeup        = { t = "drag", min = -100, max = 100 },
     scopebright    = { t = "drag", min = 0, max = 10 },
     scopethresh    = { t = "slider", min = 0.05, max = 1 },
+    scopehold      = { t = "bool" },
     -- Sub-settings of the switchable features (drawn nested under their feature, which greys them
     -- while it is off). `needs` = other settings that must be on for this one to do anything.
     -- Roomscale, auto height and head block are released (Stable) since 2026-09-27, so they are drawn
@@ -187,7 +188,8 @@ local HINTS = {
     heightcrouchfrac = { t = "slider", min = 0, max = 0.9, needs = { "heightcal", "heightcrouch" } },
     heightleash      = { t = "drag", min = -1, max = 60, needs = { "heightcal" } },
     heightstickcrouch = { t = "bool", needs = { "heightcal" } },
-    headblock      = { t = "bool" },
+    -- A MODE, not a switch: a checkbox wrote 1 on re-tick and silently replaced a chosen 2 or 3.
+    headblock      = { t = "enum", items = { "off", "on", "on, feeling for walls with a sphere", "only limit how far you lean" }, values = { 0, 1, 2, 3 } },
     headblockradius = { t = "drag", min = 1, max = 50, needs = { "headblock" } },
     stabilityfixes = { t = "bool" },
     handsmooth        = { t = "bool" },
@@ -274,7 +276,8 @@ local LABELS = {
     aimmeshcr = "Ring red", aimmeshcg = "Ring green", aimmeshcb = "Ring blue", aimtexfile = "Ring image file",
     cullfix = "Keep distant objects drawn", culldist = "Draw distance", perflog = "Record performance",
     rigfast = "Fast weapon tracking",
-    scoperes = "Lens sharpness", scopelenslumen = "Lens lighting", armhidemode = "Hiding method", armhideall = "Hide on every body part",
+    scoperes = "Lens sharpness", scopelenslumen = "Lens lighting",
+    scopehold = "Hold the trigger to zoom (off: tap to open, tap to close)", armhidemode = "Hiding method", armhideall = "Hide on every body part",
     aimbore = "Where your shots go", gripexclusive = "The grip never throws grenades",
     reloadseat = "Magazine seating distance", reloadmagbelt = "Belt magazine spot",
     reloadmagpick = "How the magazine is found", zonesnap = "When the gun and your hand are measured",
