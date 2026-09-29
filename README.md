@@ -255,7 +255,7 @@ first time the layer loads into the game.
 | Right stick **down** | Crouch |
 | Right stick **click** | Melee — or squeeze a grip and swing that hand (either hand; `meleegrip=0` to swing without the grip) |
 | Right trigger | Fire |
-| Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
+| Left grip | Grip the weapon two-handed — put your hand where you'd hold its front (see [How to zoom](#how-to-zoom)); a "Grip" prompt shows when you're in range |
 | Left trigger | Throw grenade — or, while gripping two-handed, hold for the scope (`scopehold=0` to tap it open and shut; `scope`/`scopezoom` to tune) |
 | Right grip | Reach over your right shoulder and squeeze to switch weapons; over your left shoulder or at your right hip to put the weapon away and free your hand (squeeze there again to bring it back) |
 | Right A | Jump |
@@ -267,8 +267,17 @@ first time the layer loads into the game.
 
 The scope needs **both hands on the weapon**:
 
-1. Bring your left hand to the weapon's barrel or front handle and squeeze the **left grip**. A
-   "Grip" prompt shows when you're in reach, and the controller buzzes when it takes hold.
+1. Put your left hand where you'd really hold the front of the weapon, and squeeze the **left
+   grip**. Where that is depends on the weapon:
+   - **Rifles:** just forward of your firing hand, under the barrel, where a foregrip would be.
+   - **Weapons with an off-centre front handle** — the rocket launcher, sentinel beam, beam rifle,
+     spike rifle, shotgun and flak cannon: the handle itself, not the barrel. The mod ships where
+     each of those handles sits and moves the grab spot onto it.
+   - **Pistols and other one-handers:** cup the gun at or just under your firing hand.
+
+   A "Grip" prompt shows when you're in reach, and the controller buzzes when it takes hold. If a
+   weapon's handle isn't where the mod expects, record it once with **Calibrate weapon grip** (see
+   [Custom calibration](#custom-calibration)).
 2. **Hold the left trigger.** A magnified lens rises on the gun, and it drops when you let go.
 
 Without the grip, the left trigger throws a grenade instead, so a scope that "won't open" usually
