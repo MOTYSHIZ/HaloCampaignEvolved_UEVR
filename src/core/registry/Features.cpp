@@ -291,7 +291,7 @@ const FeatureRow kFeatures[] = {
       "vehmarkercr,vehmarkerdot,vehmarkerradius,vehmarkersize,vehmarkerthick,"
       "xrtext,xrtextbg,xrtextdist,xrtextfadein,xrtextfadeout,"
       "xrtexthold,xrtextright,xrtextscale,xrtextup,xrtextwidth",
-      "vehprobe,xrlayertexth,xrlayertextw",
+      "vehmeshdump,vehprobe,xrlayertexth,xrlayertextw",
       "", FEATURE_BOOL(veh_tp) },
     { "vehaim",       1, Tier::Experimental, "Vehicles", "Aim vehicles with your hand",
       "In the vehicle cameras the vehicle aims where your controller points, and the right stick turns your view. Clicking the left stick switches a vehicle between this and aiming with the stick.",

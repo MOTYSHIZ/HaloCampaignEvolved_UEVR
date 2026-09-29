@@ -14,6 +14,7 @@
 #include "features/vehcam/VehCamMath.hpp"      // rotator <-> axes, the per-ride vehicle frame (tested out of tree)
 #include "features/vehcam/VehCamPresets.hpp"   // the camera file's types (CamType, Origin, Rides)
 #include "features/vehcam/VehCamSelect.hpp"    // the selected camera: veh_active_cam()
+#include "features/vehcam/VehMeshes.hpp"       // vehmesh_tick: the vehicle's own parts ("hideMeshes")
 #include "Rig.hpp"
 #include "UeObject.hpp"
 #include "core/MarkerFaces.hpp"
@@ -572,6 +573,9 @@ std::vector<ScanHit> s_res_chassis, s_res_bodies, s_res_parts, s_res_units;     
 // Meshes one level further down: owned by a COMPONENT of a Spartan (his BlamMeshSynchronization makes the
 // visible armour), recorded with the actor as their owner. Only the head hide reads these.
 std::vector<ScanHit> s_walk_subparts, s_res_subparts;
+// A VEHICLE's meshes, owned by it or by one of its components, recorded with the actor as their owner: the
+// parts "hideMeshes" may name that hang nowhere in its attachment tree (VehMeshes.cpp, via rider_tree).
+std::vector<ScanHit> s_walk_vehparts, s_res_vehparts;
 
 uint8_t scan_class_kind(API::UClass* cls) {
     uint8_t k = 0;
@@ -618,7 +622,7 @@ uint32_t ride_scan_request(bool force_new) {
     s_scan_walk_gen = s_scan_gen;
     s_scan_ticks = 0; s_scan_ms = 0.0; s_scan_max_ms = 0.0;
     s_walk_chassis.clear(); s_walk_bodies.clear(); s_walk_parts.clear(); s_walk_units.clear();
-    s_walk_subparts.clear();
+    s_walk_subparts.clear(); s_walk_vehparts.clear();
     s_scan_classes.clear(); s_scan_owners.clear();
     return s_scan_serial;
 }
@@ -666,8 +670,13 @@ void ride_scan_step() {
                 auto* f = o->get_fname();
                 if (f != nullptr && f->to_string() == L"Body") s_walk_bodies.push_back({o, i, owner});
             }
-        } else if (auto* oo = owner->get_outer(); oo != nullptr && (scan_owner_kind(oo) & kScanSpartan) != 0) {
-            s_walk_subparts.push_back({o, i, oo});   // made by one of his components: the actor is its owner
+        } else if ((ok & kScanVehicle) != 0 && (ok & kScanPersistent) != 0) {
+            s_walk_vehparts.push_back({o, i, owner});   // a vehicle's own mesh
+        } else if (auto* oo = owner->get_outer(); oo != nullptr) {
+            // Made by one of an actor's components: the actor is its owner.
+            const uint8_t ook = scan_owner_kind(oo);
+            if ((ook & kScanSpartan) != 0) s_walk_subparts.push_back({o, i, oo});
+            else if ((ook & kScanVehicle) != 0 && (ook & kScanPersistent) != 0) s_walk_vehparts.push_back({o, i, oo});
         }
     }
     QueryPerformanceCounter(&t1);
@@ -683,12 +692,13 @@ void ride_scan_step() {
     s_res_parts.swap(s_walk_parts);
     s_res_units.swap(s_walk_units);
     s_res_subparts.swap(s_walk_subparts);
+    s_res_vehparts.swap(s_walk_vehparts);
     s_scan_done = s_scan_serial;
     s_scan_result_gen = s_scan_walk_gen;
     API::get()->log_info("[Halo-CampE-UEVR] VEHSCAN: %d objects in %d tick(s), %.1f ms of work (%.1f ms at most in one "
-                         "tick): %d vehicle meshes, %d Spartan bodies, %d vehicle units",
-                         n, s_scan_ticks, s_scan_ms, s_scan_max_ms, (int)s_res_chassis.size(), (int)s_res_bodies.size(),
-                         (int)s_res_units.size());
+                         "tick): %d vehicle meshes (%d vehicle parts), %d Spartan bodies, %d vehicle units",
+                         n, s_scan_ticks, s_scan_ms, s_scan_max_ms, (int)s_res_chassis.size(), (int)s_res_vehparts.size(),
+                         (int)s_res_bodies.size(), (int)s_res_units.size());
 }
 
 // Is this hit still the object it was? Its slot must still hold it.
@@ -1216,6 +1226,8 @@ bool is_head_item(API::UObject* c, const std::wstring& head_bone, std::wstring* 
 // the tree is walked from those parts and the actor's root, down every AttachChildren, breadth first.
 // Things hung on him that are not his (his weapon's own actor) come along too; only a mesh named for the
 // helmet or hung from the head is ever hidden, so they are left as they are. GAME THREAD; once per apply.
+// A VEHICLE's tree the same way (vehcam_actor_tree, for "hideMeshes"): its own meshes from the scan, then
+// its root down.
 struct RawObjArray { API::UObject** data; int32_t num; int32_t max; };
 int rider_tree(API::UObject* actor, API::UObject** out, int max) {
     int n = 0;
@@ -1227,6 +1239,8 @@ int rider_tree(API::UObject* actor, API::UObject** out, int max) {
     for (const ScanHit& h : s_res_parts)
         if (h.owner == actor && scan_hit_live(h)) push(h.o);
     for (const ScanHit& h : s_res_subparts)   // made by his components, whether attached in the tree or not
+        if (h.owner == actor && scan_hit_live(h)) push(h.o);
+    for (const ScanHit& h : s_res_vehparts)   // a vehicle's meshes, likewise
         if (h.owner == actor && scan_hit_live(h)) push(h.o);
     if (auto* rp = actor->get_property_data<API::UObject*>(L"RootComponent"); rp != nullptr && !IsBadReadPtr(rp, sizeof(void*)))
         push(*rp);
@@ -1429,6 +1443,10 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
 }
 
 } // namespace
+
+int vehcam_actor_tree(API::UObject* actor, API::UObject** out, int max) {
+    return (actor != nullptr && out != nullptr && max > 0) ? rider_tree(actor, out, max) : 0;
+}
 
 // Applied on every change while mounted, and re-asserted once a second in case something drives it
 // back (it was every tick: the readback since showed the hide holding, so that cost bought nothing).
@@ -2373,6 +2391,7 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehcamsrc")      == 0) { g_cfg.veh_cam_src = (int)v; return true; }
     if (_stricmp(key, "vehanchor")      == 0) { g_cfg.veh_anchor = (int)v; return true; }
     if (_stricmp(key, "vehprobe")       == 0) { g_cfg.veh_probe = (v != 0.0); return true; }
+    if (_stricmp(key, "vehmeshdump")    == 0) { g_cfg.veh_mesh_dump = (v != 0.0); return true; }
     if (_stricmp(key, "vehtp")          == 0) { g_cfg.veh_tp = (v != 0.0); return true; }
     if (_stricmp(key, "vehaim")         == 0) { g_cfg.veh_aim = (v != 0.0); return true; }
     if (_stricmp(key, "vehstick")       == 0) { g_cfg.veh_stick_mode = (int)v; return true; }
@@ -2838,6 +2857,11 @@ void vehcam_game_tick_vehicle() {
             }
             head_hide_update(want_hide, hide_body, s_rider.index, s_head_bone);
         }
+
+        // THE VEHICLE'S OWN PARTS ("hideMeshes", VehMeshes.cpp): hidden while the selected camera names them,
+        // put back when it stops -- after the selection above, so a camera change applies the same tick. Also
+        // vehmeshdump, in a dev build.
+        vehmesh_tick(sys, s_seat.valid ? s_seat.actor : nullptr, cp, g_tp_chassis_idx.load(std::memory_order_relaxed));
 
         // A SOCKET ORIGIN (socket_resolve, above): found when a camera asks for one -- a new name or a new
         // vehicle -- and retried every ~2 s, five times, while not found (a turret actor may stream in a

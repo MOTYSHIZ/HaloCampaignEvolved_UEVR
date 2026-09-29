@@ -1409,6 +1409,11 @@
     // to decide whether a vehicle exposes a weapon aim distinct from the chase-camera value.
     // Read-only. See docs\VEHICLE_AIM_DECOUPLE_PROBE.md.
     bool  veh_probe = false;
+    // VEHICLE PARTS LISTING (dev, vehmeshdump). Seated + dev build only: lists every part of the vehicle you
+    // sit in when you get in -- class, name, mesh, where it hangs, shown or not -- and watches them while you
+    // ride, logging a part that appears, goes, shows, hides or changes mesh (a damage state) and writing the
+    // list again to data\halo_vr_vehmeshes_<vehicle>.txt. For choosing "hideMeshes". Read-only.
+    bool  veh_mesh_dump = false;
     // ROUTE A P0: owned vehicle cameras -- a sibling OPTION to bc24's first-person veh_cam (never
     // modifies it), for players who get motion sick in first person. 1 = on: in a vehicle, the
     // cameras listed for it in halo_vr_vehcams.json, stepped with left Y; left X steps the camera's

@@ -162,6 +162,19 @@ struct Apply {
         }
         return true;
     }
+    // Text, or a list of text, as lower-case names (empty ones dropped); null = none. At most `max`.
+    bool names(const Value& x, const std::string& w, std::vector<std::string>& out, const char* want, int max) {
+        out.clear();
+        if (x.is_null()) return true;
+        if (x.is_str()) { if (!x.s.empty()) out.push_back(lower(x.s)); return true; }
+        if (!x.is_arr()) return type_error(x, w, want);
+        if (static_cast<int>(x.items.size()) > max) return type_error(x, w, want);
+        for (std::size_t i = 0; i < x.items.size(); ++i) {
+            if (!x.items[i].is_str()) return type_error(x.items[i], w + "[" + std::to_string(i) + "]", "text");
+            if (!x.items[i].s.empty()) out.push_back(lower(x.items[i].s));
+        }
+        return true;
+    }
     // true / false, or null = inherit (-1).
     bool tri(const Value& x, const std::string& w, int& dst, const char* what) {
         if (x.is_null()) { dst = -1; return true; }
@@ -289,6 +302,10 @@ struct Apply {
                 ok = tri(x, w, c.hide_head, "true, false or null (null = the seat's hideHead)");
             } else if (key == "aimMarker") {
                 ok = tri(x, w, c.aim_marker, "true, false or null (null = the seat's aimMarker)");
+            } else if (key == "hideMeshes") {
+                ok = names(x, w, c.hide_meshes, "a list of at most 32 names (part of a mesh's name), [] = none, "
+                                                "or null (null = the seat's hideMeshes)", kMaxHideMeshes);
+                c.hide_meshes_set = !x.is_null();
             } else if (key == "tethering") {
                 if (!x.is_arr() || x.items.empty()) return type_error(x, w, "a list of at least one tethering mode");
                 if (x.items.size() > 8) return type_error(x, w, "at most 8 tethering modes");
@@ -347,14 +364,11 @@ struct Apply {
                     if (!x.items[i].s.empty()) out.match.push_back(lower(x.items[i].s));
                 }
             } else if (fk == "chassis") {
-                out.chassis.clear();
-                if (x.is_null()) continue;
-                if (x.is_str()) { if (!x.s.empty()) out.chassis.push_back(lower(x.s)); continue; }
-                if (!x.is_arr()) return type_error(x, w, "text or a list of text (part of the mesh's name)");
-                for (std::size_t i = 0; i < x.items.size(); ++i) {
-                    if (!x.items[i].is_str()) return type_error(x.items[i], w + "[" + std::to_string(i) + "]", "text");
-                    if (!x.items[i].s.empty()) out.chassis.push_back(lower(x.items[i].s));
-                }
+                if (!names(x, w, out.chassis, "text or a list of text (part of the mesh's name)", 64)) return false;
+            } else if (fk == "hideMeshes") {
+                if (!names(x, w, out.hide_meshes, "text or a list of at most 32 names (part of a mesh's name)",
+                           kMaxHideMeshes))
+                    return false;
             } else if (fk == "defaultCamera") {
                 // Bounded before the cast: 3000000000 used to become INT_MIN and index far outside the
                 // camera list -- a crash, and at startup UEVR then unloads the whole plugin every launch.
@@ -446,6 +460,12 @@ std::string quoted(const std::string& s) {
         else o += c;
     }
     return o + "\"";
+}
+
+std::string names_json(const std::vector<std::string>& v) {
+    std::string s = "[";
+    for (std::size_t i = 0; i < v.size(); ++i) s += (i ? ", " : "") + quoted(v[i]);
+    return s + "]";
 }
 
 std::string axes_json(bool yaw, bool pitch, bool roll) {
@@ -666,6 +686,7 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"                    is on, which it is not by default (a firstperson camera hides it regardless).\",\n";
     s += "    \"                    Left out = hidden when the camera sits at your seat or head, shown otherwise\",\n";
     s += "    \"  hideHead, aimMarker  true | false for this camera, over the seat's own\",\n";
+    s += "    \"  hideMeshes        the parts of the vehicle hidden in this camera, over the seat's list ([] = none)\",\n";
     s += "    \"Per vehicle: defaultCamera / defaultMode = where you start (from 0); motionAim = true | false overrides\",\n";
     s += "    \"  vehaim; hideHead = true hides your character's head in this seat, for true first person from a camera\",\n";
     s += "    \"  at your head (left out = false);\",\n";
@@ -678,7 +699,11 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  Pelican ride at a level's start: \\\"Pelican\\\": { \\\"match\\\": [\\\"pelican\\\"], \\\"enabled\\\": false }); its\",\n";
     s += "    \"  cameras may then be left out, and any it lists come back when it is switched on again;\",\n";
     s += "    \"  chassis = part of the name of the vehicle mesh the cameras follow, when it has several (left out =\",\n";
-    s += "    \"  one named hull or body, else the nearest). Your last camera, mode and controls in each seat are kept.\",\n";
+    s += "    \"  one named hull or body, else the nearest);\",\n";
+    s += "    \"  hideMeshes = parts of the VEHICLE hidden while you sit in this seat: a list of text found in a part's\",\n";
+    s += "    \"  name or in the name of the model it draws (case does not matter) -- for a camera inside the vehicle,\",\n";
+    s += "    \"  where the insides a damaged vehicle shows can come up across your view (left out = none).\",\n";
+    s += "    \"Your last camera, mode and controls in each seat are kept.\",\n";
     s += "    \"Keys starting with _ are notes and are ignored: add your own anywhere (\\\"_why\\\": \\\"...\\\").\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
     s += "    \"and deleting it brings the built-in cameras back.\"\n";
@@ -709,11 +734,8 @@ std::string table_to_json(const Table& t, bool guide) {
                     roles += std::string(roles.empty() ? "" : ", ") + "\"" + seat_role_name(r) + "\"";
             s += "      \"seat\": [" + roles + "],\n";
         }
-        if (!v.chassis.empty()) {
-            s += "      \"chassis\": [";
-            for (std::size_t m = 0; m < v.chassis.size(); ++m) s += (m ? ", " : "") + quoted(v.chassis[m]);
-            s += "],\n";
-        }
+        if (!v.chassis.empty()) s += "      \"chassis\": " + names_json(v.chassis) + ",\n";
+        if (!v.hide_meshes.empty()) s += "      \"hideMeshes\": " + names_json(v.hide_meshes) + ",\n";
         if (v.cameras.empty()) {
             // A seat set "enabled": false may list none: the entry ends on the key before, without its comma.
             if (s.size() >= 2 && s.compare(s.size() - 2, 2, ",\n") == 0) s.erase(s.size() - 2, 1);
@@ -737,7 +759,8 @@ std::string table_to_json(const Table& t, bool guide) {
                + ", \"collideMargin\": " + fmt_num(c.collide_margin)
                + (c.hide_body < 0 ? std::string() : std::string(", \"hideBody\": ") + (c.hide_body ? "true" : "false"))
                + (c.hide_head < 0 ? std::string() : std::string(", \"hideHead\": ") + (c.hide_head ? "true" : "false"))
-               + (c.aim_marker < 0 ? std::string() : std::string(", \"aimMarker\": ") + (c.aim_marker ? "true" : "false"));
+               + (c.aim_marker < 0 ? std::string() : std::string(", \"aimMarker\": ") + (c.aim_marker ? "true" : "false"))
+               + (c.hide_meshes_set ? ", \"hideMeshes\": " + names_json(c.hide_meshes) : std::string());
             // Each mode on its own line under the camera, naming only what differs from the camera's own
             // tracking -- the reader fills the rest back in, so the file round-trips.
             if (!c.tethering.empty()) {
@@ -817,7 +840,9 @@ bool starts_tethered(const std::string& n) { return lower(n).rfind("tethered", 0
 bool same_view(const Camera& a, const Camera& b) {
     return a.type == b.type && a.origin == b.origin && a.origin_socket == b.origin_socket
         && a.collide == b.collide && a.collide_margin == b.collide_margin
-        && a.hide_body == b.hide_body && a.hide_head == b.hide_head && a.tethering.empty() && b.tethering.empty();
+        && a.hide_body == b.hide_body && a.hide_head == b.hide_head
+        && a.hide_meshes_set == b.hide_meshes_set && a.hide_meshes == b.hide_meshes
+        && a.tethering.empty() && b.tethering.empty();
 }
 std::string trim(std::string s) {
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
@@ -910,6 +935,12 @@ bool effective_hide_head(const Vehicle& v, int ci) {
     if (ci >= 0 && ci < static_cast<int>(v.cameras.size()) && v.cameras[static_cast<size_t>(ci)].hide_head >= 0)
         return v.cameras[static_cast<size_t>(ci)].hide_head != 0;
     return v.hide_head;
+}
+
+const std::vector<std::string>& effective_hide_meshes(const Vehicle& v, int ci) {
+    if (ci >= 0 && ci < static_cast<int>(v.cameras.size()) && v.cameras[static_cast<size_t>(ci)].hide_meshes_set)
+        return v.cameras[static_cast<size_t>(ci)].hide_meshes;
+    return v.hide_meshes;
 }
 
 } // namespace halo::vehcampresets

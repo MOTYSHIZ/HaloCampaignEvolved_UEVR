@@ -128,4 +128,10 @@ bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out);
 // the layer's snapshot takes one writer at a time. Any thread.
 bool veh_tp_reticle_stamp_owns();
 
+// Every component of `actor`, up to `max` into `out`: its attachment tree from its root down (which takes
+// in whatever hangs on it -- a rider, a turret actor), plus the meshes the last ride scan found it owning
+// directly or through one of its components, attached or not. Each is a live object when returned; nothing
+// is held. For the vehicle's own parts ("hideMeshes", VehMeshes.cpp). GAME THREAD.
+int vehcam_actor_tree(uevr::API::UObject* actor, uevr::API::UObject** out, int max);
+
 } // namespace halo

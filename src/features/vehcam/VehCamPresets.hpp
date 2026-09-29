@@ -95,6 +95,10 @@ struct Camera {
                                               //      always for a firstperson camera (its view is inside it)
     int     hide_head = -1;                   // "hideHead": -1 = the vehicle entry's; 0 / 1
     int     aim_marker = -1;                  // "aimMarker": -1 = the vehicle entry's; 0 / 1
+    // "hideMeshes": this camera's own list (Vehicle::hide_meshes says what it names), used only when
+    // hide_meshes_set -- left out or null = the seat's list, [] = nothing hidden in this camera.
+    std::vector<std::string> hide_meshes;
+    bool    hide_meshes_set = false;
     // "tethering": the modes left X steps through. Empty = one mode, the camera's own tracking above.
     std::vector<Tether> tethering;
     bool hides_body() const { return hides_body(origin); }
@@ -166,6 +170,11 @@ struct Vehicle {
     // "chassis": lower-case substrings of the MESH the cameras use as the vehicle's frame, when its actor
     // has more than one ("hull", "sk_wraithmortar"). Left out: a mesh named hull or body, else the nearest.
     std::vector<std::string> chassis;
+    // "hideMeshes": PARTS OF THE VEHICLE hidden while you sit in this seat -- lower-case substrings of a mesh
+    // component's name or of the mesh asset it draws. For a camera inside the vehicle, which sees out
+    // through the hull's back faces: the internals a damaged vehicle reveals (the Banshee) come up inside
+    // that view and block it. A camera may give its own list. Left out = none. VehMeshes.cpp applies it.
+    std::vector<std::string> hide_meshes;
     std::vector<Camera> cameras;
 };
 
@@ -173,8 +182,9 @@ struct Table {
     std::vector<Vehicle> vehicles;
 };
 
-constexpr int kMaxVehicles = 32;
-constexpr int kMaxCameras  = 16;
+constexpr int kMaxVehicles   = 32;
+constexpr int kMaxCameras    = 16;
+constexpr int kMaxHideMeshes = 32;   // names in one "hideMeshes" list: every part of the vehicle is tested against each
 
 // The built-in table: what a missing file gives, and what a first run writes out -- a CHECKPOINT
 // CANONIZATION of a player's tuned file (VehCamDefaults.inc, written by Scripts\VehCams-Tool.ps1 canonize).
@@ -212,6 +222,9 @@ int merge_tethered(Table& t, std::vector<std::vector<std::pair<int, int>>>* move
 // the mode's, else the camera's, else the vehicle entry's.
 bool effective_aim_marker(const Vehicle& v, int ci, int mi);
 bool effective_hide_head(const Vehicle& v, int ci);
+// ...and the parts of the vehicle hidden in camera `ci`: the camera's own "hideMeshes" when it gives one
+// (possibly empty), else the vehicle entry's.
+const std::vector<std::string>& effective_hide_meshes(const Vehicle& v, int ci);
 
 // Index of the entry for this vehicle actor name and seat (case-insensitive substring match; an entry with
 // a "seat" list is considered only when the game has named the seat and one of its flags is listed; the

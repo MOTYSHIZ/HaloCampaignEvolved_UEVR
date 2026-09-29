@@ -75,6 +75,11 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
 // GAME thread: the "chassis" names of the entry this vehicle and seat would get (empty = none given).
 std::vector<std::string> vehcam_chassis_hint(const std::wstring& vehicle_name, int seat);
 
+// GAME thread: the parts of the vehicle the selected camera hides ("hideMeshes": the camera's own list,
+// else its seat's) -- empty while no camera is selected. `rev` (optional) changes whenever the list does,
+// so a caller can act on a change without comparing lists every tick.
+const std::vector<std::string>& vehcam_hide_meshes(uint32_t* rev = nullptr);
+
 // Any thread (the input hook, left Y): +1 = next camera, -1 = previous.
 void veh_cam_step(int dir);
 // Any thread (the input hook, left X): +1 = the current camera's next tethering mode, -1 = previous.

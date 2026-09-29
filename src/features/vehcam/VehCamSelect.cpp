@@ -55,6 +55,14 @@ int                s_mode = 0;                      // the camera's tethering mo
 std::string        s_vehicle_name;                  // the entry's name (a reload may reorder entries)
 uint32_t           s_recenter_gen = 0;              // VehActiveCam::recenter_gen / place_gen: bumped by
 uint32_t           s_place_gen = 0;                 //   camera_change() -- select(..., recenter), controls, seat
+std::vector<std::string> s_hide_meshes;             // the selected camera's "hideMeshes" (vehcam_hide_meshes)
+uint32_t           s_hide_rev = 0;                  // ...bumped when it changes
+
+void set_hide_meshes(const std::vector<std::string>& h) {
+    if (h == s_hide_meshes) return;
+    s_hide_meshes = h;
+    ++s_hide_rev;
+}
 
 // A camera CHANGE the player made or got: the view lines up with the vehicle's aim (vehcamrecenter) and your
 // head goes back on the camera's point (vehcamrecenterpos). Published with the next make_active().
@@ -273,6 +281,7 @@ void clear_selection(const char* why = "out of the vehicle") {
     if (s_vehicle >= 0) API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- camera released", why);
     s_vehicle = -1;
     s_vehicle_name.clear();
+    set_hide_meshes({});
     publish(VehActiveCam{});
     g_veh_tp_active.store(false, std::memory_order_relaxed);
 }
@@ -307,6 +316,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
     if (recenter) camera_change();
     const VehActiveCam a = make_active(vi, ci, mi);
     publish(a);
+    set_hide_meshes(vcp::effective_hide_meshes(v, ci));
     // Our camera draws only for a chase camera; a first-person entry hands the view to the seat camera.
     g_veh_tp_active.store(g_cfg.veh_tp && a.type == static_cast<uint8_t>(vcp::CamType::Chase),
                           std::memory_order_relaxed);
@@ -640,6 +650,11 @@ std::vector<std::string> vehcam_chassis_hint(const std::wstring& vehicle_name, i
     const int vi = vcp::match_vehicle(s_table, narrow(vehicle_name), static_cast<uint8_t>(seat));
     if (vi < 0) return {};
     return s_table.vehicles[vi].chassis;
+}
+
+const std::vector<std::string>& vehcam_hide_meshes(uint32_t* rev) {
+    if (rev != nullptr) *rev = s_hide_rev;
+    return s_hide_meshes;
 }
 
 void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& vehicle_name, int seat) {
