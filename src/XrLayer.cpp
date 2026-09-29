@@ -1242,24 +1242,50 @@ void generate_label(uint8_t* out, int dim, size_t stride, float r, float g, floa
 // D3D12 plumbing
 // ============================================================================================
 
-// The pane's present-submitted lists (see g_pane). Their executions were submitted by the SUBMIT
-// thread, not this one, so none of this thread's fences covers them: wait (bounded -- teardown only,
-// never a frame) for the last one before releasing the allocators and lists it executes from.
-// Callers run this only where produce_layers cannot be submitting (not Armed, or hook removed).
-void release_pane_jobs() {
-    g_pane_pending.store(-1, std::memory_order_release);
-    if (g_pane_fence != nullptr) {
-        uint64_t last = 0;
-        for (auto& j : g_pane) {
-            const uint64_t f = j.fence.load(std::memory_order_relaxed);
-            if (f > last) last = f;
-        }
-        for (int ms = 0; ms < 500; ++ms) {
-            const uint64_t done = g_pane_fence->GetCompletedValue();
-            if (done >= last || done == UINT64_MAX) break;   // UINT64_MAX: the device is gone
+// EVERY LIST THIS MODULE SUBMITTED MUST FINISH BEFORE WHAT IT REFERENCES IS DESTROYED: the swapchain
+// images the blit writes, the owned atlas, the staging buffer, and the allocators the lists were
+// recorded from. Releasing any of those under an executing list is undefined behaviour -- a device
+// removal, not a glitch -- and until this existed only the pane's lists were waited for (found by
+// the v0.6.0 release review). Three producers, three fences: the submit thread's blit (g_fence), the
+// game thread's batch (g_gt_fence), the pane's present-submitted lists (g_pane_fence).
+//
+// BOUNDED, because this runs on the game thread: teardown only (xrlayer off, shutdown, a failed
+// bring-up), never on a frame. It gives up on a removed device, whose fences read UINT64_MAX.
+// Callers run it only where nothing new can be submitted: the submit side unhooked (remove_hook --
+// the bridge rung blocks until an in-flight call has returned) or never armed.
+void wait_for_our_gpu_work() {
+    uint64_t pane_last = 0;
+    for (auto& j : g_pane) {
+        const uint64_t f = j.fence.load(std::memory_order_relaxed);
+        if (f > pane_last) pane_last = f;
+    }
+    struct Pending { ID3D12Fence* fence; uint64_t value; const char* what; };
+    const Pending all[] = {
+        {g_fence,      g_fence_v,    "overlay blit"},
+        {g_gt_fence,   g_gt_fence_v, "game-thread capture"},
+        {g_pane_fence, pane_last,    "scope pane copy"},
+    };
+    const uint64_t t0 = GetTickCount64();
+    for (const Pending& p : all) {
+        if (p.fence == nullptr || p.value == 0) continue;
+        for (;;) {
+            const uint64_t done = p.fence->GetCompletedValue();
+            if (done >= p.value || done == UINT64_MAX) break;   // UINT64_MAX: the device is gone
+            if (GetTickCount64() - t0 > 500) {
+                logf("teardown: the %s list (fence %llu, at %llu) had not finished after 500 ms -- "
+                     "releasing anyway rather than hang the game thread.",
+                     p.what, (unsigned long long)p.value, (unsigned long long)done);
+                return;
+            }
             Sleep(1);
         }
     }
+}
+
+// The pane's present-submitted lists (see g_pane). release_d3d() has already waited for them
+// (wait_for_our_gpu_work); the other caller, a failed create, never submitted one.
+void release_pane_jobs() {
+    g_pane_pending.store(-1, std::memory_order_release);
     for (auto& j : g_pane) {
         if (j.list  != nullptr) { j.list->Release();  j.list  = nullptr; }
         if (j.alloc != nullptr) { j.alloc->Release(); j.alloc = nullptr; }
@@ -1276,7 +1302,9 @@ void release_d3d() {
     // runs on the game thread, so anything released while that pointer is still visible is a
     // use-after-free of exactly the kind this rework exists to remove.
     g_source_override.store(nullptr, std::memory_order_release);
-    // The pane's lists reference g_owned, so they go (and finish) before it does.
+    // Nothing below may be released under a list still executing on the GPU.
+    wait_for_our_gpu_work();
+    // The pane's lists reference g_owned, so they go before it does.
     release_pane_jobs();
     for (int i = 0; i < XRLAYER_SLOTS; ++i) {
         g_capture_src[i] = nullptr;
@@ -1721,6 +1749,9 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 // ============================================================================================
 
 void destroy_swapchain() {
+    // The blit writes these images: none may be destroyed under a copy still executing on the GPU.
+    // (xrlayer_shutdown destroys the swapchain BEFORE release_d3d, so the wait has to be here too.)
+    wait_for_our_gpu_work();
     if (g_swapchain != XR_NULL_HANDLE && g_xr.destroy_swapchain != nullptr) {
         g_xr.destroy_swapchain(g_swapchain);
     }
