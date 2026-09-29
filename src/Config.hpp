@@ -2987,7 +2987,11 @@ struct Config {
                                     // 2026-09-28, canonized from the user's cfg (512 from 2026-09-13,
                                     // canonized from the tuned profile; was 1024)
     int   scope_div     = 2;       // capture every Nth tick (~32 Hz / N) -- the perf valve. 2 since
-                                   // 2026-09-28, canonized from the user's cfg (was 1)
+                                   // 2026-09-28, canonized from the user's cfg (was 1). ONLY READ IN
+                                   // scope_cap_mode 0: the default mode 1 captures with every rendered
+                                   // frame, so at default settings this changes nothing (found by the
+                                   // v0.6.0 perf audit -- the canonize commit claimed it halved the
+                                   // capture rate; it never did).
     float scope_dist    = 63.57f;   // pane distance along the aim ray, cm (headset-fitted)
     // Where the CAPTURE CAMERA sits along the ray, cm from the origin. It must be FURTHER out
     // than the pane (scope_dist) or it looks straight at the back of the pane and captures a

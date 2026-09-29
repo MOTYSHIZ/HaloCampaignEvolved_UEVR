@@ -370,9 +370,14 @@ bool hit_trace(const Vec3& start, const Vec3& end,
     int n = 0;
     for (int i = 0; i < ignore_count; ++i) ig[n++] = ignore[i];
     for (int pass = 0;; ++pass) {
-        if (!trace_once(start, end, ig, n, out_hit)) return false;
+        // A miss after a look-past must not leave the skipped actor named as "what was hit".
+        if (!trace_once(start, end, ig, n, out_hit)) { g_last_hit_component = nullptr; return false; }
         API::UObject* owner = nullptr;
-        if (pass >= kPassMax || !hit_trace_passable(g_last_hit_component, &owner)) return true;
+        if (!hit_trace_passable(g_last_hit_component, &owner)) return true;
+        // Out of look-past budget and STILL on something passable: no hit, exactly as EyeTrace's
+        // run_trace answers the same case. Reporting it as a surface put the reticule and the scope
+        // focus on an invisible cylinder further out while the head block saw clear space.
+        if (pass >= kPassMax) { g_last_hit_component = nullptr; return false; }
         ig[n++] = owner;
     }
 }

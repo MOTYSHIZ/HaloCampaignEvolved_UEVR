@@ -13691,6 +13691,21 @@ public:
         {
             const bool gripping = g_cfg.grip_zoom && halo::two_hand_latched();
 
+            // The grenade's edge detector. It FOLLOWS THE TRIGGER ON EVERY POLL -- while the scope has
+            // it and while a menu or a seat blocks the throw -- so a trigger that is already held when
+            // the throw path takes it over is not read as a fresh press. With hold-to-zoom (the
+            // default) the trigger is routinely still squeezed when the grip lets go, and this used to
+            // follow it only while not gripping: the held zoom became a grenade on the first unrouted
+            // poll. Own hysteresis, matching the scope's, because this is an analog axis and a wobble
+            // at the threshold must not double-throw.
+            static bool s_lt_down = false;
+            const uint8_t lt_on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
+            const uint8_t lt_off_t = (uint8_t)(lt_on_t / 2);
+            const uint8_t lt_raw   = state->Gamepad.bLeftTrigger;   // before anything below zeroes it
+            const bool lt_press    = !s_lt_down && lt_raw >= lt_on_t;
+            if (lt_press) s_lt_down = true;
+            else if (s_lt_down && lt_raw <= lt_off_t) s_lt_down = false;
+
             // ZOOM DIES WITH THE GRIP. Releasing the barrel is an unambiguous "done aiming", and a
             // scope left on after the hand that opened it let go is a scope the player has to
             // remember to close with a button that no longer does that job.
@@ -13726,20 +13741,13 @@ public:
                 // following it anyway, so a press after re-gripping is neither swallowed nor
                 // invented. Passed BEFORE the grenade path below zeroes the trigger.
                 scope_lt_unrouted(state->Gamepad.bLeftTrigger);
-                // GRENADE on the press edge. Own hysteresis, matching the scope's, because this is
-                // an analog axis and a wobble at the threshold must not double-throw. The mask is
-                // injected rather than passed through: LT is not a button the game reads as throw,
-                // and the physical grip that IS that mask has been swallowed upstream.
-                static bool s_lt_down = false;
-                const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
-                const uint8_t off_t = (uint8_t)(on_t / 2);
-                const uint8_t lt    = state->Gamepad.bLeftTrigger;
+                // GRENADE on the press edge (the detector above). The mask is injected rather than
+                // passed through: LT is not a button the game reads as throw, and the physical grip
+                // that IS that mask has been swallowed upstream. A press made while blocked is spent,
+                // not saved for later: it does not throw when the menu closes.
                 const bool blocked  = g_in_menu.load() || g_stick_mode.load();
-                if (!blocked && !s_lt_down && lt >= on_t) {
-                    s_lt_down = true;
+                if (!blocked && lt_press) {
                     lt_throw_pending = true;   // injected below the holster steal, not here
-                } else if (s_lt_down && lt <= off_t) {
-                    s_lt_down = false;
                 }
                 // Eaten either way, so Blam's native zoom never engages under the VR presentation.
                 // NOT gated on scopeeat (changed 2026-09-27): that key now means "let the game zoom

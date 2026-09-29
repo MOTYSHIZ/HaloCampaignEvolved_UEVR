@@ -1232,14 +1232,25 @@ bool reticle_stray_check_due(uint32_t tick) {
 TrackedObject g_ret_hosted_widget;
 TrackedObject g_ret_widget_parent;
 
-uevr::API::UObject* reticule_hosted_widget() { return g_ret_hosted_widget.get(); }
+// READ-ONLY, on a COPY of the handle. TrackedObject::get() RESETS a handle whose object died, and a
+// dead-but-non-empty handle is exactly how reticule_widget_move() notices the HUD was rebuilt under
+// us. scopeeat=2's zoom-sound edge asks for the widget early in update(); resetting from there erased
+// that evidence after a checkpoint revert, and the component kept drawing the dead widget's frozen
+// crosshair until the next death or level.
+uevr::API::UObject* reticule_hosted_widget() {
+    TrackedObject probe = g_ret_hosted_widget;
+    return probe.get();
+}
 
 // Collapse every scanned reticle widget that is not the one we host. ESlateVisibility::Collapsed
 // is 1. Called from the end of the scan, so it costs nothing of its own -- it reuses the list the
 // sweep just built rather than looking again.
 void reticle_collapse_strays() {
     if (!g_cfg.aim_hide_native) return;
-    auto* mine = g_ret_hosted_widget.get();
+    // A COPY, for the same reason as reticule_hosted_widget(): a reset here would hide a rebuilt HUD
+    // from the re-bind check.
+    TrackedObject mine_probe = g_ret_hosted_widget;
+    auto* mine = mine_probe.get();
 
     // FAIL CLOSED WHEN OUR OWN WIDGET CANNOT BE IDENTIFIED.
     //

@@ -3,6 +3,7 @@
 
 #include "BlamDrive.hpp"          // the unit state the radar scan is handed
 #include "Config.hpp"
+#include "DevTools.hpp"           // HALO_VR_DEV: the class census is a dev survey
 #include "core/Services.hpp"
 #include "Holster.hpp"
 #include "Markers.hpp"            // holster_marker_place_rot / scale / room_to_world
@@ -398,7 +399,11 @@ void parse_slots() {
 // expensive full-array kind, so it runs only while it has a consumer: an unbound slot, or the
 // census still collecting.
 void sweep(API::UObject* owner) {
-    const bool census_live = s_census_lines < 60 && s_census_sweeps < 25;
+    // THE CENSUS IS A DEV SURVEY: its answer is already the shipped class list. In a player build it
+    // only kept this whole-array walk running every ~4 s for its first 25 passes (~95 s) after the
+    // wrist HUD was switched on, even with every slot bound -- a VR hitch each time. Binding still
+    // sweeps whenever a slot is unbound.
+    const bool census_live = HALO_VR_DEV && s_census_lines < 60 && s_census_sweeps < 25;
     bool want = census_live;
     for (int i = 0; i < s_slot_count; ++i)
         if (!s_slots[i].failed && s_slots[i].widget.get() == nullptr && (s_slots[i].misses < 8 || s_tick - s_scan_tick >= 1200)) want = true;

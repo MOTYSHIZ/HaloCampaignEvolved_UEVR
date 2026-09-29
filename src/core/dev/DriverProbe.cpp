@@ -1,6 +1,12 @@
-// DriverProbe -- see the header for what it measures and the rules it obeys.
+// DriverProbe -- see the header for what it measures and the rules it obeys. Dev builds only: it is an
+// instrument (a writer thread, CSV files, per-frame reflected reads from the stereo callback), and a
+// config key is not a sufficient guard for code like that (CLAUDE.md, "DEV TOOLING MUST NOT BE COMPILED
+// INTO A PLAYER BUILD"). Player builds get the empty stubs at the bottom, so no call site needs an #if.
 
 #include "core/dev/DriverProbe.hpp"
+#include "DevTools.hpp"
+
+#if HALO_VR_DEV
 
 #include "ArmDriver.hpp"              // arm_driver_owns
 #include "Config.hpp"
@@ -1079,3 +1085,23 @@ void driver_probe_shutdown() {
 }
 
 } // namespace halo
+
+#else   // player builds: the key parses and nothing runs
+
+namespace halo {
+void driver_probe_engine_tick_end() {}
+void driver_probe_post_engine_tick() {}
+void driver_probe_stereo_begin() {}
+void driver_probe_stereo_end() {}
+void driver_probe_post_view(int, float, const UEVR_Vector3f*, const UEVR_Rotatorf*, bool) {}
+void driver_probe_render_sample(int) {}
+long long driver_probe_clock() { return 0; }
+void driver_probe_pose_hook_done(long long, int) {}
+void driver_probe_slot_done(long long, bool, int) {}
+void driver_probe_note_intent_mesh(float, float, float) {}
+void driver_probe_note_intent_parent(bool, const Vec3&, const Quat&) {}
+void driver_probe_note_pad(const _XINPUT_STATE*) {}
+void driver_probe_shutdown() {}
+}   // namespace halo
+
+#endif

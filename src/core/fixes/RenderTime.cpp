@@ -1,4 +1,10 @@
 #include "core/fixes/RenderTime.hpp"
+#include "DevTools.hpp"
+
+// stabilityrendertime is an EXPERIMENT (a dev key, measured worse than off), and its modes 2-4 copy
+// into the game's live render banks from the render pass. A config key is not a sufficient guard for
+// that (CLAUDE.md, DEV TOOLING), so player builds compile the empty stubs at the bottom.
+#if HALO_VR_DEV
 
 #include "Config.hpp"
 #include "core/config/CfgRead.hpp"
@@ -220,3 +226,13 @@ void render_time_refresh() {
 }
 
 } // namespace halo
+
+#else   // player builds: the key parses and nothing runs
+
+namespace halo {
+void render_time_note_build(const PaDriveDone&) {}
+void render_time_note_bank(palettearm::BlamMatrix4x3*, std::uint32_t, std::int32_t, std::int32_t, std::uint8_t) {}
+void render_time_refresh() {}
+}   // namespace halo
+
+#endif

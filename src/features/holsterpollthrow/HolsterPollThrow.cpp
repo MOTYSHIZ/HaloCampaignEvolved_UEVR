@@ -72,6 +72,7 @@ std::atomic<uintptr_t> g_greninst_obj{0};
 std::atomic<long long> g_greninst_at_ms{0};
 std::atomic<float>     g_greninst_vx{0.0f}, g_greninst_vy{0.0f}, g_greninst_vz{0.0f};
 
+#if HALO_VR_DEV   // THROWDUMP: a memory-diff survey of the unit around a throw -- a dev instrument
 void throw_dump_probe(uintptr_t obj) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
     constexpr uintptr_t SPAN = 0x600;
@@ -240,6 +241,7 @@ void throw_dump_probe(uintptr_t obj) {
                              s_t, s_lines);
     memcpy(s_prev, cur, SPAN);
 }
+#endif
 
 // ================================================================================================
 // THE HOLSTER SIDE: the XInput-cadence throw and the exports.
@@ -407,11 +409,20 @@ void holsterpollthrow_unit_state_grenades(uintptr_t obj) {
         g_unit_gvalid.store(false, std::memory_order_relaxed);
     }
 
+#if HALO_VR_DEV
     if (g_cfg.holster_poll_throw && g_cfg.throw_dump != 0) throw_dump_probe(obj);
+#endif
 }
 
 void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
     CFG_HOOK_READ;   // off the game thread: see core/config/CfgRead.hpp
+#if HALO_VR_DEV
+    // BOTH HALVES BELOW ARE EXPERIMENTS on the grenade throw, driven by dev keys -- and v3's arm is
+    // only ever set by the dev-only create hook -- so a player build compiles neither. And neither
+    // runs with the feature off: the unit-state dispatcher calls this slot whatever is enabled, and
+    // at default settings (roomscale keeps the publish alive) v3 read unit+0x10 on every sim call for
+    // nothing.
+    if (!g_cfg.holster_poll_throw) return;
     // ---- GRENINSTANT mode 2: backdate the throw-start stamp (doctrine in Config.hpp). The
     // stamp at unit+0x38C is written by the game within ~1 ms of the press; the first probe call
     // that sees it change during the press window rewrites it N ticks into the past, once per
@@ -483,6 +494,9 @@ void holsterpollthrow_unit_state_after_radar(uintptr_t obj) {
             }
         }
     }
+#else
+    (void)obj;
+#endif
 }
 
 void holsterpollthrow_game_tick_after_blam_aim() {

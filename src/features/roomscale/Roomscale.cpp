@@ -51,6 +51,25 @@ std::atomic<bool>  g_rs_active{false};
 std::atomic<uint32_t> g_rs_injected{0};
 std::atomic<float> g_rs_user_stick{0.0f};
 
+// WHEN THE GAME TICK LAST STOOD A COMMAND UP (steady ms). Both delivery paths -- the stick injection
+// on the XInput thread and the throttle write on the sim thread -- honour a command only while it is
+// fresh, as physical crouch honours its button. The tick that publishes it can stop running with the
+// command still standing: the leash block is skipped when roomscale AND auto height are switched off
+// live (nothing then clears the flags, and the sim write kept walking the Spartan by himself), and the
+// whole tick pauses for about a second after a fault. A command nobody re-stamped is not one.
+std::atomic<long long> g_rs_cmd_ms{0};
+constexpr long long    kRsCmdFreshMs = 250;
+
+long long rs_now_ms() {
+    return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool rs_cmd_fresh() {
+    const long long age = rs_now_ms() - g_rs_cmd_ms.load(std::memory_order_relaxed);
+    return age >= 0 && age <= kRsCmdFreshMs;
+}
+
 } // namespace
 
 // ---- ROOMSCALE + BOB CANCEL keys.
@@ -166,7 +185,9 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             // rewritten VR_WorldScale to 0.01, so the eye deltas below mean nothing until it is put
             // back. What it does NOT stop: the leash still absorbs only beyond roomscale_leash, so a
             // head moved during the scene is walked back to afterwards, as it always was.
-            const bool rs_ok = g_cfg.roomscale && !g_stick_mode.load() && !g_in_menu.load()
+            // And never under the kill switch (Ctrl+Home: "the game plays stock"): this block runs
+            // above the tick's kill return, where the menu and stick-mode gates it reads stop updating.
+            const bool rs_ok = g_cfg.enabled && g_cfg.roomscale && !g_stick_mode.load() && !g_in_menu.load()
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && !g_cut2d_engaged.load()
                             && g_rig_parent != nullptr;
@@ -399,6 +420,7 @@ bool roomscale_leash_lateral(const Vec3& hp, float& nx, float& ny, float& nz, bo
             // from g_pad_user_mag), so a deliberate push is still locomotion.
             g_rs_active.store(rs_cmd && !rs_thr, std::memory_order_relaxed);
             halo::g_rs_thr_active.store(rs_cmd && rs_thr, std::memory_order_relaxed);
+            g_rs_cmd_ms.store(rs_now_ms(), std::memory_order_relaxed);
             {
                 const float ae = (dt > 0.0f) ? clampf(dt / 0.15f, 0.0f, 1.0f) : 1.0f;
                 const float v_now = rs_speed_of(s_rs_cmd_mag);
@@ -457,7 +479,8 @@ void roomscale_xinput_before_brake(_XINPUT_STATE* state) {
             halo::g_pad_user_mag.store(um, std::memory_order_relaxed);
         }
         if (g_cfg.roomscale && g_rs_active.load(std::memory_order_relaxed)
-            && !g_dpad_shift_active.load() && !g_in_menu.load() && !g_stick_mode.load()) {
+            && !g_dpad_shift_active.load() && !g_in_menu.load() && !g_stick_mode.load()
+            && rs_cmd_fresh()) {
             const float ulx = (float)state->Gamepad.sThumbLX / 32767.0f;
             const float uly = (float)state->Gamepad.sThumbLY / 32767.0f;
             if (std::sqrt(ulx * ulx + uly * uly) < g_cfg.roomscale_stick) {
@@ -499,10 +522,12 @@ void roomscale_sim_unit_state_end(uintptr_t obj) {
     const bool thr_probe = g_cfg.roomscale && (g_cfg.roomscale_thr_probe != 0)
                         && !g_stick_mode_active.load(std::memory_order_relaxed)
                         && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick;
-    if ((g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)
+    // g_cfg.roomscale here too, as the stick path has it: the flag below is only cleared by the tick
+    // that sets it, and with roomscale and auto height both switched off live that tick stops.
+    if ((g_cfg.roomscale && g_cfg.roomscale_throttle == 3 && g_rs_thr_active.load(std::memory_order_relaxed)
          && !g_stick_mode_active.load(std::memory_order_relaxed)
          && g_pad_user_mag.load(std::memory_order_relaxed) < g_cfg.roomscale_stick
-         && rs_thr_guard_allows_write()) || thr_probe) {
+         && rs_thr_guard_allows_write() && rs_cmd_fresh()) || thr_probe) {
         const uintptr_t o1 = (uintptr_t)g_cfg.blam_unit_throttle_off;
         const uintptr_t o2 = (uintptr_t)g_cfg.blam_unit_throttle_off2;
         if (o1 != 0 && !IsBadWritePtr((void*)(obj + o1), 8)) {
