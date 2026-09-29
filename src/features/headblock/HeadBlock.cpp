@@ -285,7 +285,8 @@ void headblock_game_tick_after_leash() {
     // in VR, the death camera, the post-load window. Tracing from a chase or cinematic camera clamps
     // the view against geometry near that camera, pulling it toward a body the head is not on.
     {
-        const bool hb_active = (g_cfg.head_block != 0) && !g_in_menu.load() && !g_cut2d_engaged.load()
+        // g_cfg.enabled: the kill switch (Ctrl+Home) hands the view back to UEVR unclamped.
+        const bool hb_active = g_cfg.enabled && (g_cfg.head_block != 0) && !g_in_menu.load() && !g_cut2d_engaged.load()
                             && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                             && !g_view_seat_always.load(std::memory_order_relaxed)
                             && !g_stick_mode.load();

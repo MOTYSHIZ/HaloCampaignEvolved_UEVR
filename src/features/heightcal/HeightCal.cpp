@@ -1314,7 +1314,10 @@ bool heightcal_leash_vertical(const Vec3& hp, const UEVR_Vector3f& so, float& ny
                 // played in VR, death and the post-load window: no floor he stands on in any of them.
                 // The unarmed on-foot opening never enters it.
                 const bool stick = g_stick_mode.load();
-                const bool hc_active = !g_in_menu.load() && !g_cut2d_engaged.load()
+                // Not under the kill switch (Ctrl+Home, "the game plays stock"): this block runs above
+                // the tick's kill return, where the menu and stick-mode gates stop updating, and physical
+                // crouch would keep pressing B against them. Holding releases the button.
+                const bool hc_active = g_cfg.enabled && !g_in_menu.load() && !g_cut2d_engaged.load()
                                     && !halo::g_unit_mounted.load(std::memory_order_relaxed)
                                     && !stick;
                 static bool s_stick_logged = false;
@@ -1345,7 +1348,7 @@ void heightcal_xinput_before_brake(_XINPUT_STATE* state) {
     const WORD m = (WORD)g_cfg.map_rstick_down;
     // B is "back" in every menu and a vehicle may give it an action: never there, whatever the tick
     // last said. The tick releases on these too; this is the half that cannot lag behind it.
-    const bool gated = g_in_menu.load() || g_stick_mode.load() ||
+    const bool gated = !g_cfg.enabled || g_in_menu.load() || g_stick_mode.load() ||
                        halo::g_unit_mounted.load(std::memory_order_relaxed);
 
     // THE PLAYER'S OWN CROUCH INPUT, for heightstickcrouch -- read FIRST, before physical crouch adds
