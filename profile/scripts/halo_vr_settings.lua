@@ -1,6 +1,8 @@
 -- halo_vr_settings.lua -- in-game settings menus for the Halo: Campaign Evolved VR mod.
 --
--- Three panels in the UEVR overlay (Script UI section):
+-- Five panels in the UEVR overlay (Script UI section), drawn in this order: "Halo VR Controls
+-- (rebinding)", "Halo VR User Settings", "Halo VR DEV Settings", "Halo VR Calibration" and
+-- "Halo VR Experimental". The three original ones:
 --   "Halo VR User Settings"  every player-facing setting, grouped like the catalog; saves to
 --                            halo_vr_user.cfg, so changes survive updates and apply in ~2 s.
 --   "Halo VR DEV Settings"   the internal/research knobs from halo_vr_dev.cfg. Big warning:
@@ -1446,24 +1448,25 @@ local BIND_ROWS = {
     { key = "bindcrouch",    name = "Crouch",           def = "0x0000",
       note = "Unbound = crouch is on RIGHT STICK DOWN (the shipped default)." },
     { key = "bindmelee",     name = "Melee",            def = "0x0000",
-      note = "Unbound = melee is the SWING gesture only." },
+      note = "Unbound = melee is RIGHT STICK CLICK, plus the swing gesture." },
     { key = "bindreload",    name = "Reload",           def = "0x0000",
-      note = "Unbound = reload is the magazine GESTURE only." },
+      note = "Unbound = reload is the game's own button (right B), or the magazine gesture\n" ..
+             "with the Experimental Manual reload switched on." },
     { key = "bindscope",     name = "Scope toggle",     def = "0x0000",
       note = "Unbound = the scope is on the LEFT TRIGGER. Binding a button keeps the trigger too." },
     { key = "binddpadshift", name = "D-pad shift",      def = "0x0000",
-      note = "Hold to turn the left stick into the d-pad (grenades / weapon switch).\n" ..
+      note = "Hold to turn the left stick into the d-pad.\n" ..
              "Unbound = the shift is RIGHT STICK UP. Binding a button REPLACES the stick gesture." },
     { key = "mapfrom",       name = "Rebind: from",     def = "0x2000",
       note = "Press this button..." },
-    { key = "mapto",         name = "Rebind: to",       def = "0x0100",
-      note = "...and the game receives this one instead. Shipped: the crouch button becomes\n" ..
-             "equipment (LB), since crouch moved onto the right stick." },
+    { key = "mapto",         name = "Rebind: to",       def = "0x0200",
+      note = "...and the game receives this one instead. Shipped: left X (which arrives as the\n" ..
+             "crouch button) becomes equipment, since crouch moved onto the right stick." },
     { key = "mapmenuback",   name = "Menu: Back",       def = "0x4000",
       note = "Acts as Back while a menu is open. Gameplay binds pause automatically there." },
     { key = "grenadefrom",   name = "Grenade",          def = "0x0000",
-      note = "The left grip belongs to the mod (magazine grabs), so grenades need a button.\n" ..
-             "Unbound = grenades have NO binding unless the grip is shared (gripexclusive=0)." },
+      note = "The left grip belongs to the mod (the two-handed hold), so grenades moved.\n" ..
+             "Unbound = grenades are on the LEFT TRIGGER whenever you are not gripping two-handed." },
 }
 
 -- Catalog lookup, so this panel shows the same defaults and tooltips as the main settings list
