@@ -414,7 +414,11 @@
     float wrist_hud_gain_r = 3.0f;
     // Glance gate: 1 = the panels show only while the LEFT TRIGGER is held (and the trigger is
     // swallowed from the game while it serves the HUD); 0 = always visible.
-    bool  wrist_hud_trigger = true;
+    // 0 BY DEFAULT since 2026-09-28 (v0.6.0 release review): the gate swallows LT before the base mod
+    // reads it, and LT is the base mod's scope (hold to zoom, gripping) and grenade throw (not
+    // gripping). Switching the wrist HUD on from the Experimental panel took both away with nothing
+    // on screen saying why. 1 still works for anyone who wants the glance and gives those up.
+    bool  wrist_hud_trigger = false;
     // Right-wrist placement, tuned independently of the left (wristhudoffr / wristhudrotr /
     // wristhudgapr). Same axes as the left keys, in the RIGHT controller's local frame.
     // Default: the value the wrist HUD is tuned with.
