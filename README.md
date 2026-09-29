@@ -344,7 +344,7 @@ scroll to **Script UI** — five panels live there:
 - **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
   unless troubleshooting asks.
 - **Halo VR Experimental** — early previews, every one off until you switch it on: manual reload,
-  racking the slide, grenades from the pouches, a wrist HUD with the motion tracker, ForceTube
+  racking the slide, a wrist HUD with the motion tracker, a grenade throw on grip release, ForceTube
   gunstock kicks, a vehicle seat camera and more, contributed by
   [blindcowboy24](https://github.com/blindcowboy24). They are works in progress and may break things
   or feel unfinished.
