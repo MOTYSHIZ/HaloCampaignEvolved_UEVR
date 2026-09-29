@@ -192,8 +192,12 @@ this — the built-in default should be changed to whatever survives.
 `aimmeshcr/cg/cb` and `aimmeshscale` in `halo_vr_user.cfg`, live.
 
 **The scope won't open.**
-The scope needs both hands on the weapon: squeeze the left grip at the barrel until the "Grip"
-prompt takes hold, then hold the left trigger. Without the grip, the left trigger throws a grenade.
+The scope needs both hands on the weapon: put your left hand where you'd really hold the front of
+the gun — the foregrip on a rifle, the front handle on weapons like the rocket launcher and sentinel
+beam, just under your firing hand on a pistol — and squeeze the left grip until the "Grip" prompt
+takes hold, then hold the left trigger. Without the grip, the left trigger throws a grenade. If a
+weapon never takes hold where you naturally hold it, record its handle with **Calibrate weapon
+grip** in the Halo VR Calibration panel.
 If it never opens, check that `scope=1` and `twohand=1` (both the defaults) — an old
 `halo_vr_user.cfg` carried over from a previous release is the usual reason for either to be off.
 
