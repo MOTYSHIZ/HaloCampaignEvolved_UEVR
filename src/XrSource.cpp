@@ -1749,7 +1749,14 @@ void service_slot(int s, uint32_t tick, bool feed, int* batch) {
     // thread boundary that crashed the process a third time on 2026-08-23. Do not reintroduce a gap
     // here, and in particular do not hoist the whole loop's validation above the whole loop's
     // recording: the batch exists to share ONE submission, not to defer the barriers.
+    //
+    // THE SCOPE PANE is recorded here too, in the same place, but into a list of its own that is
+    // SUBMITTED at the frame's Present (scopepresentcopy; XrLayer.cpp, g_pane). The rule above is
+    // about RECORDING against a checked pointer and still holds: nothing is recorded later or on
+    // another thread. Only the moment the GPU is handed the list moves, to where the capture is
+    // always finished -- with the lifetime argument written down beside g_pane.
     if (feed && t.fed == native) {
+        if (s == XRLAYER_SLOT_PANE && xrlayer_pane_record()) return;
         if (*batch == 0) *batch = xrlayer_capture_begin() ? 1 : 2;
         if (*batch == 1) xrlayer_capture_record(s);
     }
@@ -1819,6 +1826,7 @@ void xrsource_tick(uint32_t tick) {
         for (int s = 0; s < XRLAYER_SLOTS; ++s) {
             if (g_t[s].native != nullptr || g_t[s].fed != nullptr) reset_slot(s);
         }
+        xrlayer_pane_end_tick();   // the feed just went off: nothing recorded earlier goes out late
         return;
     }
 
@@ -1912,6 +1920,9 @@ void xrsource_tick(uint32_t tick) {
     int batch = 0;
     for (int s = 0; s < XRLAYER_SLOTS; ++s) service_slot(s, tick, feed, &batch);
     if (batch == 1) xrlayer_capture_submit();
+    // Every pass, recorded or not: a pane list still unclaimed from an earlier tick is taken back
+    // rather than left to be submitted late (XrLayer.cpp, g_pane, the lifetime argument).
+    xrlayer_pane_end_tick();
 
     // ---- feed the compositor layer, on change only, per slot ----------------------------------
     //

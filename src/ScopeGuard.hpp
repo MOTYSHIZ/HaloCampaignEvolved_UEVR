@@ -42,7 +42,9 @@
 // pane. The probe only READS the engine's target, in the ENGINE_SRC_COLOR state the copy already
 // assumes (which includes NON_PIXEL_SHADER_RESOURCE); it writes only our own buffer.
 //
-// GAME THREAD, called from xrlayer_capture_record() with the open capture list.
+// GAME THREAD, called from xrlayer_capture_record() with the open capture list, or from
+// xrlayer_pane_record() with the pane's own list (whose SUBMISSION happens later, at Present --
+// the probe then reads the target when that list executes, which is the moment that matters).
 
 #include <cstdint>
 
@@ -52,13 +54,16 @@ struct ID3D12Resource;
 
 namespace halo {
 
-// One descriptor pair per capture ring slot. MUST equal XrLayer's GT_RING (static_asserted there):
-// the "rewrite only after capture_begin proved the slot's last list complete" argument is per slot.
-constexpr int kScopeGuardSlots = 2;
+// One descriptor pair per list that can carry a guarded copy: XrLayer's game-thread batch ring
+// (GT_RING, pairs 0..1) plus the pane's present-submitted ring (PANE_RING, pairs 2..5). MUST equal
+// GT_RING + PANE_RING (static_asserted there): the "rewrite a pair only once its list is proven
+// complete, or was never submitted" argument is per pair, and the two rings are live at once while
+// scopepresentcopy is being toggled, so they cannot share pairs.
+constexpr int kScopeGuardSlots = 6;
 
-// Record the probe and turn predication ON for what follows. `ring_slot` is the capture ring slot
-// (0/1) whose previous GPU work xrlayer_capture_begin() has already proven complete -- the guard
-// keeps one descriptor pair per slot, so rewriting them can never race a list still in flight.
+// Record the probe and turn predication ON for what follows. `ring_slot` is the descriptor pair
+// (0..kScopeGuardSlots-1) of a list whose previous GPU work is already proven complete or was never
+// submitted -- the guard keeps one pair per list, so rewriting it can never race a list in flight.
 // Returns true when predication was set; the caller must then call scopeguard_end() right after
 // the copy it wants guarded. Returns false (and records nothing) when the guard is off or failed,
 // in which case the copy simply runs unguarded, as it always did.

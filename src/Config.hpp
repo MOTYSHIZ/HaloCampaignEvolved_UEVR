@@ -2013,6 +2013,15 @@ struct Config {
     // the copy should find it finished -- and one frame fresher. The guard stays as the backstop;
     // its "refused N more" line is the measurement for this key. Live.
     int   xr_src_phase = 1;
+    // THE SCOPE PANE'S COPY IS SUBMITTED AT PRESENT (scopepresentcopy). 1 = on (default), 0 = the
+    // pane rides the game-thread batch like every other slot. xrsrcphase=1 made the copy land on
+    // the capture's clear less often, not never: 2-9% of scope frames still repeated, and up to a
+    // quarter in the first seconds after scoping in (dev log, 2026-09-28) -- the "scope drops to
+    // low fps sometimes" the player saw. With this on, the game thread still validates and RECORDS
+    // the pane copy, but its list is submitted from inside the frame's Present, after UE has
+    // submitted the whole frame -- so the capture is always finished and the race cannot happen.
+    // XrLayer.cpp (g_pane) has the lifetime argument. Needs xrsrcphase=1; ignored at 0. Live.
+    int   scope_present_copy = 1;
 
     // ---- WORLD NAVPOINT MARKERS ON THE COMPOSITOR LAYER (xrlayernav) -----------------------
     //

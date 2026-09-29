@@ -315,8 +315,9 @@ bool scopeguard_begin(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3
     }
     if (!build(device)) return false;
 
-    // THIS SLOT'S DESCRIPTOR PAIR, rewritten every call. Safe because xrlayer_capture_begin() only
-    // opens a ring slot once that slot's previous list has completed on the GPU, so nothing in
+    // THIS LIST'S DESCRIPTOR PAIR, rewritten every call. Safe because both callers reuse a list only
+    // once its previous execution has completed on the GPU (xrlayer_capture_begin() for the batch
+    // ring, pane_job_reusable() for the pane's) or it was never submitted at all, so nothing in
     // flight can still be reading these two descriptors.
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = s_heap->GetCPUDescriptorHandleForHeapStart();
     cpu.ptr += (SIZE_T)ring_slot * 2 * s_inc;
