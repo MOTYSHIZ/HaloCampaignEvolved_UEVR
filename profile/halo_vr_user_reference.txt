@@ -251,9 +251,10 @@
 #aimtexfile=
 
 # ===================================== WEAPON SCOPE (zoom) ======================================
-# Grip the weapon's barrel with your other hand, then squeeze the left trigger to zoom: a
-# magnifying lens appears on your aim line, showing exactly where the shot will go. Without the
-# grip, the left trigger throws a grenade instead. Needs twohand=1 (the default).
+# Take the two-handed grip with your other hand (where you would really hold the front of the
+# weapon -- see TWO-HANDED AIMING), then squeeze the left trigger to zoom: a magnifying lens
+# appears on your aim line, showing exactly where the shot will go. Without the grip, the left
+# trigger throws a grenade instead. Needs twohand=1 (the default).
 #
 # 1 = the scope is available (and the trigger no longer triggers Halo's flat zoom on foot).
 #scope=1
@@ -310,7 +311,7 @@
 # Weapon pose refresh. 1 also refreshes the weapon's pose every headset frame, 0 only on the game's
 # own update.
 #palettepubframe=0
-# Two-handed grab dot. A dot on the barrel shows where your other hand grabs for a two-handed hold.
+# Two-handed grab dot. A dot on the weapon shows where your other hand grabs for a two-handed hold.
 #palettetwohandmarker=0
 # Two-handed hold: nearest your other hand may come to the weapon hand before the two count as one
 # grip, in metres.
@@ -710,11 +711,15 @@
 # line into halo_vr_user.cfg and uncomment it to turn a feature on.
 
 # ---------------------------------------------------------------- TWO-HANDED AIMING
-# Bring your other hand to the barrel and squeeze its grip. Aim eases onto the line
-# between your two hands, so a rifle steadies the way it would if you were really
-# holding it. Roll still comes from your firing hand. Let go of the grip to release.
+# Put your other hand where you would really hold the front of the weapon and squeeze its
+# grip: just forward of your firing hand on a rifle, the front handle on weapons whose handle
+# sits off to the side (see HANDLES THAT ARE NOT ON THE BARREL), or cupped under your firing
+# hand on a pistol. Aim eases onto the line between your two hands, so a rifle steadies the
+# way it would if you were really holding it. Roll still comes from your firing hand. Let go
+# of the grip to release. (On pistols and other one-handers the grip only opens the scope; it
+# never bends your aim.)
 #
-# You do not have to hold the grip down to keep it: squeezing near the barrel LATCHES
+# You do not have to hold the grip down to keep it: squeezing in the grab spot LATCHES
 # the hold, and it stays until you release the button, wherever your hand drifts. The
 # controller buzzes when it grabs and again when it lets go.
 #
@@ -731,10 +736,12 @@
 #twohanddeny=Magnum,PlasmaPistol,PlasmaRifle,Needler,Sword
 
 # ---------------------------------------------------------------- HANDLES THAT ARE NOT ON THE BARREL
-# Two-handed aiming assumes your support hand goes ON the barrel, which is right for a
-# rifle and wrong for a rocket launcher or a sentinel beam -- their front handle sits off
-# to one side. Those weapons are awkward to grab where they are actually held, and if you
-# do grab them the weapon points slightly away from where its barrel is aimed.
+# Without a recorded handle, two-handed aiming expects your support hand ON the barrel line,
+# which is right for a rifle and wrong for a weapon whose front handle sits off to one side.
+# The mod SHIPS the handle position for the rocket launcher, sentinel beam, beam rifle, spike
+# rifle, shotgun and flak cannon (in halo_vr.cfg), so on those the grab spot is already the
+# handle. For any other weapon that is awkward to grab where you actually hold it, or that
+# points slightly away from its barrel when you do:
 #
 # You can record where a weapon's handle really is, once, and it is remembered for that
 # weapon. In the mod's Script UI, press "Calibrate weapon grip", close the menu, then hold
@@ -769,15 +776,15 @@
 # ---------------------------------------------------------------- THE GRAB GUIDE
 #
 # A marker at your support hand telling you the two-handed grip is available: the word "Grip" by
-# default, or a beam to the spot on the barrel it would grab (see grabguidemode below).
+# default, or a beam to the spot on the weapon it would grab (see grabguidemode below).
 #
 # It appears ONLY when squeezing the grip would actually take hold -- so it is a promise, not a
 # hint. If you can see it, the two-handed grip works right now. It vanishes the moment you take
-# the hold, and while your hand is off the barrel there is nothing to see.
+# the hold, and while your hand is away from the grab spot there is nothing to see.
 #
-# This exists because there are no arms drawn in this release, so nothing else tells you whether
-# your hand has reached the barrel yet. If you turn it off, the hold still works exactly the same
-# -- you just have to find the barrel by feel.
+# This exists because nothing else tells you exactly when your hand has reached the grab spot --
+# especially on a weapon whose handle is off to one side. If you turn it off, the hold still works
+# exactly the same -- you just have to find the spot by feel.
 #grabguide=1
 #
 # What it draws.
