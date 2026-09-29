@@ -22,8 +22,20 @@
 // atlas keeps the previous good frame. Resource barriers are not predicated, so the state tracking
 // around the copy is unchanged whether or not it runs. No CPU readback, no added latency.
 //
-// A GENUINELY BLACK SCENE MUST NOT FREEZE THE SCOPE: the probe counts consecutive skips in the same
-// buffer and lets a frame through after `kMaxHold` of them, so a truly black view still shows.
+// A GENUINELY BLACK SCENE MUST NOT FREEZE THE SCOPE -- AND THAT ESCAPE HATCH MUST NOT OPEN FOR THE
+// CLEAR ITSELF. The first version counted consecutive skips and let a frame through after 3 of
+// them, whatever it was. Right after the scope opens the copy lands on the clear up to a quarter of
+// the time (16 of 64 guarded copies, measured 2026-09-28), so runs of four happened and the fourth
+// -- the clear -- went to the compositor: the "occasional black flicker" that survived the guard.
+//
+// THE ALPHA TELLS THE TWO APART. The clear is FLinearColor::Black, which is (0,0,0,1) -- alpha ONE;
+// a finished FinalColorLDR frame carries alpha 0 (the desktop tonemapper starts from OutColor = 0 and
+// only its DIM_ALPHA_CHANNEL permutation writes .a; ScopeMask exists because that alpha reads ~0).
+//   * exactly (0,0,0,1) at all nine points = the clear. Held up to kMaxHoldClear (30) copies: no
+//     race outlasts that, and a capture that cleared and then never wrote still shows within ~0.5 s.
+//   * any other all-black reading = possibly a real black view. The old short hold, kMaxHold (3).
+// A frame let through resets the hold, but the atlas then keeps THAT frame while the next ones are
+// refused, so a capture stuck on its clear shows steady black rather than flashing.
 //
 // SAFETY, mirroring ScopeMask: every failure (compile, root signature, PSO, heap, buffer) latches
 // the guard OFF, logs once, and leaves the plain copy exactly as it was -- fail open, never fail the

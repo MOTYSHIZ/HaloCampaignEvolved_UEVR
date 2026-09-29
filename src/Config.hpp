@@ -3809,7 +3809,9 @@ struct Config {
     // not synchronised with that, so now and then it copied the clear -- the scope's one-frame
     // "flicker to black" (found from the 5.5.4 source, 2026-09-27). The guard probes nine points and
     // skips the copy (GPU predication) when the target still holds the clear, keeping the previous
-    // frame; a genuinely black view is still let through after three frames. Live, near-free, and
+    // frame. The clear's exact colour, (0,0,0,1), is held up to 30 frames; any other pure-black view
+    // is let through after three (the old single hold of three also let the CLEAR through on a run
+    // of four -- the black flash that outlived the first version, 2026-09-28). Live, near-free, and
     // fail-open: any setup failure disables it with one log line and leaves the plain copy. 0 is
     // the A/B arm, and the way back if it ever misbehaves.
     int   scope_clear_guard = 1;
