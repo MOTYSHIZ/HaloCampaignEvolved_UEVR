@@ -657,6 +657,7 @@ long long steady_ms() {
 void pc_reset(const char* why) {
     g_pc_have_ref = false;
     g_pc_ref = 0.0f;
+    g_pc_stick_latched = false;   // the line it waited on is gone with the reference
     g_pc_win.clear();
     g_pc_win_t = 0.0f;
     hlog("HEIGHT CROUCH: standing height forgotten (%s) -- stand still for %.0f s to re-measure it",
@@ -987,7 +988,12 @@ bool height_tick(const Vec3& hmd, float so_y, bool active, bool key_focus, float
         }
     } else {
         g_pc_on = false;   // any gate closed: never leave the button held
-        g_pc_stick_latched = false;
+        // The stick's hand-over SURVIVES a closed gate -- a pause menu, a cutscene, a seat, death, a
+        // recenter probe. Only standing up past the line ends it, and a closed gate cannot see you
+        // stand. Clearing it here re-crouched a seated player on the first tick after every pause
+        // menu (head still under the line, latch gone, 2026-09-28 log: IN_MENU 1 -> 0, then
+        // "crouching" 14 ms later). Dropped only when physical crouch itself cannot run.
+        if (g_cfg.height_crouch == 0 || eff != MODE_ABSOLUTE) g_pc_stick_latched = false;
     }
     // Every edge -- a release forced by a menu or a vehicle included -- moves the game camera, so E
     // follows it at once for a moment (see g_e_follow_t). Spent only while E is being measured, so a
