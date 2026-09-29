@@ -13,8 +13,9 @@
 // ATTACHMENT -- HOW produce_layers() GETS CALLED. Two rungs, chosen in resolve_openxr(), reported
 // as tier= in the state line. The per-frame work is identical on both; only the plumbing differs.
 //
-//   tier=apilayer  THE SHIPPING ROUTE. Our own OpenXR API layer (built in apilayer/, registered by
-//                  scripts/Register-XrApiLayer.ps1) is loaded into the process by the loader and
+//   tier=apilayer  THE SHIPPING ROUTE. Our own OpenXR API layer (built in apilayer/, enabled for this
+//                  process at DLL load by enable_api_layer_for_this_process() in Plugin.cpp -- no
+//                  registration) is loaded into the process by the loader and
 //                  calls bridge_end_frame(); the layer does the copy, the call-through and the
 //                  fail-open retry. No PDB, no signature, no recorded address, and NOTHING HERE TO
 //                  ROT when UEVR or the game updates. XrLayerBridge.hpp is our side of it.
@@ -4461,7 +4462,7 @@ void xrlayer_tick() {
              "the loader export we hook is not on any path UEVR calls, even though openxr_loader.dll "
              "is loaded in the process by something else. Hooking that export can never work here. "
              "The fix is an OpenXR API LAYER, which the statically-linked loader still loads -- it "
-             "is built in apilayer/ and registered with Register-XrApiLayer.ps1. Layer marked "
+             "is built in apilayer/ and enabled for this process at load (see the XRLAYER line). Layer marked "
              "not-live; the in-scene reticule is unaffected.");
     }
 

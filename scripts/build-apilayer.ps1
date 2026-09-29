@@ -22,10 +22,9 @@
   Also copy the DLL and its manifest into %APPDATA%\UnrealVRMod\HaloCampaignEvolved\apilayer\,
   which is where a shipped install has them.
 
-  NOTE this does NOT register the layer. Registration is a registry write that affects every OpenXR
-  application for the user, so it is a separate, explicit, reversible step --
-  profile\apilayer\Register-XrApiLayer.ps1. Deploying the files is safe on its own; nothing loads
-  them until they are either registered or activated per-process with XR_API_LAYER_PATH.
+  That is all a player needs: halo_vr.dll enables the layer from this folder for the game's own
+  process when it loads (XR_API_LAYER_PATH / XR_ENABLE_API_LAYERS, process-only), so nothing is
+  registered. Deploying the files is safe on its own -- outside the game nothing loads them.
 #>
 [CmdletBinding()]
 param(
@@ -117,8 +116,7 @@ if ($Deploy) {
         Copy-Item -Path $dll      -Destination $live -Force
         Copy-Item -Path $manifest -Destination $live -Force
         Write-Host "DEPLOYED -> $live" -ForegroundColor Green
-        Write-Host '  NOT registered. Files on disk load nothing on their own - run' -ForegroundColor DarkGray
-        Write-Host '  profile\apilayer\Register-XrApiLayer.ps1 to make the loader pick them up.' -ForegroundColor DarkGray
+        Write-Host '  The plugin enables them for the game process at load; no registration needed.' -ForegroundColor DarkGray
     } catch {
         Write-Host 'DEPLOY FAILED - the DLL is locked. Close every OpenXR application first.' -ForegroundColor Red
         exit 2

@@ -10,7 +10,8 @@ compiled into it.
 | Manifest | `profile/apilayer/XrApiLayer_HALOVR_reticule.json` (ships) |
 | Build | `scripts/build-apilayer.ps1` |
 | Test | `scripts/Verify-XrApiLayer.ps1` — **run it after any change here** |
-| Install tooling | `profile/apilayer/Register-XrApiLayer.ps1` / `Unregister-XrApiLayer.ps1` |
+| Activation | `enable_api_layer_for_this_process()` in `src/Plugin.cpp` — per process, at DLL load |
+| Legacy tooling | `profile/apilayer/Register-XrApiLayer.ps1` / `Unregister-XrApiLayer.ps1` (see below) |
 
 ## Why it exists
 
@@ -47,10 +48,11 @@ every other OpenXR application on the user's machine.
 
 ## The rule that governs every edit in this folder
 
-An implicit API layer is registered once, per user, and from then on the OpenXR loader loads it into
-**every OpenXR application that user runs** — their other VR games, their headset's utilities,
-SteamVR Home. That is the price of not needing per-process environment variables, and it is why the
-layer's first act is to check whether it is in the game and, if not, become a pure pass-through:
+The shipping route enables the layer only inside the game's own process, but it must still be
+written as if it were loaded into **every OpenXR application the user runs** — their other VR games,
+their headset's utilities, SteamVR Home. Players who registered it by hand under the v0.4.0–v0.4.2
+instructions have exactly that implicit registration, and someone may register it again. That is why
+the layer's first act is to check whether it is in the game and, if not, become a pure pass-through:
 nothing wrapped, no callback, no allocation, no file touched.
 
 Concretely:
@@ -90,17 +92,22 @@ $env:XR_ENABLE_API_LAYERS = 'XR_APILAYER_HALOVR_reticule'
 
 Use this for everything you test yourself. It affects one launch and nothing else.
 
-**Shipping — implicit registration.** Players launch from Steam and cannot set a per-process
-environment variable, so the loader has to be told about the layer once, in the registry:
-`profile\apilayer\Register-XrApiLayer.ps1`. **HKCU only, never HKLM** — per-user, no administrator
-rights, reversible by a script that ships beside it.
+**Shipping — the plugin does the same thing for the player.** `halo_vr.dll` sets those two
+variables for its own process at DLL load (`enable_api_layer_for_this_process()` in `src/Plugin.cpp`),
+from the profile's `apilayer\` folder, well before the game reaches `xrCreateInstance`. Nothing is
+registered and nothing outside the profile is written. Its `XRLAYER:` log line says what it did.
 
-Two things about that registration are worth knowing before debugging it:
+- In an **elevated** process the loader ignores these environment variables — deliberately, so a
+  normal-privilege program cannot inject code into an elevated one. Run as administrator, the game
+  gets no layer and there is nothing this repo can do about it short of asking for admin rights,
+  which it will not.
 
-- The loader reads `HKEY_CURRENT_USER` **only for non-elevated processes**. This is deliberate on
-  the loader's part — it stops a normal-privilege program injecting code into an elevated one. If
-  the game is run as administrator, a per-user registration is ignored and there is nothing this
-  repo can do about it short of asking for admin rights, which it will not.
+**Legacy — implicit registration (v0.4.0–v0.4.2).** Those releases told players to run
+`profile\apilayer\Register-XrApiLayer.ps1`, which writes one `HKEY_CURRENT_USER` value (never HKLM).
+`Unregister-XrApiLayer.ps1` must keep shipping and keep removing only what it added: the README
+promises it to those players. Worth knowing when debugging one of their machines:
+
+- The loader reads `HKEY_CURRENT_USER` **only for non-elevated processes**, for the same reason.
 - The value name is the **full path to the manifest**; the data is a `DWORD` and must be `0`
   (anything else means "skip"). The manifest's `library_path` is relative, so the loader looks for
   the DLL beside the manifest — the two must never be separated.

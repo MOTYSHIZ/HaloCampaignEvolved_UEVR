@@ -61,10 +61,12 @@ $required = @('config.txt', 'halo_vr.cfg', 'halo_vr_dev.cfg', 'halo_vr_user_refe
               'cvars_data.txt', 'user_script.txt',
               'scripts\halo_vr_settings.lua',
               'plugins\halo_vr.dll',
-              # The OpenXR API layer ships as a matched SET, and every member is load-bearing:
-              # the DLL is the code, the manifest is the only thing that tells the loader the DLL
-              # exists, and the two scripts are the only way a player can turn it on or off. Ship
-              # three of the four and the feature is either uninstallable or unremovable.
+              # The OpenXR API layer ships as a matched SET. The DLL is the code and the manifest is
+              # the only thing that tells the loader the DLL exists; the plugin enables the pair for
+              # the game's own process at load, so no registration is needed. Unregister stays
+              # because the README promises it to players who registered by hand on v0.4.0-v0.4.2 --
+              # it is how they take that registry value back out. Register stays beside it for
+              # anyone who wants the layer outside that per-process route.
               'apilayer\XrApiLayer_HALOVR_reticule.dll',
               'apilayer\XrApiLayer_HALOVR_reticule.json',
               'apilayer\Register-XrApiLayer.ps1',

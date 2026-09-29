@@ -39,15 +39,17 @@ char g_status[640] = "not probed";
 // chain, with no instance to attach to. A LoadLibrary here would also succeed on any file that
 // happened to sit on the search path under that name.
 //
-// So: present means the loader loaded it. Absent means the player has not registered it, and the
-// correct response is to carry on without it.
+// So: present means the loader loaded it. Absent means the loader did not -- the XRLAYER line from
+// enable_api_layer_for_this_process() says whether we asked it to -- and the correct response is to
+// carry on without it.
 void probe() {
     HMODULE m = GetModuleHandleW(HALOVR_LAYER_MODULE_W);
     if (m == nullptr) {
         _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
-                    "layer NOT loaded in this process (%ls). The OpenXR loader only loads it when it "
-                    "is registered, or when XR_API_LAYER_PATH/XR_ENABLE_API_LAYERS name it. The "
-                    "compositor reticule is unavailable; the in-scene one is unaffected.",
+                    "layer NOT loaded in this process (%ls). The mod asks the OpenXR loader for it at "
+                    "startup (see the XRLAYER line); if that line says it was enabled, the loader "
+                    "declined it -- usually the OpenVR runtime, or the game running as administrator. "
+                    "The compositor reticule is unavailable; the in-scene one is unaffected.",
                     HALOVR_LAYER_MODULE_W);
         logf("%s", g_status);
         g_state.store(0, std::memory_order_release);
@@ -69,16 +71,18 @@ void probe() {
 
     const HaloVrLayerApi* api = get_api(HALOVR_LAYER_ABI_VERSION);
     if (api == nullptr) {
-        // THE VERSION-SKEW CASE, AND IT IS EXPECTED TO HAPPEN. The layer is registered ONCE, by
-        // path, while halo_vr.dll is replaced by every update -- so a player whose registry still
-        // points at an older unpacked copy lands exactly here. It is a clean null and a log line
+        // THE VERSION-SKEW CASE. Since the plugin enables the layer from its own profile folder at
+        // load, plugin and layer normally come from the same install. The case that remains is a
+        // hand registration left over from v0.4.0-v0.4.2, whose registry entry can still point at an
+        // older unpacked copy -- and that lands exactly here. It is a clean null and a log line
         // rather than a call into a struct whose fields have moved, which is the failure CLAUDE.md
         // records for LuaVR: "a garbage-pointer call with no dump".
         //
         // It also covers the gated case: the layer refuses when the host process is not the game.
         _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
                     "the layer is loaded but REFUSED ABI version %u. Either it is an older build "
-                    "than this plugin (re-run Register-XrApiLayer.ps1 against the current install), "
+                    "than this plugin (a leftover hand registration from v0.4.0-v0.4.2: run "
+                    "apilayer\\Unregister-XrApiLayer.ps1 -All), "
                     "or it gated itself off for this process. Carrying on without it.",
                     (unsigned)HALOVR_LAYER_ABI_VERSION);
         logf("%s", g_status);
