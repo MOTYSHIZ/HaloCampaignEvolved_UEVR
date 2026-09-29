@@ -1814,8 +1814,9 @@ struct Config {
     // It is a real comfort control above that, not just a z-fight guard. The reticule sits at a
     // different stereo depth from the pane image, so this is the knob that decides whether the
     // crosshair reads as etched ON the glass or floating in front of it -- and that judgement is
-    // per-eye and per-person, which is exactly why it cannot be a constant.
-    float xr_layer_scope_reticle_depth = 0.2f;
+    // per-eye and per-person, which is exactly why it cannot be a constant. 1 since 2026-09-28,
+    // canonized from the user's cfg (was 0.2).
+    float xr_layer_scope_reticle_depth = 1.0f;
     int   xr_layer_roll = 0;      // CANONICALISED 2026-08-31 from the user live profile
     // CANONICALISED 2026-09-01 from the user live profile, after the objection below was DISPROVED.
     //
@@ -2973,9 +2974,11 @@ struct Config {
                                     // 16 is the canonical in-headset fit for the default lens
                                     // size -- effectiveness scales with the pane, so this sits
                                     // far above Halo's flat-screen 2x/8x on purpose.
-    int   scope_rt_size = 512;      // render-target edge in px; rebuilt live on change. 512 since
-                                    // 2026-09-13, canonized from the tuned profile (was 1024)
-    int   scope_div     = 1;       // capture every Nth tick (~32 Hz / N) -- the perf valve
+    int   scope_rt_size = 420;      // render-target edge in px; rebuilt live on change. 420 since
+                                    // 2026-09-28, canonized from the user's cfg (512 from 2026-09-13,
+                                    // canonized from the tuned profile; was 1024)
+    int   scope_div     = 2;       // capture every Nth tick (~32 Hz / N) -- the perf valve. 2 since
+                                   // 2026-09-28, canonized from the user's cfg (was 1)
     float scope_dist    = 63.57f;   // pane distance along the aim ray, cm (headset-fitted)
     // Where the CAPTURE CAMERA sits along the ray, cm from the origin. It must be FURTHER out
     // than the pane (scope_dist) or it looks straight at the back of the pane and captures a
@@ -3051,8 +3054,9 @@ struct Config {
     // set once written. Delete the key and restart for a true inherit. 0 = never written.
     float scope_autoexposure_bias = 2.5f;
     // scopelumen -> DynamicGlobalIlluminationMethod + ReflectionMethod on the capture.
-    //   -1 = leave alone (DEFAULT, i.e. the engine's forced-off state)
-    //    0 = None   1 = Lumen   2 = ScreenSpace   3 = Plugin (GI only)
+    //   -1 = leave alone (the engine's forced-off state; the default until 2026-09-28)
+    //    0 = None (DEFAULT since 2026-09-28, canonized from the user's cfg)   1 = Lumen
+    //    2 = ScreenSpace   3 = Plugin (GI only)
     //
     // UE turns Lumen OFF for every scene capture -- SceneCaptureRendering.cpp:880-885 sets both
     // methods to None and halves LumenSurfaceCacheResolution, with the comment "By default, Lumen
@@ -3082,24 +3086,31 @@ struct Config {
     // render-thread CPU. UE 5.5 always gives a Lumen capture its own Lumen scene
     // (SceneCaptureRendering.cpp:1397-1403), so there is no sharing the main one -- the three keys
     // below trim what that second scene does instead.
-    int   scope_lumen = -1;
+    //
+    // CANON 0 (2026-09-28, the user's cfg): GI None with scopelumenrefl=2 screen-space reflections --
+    // written explicitly rather than inherited, and the cheap end, not the main view's Lumen.
+    int   scope_lumen = 0;
     // The capture's REFLECTION method while scopelumen is on. -1 = follow scopelumen (Lumen
-    // reflections with scopelumen=1, the default); 0 = none; 1 = Lumen; 2 = screen-space. Lumen GI is
+    // reflections with scopelumen=1); 0 = none; 1 = Lumen; 2 = screen-space (DEFAULT since 2026-09-28,
+    // canonized from the user's cfg with scopelumen=0). Lumen GI is
     // what fixed the scope's lighting; ray-traced reflections are usually the costlier half, and a
     // magnified view shows few mirror surfaces. Only acts while scopelumen >= 0.
     // UNDER LUMEN GI (scopelumen=1) ONLY 1 IS HONOURED: 0 and 2 crash the engine on the first capture
     // frame, so apply_capture_lumen() refuses them and says why (Scope.cpp has the engine trace).
-    int   scope_lumen_refl = -1;
-    // LumenSurfaceCacheResolution for the capture while Lumen is on. 1.0 (default) is what scopelumen
-    // has always forced; 0.5 is the engine's own default for captures (SceneCaptureRendering.cpp:885).
-    // Lower = a smaller surface cache for the capture's second Lumen scene. Clamped 0.5..1.
-    float scope_lumen_cache = 1.0f;
+    int   scope_lumen_refl = 2;
+    // LumenSurfaceCacheResolution for the capture while Lumen is on. 1.0 is what scopelumen has
+    // always forced; 0.5 (DEFAULT since 2026-09-28) is the engine's own default for captures
+    // (SceneCaptureRendering.cpp:885). Lower = a smaller surface cache for the capture's second Lumen
+    // scene. Clamped 0.5..1 -- the user's cfg asked for 0.25, which the parser clamps to 0.5, so 0.5 is
+    // what actually ran and what is canonized.
+    float scope_lumen_cache = 0.5f;
     // One quality scale for the capture's Lumen: LumenFinalGatherQuality, LumenSceneLightingQuality,
-    // LumenReflectionQuality and LumenSceneDetail, each with its override. -1 = leave (default, the
-    // game's own values). 1.0 = the engine's default quality; 0.5 = cheaper; below ~0.25 gets noisy.
-    // LumenSceneDetail also trims the small objects the capture's Lumen scene tracks, which is
-    // render-thread work as well as GPU. Only matters while scopelumen is on.
-    float scope_lumen_quality = -1.0f;
+    // LumenReflectionQuality and LumenSceneDetail, each with its override. -1 = leave (the game's own
+    // values). 1.0 = the engine's default quality; 0.5 = cheaper; below ~0.25 gets noisy. 0.25
+    // (DEFAULT since 2026-09-28, canonized from the user's cfg). LumenSceneDetail also trims the small
+    // objects the capture's Lumen scene tracks, which is render-thread work as well as GPU. The live
+    // log shows all four fields applied even with scopelumen=0.
+    float scope_lumen_quality = 0.25f;
     // scopeppgrade: copy the game's COLOUR GRADE from its camera onto the capture -- the LUT, white
     // balance, the saturation/contrast/gamma/gain/offset sets, and the film curve, each with its
     // paired bOverride_ bit.
@@ -3136,6 +3147,10 @@ struct Config {
     // (Scope.cpp, the CaptureLevers note). 2.75 is the first value judged on a build where the
     // capture is configured the same in every level, so the old bracket does not carry over.
     //
+    // CANON 0 (2026-09-28, the user's cfg): do not touch ColorGain. Judged together with scopegamma
+    // 1.8, which fixes the crushed curve the old gain was lifting -- so the multiply is no longer
+    // needed. The 2.75 history above is kept for the record.
+    //
     // This initialiser IS the shipped value -- no cfg file sets scopegain -- so changing it here
     // is the whole change, and the dev catalog's commented `#scopegain=` line is documentation
     // that must move with it or it starts lying about the default (it sat at 4 through the whole
@@ -3146,7 +3161,7 @@ struct Config {
     // second problem and trades one half of the first for the other -- it lifts the dim case and
     // the blown case equally. If the too-bright report sharpens, the answer is likely
     // scopeautoexposurebias or the grade chain, not another move on this number.
-    float scope_gain = 2.75f;
+    float scope_gain = 0.0f;
     // scopelayerfollowpane: place the compositor quad AT the in-world pane's own world transform
     // instead of from scopelayerfwd/right/up/width. 1 = follow (default), 0 = use the offsets.
     //
@@ -3262,10 +3277,12 @@ struct Config {
     //       with no zoom sound simply play nothing. Reached through the hosted reticle, so it needs
     //       aimwidget on.
     // Scope path only either way: the gripzoom grenade path eats LT regardless (a throw is not a
-    // zoom). 0 and 2 are under trial 2026-09-27, not canonized.
-    int   scope_eat_lt      = 1;
-    // The scope render target's DISPLAY GAMMA (UTextureRenderTarget::TargetGamma). 0 = leave the
-    // engine's choice (default), which for our RTF_RGBA8 target is 1.0, i.e. LINEAR: the tonemapper
+    // zoom). 0 was under trial 2026-09-27; 2 is the DEFAULT since 2026-09-28, canonized from the
+    // user's cfg (was 1).
+    int   scope_eat_lt      = 2;
+    // The scope render target's DISPLAY GAMMA (UTextureRenderTarget::TargetGamma). 1.8 is the DEFAULT
+    // since 2026-09-28, canonized from the user's cfg together with scopegain=0 (was 0). 0 = leave the
+    // engine's choice, which for our RTF_RGBA8 target is 1.0, i.e. LINEAR: the tonemapper
     // pre-raises colour to the 2.2 power before its sRGB encode (PostProcessTonemap.cpp:268,
     // PostProcessCombineLUTs.usf:318), so the bytes hold roughly linear values.
     //
@@ -3282,16 +3299,17 @@ struct Config {
     // scopeautoexposurebias=0, because the current gain/bias were tuned to lift the crushed image.
     // The in-world pane samples the same target, so it reads brighter under 2.2 -- it is only the
     // fallback while the compositor quad presents. Matters for scopesrc=2 (the shipped source) only.
-    float scope_gamma       = 0.0f;
+    float scope_gamma       = 1.8f;
     // LOCAL EXPOSURE on the capture: both LocalExposureHighlightContrastScale and ...Shadow...
-    // written with their overrides. -1 = leave (default; the capture inherits the game's 0.8/0.8).
-    // 1.0 = local exposure OFF in the capture (the pass is skipped, saving GPU); 0..1 = explicit.
+    // written with their overrides. -1 = leave (the capture inherits the game's 0.8/0.8).
+    // 1.0 = local exposure OFF in the capture (the pass is skipped, saving GPU) -- the DEFAULT since
+    // 2026-09-28, canonized from the user's cfg (was -1); 0..1 = explicit.
     //
     // Why: local exposure's grid and blur are fractions of the SCREEN. A patch that sits inside one
     // cell of the eye view fills the whole grid once magnified, so the capture compresses contrast
     // across what the eye sees as a single region -- a flatter image than the main view shows for
     // the same spot. Unmeasured in headset when written.
-    float scope_local_exp   = -1.0f;
+    float scope_local_exp   = 1.0f;
     // Where the CAPTURE CAMERA gets its motion from, once attached to the rig:
     //   0 = re-anchor to the live aim ray every tick (default). The image looks exactly down the
     //       shot line, so the in-pane reticle stays truthful; any residual aim-signal jitter is
@@ -3663,7 +3681,7 @@ struct Config {
     int   scope_persist    = 1;
     // bCameraCutThisFrame. The renderer resets it to false after each capture
     // (SceneCaptureRendering.cpp:1410), so a one-shot write measures nothing.
-    //   0 = never (default).
+    //   0 = never (the default until 2026-09-28).
     //   1 = EVERY tick: invalidates the temporal history every frame -- the same hypothesis as
     //       scopepersist from the other side, and the side that KEEPS the persistent state the
     //       exposure pin needs.
@@ -3671,8 +3689,9 @@ struct Config {
     //       view state and only advances while the scope renders, so a scope-in resumes the exposure
     //       it had when last closed -- possibly in a different room -- and ramps from there. A cut
     //       makes it jump straight to this scene's target (PostProcessEyeAdaptation.cpp:517). A
-    //       likely cause of "sometimes dark on scope-in"; unmeasured in headset when written.
-    int   scope_cam_cut    = 0;
+    //       likely cause of "sometimes dark on scope-in". The DEFAULT since 2026-09-28, canonized
+    //       from the user's cfg (was 0).
+    int   scope_cam_cut    = 2;
     // PostProcessBlendWeight. At 0 the capture's own PostProcessSettings do not blend in at all,
     // so if the black survives, nothing WE wrote into those settings caused it -- which is the
     // control the exposure pin never had. <0 leaves the engine default untouched.
