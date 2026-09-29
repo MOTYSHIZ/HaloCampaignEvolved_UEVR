@@ -61,6 +61,7 @@
 #include "core/XrDisplayTime.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <cmath>
 #include <cstdarg>
@@ -679,9 +680,6 @@ bool slot_cell_coherent(int slot) {
 // purpose -- submitting both copies to the same queue is what orders capture-then-present without
 // any cross-queue fence of our own.
 constexpr int              GT_RING = 2;
-// ScopeGuard keeps one descriptor pair per ring slot and rewrites a slot's pair only once
-// xrlayer_capture_begin() has proven that slot's last list complete -- grow one, grow the other.
-static_assert(GT_RING == kScopeGuardSlots, "ScopeGuard's descriptor ring must match GT_RING");
 ID3D12CommandAllocator*    g_gt_alloc[GT_RING] = {};
 UINT64                     g_gt_alloc_fence[GT_RING] = {};
 int                        g_gt_ring  = 0;
@@ -695,6 +693,80 @@ uint32_t                   g_gt_skips    = 0;   // ring busy -- never a block, n
 int                        g_gt_open_slot = -1;
 int                        g_gt_recorded  = 0;
 uint32_t                   g_gt_rec_mask  = 0;
+
+// ---- THE SCOPE PANE'S COPY, RECORDED HERE AND SUBMITTED AT PRESENT (scopepresentcopy) --------
+//
+// WHY. A scene capture clears its target at the start of every capture and writes the image at the
+// end (ScopeGuard.hpp). A copy the game thread SUBMITS lands at an arbitrary point of the render
+// thread's frame, so now and then it lands between the two; ScopeGuard then refuses the cleared
+// frame and the scope repeats its last one. Measured 2026-09-28 (dev log): 2-9% of scope frames at
+// xrsrcphase=1, up to a quarter in the first seconds after scoping in -- "the main view feels
+// smooth, while the scope drops to low fps sometimes".
+//
+// WHERE IT CANNOT RACE. UE 5.5's D3D12 Present waits until every command list of the frame has been
+// SUBMITTED before it presents (FD3D12Viewport::Present: FlushCommands(WaitForSubmission), "wait for
+// the submission thread to process everything"), and UEVR calls xrEndFrame -- produce_layers --
+// from inside that Present (VR::on_present -> D3D12Component::on_frame -> end_frame). The RHI thread
+// is blocked there, so nothing else of UE's reaches the queue. A list submitted from produce_layers
+// is therefore ordered AFTER the capture's final write and BEFORE the next capture's clear.
+//
+// WHAT MOVES AND WHAT DOES NOT. The game thread still re-validates the chain and RECORDS the whole
+// copy -- probe, barriers, copy, mask -- as the very next thing, exactly as XrSource's no-gap rule
+// requires. Only the SUBMISSION moves: the closed list is published here, and the submit thread
+// executes it. The submit thread never sees the engine pointer and records nothing against it,
+// which is the distinction from the 2026-08-23 crash (a submit thread RECORDING a barrier against a
+// pointer checked up to a second earlier).
+//
+// WHY THE ENGINE RESOURCE IS STILL ALIVE WHEN THE LIST EXECUTES. A list recorded at post-tick N is
+// submitted at the next Present, which is Present(<=N): Present(N+1) needs the render thread to have
+// finished frame N+1, which the game thread only enqueues during tick N+1, and post-tick N+1
+// RETRACTS an unclaimed list (xrlayer_pane_end_tick, or supersedes it). Anything that releases the
+// target after post-tick N -- a GC, an UpdateResource, our own rebuild -- is enqueued behind frame N
+// on the render thread, so the RHI deletes it only after Present(N), and D3D12's deferred deletion
+// then waits for everything already submitted, our list included. A release BEFORE post-tick N is
+// seen by the validation itself: UE clears the GT-side resource pointer at once. The submit thread
+// also refuses a list more than one tick old, whatever happened to the retraction.
+//
+// ONLY WITH xrsrcphase=1. A list recorded at PRE-tick N would outlive releases made during tick N,
+// which reach the RHI before Present(N) -- so the argument above does not hold at xrsrcphase=0, and
+// pane_deferral_on() refuses it.
+//
+// The ring: at most one published list plus the ones still executing. A job is reusable once it is
+// FREE (never submitted, or dropped) or SUBMITTED and past its fence -- which is also what makes
+// ScopeGuard's per-list descriptor rewrite safe (pairs GT_RING..GT_RING+PANE_RING-1).
+constexpr int PANE_RING = 4;
+static_assert(GT_RING + PANE_RING == kScopeGuardSlots,
+              "ScopeGuard needs one descriptor pair per batch ring slot and per pane ring slot");
+enum : int { PJ_FREE = 0, PJ_RECORDED = 1, PJ_SUBMITTED = 2 };
+struct PaneJob {
+    ID3D12CommandAllocator*    alloc = nullptr;
+    ID3D12GraphicsCommandList* list  = nullptr;
+    std::atomic<int>           state{PJ_FREE};
+    std::atomic<uint64_t>      fence{0};   // the g_pane_fence value its submission signalled
+    uint32_t                   tick = 0;   // g_game_tick it was recorded on; written before publish
+    uint64_t                   pub_us = 0; // steady-clock microseconds at publish; written before publish
+};
+// THE WALL-CLOCK GUARD. The tick test in pane_submit_pending cannot see a LoadMap: it runs inside
+// the engine tick, before post-tick, so the game tick stands still for the whole load while the
+// loading screen keeps presenting. A list claimed by one of those Presents may copy from a target
+// the load's GC has already destroyed. Nothing legitimate waits this long for its Present -- two
+// frames at 45 Hz with AFR's every-other-frame end_frame is ~44 ms -- so an older list is dropped:
+// one repeated scope frame at worst. (v0.6.0 release review of 7f68915.)
+constexpr uint64_t kPaneMaxAgeUs = 100000;
+static uint64_t pane_now_us() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+PaneJob          g_pane[PANE_RING];
+std::atomic<int> g_pane_pending{-1};       // the published, unclaimed job, or -1
+ID3D12Fence*     g_pane_fence   = nullptr;
+UINT64           g_pane_fence_v = 0;       // SUBMIT THREAD once armed (release_pane_jobs resets it)
+#if HALO_VR_DEV
+// DEV ONLY: where the pane's copies went. `idle` counts Presents that found no new copy while the
+// pane quad was live -- each is a repeated scope frame, so it is the number that should stay low.
+std::atomic<uint32_t> g_pane_n_pub{0}, g_pane_n_sub{0}, g_pane_n_superseded{0}, g_pane_n_stale{0},
+                      g_pane_n_busy{0}, g_pane_n_idle{0};
+#endif
 
 // STAGE-2 SEAM AS THE SUBMIT THREAD SEES IT. Atomic because the game thread sets it while the
 // submit thread reads it every frame. nullptr = present the generated bitmap. It only ever holds
@@ -1207,11 +1279,70 @@ void generate_label(uint8_t* out, int dim, size_t stride, float r, float g, floa
 // D3D12 plumbing
 // ============================================================================================
 
+// EVERY LIST THIS MODULE SUBMITTED MUST FINISH BEFORE WHAT IT REFERENCES IS DESTROYED: the swapchain
+// images the blit writes, the owned atlas, the staging buffer, and the allocators the lists were
+// recorded from. Releasing any of those under an executing list is undefined behaviour -- a device
+// removal, not a glitch -- and until this existed only the pane's lists were waited for (found by
+// the v0.6.0 release review). Three producers, three fences: the submit thread's blit (g_fence), the
+// game thread's batch (g_gt_fence), the pane's present-submitted lists (g_pane_fence).
+//
+// BOUNDED, because this runs on the game thread: teardown only (xrlayer off, shutdown, a failed
+// bring-up), never on a frame. It gives up on a removed device, whose fences read UINT64_MAX.
+// Callers run it only where nothing new can be submitted: the submit side unhooked (remove_hook --
+// the bridge rung blocks until an in-flight call has returned) or never armed.
+void wait_for_our_gpu_work() {
+    uint64_t pane_last = 0;
+    for (auto& j : g_pane) {
+        const uint64_t f = j.fence.load(std::memory_order_relaxed);
+        if (f > pane_last) pane_last = f;
+    }
+    struct Pending { ID3D12Fence* fence; uint64_t value; const char* what; };
+    const Pending all[] = {
+        {g_fence,      g_fence_v,    "overlay blit"},
+        {g_gt_fence,   g_gt_fence_v, "game-thread capture"},
+        {g_pane_fence, pane_last,    "scope pane copy"},
+    };
+    const uint64_t t0 = GetTickCount64();
+    for (const Pending& p : all) {
+        if (p.fence == nullptr || p.value == 0) continue;
+        for (;;) {
+            const uint64_t done = p.fence->GetCompletedValue();
+            if (done >= p.value || done == UINT64_MAX) break;   // UINT64_MAX: the device is gone
+            if (GetTickCount64() - t0 > 500) {
+                logf("teardown: the %s list (fence %llu, at %llu) had not finished after 500 ms -- "
+                     "releasing anyway rather than hang the game thread.",
+                     p.what, (unsigned long long)p.value, (unsigned long long)done);
+                return;
+            }
+            Sleep(1);
+        }
+    }
+}
+
+// The pane's present-submitted lists (see g_pane). release_d3d() has already waited for them
+// (wait_for_our_gpu_work); the other caller, a failed create, never submitted one.
+void release_pane_jobs() {
+    g_pane_pending.store(-1, std::memory_order_release);
+    for (auto& j : g_pane) {
+        if (j.list  != nullptr) { j.list->Release();  j.list  = nullptr; }
+        if (j.alloc != nullptr) { j.alloc->Release(); j.alloc = nullptr; }
+        j.state.store(PJ_FREE, std::memory_order_relaxed);
+        j.fence.store(0, std::memory_order_relaxed);
+        j.tick = 0;
+    }
+    if (g_pane_fence != nullptr) { g_pane_fence->Release(); g_pane_fence = nullptr; }
+    g_pane_fence_v = 0;
+}
+
 void release_d3d() {
     // UNPUBLISH BEFORE RELEASING. The submit thread reads g_source_override every frame and this
     // runs on the game thread, so anything released while that pointer is still visible is a
     // use-after-free of exactly the kind this rework exists to remove.
     g_source_override.store(nullptr, std::memory_order_release);
+    // Nothing below may be released under a list still executing on the GPU.
+    wait_for_our_gpu_work();
+    // The pane's lists reference g_owned, so they go before it does.
+    release_pane_jobs();
     for (int i = 0; i < XRLAYER_SLOTS; ++i) {
         g_capture_src[i] = nullptr;
         g_slot_beat[i].store(0, std::memory_order_relaxed);
@@ -1498,6 +1629,28 @@ bool create_d3d_resources(float r, float g, float b, float a) {
         return false;
     }
     g_gt_fence_v = 0;
+
+    // THE PANE'S PRESENT-SUBMITTED LISTS (see g_pane). OPTIONAL: without them the pane rides the
+    // batch as it always did, so a failure here is logged and never fails the bring-up.
+    {
+        bool ok = SUCCEEDED(g_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(&g_pane_fence)));
+        for (int i = 0; ok && i < PANE_RING; ++i) {
+            ok = SUCCEEDED(g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                            IID_PPV_ARGS(&g_pane[i].alloc))) &&
+                 SUCCEEDED(g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       g_pane[i].alloc, nullptr,
+                                                       IID_PPV_ARGS(&g_pane[i].list)));
+            if (ok) g_pane[i].list->Close();
+        }
+        g_pane_pending.store(-1, std::memory_order_relaxed);
+        g_pane_fence_v = 0;
+        if (!ok) {
+            logf("scope pane's present-submitted lists could not be created -- the pane's copy "
+                 "stays in the game-thread batch (scopepresentcopy has no effect this session).");
+            release_pane_jobs();
+        }
+    }
     return true;
 }
 
@@ -1703,6 +1856,9 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 // ============================================================================================
 
 void destroy_swapchain() {
+    // The blit writes these images: none may be destroyed under a copy still executing on the GPU.
+    // (xrlayer_shutdown destroys the swapchain BEFORE release_d3d, so the wait has to be here too.)
+    wait_for_our_gpu_work();
     if (g_swapchain != XR_NULL_HANDLE && g_xr.destroy_swapchain != nullptr) {
         g_xr.destroy_swapchain(g_swapchain);
     }
@@ -2616,6 +2772,44 @@ void reticule_front_clamp(XrCompositionLayerQuad& q, XrSpace space, XrTime when)
 //
 // THE POINTERS WRITTEN HERE MUST OUTLIVE THE RETURN -- both callers forward them to the runtime
 // after this returns. That is why g_quads and g_scope_ret_quad are static and not locals.
+// SUBMIT THREAD -- inside UEVR's Present hook, so after UE has submitted the whole frame. Executes the
+// newest pane copy the game thread published (see g_pane): the one point in the frame where the
+// capture is certainly finished. Claims with an exchange, so a list the game thread is superseding
+// or retracting at this instant is either ours to submit or theirs to drop, never both.
+void pane_submit_pending() {
+    const int k = g_pane_pending.exchange(-1, std::memory_order_acq_rel);
+    if (k < 0) {
+#if HALO_VR_DEV
+        if (g_tgt_live[XRLAYER_SLOT_PANE].load(std::memory_order_relaxed)) {
+            g_pane_n_idle.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
+        return;
+    }
+    PaneJob& j = g_pane[k];
+    // Belt and braces for the lifetime argument: a list recorded more than a tick ago is never
+    // executed, whatever became of the game thread's retraction.
+    if ((uint32_t)(g_game_tick.load(std::memory_order_relaxed) - j.tick) > 1u ||
+        pane_now_us() - j.pub_us > kPaneMaxAgeUs) {
+        j.state.store(PJ_FREE, std::memory_order_release);
+#if HALO_VR_DEV
+        g_pane_n_stale.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return;
+    }
+    ID3D12CommandList* lists[] = {j.list};
+    g_queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++g_pane_fence_v;
+    // A failed Signal leaves this job never reported complete, so its slot is simply not reused;
+    // three others remain, and a device that cannot Signal is past saving anyway.
+    g_queue->Signal(g_pane_fence, v);
+    j.fence.store(v, std::memory_order_relaxed);
+    j.state.store(PJ_SUBMITTED, std::memory_order_release);
+#if HALO_VR_DEV
+    g_pane_n_sub.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
 uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
                         const XrCompositionLayerBaseHeader** out, uint32_t out_capacity) {
     if (info == nullptr || out == nullptr) return 0;
@@ -2630,6 +2824,11 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     // a pass-through.
     if (st != State::Armed) return 0;
     if (session != g_session) return 0;
+
+    // The scope pane's copy, FIRST -- before anything below can return early, so every armed frame
+    // takes the newest recorded copy even when it ends up drawing nothing, and before the atlas is
+    // copied into the swapchain further down (same queue, so that copy sees the fresh cell).
+    if (g_pane_fence != nullptr && g_queue != nullptr) pane_submit_pending();
 
     Frame fr{};
     if (!read_snapshot(&fr)) return 0;
@@ -4207,6 +4406,25 @@ void report_dark_reason(uint32_t tick) {
 void xrlayer_tick() {
     const uint32_t tick = g_game_tick.fetch_add(1, std::memory_order_relaxed) + 1;
     report_dark_reason(tick);
+#if HALO_VR_DEV
+    // WHERE THE PANE'S COPIES WENT (see g_pane), session totals, when anything moved. `no new copy`
+    // is a Present that found nothing to submit while the pane was up -- each one repeats a scope
+    // frame, so with scopepresentcopy on it and the guard's refusals are the two numbers to watch.
+    if ((tick % 256) == 0) {
+        static uint32_t s_said_pub = 0;
+        const uint32_t pub = g_pane_n_pub.load(std::memory_order_relaxed);
+        if (pub != s_said_pub) {
+            s_said_pub = pub;
+            logf("scope copy at present: recorded %u, submitted %u, superseded %u, stale %u, "
+                 "ring busy %u | Presents with no new copy while the pane was up: %u",
+                 pub, g_pane_n_sub.load(std::memory_order_relaxed),
+                 g_pane_n_superseded.load(std::memory_order_relaxed),
+                 g_pane_n_stale.load(std::memory_order_relaxed),
+                 g_pane_n_busy.load(std::memory_order_relaxed),
+                 g_pane_n_idle.load(std::memory_order_relaxed));
+        }
+    }
+#endif
     // RESET THE BREADCRUMB EVERY TICK, immediately after it has been read. Without this it only
     // ever holds the last value anyone bothered to write -- and since every write lives inside the
     // aim_reticule block, a fault that stops that block from running would leave "0 = reached the
@@ -4943,6 +5161,165 @@ void xrlayer_capture_submit() {
         for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
         logf("presenting the OWNED atlas %p (%dx%d). The submit thread no longer touches an engine "
              "resource on any path.", (void*)g_owned, g_sc_w, g_sc_h);
+    }
+}
+
+// ---- the scope pane's own copy, submitted at Present (see g_pane) --------------------------------
+//
+// GAME THREAD, all three.
+
+// Can the game thread record into job k? FREE, or SUBMITTED and finished on the GPU. RECORDED means
+// published or being submitted this instant: the submit thread's until it says otherwise.
+static bool pane_job_reusable(int k) {
+    const int st = g_pane[k].state.load(std::memory_order_acquire);
+    if (st == PJ_FREE) return true;
+    if (st != PJ_SUBMITTED) return false;
+    return g_pane_fence->GetCompletedValue() >= g_pane[k].fence.load(std::memory_order_relaxed);
+}
+
+// xrsrcphase=1 is part of the condition, not a nicety: the lifetime argument above holds only for a
+// list recorded at the END of a tick.
+// ONLY WHERE EVERY PRESENT REACHES US. UEVR calls xrEndFrame -- produce_layers, the claim -- only on
+// the right eye's frame, so under Alternating (AFR) and Synchronized Sequential about half the
+// Presents never claim a list, and the "Present(N) claims list N first" half of the lifetime
+// argument above no longer holds. Native Stereo and Mono present, and claim, every frame; anything
+// else -- including a verdict still pending -- keeps the batch copy, exactly the 66e2234 path.
+static bool pane_deferral_on() {
+    const ViewMode vm = viewmode_current();
+    return g_cfg.scope_present_copy != 0 && g_cfg.xr_src_phase == 1 && g_pane_fence != nullptr &&
+           (vm == ViewMode::Stereo || vm == ViewMode::Mono);
+}
+
+bool xrlayer_pane_record() {
+    if (!pane_deferral_on()) return false;   // not ours: the batch copies the pane, as before
+    if (g_state.load(std::memory_order_relaxed) != State::Armed) return true;
+    if (g_owned == nullptr || g_device == nullptr) return true;
+    ID3D12Resource* const src = g_capture_src[XRLAYER_SLOT_PANE];
+    const Cell& c = g_cell[XRLAYER_SLOT_PANE];
+    if (src == nullptr || c.dim <= 0) return true;
+
+    int k = -1;
+    for (int i = 0; i < PANE_RING; ++i) {
+        if (pane_job_reusable(i)) { k = i; break; }
+    }
+    if (k < 0) {
+        // Every list still executing on the GPU: skip this tick, never block -- and, as
+        // capture_begin does for a busy batch ring, keep the pane's art inside the hold window: the
+        // game thread is alive, so a busy GPU must not age a pane that has art into the fallback.
+        const uint64_t now = GetTickCount64();
+        if (g_slot_beat[XRLAYER_SLOT_PANE].load(std::memory_order_relaxed) != 0) {
+            g_slot_beat[XRLAYER_SLOT_PANE].store(now, std::memory_order_relaxed);
+        }
+        g_src_beat.store(now, std::memory_order_relaxed);
+#if HALO_VR_DEV
+        g_pane_n_busy.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return true;
+    }
+    PaneJob& j = g_pane[k];
+    if (FAILED(j.alloc->Reset()) || FAILED(j.list->Reset(j.alloc, nullptr))) return true;
+    ID3D12GraphicsCommandList* const L = j.list;
+
+    // THE BATCH PATH'S SEQUENCE IN A LIST OF ITS OWN (capture_begin + capture_record + capture_
+    // submit): atlas to COPY_DEST, guard, the engine target borrowed into COPY_SOURCE and handed
+    // straight back, mask, atlas back to COPY_SOURCE. Like every other list it starts and ends with
+    // g_owned in COPY_SOURCE, the one state the submit thread relies on. The ENGINE_SRC_COLOR
+    // assumption is now also TRUE when it executes: at Present the capture's graph has ended, so its
+    // target is in its final state -- a mid-capture landing used to hold it as a render target.
+    D3D12_RESOURCE_BARRIER to_dst{};
+    to_dst.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    to_dst.Transition.pResource   = g_owned;
+    to_dst.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    to_dst.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    to_dst.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+    L->ResourceBarrier(1, &to_dst);
+
+    // The clear guard stays as the backstop: with the copy at Present it should find nothing to
+    // refuse, and its dev line saying so is the measurement for this whole path.
+    const bool guarded = scopeguard_begin(g_device, L, src, c.dim, GT_RING + k);
+
+    D3D12_RESOURCE_BARRIER to_src{};
+    to_src.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    to_src.Transition.pResource   = src;
+    to_src.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    to_src.Transition.StateBefore = ENGINE_SRC_COLOR;
+    to_src.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    L->ResourceBarrier(1, &to_src);
+
+    D3D12_TEXTURE_COPY_LOCATION dl{};
+    dl.pResource        = g_owned;
+    dl.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dl.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION sl{};
+    sl.pResource        = src;
+    sl.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    sl.SubresourceIndex = 0;
+    L->CopyTextureRegion(&dl, (UINT)c.x, (UINT)c.y, 0, &sl, nullptr);
+
+    D3D12_RESOURCE_BARRIER src_back = to_src;
+    src_back.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    src_back.Transition.StateAfter  = ENGINE_SRC_COLOR;
+    L->ResourceBarrier(1, &src_back);
+    if (guarded) scopeguard_end(L);   // predication OFF before anything else is recorded
+
+    scopemask_apply(g_device, L, g_owned, c.x, c.y, c.dim);
+
+    D3D12_RESOURCE_BARRIER dst_back = to_dst;
+    dst_back.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    dst_back.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    L->ResourceBarrier(1, &dst_back);
+    if (FAILED(L->Close())) {
+        j.state.store(PJ_FREE, std::memory_order_relaxed);
+        return true;
+    }
+
+    // PUBLISH. The exchange hands the newest list over; one still waiting from earlier in this tick
+    // was never claimed by a Present, so it was never executed and is ours to free.
+    const uint32_t gtick = g_game_tick.load(std::memory_order_relaxed);
+    j.tick = gtick;
+    j.pub_us = pane_now_us();
+    j.state.store(PJ_RECORDED, std::memory_order_relaxed);
+    const int old = g_pane_pending.exchange(k, std::memory_order_acq_rel);
+    if (old >= 0) {
+        g_pane[old].state.store(PJ_FREE, std::memory_order_release);
+#if HALO_VR_DEV
+        g_pane_n_superseded.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+#if HALO_VR_DEV
+    g_pane_n_pub.fetch_add(1, std::memory_order_relaxed);
+#endif
+
+    // capture_submit's bookkeeping for a recorded slot, and its first-capture publication of the
+    // owned atlas (a session whose first copy is the pane's must still present it).
+    const uint64_t now = GetTickCount64();
+    g_src_beat.store(now, std::memory_order_relaxed);
+    g_slot_beat[XRLAYER_SLOT_PANE].store(now, std::memory_order_relaxed);
+    g_slot_cap_tick[XRLAYER_SLOT_PANE].store(gtick, std::memory_order_relaxed);
+    if (g_source_override.load(std::memory_order_relaxed) != g_owned) {
+        g_source_override.store(g_owned, std::memory_order_release);
+        for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
+        logf("presenting the OWNED atlas %p (%dx%d), first filled by the scope pane's copy.",
+             (void*)g_owned, g_sc_w, g_sc_h);
+    }
+    return true;
+}
+
+// End of the game thread's capture pass. A pane list still unclaimed from an EARLIER tick must not
+// be submitted now (see g_pane: it is only proven safe up to Present(N) of the tick that recorded
+// it), so it is taken back here. A list recorded THIS tick stays up for the next Present.
+void xrlayer_pane_end_tick() {
+    const int k = g_pane_pending.load(std::memory_order_acquire);
+    if (k < 0) return;
+    // With the path switched OFF (scopepresentcopy=0, or xrsrcphase=0 -- whose pass runs at the
+    // START of a tick, where "this tick's own" proves nothing), take back whatever is waiting.
+    if (pane_deferral_on() && g_pane[k].tick == g_game_tick.load(std::memory_order_relaxed)) return;
+    int expect = k;
+    if (g_pane_pending.compare_exchange_strong(expect, -1, std::memory_order_acq_rel)) {
+        g_pane[k].state.store(PJ_FREE, std::memory_order_release);
+#if HALO_VR_DEV
+        g_pane_n_stale.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
 }
 

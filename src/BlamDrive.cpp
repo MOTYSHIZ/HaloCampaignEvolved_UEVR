@@ -26,14 +26,15 @@ namespace {
 
 // The orientation getter, dll+0x5A6AD0. Hooked purely to get onto the sim thread -- its return
 // value is passed through untouched. See BlamDrive.hpp for why this function and not the setter.
-// ADDR-HYGIENE: resolved -- find_getter_by_signature() locates this function by SHAPE at startup and
-// refuses an ambiguous match; this constant is only the fallback when the scan finds nothing, and
-// the watchdog below catches the case where the fallback is also wrong (installed but never called).
 // 2026-08-17 game update: .text shifted by +0x10, so the getter moved 0x5A6AD0 -> 0x5A6AE0.
 // Verified statically against the shipped DLL: GETTER_SIG matches exactly once, at 0x5A6AE0 (a
 // .pdata function start, end 0x5A6B67, whose mov r9d resolves to _tls_index at 0xD72730). The old
 // address holds the previous function's epilogue (5F 5E 5D 5B C3). The scan finds the new address
 // either way; this keeps the fallback and the self-test's AGREE line honest.
+// ADDR-HYGIENE: resolved -- find_getter_by_signature() locates this function by SHAPE at startup and
+// refuses an ambiguous match; this constant is only the fallback when the scan does not find exactly
+// one, and the watchdog below catches the case where the fallback is also wrong (installed but never
+// called). The fallback itself is hooked with no prologue check.
 constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AE0;
 
 // Where _tls_index sat on the build these offsets were derived from. NO LONGER USED TO READ IT --

@@ -608,6 +608,17 @@ bool xrlayer_capture_begin();
 bool xrlayer_capture_record(int slot);
 void xrlayer_capture_submit();
 
+// THE SCOPE PANE'S COPY, SUBMITTED AT PRESENT (scopepresentcopy; XrLayer.cpp, g_pane). GAME THREAD.
+// xrlayer_pane_record() is called for the pane slot in place of xrlayer_capture_record(), in the
+// same spot -- immediately after the slot's re-validation -- and records the whole copy into a list
+// of its own that the submit thread executes from inside the frame's Present, where the capture is
+// always finished. Returns false when that path is off (the caller then uses the batch as before),
+// true when it handled the slot, including a skip for a busy ring. Needs no open batch.
+// xrlayer_pane_end_tick() goes after the capture pass, every pass: it takes back a list left
+// unclaimed from an earlier tick, which must never be submitted late.
+bool xrlayer_pane_record();
+void xrlayer_pane_end_tick();
+
 // Tear down the swapchain, remove the hook and forget everything. Safe to call when nothing was
 // ever set up.
 //

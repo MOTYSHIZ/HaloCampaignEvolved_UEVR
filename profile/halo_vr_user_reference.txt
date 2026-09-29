@@ -261,9 +261,10 @@
 # 2x on the magnum and 2x/8x on the sniper -- a small VR lens wants much more).
 #scopezoom=16
 # Image sharpness, pixels. Higher is sharper and costs more GPU.
-#scoperes=512
-# Update the lens image every Nth frame. Raise to 2-4 if the scope costs performance.
-#scopediv=1
+#scoperes=420
+# Update the lens image every Nth frame -- but only with scopecapmode=0 (halo_vr_dev.cfg). The
+# default capture draws the lens with every rendered frame, and then this setting does nothing.
+#scopediv=2
 # Lens shape: 1 = round, 0 = square (square shows the most image).
 #scopeshape=1
 # The hold-to-place key. Default: Delete.
@@ -768,11 +769,10 @@
 #handsmoothmelee=0
 
 # ------------------------------------------------------------ STABILITY FIXES (stabilityfixes)
-# While a changed settings file is read back in, the controller, render and game threads keep using
-# a copy of the old settings, so none of them ever sees a half-loaded one. It also silences a
-# reticule readback the base mod logged every few seconds, and tints the grenade pouch markers when
-# they are shown. Its diagnostic logs and extra button steals stay off until their own keys turn
-# them on.
+# While a changed settings file is read back in, the features that run off the game thread keep
+# using a copy of the old settings, so none of them ever sees a half-loaded one. It also silences a
+# reticule readback the base mod logged every few seconds. Its diagnostic logs, the pouch marker
+# tint and its extra button steals stay off until their own keys turn them on.
 #
 # 1 = on, 0 = off (settings are read back in unguarded, as the base mod shipped it).
 #stabilityfixes=1
@@ -806,9 +806,9 @@
 # the hold, and it stays until you release the button, wherever your hand drifts. The
 # controller buzzes when it grabs and again when it lets go.
 #
-# OFF BY DEFAULT while it is new. It is safe to switch on and off mid-session -- the
-# config reloads about every two seconds -- so it is easy to A/B against one-handed.
-#twohand=0
+# ON BY DEFAULT. It is safe to switch off and on mid-session -- the config reloads about
+# every two seconds -- so it is easy to A/B against one-handed.
+#twohand=1
 
 # Weapons that never two-hand, as a comma-separated list matched against the weapon's
 # internal name. A one-handed weapon has no barrel to grab, so a second hand there is
@@ -967,10 +967,6 @@
 # Pad mask ORed in to melee. 0x0080 = RTHUMB (right stick click), this profile's
 # melee. Confirm against your own mapping with mapbtnlog=1 before changing it.
 #meleemask=0x0080
-
-# Prints every swing's peak speed and whether it fired -- the tuning instrument
-# for meleespeed and meleefwd. Set it, swing a dozen times, read the log, turn
-# it off.
 
 # ---------------------------------------------------------------- ARMS: PLAYER IK
 # Which system poses your first-person arms.
@@ -1407,7 +1403,7 @@
 # xrlayerscopereticlesize as you go more negative. The two work as a pair.
 #
 # To remove the crosshair entirely use xrlayerscopereticle=0 rather than a depth of 0.
-#xrlayerscopereticledepth=0.2
+#xrlayerscopereticledepth=1
 
 # ================================== WORLD DETAIL & PERFORMANCE ==================================
 # The game decides what to keep drawn partly from where your AIM points rather than from where you

@@ -30,20 +30,19 @@ std::wstring class_name_of(API::UObject* obj) {
 // that as "no object", a state each of them already handles.
 constexpr int32_t UOBJ_INTERNAL_INDEX_OFF = 0x0C;
 
-bool uobject_slot_valid(const API::UObject* p) {
-    if (p == nullptr || (uintptr_t)p < 0x10000) return false;
-    if (IsBadReadPtr(p, (UINT_PTR)UOBJ_INTERNAL_INDEX_OFF + sizeof(int32_t))) return false;
+int32_t uobject_slot_index(const API::UObject* p) {
+    if (p == nullptr || (uintptr_t)p < 0x10000) return -1;
+    if (IsBadReadPtr(p, (UINT_PTR)UOBJ_INTERNAL_INDEX_OFF + sizeof(int32_t))) return -1;
     auto* arr = API::get()->get_uobject_array();
-    if (arr == nullptr) return false;
+    if (arr == nullptr) return -1;
     const int32_t idx = *reinterpret_cast<const int32_t*>(
                             reinterpret_cast<const uint8_t*>(p) + UOBJ_INTERNAL_INDEX_OFF);
-    if (idx < 0 || idx >= arr->get_object_count()) return false;
-    return arr->get_object(idx) == p;
+    if (idx < 0 || idx >= arr->get_object_count()) return -1;
+    return (arr->get_object(idx) == p) ? idx : -1;
 }
 
-int32_t uobject_slot_index(const API::UObject* p) {
-    if (!uobject_slot_valid(p)) return -1;
-    return *reinterpret_cast<const int32_t*>(reinterpret_cast<const uint8_t*>(p) + UOBJ_INTERNAL_INDEX_OFF);
+bool uobject_slot_valid(const API::UObject* p) {
+    return uobject_slot_index(p) >= 0;
 }
 
 bool uobject_live(API::UObject* p, int32_t* cached_index) {
@@ -56,8 +55,13 @@ bool uobject_live(API::UObject* p, int32_t* cached_index) {
     if (*cached_index >= 0 && *cached_index < n && arr->get_object(*cached_index) == p) {
         return true;
     }
-    // Either first sight of this pointer, or the slot changed. One walk to (re)locate it;
-    // not finding it means the object is gone.
+    // Either first sight of this pointer, or the slot changed. The object's own InternalIndex,
+    // verified against the slot, answers that in one compare; the walk stays as the fallback for a
+    // pointer whose index does not check out. Not finding it means the object is gone.
+    {
+        const int32_t idx = uobject_slot_index(p);
+        if (idx >= 0) { *cached_index = idx; return true; }
+    }
     for (int32_t i = 0; i < n; ++i) {
         if (arr->get_object(i) == p) { *cached_index = i; return true; }
     }

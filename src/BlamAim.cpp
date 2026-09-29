@@ -39,13 +39,14 @@ namespace {
 //   samples, polled off-thread while the game ran. The chain is only valid INSIDE the sim's own
 //   call stack. A hook runs exactly there, so the same chain that never resolved from the tick
 //   should resolve here. That is the point of hooking rather than a nicety.
-// ADDR-HYGIENE: dev-only -- this file's hooks are installed only when `blamaim` is enabled, a
-// dev-catalog key that ships at 0. NOTE it is the same function BlamDrive resolves BY SIGNATURE; if
-// this path is ever promoted, take the resolved address from there rather than this second copy.
 // 2026-08-17 game update: the +0x10 .text shift caught BOTH of this file's recorded RVAs. Verified
 // statically against the shipped DLL: 0x5A6AD0 reads 5F 5E 5D 5B C3 (pops/ret), 0x5A6AE0 is a .pdata
 // function start with the prologue below. Installing on the old address patches the previous
 // function's epilogue, so the hook is gated on the prologue.
+// ADDR-HYGIENE: dev-only -- this whole file is #if HALO_VR_DEV, and its hooks are installed only when
+// `blamaim` is enabled, a dev-catalog key that ships at 0. NOTE it is the same function BlamDrive
+// resolves BY SIGNATURE; if this path is ever promoted, take the resolved address from there rather
+// than this second copy.
 constexpr uintptr_t RVA_GET_ORIENTATION = 0x5A6AE0;
 // First bytes of the function, checked before the hook goes in. The trailing rip-relative
 // displacement of the `mov r9d,[rip+..]` is excluded on purpose -- it re-links every build.

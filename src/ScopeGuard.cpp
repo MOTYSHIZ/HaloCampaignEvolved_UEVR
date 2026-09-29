@@ -16,8 +16,18 @@
 namespace halo {
 namespace {
 
-constexpr uint32_t kMaxHold  = 3;     // consecutive cleared frames refused before one is let through
-constexpr UINT     kBufBytes = 256;   // predicate (8 B) + held count (4 B) + refused total (4 B), padded
+// TWO HOLDS, because two different things read as pure black at the nine points (ScopeGuard.hpp):
+//   the engine's CLEAR, which is exactly (0,0,0,1) -- held up to kMaxHoldClear copies, because a
+//     finished frame never carries that alpha, so holding it cannot freeze a real view; and
+//   ANY OTHER all-black reading, which may be a genuinely black view -- the old short hold.
+// A single hold of 3 let the 4th consecutive CLEAR through, and that was the black flash that
+// survived the first version of this guard.
+constexpr uint32_t kMaxHold      = 3;    // all-black but NOT the clear's colour: let through after 3
+constexpr uint32_t kMaxHoldClear = 30;   // the clear itself: ~0.5 s of copies before one goes through
+// predicate (8 B), held (4), then the DEV-only counters: refused total (4), black frames copied (4),
+// refused-but-not-the-clear (4), current all-black run (4), longest run (4) -- 32 B used, padded.
+constexpr UINT     kBufBytes = 256;
+constexpr UINT     kRbBytes  = 32;
 constexpr int      kSlots    = kScopeGuardSlots;   // XrLayer static_asserts GT_RING matches
 
 // ---- state, all latching (the ScopeMask rule: a failing device call is never retried per frame) ----
@@ -33,13 +43,18 @@ ID3D12Resource*        s_pred     = nullptr;   // the predicate buffer -- ours, 
 D3D12_RESOURCE_STATES  s_pred_state = D3D12_RESOURCE_STATE_COMMON;
 UINT                   s_inc      = 0;
 #if HALO_VR_DEV
-// DEV ONLY: how many cleared frames the guard has refused, read back every 64 guarded copies. This
-// is the log line that turns "the flicker stopped" into "the flicker WAS this".
+// DEV ONLY: the guard's counters, read back every 64 guarded copies. This is the log line that
+// turns "the flicker stopped" into "the flicker WAS this" -- and, since the second version, the one
+// that says whether any black frame still REACHED the compositor (`shown`).
 ID3D12Resource*        s_readback = nullptr;
 const uint32_t*        s_rb_map   = nullptr;
 uint32_t               s_rb_calls = 0;
-uint32_t               s_rb_said  = 0;
+uint32_t               s_rb_said  = 0;     // refused, as last logged
 uint32_t               s_rb_base  = 0;     // first reading: the buffer starts with undefined content
+uint32_t               s_rb_shown = 0;     // black frames copied, as last logged
+uint32_t               s_rb_shown_base = 0;
+uint32_t               s_rb_loose_base = 0;
+uint32_t               s_rb_longest = 0;
 bool                   s_rb_have  = false;
 #endif
 
@@ -58,30 +73,54 @@ void die(const char* why) {
     }
 }
 
-// Nine points on a 3x3 grid at the sixths of the target. ALL must be exactly black for the frame to
-// count as the engine's clear: the clear colour is (0,0,0) and an 8-bit UNORM zero reads back as
-// exactly 0.0, whereas a lit, auto-exposed frame is essentially never pure zero at nine spread-out
-// points. `held` counts consecutive refusals so a genuinely black view is still let through.
+// Nine points on a 3x3 grid at the sixths of the target. ALL must be exactly black (RGB) for the
+// frame to be held at all -- an 8-bit UNORM zero reads back as exactly 0.0, whereas a lit,
+// auto-exposed frame is essentially never pure zero at nine spread-out points.
+//
+// THE ALPHA SAYS WHICH BLACK IT IS. The engine clears with FLinearColor::Black, whose alpha is 1
+// (Color.cpp: Black(0,0,0) with InA defaulting to 1.0f), so the clear reads (0,0,0,1) everywhere. A
+// finished FinalColorLDR frame carries alpha 0: the desktop tonemapper starts from OutColor = 0 and
+// only its DIM_ALPHA_CHANNEL permutation writes .a -- and ScopeMask exists because the capture's
+// alpha reads ~0. So (0,0,0,1) at all nine points is the clear, and gets the long hold; any other
+// all-black reading might be a real black view, and keeps the short one.
+//
+// `held` counts consecutive refusals (reset when a copy runs); `run` counts consecutive all-black
+// READINGS and survives a let-through, so its maximum says how close the race came to a cap.
+//
+// Everything after `held` is a COUNTER -- it answers a question rather than playing the game -- so
+// it is compiled into the probe only in a DEV build (SCOPEGUARD_COUNTERS, set in build()). A player's
+// probe makes the decision and stores nothing else.
 const char* kCS =
     "Texture2D<float4> Src : register(t0);\n"
     "RWByteAddressBuffer Pred : register(u0);\n"
-    "cbuffer C : register(b0) { uint dim; uint maxHold; uint pad0; uint pad1; };\n"
+    "cbuffer C : register(b0) { uint dim; uint maxHold; uint maxHoldClear; uint pad0; };\n"
     "[numthreads(1,1,1)]\n"
     "void main() {\n"
-    "    bool cleared = true;\n"
+    "    bool black = true;\n"
+    "    bool clr = true;\n"
     "    [unroll] for (uint i = 0; i < 3; ++i) {\n"
     "        [unroll] for (uint j = 0; j < 3; ++j) {\n"
     "            uint2 p = uint2(((2 * i + 1) * dim) / 6, ((2 * j + 1) * dim) / 6);\n"
-    "            float3 c = Src.Load(int3(p, 0)).rgb;\n"
-    "            if (any(c != 0.0f)) cleared = false;\n"
+    "            float4 c = Src.Load(int3(p, 0));\n"
+    "            if (any(c.rgb != 0.0f)) black = false;\n"
+    "            if (c.a != 1.0f) clr = false;\n"
     "        }\n"
     "    }\n"
+    "    clr = clr && black;\n"
     "    uint held = Pred.Load(8);\n"
+    "    uint cap  = clr ? maxHoldClear : maxHold;\n"
     "    uint skip = 0;\n"
-    "    if (cleared && held < maxHold) { skip = 1; held = held + 1; } else { held = 0; }\n"
+    "    if (black && held < cap) { skip = 1; held = held + 1; } else { held = 0; }\n"
     "    Pred.Store2(0, uint2(skip, 0));\n"
     "    Pred.Store(8, held);\n"
+    "#if SCOPEGUARD_COUNTERS\n"
     "    Pred.Store(12, Pred.Load(12) + skip);\n"
+    "    Pred.Store(16, Pred.Load(16) + ((black && skip == 0) ? 1u : 0u));\n"
+    "    Pred.Store(20, Pred.Load(20) + ((skip != 0 && !clr) ? 1u : 0u));\n"
+    "    uint run = black ? Pred.Load(24) + 1 : 0;\n"
+    "    Pred.Store(24, run);\n"
+    "    Pred.Store(28, max(Pred.Load(28), run));\n"
+    "#endif\n"
     "}\n";
 
 typedef HRESULT (WINAPI *PFN_D3DCompile)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR,
@@ -105,8 +144,13 @@ bool build(ID3D12Device* device) {
         return false;
     }
 
+    // The counters are a dev instrument (see kCS), so only a DEV build compiles them in.
+    const D3D_SHADER_MACRO defs[] = {
+        {"SCOPEGUARD_COUNTERS", HALO_VR_DEV ? "1" : "0"},
+        {nullptr, nullptr},
+    };
     ID3DBlob* cs = nullptr; ID3DBlob* err = nullptr;
-    if (FAILED(compile(kCS, std::strlen(kCS), "scopeguard", nullptr, nullptr, "main", "cs_5_0",
+    if (FAILED(compile(kCS, std::strlen(kCS), "scopeguard", defs, nullptr, "main", "cs_5_0",
                        0, 0, &cs, &err)) || cs == nullptr) {
         char msg[256] = {0};
         if (err != nullptr && err->GetBufferPointer() != nullptr) {
@@ -210,14 +254,15 @@ bool build(ID3D12Device* device) {
                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                   IID_PPV_ARGS(&s_readback)))) {
         void* p = nullptr;
-        D3D12_RANGE r{0, 16};
+        D3D12_RANGE r{0, kRbBytes};
         if (SUCCEEDED(s_readback->Map(0, &r, &p))) s_rb_map = static_cast<const uint32_t*>(p);
     }
 #endif
 
     s_ready = true;
     logf_("ready -- the scope pane's copy now refuses a frame that is still the capture's black "
-          "clear (nine-point probe, predicated copy, at most %u frames held)", kMaxHold);
+          "clear (nine-point probe, predicated copy; the clear's exact (0,0,0,1) is held up to %u "
+          "frames, any other all-black view %u)", kMaxHoldClear, kMaxHold);
     return true;
 }
 
@@ -270,8 +315,9 @@ bool scopeguard_begin(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3
     }
     if (!build(device)) return false;
 
-    // THIS SLOT'S DESCRIPTOR PAIR, rewritten every call. Safe because xrlayer_capture_begin() only
-    // opens a ring slot once that slot's previous list has completed on the GPU, so nothing in
+    // THIS LIST'S DESCRIPTOR PAIR, rewritten every call. Safe because both callers reuse a list only
+    // once its previous execution has completed on the GPU (xrlayer_capture_begin() for the batch
+    // ring, pane_job_reusable() for the pane's) or it was never submitted at all, so nothing in
     // flight can still be reading these two descriptors.
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = s_heap->GetCPUDescriptorHandleForHeapStart();
     cpu.ptr += (SIZE_T)ring_slot * 2 * s_inc;
@@ -302,7 +348,7 @@ bool scopeguard_begin(ID3D12Device* device, ID3D12GraphicsCommandList* list, ID3
     D3D12_GPU_DESCRIPTOR_HANDLE gpu = s_heap->GetGPUDescriptorHandleForHeapStart();
     gpu.ptr += (UINT64)ring_slot * 2 * s_inc;
     list->SetComputeRootDescriptorTable(0, gpu);
-    const uint32_t consts[4] = {(uint32_t)dim, kMaxHold, 0u, 0u};
+    const uint32_t consts[4] = {(uint32_t)dim, kMaxHold, kMaxHoldClear, 0u};
     list->SetComputeRoot32BitConstants(1, 4, consts, 0);
     list->Dispatch(1, 1, 1);
 
@@ -330,18 +376,32 @@ void scopeguard_end(ID3D12GraphicsCommandList* list) {
     // it was recorded 64 captures ago), then queue a fresh one. Recorded after predication is off,
     // so the readback copy itself always runs.
     if (s_readback != nullptr && s_rb_map != nullptr && (++s_rb_calls % 64) == 0) {
-        const uint32_t total = s_rb_map[3];
+        const uint32_t total   = s_rb_map[3];
+        const uint32_t shown   = s_rb_map[4];   // all-black frames that WERE copied
+        const uint32_t loose   = s_rb_map[5];   // refusals that were not the clear's (0,0,0,1)
+        const uint32_t longest = s_rb_map[7];
         if (!s_rb_have) {
             s_rb_have = true;               // the first read may carry the buffer's initial content
             s_rb_said = total;
             s_rb_base = total;
-        } else if (total != s_rb_said) {
-            logf_("refused %u more cleared frame(s) (%u since the first reading) -- each would have "
-                  "been a one-frame black flash in the scope", total - s_rb_said, total - s_rb_base);
+            s_rb_shown = shown;
+            s_rb_shown_base = shown;
+            s_rb_loose_base = loose;
+            s_rb_longest = longest;
+        } else if (total != s_rb_said || shown != s_rb_shown || longest != s_rb_longest) {
+            // `shown` is the number that matters to the player: each is a black frame that reached
+            // the compositor. With the two holds it should stay 0 unless the view really is black.
+            logf_("refused %u more cleared frame(s) (%u since the first reading, %u of them NOT the "
+                  "clear's exact colour) | black frames COPIED to the scope: %u more, %u total | "
+                  "longest all-black run %u (holds: clear %u, other black %u)",
+                  total - s_rb_said, total - s_rb_base, loose - s_rb_loose_base,
+                  shown - s_rb_shown, shown - s_rb_shown_base, longest, kMaxHoldClear, kMaxHold);
             s_rb_said = total;
+            s_rb_shown = shown;
+            s_rb_longest = longest;
         }
         transition(list, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->CopyBufferRegion(s_readback, 0, s_pred, 0, 16);
+        list->CopyBufferRegion(s_readback, 0, s_pred, 0, kRbBytes);
     }
 #endif
 

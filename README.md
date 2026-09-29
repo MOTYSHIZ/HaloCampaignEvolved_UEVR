@@ -38,14 +38,17 @@ appropriately.
 - **Aim follows the barrel** — shots go where the weapon's barrel actually points, measured from the
   weapon itself, so there is no aim calibration to do. Most weapons ship with their barrel
   pre-measured.
-- **Weapon scope** — while you're gripping two-handed (pistols too), the left trigger raises a
-  magnified lens on the gun, aimed down the ray your shots actually follow. Without the grip, the
-  same trigger throws a grenade. Halo's flat zoom (which hides the weapon and masks your view) stays
-  suppressed.
+- **Weapon scope** — while you're gripping two-handed (pistols too), hold the left trigger to raise
+  a magnified lens on the gun, aimed down the ray your shots actually follow, with the weapon's own
+  zoom sound. Without the grip, the same trigger throws a grenade. Halo's flat zoom (which hides the
+  weapon and masks your view) stays suppressed.
 - **Player IK** — your first-person arms follow your real hands: the game's own arm skeleton is
   solved to your controllers, with elbows, forearm twist, weapon recoil, the off hand on the
   weapon's grip when you hold it two-handed, and the off hand joining reloads, melees and grenade
   throws.
+- **Hand smoothing** — your tracked hands are steadied before anything reads them, so aim, the arms
+  and two-handed holds all see the same steady hands: a still hand is held still, a fast move passes
+  through with little lag. Melee still reads your raw swing.
 - **Hand gestures** — a free hand shapes its fingers from your controller: fist, point, thumbs up and
   OK, from the grip, the trigger and the thumb sensors. With [our UEVR build](#uevr-version) a finger
   resting on the trigger or a thumb resting on the stick counts too. The poses are yours to tune in
@@ -74,6 +77,9 @@ appropriately.
   `halo_vr_user.cfg` live, no restart, and the mod never writes over your choices. Calibration can be
   run from the menu too — no keyboard needed. (When a new release lands, install it fresh — see
   [Updating](#updating-install-every-release-fresh).)
+- **Experimental features** — early previews, off by default, in the menu's own panel: manual
+  reloads, racking the slide, a wrist HUD with the motion tracker, ForceTube gunstock kicks and more,
+  contributed by [blindcowboy24](https://github.com/blindcowboy24). Expect rough edges.
 
 ## Requirements
 
@@ -250,7 +256,7 @@ first time the layer loads into the game.
 | Right stick **click** | Melee — or squeeze a grip and swing that hand (either hand; `meleegrip=0` to swing without the grip) |
 | Right trigger | Fire |
 | Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
-| Left trigger | Throw grenade — or, while gripping two-handed, toggle the scope (`scope`/`scopezoom` to tune) |
+| Left trigger | Throw grenade — or, while gripping two-handed, hold for the scope (`scopehold=0` to tap it open and shut; `scope`/`scopezoom` to tune) |
 | Right grip | Reach over your right shoulder and squeeze to switch weapons; over your left shoulder to put the weapon away and free your hand (squeeze there again to bring it back) |
 | Right A | Jump |
 | Left Y | Switch weapon — with a controller near your head, **pause** instead |
@@ -320,7 +326,7 @@ change — which is also what makes it the one file worth keeping a copy of acro
 the next launch), and that is a perfectly good place to be.
 
 **Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press and hold both thumbsticks) and
-scroll to **Script UI** — four panels live there:
+scroll to **Script UI** — five panels live there:
 
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
   catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
@@ -337,6 +343,11 @@ scroll to **Script UI** — four panels live there:
   One-press resets take you back to the shipped fit, per gesture or wholesale.
 - **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
   unless troubleshooting asks.
+- **Halo VR Experimental** — early previews, every one off until you switch it on: manual reload,
+  racking the slide, a wrist HUD with the motion tracker, a grenade throw on grip release, ForceTube
+  gunstock kicks, a vehicle seat camera and more, contributed by
+  [blindcowboy24](https://github.com/blindcowboy24). They are works in progress and may break things
+  or feel unfinished.
 
 This ships as `scripts/halo_vr_settings.lua` and needs nothing extra: UEVR's built-in Lua
 scripting loads it automatically.
@@ -471,7 +482,7 @@ delete it and recapture rather than fighting it.
 - **The scope view can be too bright**, and its lighting often doesn't match the scene around it.
   Work in progress.
 - **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
-  weapons, then toggle the scope off and on again. Also work in progress.
+  weapons, then close the scope and open it again. Also work in progress.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a

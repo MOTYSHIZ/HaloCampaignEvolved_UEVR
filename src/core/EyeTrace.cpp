@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "HitTrace.hpp"                // hit_trace_passable: the aim ray's look-past rule, shared
 #include "UeObject.hpp"                // narrow, class_name_of: naming what a trace started inside
+#include "ViewMode.hpp"                // how the eyes are rendered decides how they pair
 #include "core/WorldScale.hpp"
 #include "uevr/API.hpp"
 
@@ -48,6 +49,9 @@ double   g_raw_prev[2][3]{};
 bool     g_have_raw[2]{};
 uint64_t g_raw_seq[2]{};   // the post sample count when each slot was last written
 uint64_t g_post_seq = 0;   // post samples so far, either eye
+double   g_off_prev[3]{};  // the previous post sample's offset from its own pre (either slot)
+uint64_t g_off_prev_seq = 0;
+bool     g_off_prev_have = false;
 
 // ---- reflection-resolved Kismet traces. Every offset comes from the UFunction and the HitResult
 // script struct, never from a written-down layout (the same discipline as HitTrace.cpp).
@@ -277,7 +281,7 @@ bool run_trace(const TraceFn& t, const Vec3& a, const Vec3& b, float radius, int
     constexpr int kMax = 16;
     API::UObject* ig[kMax];
     int n = 0;
-    for (int i = 0; i < n_ignore && n < kMax - kExtra; ++i) ig[n++] = ignore[i];
+    for (int i = 0; ignore != nullptr && i < n_ignore && n < kMax - kExtra; ++i) ig[n++] = ignore[i];
 
     for (int attempt = 0; attempt <= kExtra; ++attempt) {
         Vec3 loc{}, imp{};
@@ -383,19 +387,43 @@ bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* 
         // trace, hitting the ground 2.6 m along it, pushed the rendered eye 416 m into the sky.
         // AimConverge learned the same lesson (its CYCLOPEAN EYE note). And a separation no head can
         // have is not one: half a real metre is several times any IPD, at any world scale.
-        double e[3] = {0.0, 0.0, 0.0};
-        if (g_have_raw[0] && g_have_raw[1] && g_raw_seq[1] == g_raw_seq[0] + 1) {
+        const double cap = 0.5 * (double)uevr_cm_per_metre_cached();
+        double c[3];
+        const ViewMode vm = viewmode_current();
+        if (vm == ViewMode::Alternating || vm == ViewMode::Unknown) {
+            // ONE VIEW PER FRAME, THE EYES TAKING TURNS (AFR, Synchronized Sequential; Unknown while
+            // the verdict is pending). Every sample arrives as index 0, so there is never an eye-1 slot
+            // to pair with, and one eye's offset alone carries its half IPD: the clamp, a fraction of
+            // it, then moved each eye by a DIFFERENT vector and pulled the two views together by the
+            // clamp fraction -- at a full clamp, no stereo at all. The head centre is this eye's offset
+            // averaged with the previous sample's, which was the other eye (AimConverge averages its
+            // deltas the same way). Only when that sample came straight before this one, and within the
+            // same half-metre cap: anything else falls back to this eye alone, as before. Harmless if
+            // the pending verdict turns out to be Mono: two centre-eye samples average to the centre.
+            double off[3];
             double m2 = 0.0;
             for (int k = 0; k < 3; ++k) {
-                e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
-                m2 += e[k] * e[k];
+                off[k] = raw[k] - g_pre[index][k];
+                const double d = off[k] - g_off_prev[k];
+                m2 += d * d;
             }
-            const double cap = 0.5 * (double)uevr_cm_per_metre_cached();
-            if (!(m2 <= cap * cap)) e[0] = e[1] = e[2] = 0.0;
+            const bool pair = g_off_prev_have && g_off_prev_seq == g_post_seq && m2 <= cap * cap;
+            for (int k = 0; k < 3; ++k) c[k] = pair ? 0.5 * (off[k] + g_off_prev[k]) : off[k];
+        } else {
+            // Two views per frame (Native Stereo), or Mono's one centre eye (where no eye-1 slot is
+            // live and e stays zero).
+            double e[3] = {0.0, 0.0, 0.0};
+            if (g_have_raw[0] && g_have_raw[1] && g_raw_seq[1] == g_raw_seq[0] + 1) {
+                double m2 = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    e[k] = g_raw_prev[1][k] - g_raw_prev[0][k];
+                    m2 += e[k] * e[k];
+                }
+                if (!(m2 <= cap * cap)) e[0] = e[1] = e[2] = 0.0;
+            }
+            const double half = (index == 0) ? 0.5 : -0.5;
+            for (int k = 0; k < 3; ++k) c[k] = raw[k] - g_pre[index][k] + half * e[k];
         }
-        const double half = (index == 0) ? 0.5 : -0.5;
-        double c[3];
-        for (int k = 0; k < 3; ++k) c[k] = raw[k] - g_pre[index][k] + half * e[k];
         g_head_cx.store((float)c[0], std::memory_order_relaxed);
         g_head_cy.store((float)c[1], std::memory_order_relaxed);
         g_head_cz.store((float)c[2], std::memory_order_relaxed);
@@ -411,9 +439,14 @@ bool eye_note_post(int index, double* x, double* y, double* z, const HeadClamp* 
     }
     if (clamp != nullptr && clamp->apply(mode, raw, x, y, z)) moved = true;
 
-    for (int k = 0; k < 3; ++k) g_raw_prev[index][k] = raw[k];
+    for (int k = 0; k < 3; ++k) {
+        g_raw_prev[index][k] = raw[k];
+        g_off_prev[k] = raw[k] - g_pre[index][k];
+    }
     g_have_raw[index] = true;
     g_raw_seq[index] = ++g_post_seq;
+    g_off_prev_seq  = g_post_seq;
+    g_off_prev_have = true;
     return moved;
 }
 

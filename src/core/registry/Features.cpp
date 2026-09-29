@@ -171,7 +171,7 @@ const FeatureRow kFeatures[] = {
     // their own keys. Nothing in it is an experiment any more; the one that was (stabilityrendertime,
     // measured worse than off) is a dev key and stays off.
     { "stabilityfixes", 1, Tier::Stable, "", "Stability fixes",
-      "While a changed settings file is read back in, the controller, render and game threads keep using a copy of the old settings, so none of them ever sees a half-loaded one. Also silences a reticule readback the base mod logged every few seconds, and tints the grenade pouch markers when they are shown. The turn and melee diagnostic logs and the extra button steals it carries stay off until their own keys turn them on.",
+      "While a changed settings file is read back in, the features that run off the game thread keep using a copy of the old settings, so none of them ever sees a half-loaded one. Also silences a reticule readback the base mod logged every few seconds. Its turn and melee diagnostic logs, the pouch marker tint and its extra button steals stay off until their own keys turn them on.",
       "",
       "stabilitygrenminthrow,stabilityholstermarkercolor,stabilityrendertime,stabilityrendertimelog,stabilityturnlog,stabilitywidgetlog",
       "", FEATURE_BOOL(stability_fixes) },
@@ -241,7 +241,11 @@ const FeatureRow kFeatures[] = {
       "reloadstepvariant,reloadstepvia,reloadvrlog,reloadwellfwd,reloadwellmarkerscale,reloadwwisedump,"
       "reserveoff,roundsoff,wellmarkercolor,wpnammodump,zonehandrel",
       "", FEATURE_BOOL(reload_vr) },
-    { "grenadeswallow", 1, Tier::Experimental, "Melee and grenades", "Grenades from the pouches only",
+    // DevExperimental since the v0.6.0 release review (2026-09-28): on this build it strips 0x2000,
+    // which the base mod's rebind turns into EQUIPMENT (mapfrom 0x2000 -> 0x0200), while grenades are
+    // thrown from the left trigger, which it never touches -- so it took equipment away and left
+    // grenades alone. Not offered to players until it suppresses the trigger's throw instead.
+    { "grenadeswallow", 1, Tier::DevExperimental, "Melee and grenades", "Grenades from the pouches only",
       "The left face button stops throwing grenades; grenades come from your chest pouches.",
       "",
       "grenadecode,grenadeswallowlog",
@@ -665,10 +669,22 @@ void publish_feature_list(const char* data_dir);
 // looks exactly like "plugin not loaded"; the flags let the menu name the missing file instead.
 // Plus the fork's auto-height line (height=<mode> <view height above game floor> m), empty while
 // heightcal is off.
+//
+// THE LIVE HEIGHT COUNTS AS A CHANGE ONLY WHILE THE MENU IS OPEN. The auto-height line carries your
+// head height to the centimetre, so almost any head movement between two ~2 s polls "changed" it, and
+// with auto height on by default every poll rewrote the status file on the game thread -- an
+// open/write/close 30-45 times a minute, undoing the v0.3.1 freeze audit the mirrors above were built
+// around (game-thread file I/O here has measured 143.9 ms under disk contention). Only the settings
+// menu reads that line, so while UEVR's overlay is closed a new height waits; the first poll after it
+// opens brings it up to date, and any other change still writes it along with everything else.
 bool features_menu_status_changed() {
     const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
     const int dev_missing = (GetFileAttributesA(g_dev_cfg_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;
-    return features_menu_status_line() != s_last_height || ref_missing != s_last_ref || dev_missing != s_last_dev;
+    if (ref_missing != s_last_ref || dev_missing != s_last_dev) return true;
+    auto* p = uevr::API::get()->param();
+    const bool menu_open = p != nullptr && p->functions != nullptr && p->functions->is_drawing_ui != nullptr &&
+                           p->functions->is_drawing_ui();
+    return menu_open && features_menu_status_line() != s_last_height;
 }
 std::string features_menu_status_text(const char* status) {
     const int ref_missing = (GetFileAttributesA(g_user_ref_path) == INVALID_FILE_ATTRIBUTES) ? 1 : 0;

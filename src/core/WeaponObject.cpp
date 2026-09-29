@@ -36,6 +36,10 @@ bool readable(const void* p, size_t n) { return p != nullptr && !IsBadReadPtr(p,
 
 // The shared render capture pointer and the capture context stride (BlamPalette.cpp documents both);
 // the copy scan below searches the capture region for copies of the weapon's nodes.
+// ADDR-HYGIENE: UNGUARDED (read-only) -- nothing checks it at runtime. It only bounds the region the
+// wpnnodecopyscan dev key (off by default) searches, behind IsBadReadPtr, so a wrong value finds no
+// copies; the copies wpnnodepoke then writes are ones whose contents matched the live node block.
+// The same .data pointer as PaletteHook.cpp's SHARED_CAPTURE_PTR_RVA and BlamPalette.cpp's copy.
 constexpr uintptr_t RVA_SHARED_CAPTURE_PTR = 0x1831220;
 constexpr uintptr_t CAPTURE_CTX_STRIDE     = 0x30600;
 
@@ -53,6 +57,10 @@ constexpr uintptr_t CAPTURE_CTX_STRIDE     = 0x30600;
 //     BlamMeshSynchronization renders, which is why writes to the live node never showed.
 // A PRE-hook applying the slide pull to the live node, for the weapon's datum only, just before
 // the original runs, is what makes the pull render. rax is returned through untouched.
+// ADDR-HYGIENE: guarded -- blam_capture_hook_tick() compares OBJ_CAPTURE_PROLOGUE (25 bytes, the 0x108
+// frame size included) at this address before hooking and refuses on a mismatch (SLIDEHOOK: PROLOGUE
+// MISMATCH, hook stays off). Not resolved: nothing scans for a moved function. Installed only while
+// the rack is available (slidevr, Experimental and off by default) and slidehook is on.
 constexpr uintptr_t RVA_OBJ_CAPTURE = 0x5ADBC0;
 constexpr uint8_t OBJ_CAPTURE_PROLOGUE[] = {
     0x40, 0x55,                   // push rbp

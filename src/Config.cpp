@@ -1346,6 +1346,7 @@ static bool parse_xrlayer_key(const char* key, double v) {
     // at the low end is the flash this key exists to remove.
     if (_stricmp(key, "xrlayerhold")     == 0) { g_cfg.xr_layer_hold_ms   = (int)clampf((float)v, 0.0f, 60000.0f); return true; }
     if (_stricmp(key, "xrsrcphase")      == 0) { g_cfg.xr_src_phase       = (int)clampf((float)v, 0.0f, 1.0f);     return true; }
+    if (_stricmp(key, "scopepresentcopy") == 0) { g_cfg.scope_present_copy = (int)clampf((float)v, 0.0f, 1.0f);    return true; }
     // ---- world navpoint markers on the layer. All four live HERE and nowhere else: the general
     // else-if chain in parse_config_key_2 is already at MSVC's 128-deep block limit, and adding to
     // it fails the build (C1061) pointing at an unrelated line.
