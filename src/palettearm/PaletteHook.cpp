@@ -32,14 +32,14 @@ constexpr unsigned char kBuildSig[] = {
 constexpr char kBuildMask[] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 static_assert(sizeof(kBuildMask) - 1 == sizeof(kBuildSig), "signature and mask must agree");
 
-// ADDR-HYGIENE: resolved -- fallback only. palettehook_install() scans kBuildSig first and requires
-// a UNIQUE match; this RVA is used only if the scan finds nothing, and even then only after the
-// signature bytes are confirmed present AT this address. If both fail the hook stays off.
 // 2026-08-17 game update: .text shifted by +0x10 (.data did not move), so the builder moved
 // 0x46EC10 -> 0x46EC20. Verified statically against the shipped DLL: 0x46EC20 is a .pdata function
 // start (end 0x46FCB2), kBuildSig matches there and nowhere else, and it references
 // SHARED_CAPTURE_PTR_RVA at 0x46FA07 and 0x46FBC2. The old address holds the previous function's
 // tail (44 89 42 38 C3). The scan above already finds the new address; this keeps the fallback honest.
+// ADDR-HYGIENE: resolved -- fallback only. palettehook_install() scans kBuildSig first and requires
+// a UNIQUE match; this RVA is used only if the scan does not find exactly one, and even then only
+// after the signature bytes are confirmed present AT this address. If both fail the hook stays off.
 constexpr uintptr_t FP_WEAPON_BUILD_RVA = 0x46EC20;
 
 // ADDR-HYGIENE: resolved -- fallback only. addrcascade::tls_index() reads the PE TLS directory,
