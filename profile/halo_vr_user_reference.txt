@@ -258,9 +258,9 @@
 # 2x on the magnum and 2x/8x on the sniper -- a small VR lens wants much more).
 #scopezoom=16
 # Image sharpness, pixels. Higher is sharper and costs more GPU.
-#scoperes=512
-# Update the lens image every Nth frame. Raise to 2-4 if the scope costs performance.
-#scopediv=1
+#scoperes=420
+# Update the lens image every Nth frame (2 by default). Raise to 3-4 if the scope costs performance.
+#scopediv=2
 # Lens shape: 1 = round, 0 = square (square shows the most image).
 #scopeshape=1
 # The hold-to-place key. Default: Delete.
@@ -1316,7 +1316,7 @@
 # xrlayerscopereticlesize as you go more negative. The two work as a pair.
 #
 # To remove the crosshair entirely use xrlayerscopereticle=0 rather than a depth of 0.
-#xrlayerscopereticledepth=0.2
+#xrlayerscopereticledepth=1
 
 # ================================== WORLD DETAIL & PERFORMANCE ==================================
 # The game decides what to keep drawn partly from where your AIM points rather than from where you
