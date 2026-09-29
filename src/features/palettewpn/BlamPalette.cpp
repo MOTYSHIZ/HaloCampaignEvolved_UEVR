@@ -161,9 +161,13 @@ struct Candidate { uintptr_t at; int32_t nodes; };
 Candidate            g_cand[kMaxCandidates]{};
 std::atomic<int>     g_cand_count{0};
 
-// _tls_index for the sim module, read from the same place BlamDrive reads it. Duplicated rather
-// than shared because BlamDrive keeps it file-static, and reaching into it would couple the two
-// files for one integer; if a third consumer ever appears, promote it then.
+// _tls_index for the sim module, read RAW at the RVA it had on one build. That is no longer what
+// BlamDrive does: BlamDrive reads the PE TLS directory and publishes that exact read as
+// sim_tls_index() (BlamDrive.hpp), so neither "the same place" nor "file-static" holds any more.
+// ADDR-HYGIENE: UNGUARDED -- nothing here compares it with the PE TLS directory. Nothing is written
+// through it unchecked: the pose and capture paths re-check what they reach (the value checks at
+// OFF_TLS_PLAYER_BANK and RVA_SHARED_CAPTURE_PTR below), so a stale value leaves the palette weapon
+// quietly finding nothing. BlamDrive's BUILD DIFFERS line tests the same number and would say so.
 constexpr uintptr_t RVA_TLS_INDEX = 0xD72730;
 
 bool readable(const void* p, size_t n) { return p != nullptr && !IsBadReadPtr(p, n); }
@@ -1066,6 +1070,10 @@ namespace {
 //   * its prologue spills ecx, edx and r8b -- (int32 local_player, int32 weapon_slot, bool)
 // The old address held `44 89 42 38 C3 CC CC...` -- mov [rdx+38],r8d / ret / padding, i.e. the TAIL
 // of the previous function. Installing a jump over a ret is why it crashed within 5 ms.
+// ADDR-HYGIENE: guarded -- blam_palette_pose_hook_sync() compares FP_BUILD_PROLOGUE (below) at this
+// address before hooking and refuses on a mismatch, so the arbiter falls back to UeRig. Guarded, not
+// resolved: nothing here scans for a moved builder, though PaletteHook.cpp's kBuildSig (whose first
+// 16 bytes are this prologue) finds the same function by shape. Only under palettewpn, off by default.
 constexpr uintptr_t RVA_FP_BUILD = 0x46EC20;
 
 // The first bytes of that function, checked before the hook goes in. An offset is only true for one
@@ -1085,15 +1093,32 @@ int       g_pose_hooked_which = 0;
 // block. Offsets are properties of this build of the game, validated below rather than trusted:
 // the node counts sit immediately before the array and must both read 76, which is the same
 // corroboration the shape scan used, applied here as a precondition instead of as evidence.
+//
+// This is the same weapon-slot chain, measured on the same build, that palettearm\PaletteHook.cpp
+// carries, and it is marked the same way: UNGUARDED, meaning value-checked but never resolved.
+// live_palette_for() hands out a palette only when the flags carry 0x0C, no index is -1 and BOTH
+// counts read exactly 76, so a moved struct fails closed -- silently, because an empty slot is
+// ordinary. The palette itself, the field written through, is checked only by sitting right after
+// the counts. Re-derive these, never nudge them.
+// ADDR-HYGIENE: UNGUARDED -- chain note above; a wrong pointer lands on a "slot" that fails the counts.
 constexpr uintptr_t OFF_TLS_PLAYER_BANK = 0x4F8;
 constexpr uintptr_t PLAYER_STRIDE       = 0x52D8;
 constexpr uintptr_t WEAPON_SLOT_STRIDE  = 0x2908;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; must carry 0x0C. ALSO WRITTEN (|= 3) by fpanimkill=1.
 constexpr uintptr_t OFF_SLOT_FLAGS      = 0x38;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; read only, and must not be -1.
 constexpr uintptr_t OFF_SLOT_OBJECT     = 0x44;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; read only, and must not be -1.
 constexpr uintptr_t OFF_SLOT_ANIMATION  = 0x58;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; must not be -1, and a capture bank is written only
+// when its OFF_CAPTURE_TAG reads the same value.
 constexpr uintptr_t OFF_SLOT_MODEL_TAG  = 0x194;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; must read exactly 76 or the slot is refused.
 constexpr uintptr_t OFF_SOURCE_COUNT    = 0x108C;
+// ADDR-HYGIENE: UNGUARDED -- chain note above; must read exactly 76 or the slot is refused.
 constexpr uintptr_t OFF_FINAL_COUNT     = 0x1090;
+// ADDR-HYGIENE: UNGUARDED -- chain note above. THIS is the one written through; nothing checks it
+// but its place right after the two counts.
 constexpr uintptr_t OFF_FINAL_PALETTE   = 0x1094;
 constexpr int32_t   FP_NODE_COUNT       = 76;
 
@@ -1110,13 +1135,28 @@ constexpr int32_t   FP_NODE_COUNT       = 76;
 // sub-tick smoothness. That is right for stock animation and wrong for anything we drive: blending
 // a fresh pose against a stale one drags the result backwards. Writing both endpoints makes the
 // blend collapse to our value while stock nodes keep their normal interpolation.
+//
+// The capture chain is PaletteHook.cpp's too (same build, same numbers), and is marked the same
+// way. Not written blind: collect_capture_banks() hands out a bank record only when its tag AND node
+// count match the slot the builder just filled, behind IsBadReadPtr/IsBadWritePtr, so a moved
+// layout fails closed, silently.
+// ADDR-HYGIENE: UNGUARDED -- capture chain note above. Read behind IsBadReadPtr; the CAPTUREPTR
+// check in blam_palette_hook_tick() also logs what it points at and shape-tests the banks there,
+// until it finds the palette.
 constexpr uintptr_t RVA_SHARED_CAPTURE_PTR = 0x1831220;
+// ADDR-HYGIENE: UNGUARDED -- capture chain note above; only gates collection (ctx[2] != 0,
+// ctx[0] < 2) and names the bank being built. A wrong pointer mis-gates or mislabels a bank; the
+// tag and count match still decides where anything is written.
 constexpr uintptr_t OFF_TLS_CAPTURE_CTX    = 0x5B8;
 constexpr uintptr_t CAPTURE_CTX_STRIDE     = 0x30600;
 constexpr uintptr_t CAPTURE_PLAYER_STRIDE  = 0x30D4;
 constexpr uintptr_t CAPTURE_SLOT_STRIDE    = 0x1868;
+// ADDR-HYGIENE: UNGUARDED -- capture chain note above; must equal the live slot's model tag.
 constexpr uintptr_t OFF_CAPTURE_TAG        = 0x24010;
+// ADDR-HYGIENE: UNGUARDED -- capture chain note above; must equal the live slot's node count.
 constexpr uintptr_t OFF_CAPTURE_COUNT      = 0x24014;
+// ADDR-HYGIENE: UNGUARDED -- capture chain note above. THIS is the one written through, and the one
+// the renderer reads; nothing checks it but its place right after the matched count.
 constexpr uintptr_t OFF_CAPTURE_PALETTE    = 0x24018;
 
 // What the live slot holds, so the capture banks can be matched against it. A capture record is
@@ -6824,6 +6864,9 @@ void blam_palette_hook_tick() {
 // only (rcx = node A, rdx = node B, r8 = &t, r9 = destination node), verified by disassembly;
 // the destination gate below touches ONLY the local player's FP palette in the render arenas.
 namespace {
+// ADDR-HYGIENE: guarded -- blam_palette_final_hook_tick() compares NODE_SLERP_PROLOGUE (12 bytes, the
+// 0xD8 frame size included) here before hooking and refuses on a mismatch. Not resolved: nothing
+// scans for a moved function. Only under palettewpn with palettefinal set (0 by default).
 constexpr uintptr_t RVA_NODE_SLERP = 0x23BF40;
 // palettefinal=2 (2026-09-12, after the record-ownership freeze proved the post-blend record
 // is UPLOAD-GATED -- fresh moving bytes written 40/s never reached the screen): the blend at
@@ -6831,6 +6874,9 @@ constexpr uintptr_t RVA_NODE_SLERP = 0x23BF40;
 // golden lands in both sim banks; the blend then interpolates our data with its own code, its
 // dirty tracking sees its own writes, the upload runs normally, and the phase-locked 17 us
 // stock window dies because at the read moment the sources are always ours.
+// ADDR-HYGIENE: guarded (weakly) -- hooked beside the slerp only if BANK_BLEND_PROLOGUE matches here;
+// those 12 bytes are register saves with no frame size in them, so they say little about WHICH
+// function starts at this RVA on another build. Only under palettewpn with palettefinal set.
 constexpr uintptr_t RVA_BANK_BLEND = 0x23DAC0;
 constexpr uint8_t BANK_BLEND_PROLOGUE[12] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x4C, 0x89};
 using BankBlendFn = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
@@ -6862,6 +6908,10 @@ uintptr_t hooked_bank_blend(uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t 
     return g_blend_original(a1, a2, a3, a4, a5, a6, a7, a8);
 }
 constexpr uint8_t NODE_SLERP_PROLOGUE[12] = {0x4C, 0x8B, 0xDC, 0x48, 0x81, 0xEC, 0xD8, 0x00, 0x00, 0x00, 0xC5, 0xFA};
+// ADDR-HYGIENE: guarded -- by content, not by value: hooked_node_slerp() uses these two pointers only
+// to scope where a slerp's output may land, and writes only at the record where that output matched
+// the golden palette 1000 times at one base (the lock), so a wrong value locks nothing. Caveats: read
+// with no IsBadReadPtr on the render thread, and the lock is never re-proven once taken.
 constexpr uintptr_t RVA_RENDER_ARENAS = 0x1831228;   // two pointers, +0 and +8
 using NodeSlerpFn = void (*)(void*, void*, void*, void*);
 NodeSlerpFn g_slerp_original = nullptr;
@@ -7065,6 +7115,10 @@ namespace {
 // 0x46A2E0 is the next candidate: a true head (four homed register args) whose body loops
 // the weapon slots (0x2908 stride), gates on the slot's flags and reads its animation field
 // before taking the palette at +0x1094 -- the per-slot poser.
+// ADDR-HYGIENE: guarded (weakly) -- blam_palette_final_hook_tick() hooks only if FP_ANIM_PROLOGUE
+// matches here, else logs FPANIMKILL: prologue mismatch; those 12 bytes are argument home-stores with
+// no frame size in them, so they say little about WHICH function starts at this RVA on another
+// build. Only under palettewpn with fpanimkill set (0 by default).
 constexpr uintptr_t RVA_FP_ANIM = 0x46A2E0;
 constexpr uint8_t FP_ANIM_PROLOGUE[12] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x44, 0x89, 0x44, 0x24, 0x18, 0x89, 0x54};
 using FpAnimFn = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,

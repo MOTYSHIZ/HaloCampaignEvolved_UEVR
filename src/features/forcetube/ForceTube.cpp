@@ -57,6 +57,9 @@ std::atomic<uint32_t> g_ft_shots{0};
 // create_projectile: same address + prologue the dev tooling verified 2026-08-27. Duplicated here
 // KNOWINGLY (BlamAim is compiled out of shipping builds); the prologue gate makes a stale copy
 // fail closed with a log line instead of crashing -- see halo-uevr-game-update-recovery.
+// ADDR-HYGIENE: guarded -- install_hook() compares FT_CREATE_PROLOGUE (16 bytes, the 0x498 frame size
+// included) at this address before hooking and refuses on a mismatch ("spawn prologue mismatch",
+// kicks stay off). Not resolved: nothing scans for a moved function. forcetube is off by default.
 constexpr uintptr_t FT_RVA_CREATE_PROJECTILE = 0x5A0FC0;
 constexpr uint8_t   FT_CREATE_PROLOGUE[] = {
     0x48,0x89,0x4C,0x24,0x08, 0x41,0x54, 0x41,0x55, 0x48,0x81,0xEC,0x98,0x04,0x00,0x00
