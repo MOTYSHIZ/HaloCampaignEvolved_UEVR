@@ -33,10 +33,11 @@
 #turndz=0.30
 
 # ---- Button remaps.
-# Hold right stick UP: the left stick becomes the d-pad (grenades / weapon switching).
+# Hold right stick UP: the left stick becomes the d-pad (the same d-pad as reaching for your head,
+# below).
 #mapdpadshift=1
 #
-# ---- Reach for your head instead (EXPERIMENTAL, off by default).
+# ---- Reach for your head instead (on by default).
 # Bring either hand near your head and the RIGHT stick becomes the d-pad, so the left stick keeps
 # walking you around. The stick-up shift above takes the left stick instead, which means you cannot
 # move while switching grenades or triggering equipment -- exactly when you want to be moving.
@@ -45,9 +46,9 @@
 # turning, and the right-stick-DOWN crouch. Both come straight back when you lower your hand.
 # Your left stick keeps moving you the whole time, correctly oriented -- that is the point.
 #
-# Off until you have tuned the radius, because the cost of a false trigger is losing TURNING for a
-# moment, which is worse than a missed d-pad press. Turn it on, play a few minutes, and if it fires
-# when you did not mean it, raise dpadheadcm or dpadheaddwell.
+# A false trigger costs you TURNING for a moment, which is worse than a missed d-pad press. If it
+# fires when you did not mean it, raise dpadheadcm or dpadheaddwell, or set dpadhead=0 to turn it
+# off.
 #dpadhead=1
 # How close your hand has to get, in centimetres.
 #dpadheadcm=18
@@ -93,9 +94,10 @@
 # gesture controls are the designed experience, and a bind is an addition, never a prerequisite.
 # Crouch. 0 = right stick DOWN.
 #bindcrouch=0x0000
-# Melee. 0 = the swing gesture only.
+# Melee. 0 = right stick click and the swing gesture.
 #bindmelee=0x0000
-# Reload. 0 = the magazine gesture only.
+# Reload. 0 = right B, the game's own reload (or the magazine gesture, with the Experimental
+# Manual reload switched on).
 #bindreload=0x0000
 # Scope. 0 = left trigger. Binding a button KEEPS the trigger working as well. The button follows
 # scopehold just as the trigger does: hold to zoom by default, or a toggle with scopehold=0.
@@ -249,8 +251,9 @@
 #aimtexfile=
 
 # ===================================== WEAPON SCOPE (zoom) ======================================
-# Squeeze the left trigger to zoom: a magnifying lens appears on your aim line, showing exactly
-# where the shot will go.
+# Grip the weapon's barrel with your other hand, then squeeze the left trigger to zoom: a
+# magnifying lens appears on your aim line, showing exactly where the shot will go. Without the
+# grip, the left trigger throws a grenade instead. Needs twohand=1 (the default).
 #
 # 1 = the scope is available (and the trigger no longer triggers Halo's flat zoom on foot).
 #scope=1

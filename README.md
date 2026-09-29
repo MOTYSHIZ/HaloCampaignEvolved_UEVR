@@ -14,8 +14,8 @@ For Halo Campaign Evolved, Unreal is essentially the presentation layer, and a l
 on Blam. So a number of workarounds were required to get aim and movement working in VR
 appropriately.
 
-> **Status: early access.** Built and tested against the Steam release of Halo: Campaign Evolved,
-> on [UEVR nightly-01138 or newer](#uevr-version) — best on [our UEVR build](#uevr-version), attached
+> **Status: early access.** Built and tested against both the Steam and the Game Pass / Microsoft
+> Store releases of Halo: Campaign Evolved, on [UEVR nightly-01138 or newer](#uevr-version) — best on [our UEVR build](#uevr-version), attached
 > to each release. Works in multiplayer!
 
 ## Features
@@ -83,7 +83,8 @@ appropriately.
 
 ## Requirements
 
-- **Halo: Campaign Evolved** (Steam).
+- **Halo: Campaign Evolved** — Steam, or Game Pass / Microsoft Store. Both use the same profile
+  and the same install steps.
 - **UEVR** — [our UEVR build](#uevr-version) (recommended, attached to each release), or stock
   [nightly-01138 or newer](#uevr-version). Older builds render this game black.
 - A VR headset set to the **OpenXR** runtime — the shipped config selects this for you. OpenVR
@@ -162,9 +163,8 @@ copy these out of the folder before deleting it and put them back afterwards:
 | File | What it holds |
 |---|---|
 | `halo_vr_user.cfg` | every setting you have changed |
-| `halo_vr_calib.cfg`, `halo_vr_calib_left.cfg` | your calibration, per hand |
+| `halo_vr_calib.cfg` | your calibration |
 | `halo_vr_weapons.cfg` | per-weapon adjustments |
-| `halo_vr_palette_calib.cfg` | the *weapon follows your hand* fit |
 | `halo_vr_handposes.json` | your edited hand poses |
 
 Settings get added, renamed and re-tuned between releases, and a value measured against an older
@@ -230,9 +230,9 @@ nothing to register and nothing is written outside the mod's folder.
 - To go back to drawing them in the world, set `xrlayer=0` (reticule) and `xrlayernav=0`
   (waypoints) in `halo_vr_user.cfg`. Setting the environment variable `HALOVR_LAYER_DISABLE=1`
   stops the layer loading at all.
-- **Run the game normally, not as administrator.** The OpenXR loader ignores layers from per-user
-  locations in elevated programs, so that ordinary software cannot inject code into elevated
-  software.
+- **Run the game normally, not as administrator.** In an elevated program the OpenXR loader ignores
+  the layer path the mod hands it, so that ordinary software cannot inject code into elevated
+  software, and you get the in-world reticule instead.
 
 **How to tell whether it's working:** a `halo_vr_layer.log` file appears in the `apilayer` folder the
 first time the layer loads into the game.
@@ -257,11 +257,28 @@ first time the layer loads into the game.
 | Right trigger | Fire |
 | Left grip | Grip the weapon two-handed — reach for the barrel; a "Grip" prompt shows when you're in range |
 | Left trigger | Throw grenade — or, while gripping two-handed, hold for the scope (`scopehold=0` to tap it open and shut; `scope`/`scopezoom` to tune) |
-| Right grip | Reach over your right shoulder and squeeze to switch weapons; over your left shoulder to put the weapon away and free your hand (squeeze there again to bring it back) |
+| Right grip | Reach over your right shoulder and squeeze to switch weapons; over your left shoulder or at your right hip to put the weapon away and free your hand (squeeze there again to bring it back) |
 | Right A | Jump |
 | Left Y | Switch weapon — with a controller near your head, **pause** instead |
 | Left X | Equipment / overshield |
-| Right B | Reload (in menus: **Back**) |
+| Right B | Reload — also the game's interact and get-into-vehicle button (in menus: **Back**) |
+
+### How to zoom
+
+The scope needs **both hands on the weapon**:
+
+1. Bring your left hand to the weapon's barrel or front handle and squeeze the **left grip**. A
+   "Grip" prompt shows when you're in reach, and the controller buzzes when it takes hold.
+2. **Hold the left trigger.** A magnified lens rises on the gun, and it drops when you let go.
+
+Without the grip, the left trigger throws a grenade instead, so a scope that "won't open" usually
+means the grip hadn't taken hold yet. Letting go of the grip also closes the scope.
+
+If it still never appears, check two switches in **Halo VR User Settings** (see
+[Configuration](#configuration)): the **weapon scope** must be on (`scope=1`) and **two-handed
+aiming** must be on (`twohand=1`). Both are on by default, so an older `halo_vr_user.cfg` carried
+across from a previous release is the usual reason for either to be off. Prefer to tap the scope
+open and shut rather than hold it? Set `scopehold=0`.
 
 The mod ships with a working calibration out of the box — try it as-is first. If the weapon doesn't
 sit right in your hand, or shots don't land where you're pointing, see **Custom calibration** below.
@@ -308,10 +325,10 @@ keep a copy if you want to try carrying it over: see
 | `aimmesh` | 0 | Optional geometric ring at the aim point (off; the game's own crosshair now shows in colour) |
 | `aimmeshcr/cg/cb` | blue | Ring colour, if `aimmesh=1` (RGB 0–1) |
 | `aimmeshscale` | 0.14 | Ring size |
-| `aimreticuledist` | 500 | Ring distance from you, in cm |
+| `aimreticuledist` | 500 | How far away the reticle floats when you aren't aiming at anything, in cm |
 | `aimwidget` | 1 | Host the game's own crosshair (with hit marker) at the aim point |
 | `aimwidgetgain` | 5 | Brightness of the hosted crosshair (multiplies with `aimwidgettint`). Unlit UI is scaled down by the scene's exposure, so it needs lifting back; lower it if the crosshair blooms |
-| `hudhide` | 0 | Collapse the flat HUD crosshair once you trust the ring |
+| `hudhide` | 0 | Hide the game's original flat crosshair |
 | `turnmode` / `snapdeg` | 1 / 45 | Snap turn on, 45° per step (`turnmode=2` for smooth turning) |
 | `scope` | 1 | Left-trigger weapon scope (magnified lens on the gun) |
 | `scopezoom` | 16 | Scope magnification |
@@ -326,23 +343,23 @@ change — which is also what makes it the one file worth keeping a copy of acro
 the next launch), and that is a perfectly good place to be.
 
 **Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
-scroll to **Script UI** — five panels live there:
+scroll to **Script UI** — five panels live there, in this order:
 
+- **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
+  scope toggle, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
+  press the button, and it records what your controller actually sends.
 - **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
   catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
   Saves to `halo_vr_user.cfg`, exactly as a hand edit would, and applies live within a couple of
   seconds.
-- **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
-  scope, equipment, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
-  press the button, and it records what your controller actually sends.
+- **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
+  unless troubleshooting asks.
 - **Halo VR Calibration** — the calibration gestures as buttons, no keyboard needed: arm one,
   close the menu (controllers don't reach the game while it's open), line your controller up, then
   **right trigger saves & finishes** — or **left trigger saves & re-arms** on release, for
   consecutive passes. Triggers won't fire your weapon while a calibration is armed. The scope's
   placement is armed from here too — for every weapon, or as a trim for just the one in your hands.
   One-press resets take you back to the shipped fit, per gesture or wholesale.
-- **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
-  unless troubleshooting asks.
 - **Halo VR Experimental** — early previews, every one off until you switch it on: manual reload,
   racking the slide, a wrist HUD with the motion tracker, a grenade throw on grip release, ForceTube
   gunstock kicks, a vehicle seat camera and more, contributed by
@@ -365,28 +382,6 @@ or lose. Two other files do ship next to yours:
   for a stutter report, are in the player catalog instead. Updates overwrite it, so experiments
   never linger.
 
-## Left-handed aim
-
-Not properly supported yet. An `aimhand` setting exists in the mod's internals, but the newer
-systems don't honour it end to end, so it's hidden from the settings until left-handed play
-actually works — it's on the list.
-
-<details><summary>What it was intended to do</summary>
-
-- **Each hand keeps its own calibration.** Switching handedness never overwrites the other hand's
-  tuning. The first time you select left, it is seeded by mirroring your right-hand calibration,
-  which gets you close — but re-run both calibrations (see [Custom calibration](#custom-calibration))
-  for a proper left-hand fit.
-- **The weapon model stays right-handed.** Halo's first-person arms and weapons are authored for a
-  right hand, and a mod cannot mirror a skeletal mesh. The gun will be held in your left hand but
-  still *look* like a right-handed weapon — magazine and ejection port on the usual side.
-
-The control layout is unchanged: movement stays on the left stick and turning on the right. If you
-would prefer those swapped for left-handed play, say so — it is a small addition, but it is a
-preference rather than an obvious default.
-
-</details>
-
 ## Custom calibration
 
 The shipped calibration was measured on **Quest Touch controllers**, so it encodes one particular set
@@ -396,15 +391,20 @@ the mod as-is first, and expect to want this section if you're on different cont
 If the visual weapon doesn't sit right in your hand, these calibrations let you match the mod to your
 own hardware and grip. They run in-mission, **persist across sessions** once set, and are armed from
 the **Halo VR Calibration** panel (see [Configuration](#configuration)): arm one, close the menu, line
-up, then **right trigger saves & finishes** or **left trigger saves & re-arms**. Nothing calibrates
-from the keyboard alone, so a stray key press can't overwrite your fit.
+up, then **right trigger saves & finishes** or **left trigger saves & re-arms**.
+
+Two keyboard keys also calibrate directly, without arming anything: **`Page Down`** captures the held
+weapon's barrel line, and holding **`Delete`** places the scope lens (both described below). They only
+respond while the game window is in front, so typing in another window can't set them off — but a
+stray press while you're in the game will save, so if a fit suddenly changes, that is the first
+thing to suspect.
 
 | Panel button | Calibration | Workflow |
 |---|---|---|
 | **Calibrate weapon pose** | **Pose-match** (grip) | Line your controller up with the frozen on-screen weapon, then save. This aligns the weapon's grip to how you actually hold your controller. `End` works in place of the trigger while this is armed. |
 | **Calibrate weapon pose — THIS WEAPON only** | **Per-weapon pose** | The same gesture, stored as an adjustment for the weapon in your hands. Every other weapon keeps the global fit. |
 | **Calibrate weapon grip (off-centre handles)** | **Front handle** | Click it and the weapon freezes. Put your support hand where that weapon's front handle really is, then click **SAVE grip**. Only the two-handed hold changes. |
-| **Arm per-weapon scope trim** / **Arm BASE scope calibration** | **Scope placement** | The scope pane stays visible while either is armed. Hold `Delete`, move the lens to where you want it on the gun, then release — stored for the weapon in your hands, or for every weapon. |
+| **Arm per-weapon scope trim** / **Arm BASE scope calibration** | **Scope placement** | The scope pane stays visible while either is armed. Hold `Delete`, move the lens to where you want it on the gun, then release. With the per-weapon trim armed it's stored for the weapon in your hands; otherwise it's stored for every weapon — including when you hold `Delete` without arming anything. |
 
 **Aim needs no calibration.** Shots follow the weapon's own barrel. If a particular weapon still
 shoots off its barrel for you, hold it steady where it should point and tap `Page Down` to capture
@@ -430,27 +430,22 @@ wrong, hold that weapon and store an adjustment for it alone with the per-weapon
 
 ### Where your calibration is stored
 
-Calibrations write to three files next to the config:
+Calibrations write to two files next to the config:
 
 ```
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg          (the global fit, captured barrel lines)
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg        (per-weapon adjustments, front handles)
-%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_palette_calib.cfg  ("weapon follows your hand": grip, aim and per-weapon)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_calib.cfg     (the global fit, captured barrel lines)
+%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_weapons.cfg   (per-weapon adjustments, front handles)
 ```
-
-The third one only appears if you use *Weapon follows your hand* and calibrate it — its grip (Page
-Up), weapon (Home) and aim (Page Down) captures are kept apart from the standard calibration so
-neither can overwrite the other, and either can be reset without touching the other.
 
 They override the shipped calibration in `halo_vr.cfg`. Keeping them separate is deliberate: a new
 release brings a fresh shipped calibration, and your measured fit stays a file of your own that you
 can keep, drop, or recapture.
 
 **To go back to the shipped calibration, delete `halo_vr_calib.cfg` — and `halo_vr_weapons.cfg` to
-clear every per-weapon adjustment, or `halo_vr_palette_calib.cfg` to clear the weapon-follows-your-hand
-fit.** None is part of the download — each only exists once you've calibrated — so there's no original
-copy to restore, and deleting one simply lets the shipped defaults apply again. The mod recreates them
-next time you calibrate.
+clear every per-weapon adjustment.** Neither is part of the download, so there's no original copy to
+restore, and deleting one simply lets the shipped defaults apply again. `halo_vr_calib.cfg` only
+appears once you've calibrated; `halo_vr_weapons.cfg` is created on first launch as an empty
+template listing the weapon names, and comes back that way if you delete it.
 
 Once you have a calibration you like, copy those files somewhere safe, along with `halo_vr_user.cfg`
 if you've changed settings. They're small, plain text, and they're the only things in the profile
@@ -475,12 +470,20 @@ delete it and recapture rather than fighting it.
 - **Buttons mapped wrong?** You're on the OpenVR runtime. See [Runtime](#runtime-use-openxr) for the
   one-line fix.
 - **Your hands are invisible until you pick up your first weapon.** Motion aim and turning work
-  normally while you're unarmed — but you won't see arms. The game T-poses the empty first-person
-  arms, because on a flat screen holding nothing means there's simply no viewmodel to draw; in VR
-  they'd be right in front of you, following your hand, T-pose and all. They stay hidden until
-  there are proper VR hands to show instead.
-- **The scope view can be too bright**, and its lighting often doesn't match the scene around it.
-  Work in progress.
+  normally while you're unarmed — but you won't see arms. With no weapon in hand the game never
+  builds a first-person arm pose at all, so there is nothing for the mod's arm solver to drive;
+  what the game does draw is a T-pose, which in VR would sit right in front of you. Once you have a
+  weapon, putting it away over your shoulder keeps your hands visible.
+- **The scope's lighting can differ from the scene around it.** By default it leaves Lumen lighting
+  out of its picture, for performance; `scopelumen=1` brings it in at a real GPU cost.
+- **A very quick duck can leave Chief crouched** after you stand back up, because the game's
+  controller crouch is a toggle by default. Duck again to stand him up, or turn on the game's
+  **Hold to crouch** controller setting.
+- **Right after a system recenter**, physical crouch can press or release for up to a second while
+  the mod re-measures your floor.
+- **Auto height needs the headset-drawn reticule on OpenXR.** With it switched off (`xrlayer=0`),
+  auto height can't find your real floor, so it follows your eye level instead and physical crouch
+  stays off.
 - **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
   weapons, then close the scope and open it again. Also work in progress.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
@@ -550,17 +553,22 @@ Unparalleled patience and politeness in his manner of contribution, with great c
   weapon scope follows his design too: suppress Halo's own zoom and mount a synthetic magnified lens
   on the gun, and our scope camera's roll lock adapts a construction from his MIT-licensed
   `scope_logic.cpp` ("preserve the rifle's roll while keeping up perpendicular to the actual bullet
-  direction") — credited at the point of use in `src/Scope.cpp`.
+  direction") — credited at the point of use in `src/Scope.cpp`. **Player IK** leans on his arm work
+  just as much: the "stretch, don't clamp" rule for a hand beyond the arm's reach, a wrist target
+  built without the live camera so a camera move can't throw the hand, the off arm solved onto its
+  own controller, and the hands-only view (his `floating_hands`) — each credited where it is used
+  under `src/palettearm/`. His stick-shaping law and fake-pad presence trick shaped the early aim
+  path too.
 - **[LunchAndVR](https://www.youtube.com/@LunchAndVR)** — For creating the community UEVR profile this
   configuration descends from, and for bundling elliotttate's cutscene plugin with it, which is how
-  this project found it.
+  this project found it. Also for reporting the periodic microstutter fixed in 0.1.2, and — more
+  usefully than the report itself — for pinning it to *this* profile rather than his own. That one
+  observation is what turned an open-ended performance hunt into a search of our own plugin, where
+  the cause turned out to be two full object-array sweeps burning ~5% of game-thread time.
 - **ShadowNK** — for the field report and logs on 0.2's movement direction. Those logs exposed that
   the mod's recorded memory addresses were measurements of one specific game build — silently wrong
   on any other — and drove the move to verified, self-reporting address resolution that can survive
-  game updates. Exactly the kind of report that makes the mod better for everyone. Also for reporting the periodic microstutter fixed in 0.2, and —
-  more usefully than the report itself — for pinning it to *this* profile rather than his own. That
-  one observation is what turned an open-ended performance hunt into a search of our own plugin,
-  where the cause turned out to be two full object-array sweeps burning ~5% of game-thread time.
+  game updates. Exactly the kind of report that makes the mod better for everyone.
 
 ### Referenced mod credit
 
