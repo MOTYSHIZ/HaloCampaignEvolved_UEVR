@@ -61,6 +61,7 @@
 #include "core/XrDisplayTime.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -718,7 +719,19 @@ struct PaneJob {
     std::atomic<int>           state{PJ_FREE};
     std::atomic<uint64_t>      fence{0};   // the g_pane_fence value its submission signalled
     uint32_t                   tick = 0;   // g_game_tick it was recorded on; written before publish
+    uint64_t                   pub_us = 0; // steady-clock microseconds at publish; written before publish
 };
+// THE WALL-CLOCK GUARD. The tick test in pane_submit_pending cannot see a LoadMap: it runs inside
+// the engine tick, before post-tick, so the game tick stands still for the whole load while the
+// loading screen keeps presenting. A list claimed by one of those Presents may copy from a target
+// the load's GC has already destroyed. Nothing legitimate waits this long for its Present -- two
+// frames at 45 Hz with AFR's every-other-frame end_frame is ~44 ms -- so an older list is dropped:
+// one repeated scope frame at worst. (v0.6.0 release review of 7f68915.)
+constexpr uint64_t kPaneMaxAgeUs = 100000;
+static uint64_t pane_now_us() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 PaneJob          g_pane[PANE_RING];
 std::atomic<int> g_pane_pending{-1};       // the published, unclaimed job, or -1
 ID3D12Fence*     g_pane_fence   = nullptr;
@@ -2600,7 +2613,8 @@ void pane_submit_pending() {
     PaneJob& j = g_pane[k];
     // Belt and braces for the lifetime argument: a list recorded more than a tick ago is never
     // executed, whatever became of the game thread's retraction.
-    if ((uint32_t)(g_game_tick.load(std::memory_order_relaxed) - j.tick) > 1u) {
+    if ((uint32_t)(g_game_tick.load(std::memory_order_relaxed) - j.tick) > 1u ||
+        pane_now_us() - j.pub_us > kPaneMaxAgeUs) {
         j.state.store(PJ_FREE, std::memory_order_release);
 #if HALO_VR_DEV
         g_pane_n_stale.fetch_add(1, std::memory_order_relaxed);
@@ -4899,8 +4913,15 @@ static bool pane_job_reusable(int k) {
 
 // xrsrcphase=1 is part of the condition, not a nicety: the lifetime argument above holds only for a
 // list recorded at the END of a tick.
+// ONLY WHERE EVERY PRESENT REACHES US. UEVR calls xrEndFrame -- produce_layers, the claim -- only on
+// the right eye's frame, so under Alternating (AFR) and Synchronized Sequential about half the
+// Presents never claim a list, and the "Present(N) claims list N first" half of the lifetime
+// argument above no longer holds. Native Stereo and Mono present, and claim, every frame; anything
+// else -- including a verdict still pending -- keeps the batch copy, exactly the 66e2234 path.
 static bool pane_deferral_on() {
-    return g_cfg.scope_present_copy != 0 && g_cfg.xr_src_phase == 1 && g_pane_fence != nullptr;
+    const ViewMode vm = viewmode_current();
+    return g_cfg.scope_present_copy != 0 && g_cfg.xr_src_phase == 1 && g_pane_fence != nullptr &&
+           (vm == ViewMode::Stereo || vm == ViewMode::Mono);
 }
 
 bool xrlayer_pane_record() {
@@ -4990,6 +5011,7 @@ bool xrlayer_pane_record() {
     // was never claimed by a Present, so it was never executed and is ours to free.
     const uint32_t gtick = g_game_tick.load(std::memory_order_relaxed);
     j.tick = gtick;
+    j.pub_us = pane_now_us();
     j.state.store(PJ_RECORDED, std::memory_order_relaxed);
     const int old = g_pane_pending.exchange(k, std::memory_order_acq_rel);
     if (old >= 0) {
