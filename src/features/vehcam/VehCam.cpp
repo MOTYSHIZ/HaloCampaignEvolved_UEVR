@@ -1146,8 +1146,11 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
 // Chief in his seat is part of the picture everywhere else (the user, 2026-09-26).
 //
 // UE's own USkinnedMeshComponent.HideBoneByName on his head bone: that bone and every bone below it draw at
-// zero scale. Only the SKINNING changes -- his bones' positions do not, so the playerhead origin still reads
-// the head -- and PBO_None leaves his physics alone. Called on EVERY mesh part of his biped: the part that
+// zero scale -- and PBO_None leaves his physics alone. DOUBTFUL SINCE 2026-09-29, and never measured here:
+// that his bones keep MOVING while hidden, so the playerhead origin still reads a live head. A root-bone hide
+// on the Banshee's skeletal mesh froze nearly every part hung on it in a flip (VehMeshes.cpp), so a hidden
+// bone seems to drop out of the pose update. If a playerhead camera with hideHead on stops following his
+// head, this is why. Called on EVERY mesh part of his biped: the part that
 // owns the pose takes it, and parts that follow its pose (a modular character's armour pieces) take it from
 // there -- the engine ignores the call on those, as on a part without that bone. The parameter blocks come
 // from the functions' own reflection, by name, so a build that reshapes them is refused, not written into.
