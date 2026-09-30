@@ -30,7 +30,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <string>
 
 #include "Math.hpp"
 #include "features/FeatureHooks.hpp"
@@ -134,12 +133,5 @@ bool veh_tp_reticle_stamp_owns();
 // directly or through one of its components, attached or not. Each is a live object when returned; nothing
 // is held. For the vehicle's own parts ("hideMeshes", VehMeshes.cpp). GAME THREAD.
 int vehcam_actor_tree(uevr::API::UObject* actor, uevr::API::UObject** out, int max);
-
-// Hide (or show again) what a skinned mesh DRAWS from `bone` down: HideBoneByName / UnHideBoneByName, the head
-// hide's calls. Only the skinning -- the bones keep moving, and whatever hangs from them stays as it is. False =
-// the calls are not available on this build. GAME THREAD.
-bool vehcam_skin_hide(uevr::API::UObject* skinned, const std::wstring& bone, bool hide);
-// -1 = no readback on this build; else whether `bone` is hidden on it. GAME THREAD.
-int vehcam_skin_hidden(uevr::API::UObject* skinned, const std::wstring& bone);
 
 } // namespace halo

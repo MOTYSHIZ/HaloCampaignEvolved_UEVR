@@ -1285,7 +1285,7 @@ int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
     return -1;
 }
 
-bool bone_hide_ready() {
+bool head_hide_ready() {
     if (s_hh.state >= 0) return s_hh.state == 1;
     s_hh.state = 0;
     s_hh.skinned = API::get()->find_uobject<API::UClass>(L"Class /Script/Engine.SkinnedMeshComponent");
@@ -1303,21 +1303,17 @@ bool bone_hide_ready() {
         }
         if (s_hh.hide_name >= 0 && s_hh.hide_op >= 0 && s_hh.unhide_name >= 0) s_hh.state = 1;
     }
-    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: hiding a skinned mesh's bones %s (SkinnedMeshComponent %s, "
+    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: hiding the player's head bone %s (SkinnedMeshComponent %s, "
                          "HideBoneByName %s, UnHideBoneByName %s)",
-                         s_hh.state == 1 ? "is available"
-                                         : "is NOT available on this build -- hideHead hides the helmet pieces only, and "
-                                           "hideMeshes leaves a skinned part that carries others shown",
+                         s_hh.state == 1 ? "is available" : "is NOT available on this build -- hideHead hides the helmet pieces only",
                          s_hh.skinned != nullptr ? "found" : "NOT found", hide != nullptr ? "found" : "NOT found",
                          unhide != nullptr ? "found" : "NOT found");
     return s_hh.state == 1;
 }
 
-// HideBoneByName / UnHideBoneByName: `bone` and every bone below it draw at zero scale, or again. Only the
-// SKINNING -- the bones keep moving and whatever hangs from their sockets stays (measured with the head hide).
-void bone_hide_call(API::UObject* part, const std::wstring& bone, bool hide) {
+void head_hide_call(API::UObject* part, bool hide) {
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-    const API::FName name = make_fname(bone.c_str());   // make_fname: API::FName resolves to None here
+    const API::FName name = make_fname(s_hh.bone.c_str());   // make_fname: API::FName resolves to None here
     if (hide) {
         std::memcpy(p + s_hh.hide_name, &name, sizeof(int32_t) * 2);
         p[s_hh.hide_op] = 0;                                  // PBO_None: his physics stays as it is
@@ -1329,10 +1325,10 @@ void bone_hide_call(API::UObject* part, const std::wstring& bone, bool hide) {
 }
 
 // -1 = no readback on this build; else whether the part says the bone is hidden.
-int bone_hidden_readback(API::UObject* part, const std::wstring& bone) {
+int head_hidden_readback(API::UObject* part) {
     if (s_hh.is_name < 0 || s_hh.is_ret < 0) return -1;
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-    const API::FName name = make_fname(bone.c_str());
+    const API::FName name = make_fname(s_hh.bone.c_str());
     std::memcpy(p + s_hh.is_name, &name, sizeof(int32_t) * 2);
     part->call_function(L"IsBoneHiddenByName", p);
     return p[s_hh.is_ret] != 0 ? 1 : 0;
@@ -1342,7 +1338,7 @@ void head_hide_restore(const char* why) {
     if (!s_hh.on) return;
     int n = 0, ni = 0;
     for (int i = 0; i < s_hh.n; ++i)   // only a bone WE hid: one the game had hidden stays the game's
-        if (auto* c = s_hh.parts[i].get(); c != nullptr && !s_hh.part_was_hidden[i]) { bone_hide_call(c, s_hh.bone, false); ++n; }
+        if (auto* c = s_hh.parts[i].get(); c != nullptr && !s_hh.part_was_hidden[i]) { head_hide_call(c, false); ++n; }
     for (int i = 0; i < s_hh.ni; ++i)
         if (auto* c = s_hh.items[i].get()) { head_item_restore(c, s_hh.item_scale[i]); ++ni; }
     API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: the player's head shown again (%s; %d helmet piece(s), "
@@ -1362,7 +1358,7 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
     }
     if (s_hh.on && ((uintptr_t)body != s_hh.body || bone != s_hh.bone)) head_hide_restore("a new body");
     // No head bone found, or no bone hide on this build: the helmet pieces still go.
-    const bool bones = !bone.empty() && bone_hide_ready();
+    const bool bones = !bone.empty() && head_hide_ready();
     if (!s_hh.on) {
         s_hh.body = (uintptr_t)body;
         s_hh.bone = bone;
@@ -1403,9 +1399,9 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
             auto* c = s_hh.parts[i].get();
             s_hh.part_was_hidden[i] = false;
             if (c == nullptr) continue;
-            s_hh.part_was_hidden[i] = bone_hidden_readback(c, s_hh.bone) == 1;   // before we touch it
-            bone_hide_call(c, s_hh.bone, true);
-            const int r = bone_hidden_readback(c, s_hh.bone);
+            s_hh.part_was_hidden[i] = head_hidden_readback(c) == 1;   // before we touch it
+            head_hide_call(c, true);
+            const int r = head_hidden_readback(c);
             if (r >= 0) { ++readable; hidden += r; }
         }
         s_hh.on = true;
@@ -1440,7 +1436,7 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
     // scale (the body hider's own restore, among others) is overruled within a second.
     if ((++s_hh.reassert % 32u) == 0u) {
         for (int i = 0; i < s_hh.n; ++i)
-            if (auto* c = s_hh.parts[i].get()) bone_hide_call(c, s_hh.bone, true);
+            if (auto* c = s_hh.parts[i].get()) head_hide_call(c, true);
         for (int i = 0; i < s_hh.ni; ++i)
             if (auto* c = s_hh.items[i].get()) head_item_hide(c);
     }
@@ -1450,17 +1446,6 @@ void head_hide_update(bool want, API::UObject* body, int32_t body_idx, const std
 
 int vehcam_actor_tree(API::UObject* actor, API::UObject** out, int max) {
     return (actor != nullptr && out != nullptr && max > 0) ? rider_tree(actor, out, max) : 0;
-}
-
-bool vehcam_skin_hide(API::UObject* skinned, const std::wstring& bone, bool hide) {
-    if (skinned == nullptr || bone.empty() || !bone_hide_ready()) return false;
-    bone_hide_call(skinned, bone, hide);
-    return true;
-}
-
-int vehcam_skin_hidden(API::UObject* skinned, const std::wstring& bone) {
-    if (skinned == nullptr || bone.empty() || !bone_hide_ready()) return -1;
-    return bone_hidden_readback(skinned, bone);
 }
 
 // Applied on every change while mounted, and re-asserted once a second in case something drives it

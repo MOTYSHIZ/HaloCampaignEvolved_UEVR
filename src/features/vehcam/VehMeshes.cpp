@@ -11,6 +11,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -197,34 +198,89 @@ int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
     return (p != nullptr) ? p->get_offset() : -1;
 }
 
-// A skinned mesh's root bone (index 0), by GetBoneName's own reflection; empty = not found.
-std::wstring root_bone(API::UObject* c) {
-    auto* cls = c->get_class();
-    API::UFunction* fn = (cls != nullptr) ? cls->find_function(L"GetBoneName") : nullptr;
-    const int32_t idx = fn_param(fn, L"BoneIndex"), ret = fn_param(fn, L"ReturnValue");
-    if (idx < 0 || ret < 0) return {};
+// ---------------------------------------------------------------- A SKINNED MESH'S OWN DRAWING
+//
+// What a skinned mesh draws, hidden and nothing else: USkinnedMeshComponent.ShowMaterialSection, per level of
+// detail and material. Its visibility, its bones, its pose and everything hung from them stay exactly as they
+// were. Both simpler ways froze the Banshee in the headset (the author, 2026-09-29): hidden by its VISIBILITY
+// flags its skeletal mesh stopped updating its pose, and hidden by HideBoneByName on its ROOT bone most of the
+// parts hung on it stopped following a flip -- a hidden bone drops out of the pose update. The parameter blocks
+// come from the functions' own reflection, by name; a build without them leaves such a mesh shown (fail closed).
+constexpr int kMaxLods = 8;
+constexpr int kMaxMats = 64;
+struct SectionRefl {
+    int state = -1;                                   // -1 not tried; 0 unusable; 1 ready
+    int32_t mat = -1, sec = -1, on = -1, lod = -1;    // ShowMaterialSection(MaterialID, SectionIndex, bShow, LODIndex)
+    int32_t is_mat = -1, is_lod = -1, is_ret = -1;    // IsMaterialSectionShown(MaterialID, LODIndex): optional readback
+    int32_t lods_ret = -1, mats_ret = -1;             // GetNumLODs(), GetNumMaterials()
+};
+SectionRefl s_sr;
+
+bool section_ready() {
+    if (s_sr.state >= 0) return s_sr.state == 1;
+    s_sr.state = 0;
+    auto fn = [](const wchar_t* n) { return s_rf.skinned != nullptr ? s_rf.skinned->find_function(n) : nullptr; };
+    API::UFunction* show = fn(L"ShowMaterialSection");
+    API::UFunction* is = fn(L"IsMaterialSectionShown");
+    s_sr.mat = fn_param(show, L"MaterialID");
+    s_sr.sec = fn_param(show, L"SectionIndex");
+    s_sr.on = fn_param(show, L"bShow");
+    s_sr.lod = fn_param(show, L"LODIndex");
+    s_sr.is_mat = fn_param(is, L"MaterialID");
+    s_sr.is_lod = fn_param(is, L"LODIndex");
+    s_sr.is_ret = fn_param(is, L"ReturnValue");
+    s_sr.lods_ret = fn_param(fn(L"GetNumLODs"), L"ReturnValue");
+    s_sr.mats_ret = fn_param(fn(L"GetNumMaterials"), L"ReturnValue");
+    if (s_sr.mat >= 0 && s_sr.sec >= 0 && s_sr.on >= 0 && s_sr.lod >= 0 && s_sr.lods_ret >= 0 && s_sr.mats_ret >= 0)
+        s_sr.state = 1;
+    API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hiding a skinned mesh's own drawing %s (ShowMaterialSection %s, "
+                         "IsMaterialSectionShown %s, GetNumLODs %s)",
+                         s_sr.state == 1 ? "is available"
+                                         : "is NOT available on this build -- a skinned part that carries others stays shown",
+                         s_sr.mat >= 0 ? "found" : "NOT found", s_sr.is_ret >= 0 ? "found" : "NOT found",
+                         s_sr.lods_ret >= 0 ? "found" : "NOT found");
+    return s_sr.state == 1;
+}
+
+int32_t call_count(API::UObject* c, const wchar_t* fn, int32_t ret) {
     alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
-    *reinterpret_cast<int32_t*>(p + idx) = 0;
-    c->call_function(L"GetBoneName", p);
-    const std::wstring n = reinterpret_cast<API::FName*>(p + ret)->to_string();
-    return (n.empty() || n == L"None") ? std::wstring{} : n;
+    c->call_function(fn, p);
+    return *reinterpret_cast<int32_t*>(p + ret);
+}
+
+void show_section(API::UObject* c, int mat, int lod, bool show) {
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    *reinterpret_cast<int32_t*>(p + s_sr.mat) = mat;
+    *reinterpret_cast<int32_t*>(p + s_sr.sec) = mat;   // section = material unless the LOD remaps it
+    p[s_sr.on] = show ? 1 : 0;
+    *reinterpret_cast<int32_t*>(p + s_sr.lod) = lod;
+    c->call_function(L"ShowMaterialSection", p);
+}
+
+// 1 shown, 0 hidden, -1 no readback on this build.
+int section_shown(API::UObject* c, int mat, int lod) {
+    if (s_sr.is_mat < 0 || s_sr.is_lod < 0 || s_sr.is_ret < 0) return -1;
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    *reinterpret_cast<int32_t*>(p + s_sr.is_mat) = mat;
+    *reinterpret_cast<int32_t*>(p + s_sr.is_lod) = lod;
+    c->call_function(L"IsMaterialSectionShown", p);
+    return p[s_sr.is_ret] != 0 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- THE HIDE ("hideMeshes")
 constexpr int kMaxParts = 48;   // hidden at once: a vehicle's damage parts are a handful
 
 // Shrunk: a part nothing hangs from. Flagged: a STATIC mesh that carries others, hidden by its own flags.
-// Skin: a SKINNED mesh that carries others -- the cameras' frame above all -- whose own triangles are hidden by
-// a bone hide on its root. Its visibility must stay on: hidden by its flags, the Banshee's skeletal mesh stopped
-// updating its pose and every animated part hung on its bones froze (the author, in the headset, 2026-09-29).
-enum class How : uint8_t { Shrunk, Flagged, Skin };
+// Sections: a SKINNED mesh that carries others -- the cameras' frame above all -- whose own drawing is hidden,
+// section by section, so its visibility and its pose stay live (above: both simpler ways froze the Banshee).
+enum class How : uint8_t { Shrunk, Flagged, Sections };
 struct Part {
     TrackedObject obj;
     How    how = How::Shrunk;
     double scale[3] = {1.0, 1.0, 1.0};   // Shrunk: the scale to put back -- the one it had, or the game's latest
     bool   vis = true, hid = false;      // Flagged: the flags to put back, likewise
-    std::wstring bone;                   // Skin: the root bone hidden...
-    bool   skin_was = false;             // ...and whether it was hidden before we came (then it stays so)
+    uint64_t ours[kMaxLods] = {};        // Sections: per LOD, the materials WE hid (one hidden before us stays so)
+    int    lods = 0;
     bool   fought = false;               // something put it back while we held it (said once)
     std::wstring label;                  // its name, and the mesh it draws
 };
@@ -250,9 +306,12 @@ void put_back(Part& p) {
         if (is_shrunk(c)) set_scale(c, p.scale);           // only while it is still ours
         return;
     }
-    if (p.how == How::Skin) {
-        // Only a hide of ours, and only while it holds (-1: no readback on this build, so show it anyway).
-        if (!p.skin_was && vehcam_skin_hidden(c, p.bone) != 0) vehcam_skin_hide(c, p.bone, false);
+    if (p.how == How::Sections) {
+        // Only the sections WE hid, and only while they are still hidden (-1: no readback, so show them anyway).
+        for (int lod = 0; lod < p.lods; ++lod)
+            for (int m = 0; m < kMaxMats; ++m)
+                if ((p.ours[lod] >> m) & 1u)
+                    if (section_shown(c, m, lod) != 1) show_section(c, m, lod, true);
         return;
     }
     // The flags we set, back to the game's word -- only where they still hold ours.
@@ -290,16 +349,26 @@ void hide_part(API::UObject* c, int32_t idx, bool frame, std::wstring label) {
     // shrink everything hung on it.
     const bool carrier = frame || child_count(c) > 0;
     const bool skinned = carrier && s_rf.skinned != nullptr && c->is_a(s_rf.skinned);
-    std::wstring bone;
-    int was = -1;
+    uint64_t ours[kMaxLods] = {};
+    int lods = 0, hid = 0;
     if (skinned) {
-        bone = root_bone(c);
-        was = bone.empty() ? -1 : vehcam_skin_hidden(c, bone);
-        if (bone.empty() || !vehcam_skin_hide(c, bone, true)) {
-            // Fail closed: hidden by its flags instead, its pose would stop, and every part hung on it with it.
+        // Every section of every level of detail, skipping any already hidden: that one is the game's.
+        if (section_ready()) {
+            lods = std::clamp(call_count(c, L"GetNumLODs", s_sr.lods_ret), 1, kMaxLods);
+            const int mats = std::clamp(call_count(c, L"GetNumMaterials", s_sr.mats_ret), 0, kMaxMats);
+            for (int lod = 0; lod < lods; ++lod)
+                for (int m = 0; m < mats; ++m) {
+                    if (section_shown(c, m, lod) == 0) continue;
+                    show_section(c, m, lod, false);
+                    ours[lod] |= 1ull << m;
+                    ++hid;
+                }
+        }
+        if (hid == 0) {
+            // Fail closed: hidden by its flags or a bone hide instead, its pose would stop, and the parts on it.
             API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: %ls NOT hidden -- a skinned mesh that carries other parts is "
-                                 "hidden only by a bone hide, and %s", label.c_str(),
-                                 bone.empty() ? "its root bone was not found" : "that is not available on this build");
+                                 "hidden only by its material sections, and %s", label.c_str(),
+                                 s_sr.state == 1 ? "it has none shown" : "that is not available on this build");
             return;
         }
     }
@@ -308,9 +377,9 @@ void hide_part(API::UObject* c, int32_t idx, bool frame, std::wstring label) {
     p.obj.set_at(c, idx);
     p.label = std::move(label);
     if (skinned) {
-        p.how = How::Skin;
-        p.bone = std::move(bone);
-        p.skin_was = was == 1;
+        p.how = How::Sections;
+        p.lods = lods;
+        for (int lod = 0; lod < lods; ++lod) p.ours[lod] = ours[lod];
     } else if (carrier) {
         // A static mesh has no pose to lose: hidden by its own flags, never propagated, so whatever hangs from
         // it stays shown.
@@ -325,10 +394,10 @@ void hide_part(API::UObject* c, int32_t idx, bool frame, std::wstring label) {
         set_scale(c, kShrunk);
     }
     const char* why = frame ? "it is the cameras' frame" : "parts hang from it";
-    if (p.how == How::Skin)
-        API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- its own triangles, by a bone hide on %ls (%s, so it "
-                             "keeps its visibility and its pose, and they stay shown and moving)",
-                             p.label.c_str(), p.bone.c_str(), why);
+    if (p.how == How::Sections)
+        API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- its own drawing, %d material section(s) over %d "
+                             "LOD(s) (%s, so it keeps its visibility and its pose, and they stay shown and moving)",
+                             p.label.c_str(), hid, p.lods, why);
     else if (p.how == How::Flagged)
         API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- by its visibility (%s, so it is not shrunk and "
                              "they stay shown)", p.label.c_str(), why);
@@ -369,12 +438,15 @@ void hold() {
                 set_scale(c, kShrunk);
                 fought = true;
             }
-        } else if (p.how == How::Skin) {
-            const int r = vehcam_skin_hidden(c, p.bone);
-            if (r != 1) {                              // put back (0), or no readback on this build (-1)
-                vehcam_skin_hide(c, p.bone, true);
-                fought = r == 0;
-            }
+        } else if (p.how == How::Sections) {
+            for (int lod = 0; lod < p.lods; ++lod)
+                for (int m = 0; m < kMaxMats; ++m) {
+                    if (((p.ours[lod] >> m) & 1u) == 0) continue;
+                    const int r = section_shown(c, m, lod);
+                    if (r == 0) continue;              // still hidden
+                    show_section(c, m, lod, false);    // shown again (1), or no readback on this build (-1)
+                    fought = fought || r == 1;
+                }
         } else {
             const bool v = vis_flag(c), h = hid_flag(c);
             if (v || !h) {
