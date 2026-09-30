@@ -19,12 +19,12 @@
 // touched the helmet's scale; if it touches a vehicle part's, the hold puts it back within a quarter second
 // and the log says so once. A part that CARRIES others (anything hangs from it), and the cameras' frame
 // every seat and socket sits on, is never shrunk -- that would shrink everything hung on it, the Chief
-// included. A STATIC one is hidden by its own visibility flags instead, never propagated. A SKINNED one has
-// only its own drawing hidden, material section by material section (ShowMaterialSection), so its bones and
-// pose stay live. Both simpler ways froze the Banshee in the headset (the author, 2026-09-29): hidden by its
-// flags its skeletal mesh stopped updating its pose, and hidden by a bone hide on its root most parts hung on it
-// stopped following a flip. Only MESHES belonging to the vehicle's own actors are ever touched -- never the
-// Chief riding it, nor anything else merely hanging on it.
+// included. It is hidden by its own visibility flags instead, never propagated -- and a SKINNED one is also
+// held to AlwaysTickPoseAndRefreshBones while hidden, since a skeletal mesh that is not drawn otherwise stops
+// refreshing its bones and every part hung on them freezes (the Banshee in the headset, 2026-09-29: a bone
+// hide on its root froze them too, and hiding its material section left the stray triangle drawn -- only the
+// flags reach it). Only MESHES belonging to the vehicle's own actors are ever touched -- never the Chief riding
+// it, nor anything else merely hanging on it.
 
 #include <cstdint>
 
