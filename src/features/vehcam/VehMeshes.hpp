@@ -4,9 +4,12 @@
 // LISTED (vehmeshdump).
 //
 // WHY. Some cameras sit INSIDE the vehicle and see out through the hull's back faces, which the engine does
-// not draw. A damaged vehicle shows its insides -- parts that appear with the damage -- and from in there
-// they come up right across that view (the Banshee's, reported 2026-09-29). A seat, or one of its cameras,
-// names the parts to hide; they are hidden while that camera is up and put back when it is not.
+// not draw. A damaged vehicle shows its insides, and from in there they come up right across that view (the
+// Banshee's, reported 2026-09-29). Measured on the Banshee the same day: damage SWAPS a piece's mesh from its
+// _Default to its _Damage asset, on the same component, and splits the canopy and the wings into more pieces
+// (docs: VEHICLE_MESHES.md in the private tree) -- so a part is judged again whenever its mesh changes, not
+// only when it first appears. A seat, or one of its cameras, names the parts to hide; they are hidden while
+// that camera is up and put back when it is not.
 //
 // HOW. By SCALE, as the Chief's helmet is hidden (VehCam.cpp, head_item_hide): a part shrunk to 0.001 draws
 // nothing whatever its visibility flags say, so the flags stay the game's -- a damage state that reveals a
