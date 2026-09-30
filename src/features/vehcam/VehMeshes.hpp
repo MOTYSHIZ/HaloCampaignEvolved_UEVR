@@ -9,18 +9,21 @@
 // _Default to its _Damage asset, on the same component, and splits the canopy and the wings into more pieces
 // (docs: VEHICLE_MESHES.md in the private tree) -- so a part is judged again whenever its mesh changes, not
 // only when it first appears. A seat, or one of its cameras, names the parts to hide; they are hidden while
-// that camera is up and put back when it is not.
+// that camera is up and put back when it is not. What the Banshee's HangGlider camera actually hit turned out
+// to be neither: one stray triangle a few centimetres from the eye, drawn by the hull's own skeletal mesh
+// (SK_Banshee, a skeleton carrier with next to no geometry) -- in stock and damaged Banshees alike.
 //
 // HOW. By SCALE, as the Chief's helmet is hidden (VehCam.cpp, head_item_hide): a part shrunk to 0.001 draws
 // nothing whatever its visibility flags say, so the flags stay the game's -- a damage state that reveals a
 // part changes only them -- and the restore owns the scale, and only while it is still ours. The game never
 // touched the helmet's scale; if it touches a vehicle part's, the hold puts it back within a quarter second
-// and the log says so once. A part that
-// CARRIES others (anything hangs from it) is hidden by its own visibility flags instead, never propagated,
-// so whatever hangs from it keeps its size: the Chief rides a seat, and a shrunk seat would shrink him.
-// The cameras' frame (the chassis) is never shrunk for the same reason: every seat and socket sits on it.
-// Only MESHES belonging to the vehicle's own actors are ever touched -- never the Chief riding it, nor
-// anything else merely hanging on it.
+// and the log says so once. A part that CARRIES others (anything hangs from it), and the cameras' frame
+// every seat and socket sits on, is never shrunk -- that would shrink everything hung on it, the Chief
+// included. A STATIC one is hidden by its own visibility flags instead, never propagated. A SKINNED one is
+// hidden by a bone hide on its root, which removes only what it draws: hidden by its flags, the Banshee's
+// skeletal mesh stopped updating its pose, and every animated part hung on its bones froze with it (the
+// author, in the headset, 2026-09-29). Only MESHES belonging to the vehicle's own actors are ever touched --
+// never the Chief riding it, nor anything else merely hanging on it.
 
 #include <cstdint>
 

@@ -190,15 +190,41 @@ bool is_shrunk(API::UObject* c) {
     return std::fabs(s[0] - kShrink) < 1e-5 && std::fabs(s[1] - kShrink) < 1e-5 && std::fabs(s[2] - kShrink) < 1e-5;
 }
 
+// A UFUNCTION parameter's offset in its parameter block; -1 = none (or a block too big for our buffer).
+int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
+    if (fn == nullptr || fn->get_properties_size() > static_cast<int32_t>(RIG_PARAM_BUF)) return -1;
+    auto* p = fn->find_property(name);
+    return (p != nullptr) ? p->get_offset() : -1;
+}
+
+// A skinned mesh's root bone (index 0), by GetBoneName's own reflection; empty = not found.
+std::wstring root_bone(API::UObject* c) {
+    auto* cls = c->get_class();
+    API::UFunction* fn = (cls != nullptr) ? cls->find_function(L"GetBoneName") : nullptr;
+    const int32_t idx = fn_param(fn, L"BoneIndex"), ret = fn_param(fn, L"ReturnValue");
+    if (idx < 0 || ret < 0) return {};
+    alignas(16) uint8_t p[RIG_PARAM_BUF] = {0};
+    *reinterpret_cast<int32_t*>(p + idx) = 0;
+    c->call_function(L"GetBoneName", p);
+    const std::wstring n = reinterpret_cast<API::FName*>(p + ret)->to_string();
+    return (n.empty() || n == L"None") ? std::wstring{} : n;
+}
+
 // ---------------------------------------------------------------- THE HIDE ("hideMeshes")
 constexpr int kMaxParts = 48;   // hidden at once: a vehicle's damage parts are a handful
 
-enum class How : uint8_t { Shrunk, Flagged };
+// Shrunk: a part nothing hangs from. Flagged: a STATIC mesh that carries others, hidden by its own flags.
+// Skin: a SKINNED mesh that carries others -- the cameras' frame above all -- whose own triangles are hidden by
+// a bone hide on its root. Its visibility must stay on: hidden by its flags, the Banshee's skeletal mesh stopped
+// updating its pose and every animated part hung on its bones froze (the author, in the headset, 2026-09-29).
+enum class How : uint8_t { Shrunk, Flagged, Skin };
 struct Part {
     TrackedObject obj;
     How    how = How::Shrunk;
     double scale[3] = {1.0, 1.0, 1.0};   // Shrunk: the scale to put back -- the one it had, or the game's latest
     bool   vis = true, hid = false;      // Flagged: the flags to put back, likewise
+    std::wstring bone;                   // Skin: the root bone hidden...
+    bool   skin_was = false;             // ...and whether it was hidden before we came (then it stays so)
     bool   fought = false;               // something put it back while we held it (said once)
     std::wstring label;                  // its name, and the mesh it draws
 };
@@ -222,6 +248,11 @@ void put_back(Part& p) {
     if (c == nullptr) return;                              // gone with its vehicle: nothing to put back
     if (p.how == How::Shrunk) {
         if (is_shrunk(c)) set_scale(c, p.scale);           // only while it is still ours
+        return;
+    }
+    if (p.how == How::Skin) {
+        // Only a hide of ours, and only while it holds (-1: no readback on this build, so show it anyway).
+        if (!p.skin_was && vehcam_skin_hidden(c, p.bone) != 0) vehcam_skin_hide(c, p.bone, false);
         return;
     }
     // The flags we set, back to the game's word -- only where they still hold ours.
@@ -255,14 +286,34 @@ void hide_part(API::UObject* c, int32_t idx, bool frame, std::wstring label) {
         }
         return;
     }
+    // It carries other parts, or it IS the frame every seat and socket sits on: never shrunk, which would
+    // shrink everything hung on it.
+    const bool carrier = frame || child_count(c) > 0;
+    const bool skinned = carrier && s_rf.skinned != nullptr && c->is_a(s_rf.skinned);
+    std::wstring bone;
+    int was = -1;
+    if (skinned) {
+        bone = root_bone(c);
+        was = bone.empty() ? -1 : vehcam_skin_hidden(c, bone);
+        if (bone.empty() || !vehcam_skin_hide(c, bone, true)) {
+            // Fail closed: hidden by its flags instead, its pose would stop, and every part hung on it with it.
+            API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: %ls NOT hidden -- a skinned mesh that carries other parts is "
+                                 "hidden only by a bone hide, and %s", label.c_str(),
+                                 bone.empty() ? "its root bone was not found" : "that is not available on this build");
+            return;
+        }
+    }
     Part& p = s_h.parts[s_h.n++];
     p = Part{};
     p.obj.set_at(c, idx);
     p.label = std::move(label);
-    const int kids = child_count(c);
-    if (frame || kids > 0) {
-        // It carries other parts (or it IS the frame every seat and socket sits on): hidden by its own flags,
-        // never propagated, so whatever hangs from it keeps its size and stays shown.
+    if (skinned) {
+        p.how = How::Skin;
+        p.bone = std::move(bone);
+        p.skin_was = was == 1;
+    } else if (carrier) {
+        // A static mesh has no pose to lose: hidden by its own flags, never propagated, so whatever hangs from
+        // it stays shown.
         p.how = How::Flagged;
         p.vis = vis_flag(c);
         p.hid = hid_flag(c);
@@ -273,10 +324,16 @@ void hide_part(API::UObject* c, int32_t idx, bool frame, std::wstring label) {
         for (int k = 0; k < 3; ++k) p.scale[k] = std::isfinite(s[k]) ? s[k] : 1.0;
         set_scale(c, kShrunk);
     }
-    API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- %s", p.label.c_str(),
-                         p.how == How::Shrunk ? "shrunk"
-                         : frame ? "by its visibility (it is the cameras' frame, so never shrunk)"
-                                 : "by its visibility (parts hang from it, so it is not shrunk and they stay shown)");
+    const char* why = frame ? "it is the cameras' frame" : "parts hang from it";
+    if (p.how == How::Skin)
+        API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- its own triangles, by a bone hide on %ls (%s, so it "
+                             "keeps its visibility and its pose, and they stay shown and moving)",
+                             p.label.c_str(), p.bone.c_str(), why);
+    else if (p.how == How::Flagged)
+        API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- by its visibility (%s, so it is not shrunk and "
+                             "they stay shown)", p.label.c_str(), why);
+    else
+        API::get()->log_info("[Halo-CampE-UEVR] VEHMESH: hidden %ls -- shrunk", p.label.c_str());
 }
 
 // Whether `c` is a part the list names: a MESH of the vehicle's own actors -- never the Chief riding it, or
@@ -311,6 +368,12 @@ void hold() {
                 for (int j = 0; j < 3; ++j) if (std::isfinite(s[j])) p.scale[j] = s[j];
                 set_scale(c, kShrunk);
                 fought = true;
+            }
+        } else if (p.how == How::Skin) {
+            const int r = vehcam_skin_hidden(c, p.bone);
+            if (r != 1) {                              // put back (0), or no readback on this build (-1)
+                vehcam_skin_hide(c, p.bone, true);
+                fought = r == 0;
             }
         } else {
             const bool v = vis_flag(c), h = hid_flag(c);
@@ -398,13 +461,6 @@ struct Dump {
 Dump s_dd;
 
 std::string w2s(const std::wstring& w) { return narrow(w); }
-
-// A UFUNCTION parameter's offset in its parameter block; -1 = none (or a block too big for our buffer).
-int32_t fn_param(API::UFunction* fn, const wchar_t* name) {
-    if (fn == nullptr || fn->get_properties_size() > static_cast<int32_t>(RIG_PARAM_BUF)) return -1;
-    auto* p = fn->find_property(name);
-    return (p != nullptr) ? p->get_offset() : -1;
-}
 
 std::string materials_of(API::UObject* c) {
     auto* cls = c->get_class();
