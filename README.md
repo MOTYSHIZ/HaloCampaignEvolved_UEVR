@@ -643,3 +643,7 @@ For Software Engineering, I don't consider it to be the same kind of issue as wi
 constantly building off of "stolen" and open-source work anyways. Engineering is very
 results-oriented, while for the arts the personal journey part of it is more essential for the
 individual and shape of the end work.
+
+### Support
+If you feel inclined to support me, please feel free to at:
+https://ko-fi.com/nitsujack
