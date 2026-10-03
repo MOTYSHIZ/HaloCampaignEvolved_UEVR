@@ -43,7 +43,8 @@
 // Warthog, so the verdict no longer depends on how fast the player is going.
 // The declared VR_RenderingMethod is read separately on the game thread's 2 s poll and kept
 // alongside, for the log line and for the one decision that must not rest on a heuristic alone
-// (flattening the compositor quads, XrLayer.cpp). That decision needs THREE things to agree:
+// (flattening the compositor quads, XrLayer.cpp). That decision needs FOUR things to agree -- the
+// three below, and a backend that does not warp the view into stereo (AFW; see further down):
 //   1. the topology reads Mono (one view per frame that does not alternate);
 //   2. UEVR declares method 3;
 //   3. BOTH EYES REPORT THE SAME PROJECTION MATRIX (get_ue_projection_matrix per eye, also read on
@@ -62,9 +63,18 @@
 //
 // The detector rather than the declaration decides how the consumers average, because the
 // declaration can be true and inert: an older backend ignores VR_RenderingMethod=3 and renders
-// stereo; the PureDark AFW backend reads 3 as Alternate Frame Warping, which renders the eyes by
-// turns and therefore reads Alternating here. What the callbacks DO is the only fact that matters
-// to a consumer of the callbacks; the projection test above covers the one case they cannot tell.
+// stereo. What the callbacks DO is the only fact that matters to a consumer of the callbacks.
+//
+// THE CASE THE CALLBACKS CANNOT TELL, and the fourth condition on flattening. PureDark's AFW
+// backend reads method 3 as Alternate Frame Warping. This file used to assume that renders the
+// eyes by turns and so reads Alternating. A player's log on UEVR_AFW_v1.0-beta.5 (2026-09-30)
+// showed otherwise: ONE centre view per frame, with IDENTICAL per-eye projections, so all three
+// tests above passed and the quads were flattened to infinity. AFW then warps that one view into a
+// stereo pair, so the headset DOES show depth, and the flattened reticule doubled against it. The
+// callbacks and the projections are the same as true mono, so only the backend's identity
+// separates the two. It is read from UEVR's own tag and branch (the earlier AFW report read
+// "branch=AFW"; this one "tag=UEVR_AFW_v1.0-beta.5"). Aim convergence is unaffected: it uses the
+// single view as the head, which is right for both.
 //
 // HEADLESS CAVEAT: under the SimVR/OpenVR harness the runtime reports no HMD, UEVR's eye offsets
 // are zero, and AFR is indistinguishable from Mono by construction -- an AFR arm reading "mono"
@@ -102,9 +112,17 @@ int  viewmode_declared();
 void viewmode_set_shared_projection(bool shared);
 bool viewmode_shared_projection();
 
-// True when the single rendered view is the CENTRE eye by construction: the topology reads Mono,
-// UEVR declares the Mono method (3), AND both eyes share one projection. All three are required --
-// see the header comment.
+// GAME THREAD, on the same poll: whether the backend is PureDark's AFW build (its UEVR tag or branch
+// names AFW). There, method 3 is Alternate Frame Warping, and it passes the other three tests
+// below while the headset still shows depth (see the header comment). False until the poll has
+// looked.
+void viewmode_set_backend_warps(bool warps);
+bool viewmode_backend_warps();
+
+// True when the single rendered view is the CENTRE eye by construction AND that one image is what
+// both eyes see: the topology reads Mono, UEVR declares method 3, both eyes share one projection,
+// AND the backend does not warp the view into a stereo pair (AFW). All four are required -- see
+// the header comment. Never relax it to fewer.
 bool viewmode_is_mono();
 
 // Number of post-callbacks counted so far. A consumer that averages "this sample with the
