@@ -2080,7 +2080,10 @@ struct Config {
     //   1 (default) = while the callbacks read as one centre view per frame, UEVR declares
     //                 method 3, AND both eyes report the same projection matrix (the physical
     //                 signature of one image serving both eyes; a stereo pair reports mirrored
-    //                 frustums), every quad slides out along its own ray to xrlayermonofar metres
+    //                 frustums), AND the backend is not PureDark's AFW build (there method 3
+    //                 warps the one view into a stereo pair, so the headset shows depth and a
+    //                 flattened reticule doubles -- player report 2026-09-30), every quad slides
+    //                 out along its own ray to xrlayermonofar metres
     //                 with its angular size held, so its disparity matches the image (~0).
     //   0           = never.
     //   2           = always -- an A/B of the mechanism that needs no mono session.

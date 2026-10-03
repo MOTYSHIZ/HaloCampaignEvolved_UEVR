@@ -173,7 +173,7 @@
 // Shipped version, logged at startup so a bug report identifies the build it came from. There is no
 // other build marker in the DLL, so this is the only thing tying a log.txt to a release.
 // BUMP THIS WITH THE RELEASE TAG -- CI publishes on `v*`, and the two are not linked automatically.
-#define HALO_VR_VERSION "0.6.0"
+#define HALO_VR_VERSION "0.6.1"
 
 using namespace uevr;
 
@@ -6409,6 +6409,35 @@ void update() {
             const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
             halo::viewmode_set_declared(declared);
 
+            // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping, which looks
+            // exactly like mono to every test we can run on the callbacks, yet shows the headset a
+            // stereo pair -- so flattening the quads doubled the reticule (ViewMode.hpp). The backend
+            // names itself in its tag or branch; both are fixed for the session, so read them once.
+            {
+                static int s_warps = -1;
+                if (s_warps < 0) {
+                    const auto* fns = API::get()->param()->functions;
+                    auto names_afw = [](const char* s) {
+                        if (s == nullptr) return false;
+                        for (const char* p = s; p[0] != '\0' && p[1] != '\0' && p[2] != '\0'; ++p) {
+                            if ((p[0] == 'A' || p[0] == 'a') && (p[1] == 'F' || p[1] == 'f') &&
+                                (p[2] == 'W' || p[2] == 'w')) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    s_warps = (names_afw(fns->get_tag()) || names_afw(fns->get_branch())) ? 1 : 0;
+                    halo::viewmode_set_backend_warps(s_warps == 1);
+                    if (s_warps == 1) {
+                        API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: AFW backend (tag=%s branch=%s) -- "
+                                             "VR_RenderingMethod=3 there warps one view into a stereo pair, so "
+                                             "the compositor quads are never flattened on it.",
+                                             fns->get_tag(), fns->get_branch());
+                    }
+                }
+            }
+
             // ONE PROJECTION FOR BOTH EYES? The physical test behind quad flattening (ViewMode.hpp):
             // the monofix mono path gives every eye the union-FOV projection, so the two matrices
             // come back identical, while every stereo-pair mode returns mirrored per-eye frustums.
@@ -6452,7 +6481,10 @@ void update() {
                                      declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm),
                                      shared ? "IDENTICAL (one image serves both eyes)" : "differ (a stereo pair)",
                                      head_from,
-                                     flat ? "FLATTENED to infinity to match the mono image" : "at their real depth",
+                                     flat ? "FLATTENED to infinity to match the mono image"
+                                          : (declared == 3 && halo::viewmode_backend_warps())
+                                                ? "at their real depth (AFW shows a stereo pair, never flattened)"
+                                                : "at their real depth",
                                      g_cfg.xr_layer_mono_flat, halo::viewmode_samples(), ring, swing);
             }
         }
