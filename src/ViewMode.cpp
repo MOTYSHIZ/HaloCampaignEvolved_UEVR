@@ -18,6 +18,7 @@ namespace {
 std::atomic<int>      g_mode{(int)ViewMode::Unknown};
 std::atomic<int>      g_declared{-1};
 std::atomic<bool>     g_shared_projection{false};
+std::atomic<bool>     g_backend_warps{false};
 std::atomic<unsigned> g_samples{0};
 // Diagnostics for the VIEWMODE line: the vote ring as of the last sample, and the largest
 // second difference seen since the poll last read it (in game cm). Relaxed stores; the render
@@ -163,8 +164,17 @@ bool viewmode_shared_projection() {
     return g_shared_projection.load(std::memory_order_relaxed);
 }
 
+void viewmode_set_backend_warps(bool warps) {
+    g_backend_warps.store(warps, std::memory_order_relaxed);
+}
+
+bool viewmode_backend_warps() {
+    return g_backend_warps.load(std::memory_order_relaxed);
+}
+
 bool viewmode_is_mono() {
-    return viewmode_current() == ViewMode::Mono && viewmode_declared() == 3 && viewmode_shared_projection();
+    return viewmode_current() == ViewMode::Mono && viewmode_declared() == 3 &&
+           viewmode_shared_projection() && !viewmode_backend_warps();
 }
 
 unsigned viewmode_samples() {
@@ -190,7 +200,9 @@ const char* viewmode_method_name(int declared_method) {
     case 0:  return "Native Stereo";
     case 1:  return "Synchronized Sequential";
     case 2:  return "Alternating/AFR";
-    case 3:  return "Mono on the monofix backend (AFW on PureDark's)";
+    case 3:  return viewmode_backend_warps()
+                        ? "Alternate Frame Warping on this AFW backend: one view warped into a stereo pair"
+                        : "Mono on the monofix backend";
     case -1: return "unreadable";
     default: return "unknown value";
     }
