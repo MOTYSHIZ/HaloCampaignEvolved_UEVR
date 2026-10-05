@@ -6368,12 +6368,11 @@ void update() {
             char cur[16]{};
             API::get()->param()->vr->get_mod_value("VR_RenderingMethod", cur, sizeof(cur));
             const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
-            halo::viewmode_set_declared(declared);
-
-            // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping, which looks
-            // exactly like mono to every test we can run on the callbacks, yet shows the headset a
-            // stereo pair -- so flattening the quads doubled the reticule (ViewMode.hpp). The backend
-            // names itself in its tag or branch; both are fixed for the session, so read them once.
+            // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping: the eyes render
+            // BY TURNS and the other is warped, so it must never be read as mono (ViewMode.hpp has the
+            // source trace and the two releases that got this wrong). The backend names itself in its
+            // tag or branch; both are fixed for the session, so read them once -- and publish this
+            // BEFORE the declared method below, so the render thread never sees method 3 without it.
             {
                 static int s_warps = -1;
                 if (s_warps < 0) {
@@ -6392,12 +6391,14 @@ void update() {
                     halo::viewmode_set_backend_warps(s_warps == 1);
                     if (s_warps == 1) {
                         API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: AFW backend (tag=%s branch=%s) -- "
-                                             "VR_RenderingMethod=3 there warps one view into a stereo pair, so "
-                                             "the compositor quads are never flattened on it.",
+                                             "VR_RenderingMethod=3 there renders the eyes by turns (the other is warped), "
+                                             "so it is never treated as mono and the quads are never flattened.",
                                              fns->get_tag(), fns->get_branch());
                     }
                 }
             }
+
+            halo::viewmode_set_declared(declared);
 
             // ONE PROJECTION FOR BOTH EYES? The physical test behind quad flattening (ViewMode.hpp):
             // the monofix mono path gives every eye the union-FOV projection, so the two matrices
@@ -6444,7 +6445,7 @@ void update() {
                                      head_from,
                                      flat ? "FLATTENED to infinity to match the mono image"
                                           : (declared == 3 && halo::viewmode_backend_warps())
-                                                ? "at their real depth (AFW shows a stereo pair, never flattened)"
+                                                ? "at their real depth (AFW renders the eyes by turns: never flattened)"
                                                 : "at their real depth",
                                      g_cfg.xr_layer_mono_flat, halo::viewmode_samples(), ring, swing);
             }

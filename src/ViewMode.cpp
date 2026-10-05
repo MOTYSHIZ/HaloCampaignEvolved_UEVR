@@ -126,13 +126,25 @@ void viewmode_note_post(int view_index, float x, float y, float z) {
     ViewMode m;
     if (other_fresh) {
         m = ViewMode::Stereo;
-    } else if (g_shared_projection.load(std::memory_order_relaxed)) {
-        // ONE PROJECTION FOR BOTH EYES SETTLES IT. An alternating stereo pair always carries
-        // mirrored per-eye frustums, so a single view whose two projections are identical cannot
-        // be AFR whatever its position is doing -- and on this title the position DOES swing while
-        // scoped and walking (2026-09-15 log: the ring voted Alternating for a second at a time,
-        // flattening flickered off and on, and the scope pane visibly switched between stereo and
-        // mono). The vote below is for runtimes that report a real stereo pair.
+    } else if (g_shared_projection.load(std::memory_order_relaxed) &&
+               g_declared.load(std::memory_order_relaxed) == 3 &&
+               !g_backend_warps.load(std::memory_order_relaxed)) {
+        // ONE PROJECTION FOR BOTH EYES, ON THE MONO METHOD OF A BACKEND THAT HAS ONE, SETTLES IT.
+        // Needed because on this title the mono view's position DOES swing while scoped and
+        // walking (2026-09-15 log: the ring voted Alternating for a second at a time, flattening
+        // flickered off and on, and the scope pane visibly switched between stereo and mono).
+        //
+        // THE SHARED PROJECTION ALONE PROVES NOTHING, and this branch used to rest on it alone
+        // ("an alternating pair always carries mirrored frustums"). False: UEVR's
+        // HorizontalProjectionOverride=Symmetric hands both eyes one frustum on ANY method and any
+        // backend (OpenXR.cpp get_mat), and a symmetric-lens headset does it unasked. PureDark's AFW
+        // renders the eyes BY TURNS (true_index = g_frame_count % 2, the eye offset applied each
+        // frame -- FFakeStereoRenderingHook.cpp, read at commit c40eaab) and reported identical
+        // projections in a player's log, so this branch called it Mono, every consumer took ONE EYE
+        // as the head, and the reticule was placed from the left eye one frame and the right eye the
+        // next: the doubled reticule of 2026-09-30 and 2026-10-05, which survived v0.6.1's removal of
+        // the flattening. So the shortcut now also needs the declared method to be 3 and the backend
+        // not to be AFW; everything else is decided by what the positions actually do, below.
         m = ViewMode::Mono;
     } else if (s_hist_n >= 8) {
         m = (popcount8(s_hist) >= kAltVotes) ? ViewMode::Alternating : ViewMode::Mono;
@@ -201,7 +213,7 @@ const char* viewmode_method_name(int declared_method) {
     case 1:  return "Synchronized Sequential";
     case 2:  return "Alternating/AFR";
     case 3:  return viewmode_backend_warps()
-                        ? "Alternate Frame Warping on this AFW backend: one view warped into a stereo pair"
+                        ? "Alternate Frame Warping on this AFW backend: the eyes render by turns, the other is warped"
                         : "Mono on the monofix backend";
     case -1: return "unreadable";
     default: return "unknown value";
