@@ -1,21 +1,35 @@
 HALO VR -- VEHICLE MESH REFERENCE
 
-The names "hideMeshes" can use in halo_vr_vehcams.json. This file is documentation only: the mod never
-reads it, and editing it changes nothing.
+Names for two settings in halo_vr_vehcams.json, the vehicle camera file:
 
-WHAT hideMeshes IS FOR
+  PART 1   "hideMeshes"   the parts of a vehicle you can hide          -> MESH names
+  PART 2   "origin"       what a camera sits on and is measured from   -> the built-in names, or a
+                                                                         BONE or SOCKET name
+
+The two take different names: a mesh name does nothing as an origin, and a bone name hides nothing.
+This file is documentation only. The mod never reads it, and editing it changes nothing.
+
+Names are the game's own, listed from the Steam release on 2026-10-04. A game update may
+rename or add some. Case never matters.
+
+
+====================================================================================================
+PART 1 -- "hideMeshes": HIDING PARTS OF A VEHICLE
+====================================================================================================
+
+WHAT IT IS FOR
   Some vehicle cameras sit INSIDE the vehicle and see out through its hull. Anything the game draws in
   there shows up right in front of your eyes: the insides a damaged vehicle reveals, or a stray piece
   of geometry nobody could see in the flat game. hideMeshes hides parts of the vehicle while you sit in
   a seat, or only in one of its cameras.
 
 HOW TO USE IT
-  In halo_vr_vehcams.json, on a vehicle entry (every camera of that seat) or on one camera:
+  On a vehicle entry (every camera of that seat) or on one camera:
 
       "hideMeshes": ["canopy_m_core_damage", "canopy_m_panel"]
 
-  - Each entry is TEXT FOUND IN A NAME below. Case does not matter. "canopy" hides every part with
-    canopy in its name; "canopy_m_panela_damage" hides exactly one.
+  - Each entry is TEXT FOUND IN A MESH NAME below. "canopy" hides every part with canopy in its
+    name; "canopy_m_panela_damage" hides exactly one.
   - A camera's own list REPLACES its seat's list. "hideMeshes": [] on a camera hides nothing there.
   - Only parts of the vehicle itself are ever hidden, never your own body.
   - A part comes back the moment you change camera, get out, or press the kill switch.
@@ -38,12 +52,11 @@ HOW THE GAME BUILDS A VEHICLE
   Hiding a turret's parts from a seat on the hull, or the hull's from some turret seats, is untested:
   if a name does nothing, that is the likely reason.
 
-Names are the game's own, listed from the Steam release on 2026-10-04. A game update may
-rename or add parts. Debris that flies off a vehicle is not listed: it is not part of the vehicle.
+  Debris that flies off a vehicle is not listed: it is not part of the vehicle.
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 BANSHEE        camera file entry: "Banshee"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Banshee                                           skeleton only
   Stock parts
@@ -84,9 +97,9 @@ BANSHEE        camera file entry: "Banshee"
     SM_Banshee_Wing_R_Front_Damage
     SM_Banshee_Wing_R_Rear_Damage
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 GHOST        camera file entry: "Ghost"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Stock parts
     SM_Ghost_Chassis_Default_UI
     SM_Ghost_Default_Body
@@ -138,9 +151,9 @@ GHOST        camera file entry: "Ghost"
     SM_Ghost_Semi_Damaged_Pedal
     SM_Ghost_Semi_Damaged_Tail
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 WARTHOG        camera file entry: "Warthog / Warthog passenger"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Warthog_Antenna_Default                           skeleton only
     SK_Warthog_01                                        a full skinned mesh
@@ -220,9 +233,9 @@ WARTHOG        camera file entry: "Warthog / Warthog passenger"
     SM_Warthog_Semi_Damaged_Tailgate_Upper_Panel_Left
     SM_Warthog_Semi_Damaged_Tailgate_Upper_Panel_Right
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 WARTHOG CHAINGUN        camera file entry: "Warthog gunner"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Warthog_Chaingun_Common                           skeleton only
   Stock parts
@@ -232,9 +245,9 @@ WARTHOG CHAINGUN        camera file entry: "Warthog gunner"
     SM_Warthog_Chaingun_Shield
     SM_Warthog_Chaingun_Shield_Panel
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 SCORPION        camera file entry: "Scorpion"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Scorpion                                          skeleton only
     SK_Scorpion_TreadBL                                  a full skinned mesh
@@ -418,9 +431,9 @@ SCORPION        camera file entry: "Scorpion"
     SM_Scorpion_R_Tread_Shield3_R_Damage
     SM_Scorpion_R_Tread_Shield4_R_Damage
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 SCORPION CANNON (the turret)        camera file entry: "Scorpion"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_ScorpionCannon                                    skeleton only
     SK_ScorpionCannon_LeftAntenna                        a full skinned mesh
@@ -446,9 +459,9 @@ SCORPION CANNON (the turret)        camera file entry: "Scorpion"
     SM_ScorpionCannon_MainTurret_M_RightPanels_Damage
     SM_ScorpionCannon_TurretBack_M_Damage
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 SCORPION ANTI-INFANTRY GUN        camera file entry: "Scorpion gunner"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_ScorpionAntiInfantry                              skeleton only
   Stock parts
@@ -462,9 +475,9 @@ SCORPION ANTI-INFANTRY GUN        camera file entry: "Scorpion gunner"
     SM_ScorpionAntiInfantry_GunBase_M_ShieldLeft_Damage
     SM_ScorpionAntiInfantry_GunBase_M_ShieldRight_Damage
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 WRAITH        camera file entry: "Wraith"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Common_Wraith                                     skeleton only
     SK_Wraith_Default                                    a full skinned mesh
@@ -525,9 +538,9 @@ WRAITH        camera file entry: "Wraith"
     SM_Wraith_Wing_Left_Dmg
     SM_Wraith_Wing_Right_Dmg
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 WRAITH MORTAR        camera file entry: "Wraith"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Wraith_Common_Mortar                              skeleton only
   Stock parts
@@ -566,18 +579,18 @@ WRAITH MORTAR        camera file entry: "Wraith"
     SM_Wraith_Mortar_MortarHull_M_Dmg
     SM_Wraith_Mortar_Root_M_Dmg
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 WRAITH ANTI-INFANTRY GUN        camera file entry: "Wraith turret"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Wraith_Common_Anti_Infantry                       skeleton only
   Stock parts
     SM_WraithAntiInfantry_Default_Gun
     SM_WraithAntiInfantry_Default_Seat
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 SHADE        camera file entry: "Shade"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Common_Shade                                      skeleton only
     SK_Shade_PlasmaCannon                                skeleton only
@@ -599,9 +612,9 @@ SHADE        camera file entry: "Shade"
     SM_Shade_Guns_Plasma_Dmg
     SM_Shade_Turret_Plasma_Dmg
 
-====================================================================================================
+----------------------------------------------------------------------------------------------------
 PELICAN        camera file entry: "Pelican"
-====================================================================================================
+----------------------------------------------------------------------------------------------------
   Skeletal meshes
     SK_Pelican                                           a full skinned mesh
     SK_Pelican_Common                                    skeleton only
@@ -646,4 +659,280 @@ PELICAN        camera file entry: "Pelican"
     SM_PelicanChinGun_GunPart1_M_Default
     SM_PelicanChinGun_GunPart2_M_Default
     SM_PelicanChinGun_Root_M_Default
+
+
+====================================================================================================
+PART 2 -- "origin": WHAT A CAMERA SITS ON
+====================================================================================================
+
+WHAT IT IS
+  A camera's "offset" is [forward, right, up] in cm FROM its origin, and the camera rides whatever its
+  origin is. Set it on a camera, or on one of a camera's tethering modes (which then overrides the
+  camera's for that mode):
+
+      "origin": "ScorpionCannon/MainTurret_M", "offset": [-150, 0, 80]
+
+THE BUILT-IN ORIGINS
+  "seat"         where you sit: the vehicle's hull, measured from your seat
+  "vehicle"      the centre of the vehicle
+  "playerhead"   the Chief's head ("head" is read too). The camera follows the CHIEF, so it turns with
+                 a turret that carries him even where the turret's own body does not turn (the Shade).
+                 The seat's "hideHead": true hides his helmet for true first person from here.
+
+A BONE OR SOCKET AS THE ORIGIN
+  Any other text is the name of a bone or socket on the vehicle, and the camera rides that part: a
+  turret that turns on its own, a gun barrel, a hatch. Names are listed per vehicle below.
+  - An exact bone or socket name is used first.
+  - Failing that, the first BONE whose name contains your text. A socket needs its exact name.
+  - The search starts on the vehicle you sit in, then goes to the other vehicle parts within 12 m,
+    nearest first. A turret is usually a vehicle of its own, so this is how its bones are reached.
+  - "Part/Name" looks only at the part whose name contains Part. Many names exist on several parts
+    (Root_M, Pedestal, AimYaw and AimPitch are on nearly every skeleton), so without it you get the
+    first match, usually the hull's. Each list below is headed by its Part text. Only the Scorpion's
+    three have been tried; the others are the game's own names for those parts.
+  - A name that is not found leaves the camera on the vehicle's centre, and log.txt says what was
+    searched: look for the lines starting VEHCAM: origin. A found name is logged the same way.
+  - Most of these names are untested as origins. The socket lists are read from the game's name tables
+    and may hold a few names that are not real sockets.
+  - Effect, debris and character-pose sockets (fx_..., garbage_..., ..._ik_...) are left out.
+
+----------------------------------------------------------------------------------------------------
+BANSHEE        camera file entry: "Banshee"
+----------------------------------------------------------------------------------------------------
+  Part "BansheeVehicle/"
+    Bones (21): AimPitch, AimYaw, BoostIn_L, BoostIn_R, BoostOut_L, BoostOut_R, Canopy_M, Gun_L, Gun_R,
+      Hull_M, Pedestal, RearSeal_M, Root_M, Rudder_L, Rudder_R, RudderBottom_L, RudderBottom_R,
+      RudderTop_L, RudderTop_R, Wing_L, Wing_R
+    Sockets (48): banshee_b_d_l, banshee_b_d_l_enter, banshee_b_d_r, banshee_b_d_r_enter, banshee_d,
+      banshee_d_camera, banshee_d_enter, banshee_p_l, banshee_p_l_enter, banshee_p_r, banshee_p_r_enter,
+      Canopy_MSocket, chud_nav_point, cockpit, default, engine, engine_left, engine_right,
+      hover_thrusters, hull, hull_back_antigrav, Hull_MSocket, l_fx_boost, l_fx_boost_Space, l_fx_gun,
+      l_fx_wingtip, l_fx_wingtip_Space, pathfinding, PedestalSocket, primary_trigger, r_fx_boost,
+      r_fx_boost_Space, r_fx_gun, r_fx_wingtip, r_fx_wingtip_Space, Rudder_LSocket, Rudder_RSocket,
+      RudderBottom_L_FX, RudderBottom_R_FX, RudderBottom_RSocket, secondary_trigger, target_hull,
+      target_l_wing, target_r_wing, wing_left, Wing_LSocket, wing_right, Wing_RSocket
+
+----------------------------------------------------------------------------------------------------
+GHOST        camera file entry: "Ghost"
+----------------------------------------------------------------------------------------------------
+  Part "GhostVehicle/"
+    Bones (16): b_aileron_left, b_aileron_right, b_aim_pitch, b_aim_yaw, b_antigrav_back,
+      b_antigrav_front, b_chassis, b_engine, b_gun_left, b_gun_right, b_pedestal, b_seat, b_stick_left,
+      b_stick_right, b_swing_arm, ghost_world
+    Sockets (81): accel_left, accel_right, antigrav_back, antigrav_back_p, antigrav_front_left,
+      antigrav_front_left_p, antigrav_front_right, antigrav_front_right_p, b_antigrav_backSocket,
+      b_chassisSocket, chud_nav_point, dest_cylinder_l_back, dest_cylinder_l_front, dest_cylinder_l_mid,
+      dest_cylinder_r_back, dest_cylinder_r_front, dest_cylinder_r_mid, dest_engine_front_block_l_mid,
+      dest_engine_front_block_l_top, dest_engine_front_block_r_mid, dest_engine_front_block_r_top,
+      dest_engine_l_lower, dest_engine_mainpipe, dest_engine_r_lower, dest_engine_topbackpipe,
+      dest_engine_topfrontpipe, dest_engine_topmidpipe, dest_l_wing_end, dest_r_wing_end,
+      dest_tail_panel_l, dest_tail_panel_l_lower, dest_tail_panel_r, dest_tail_panel_r_lower,
+      dest_tail_rear, dest_tail_up, dest_weakpoint_l, dest_weakpoint_r, engine, engine_left,
+      engine_right, ghost_b_d_b, ghost_b_d_b_enter, ghost_b_d_l, ghost_b_d_l_enter, ghost_b_d_r,
+      ghost_b_d_r_enter, ghost_d, ghost_d_camera, ghost_d_enter, grunt_left_hand, grunt_right_hand,
+      hover_thrusters, hull, l_fx_antigrav_back, l_fx_boost, l_fx_gun, left_foot, left_hand,
+      marine_left_foot, marine_left_hand, marine_right_foot, marine_right_hand, pathfinding,
+      primary_trigger, r_fx_antigrav_back, r_fx_boost, r_fx_gun, right_foot, right_hand, running_lights,
+      spartan_foot_left, spartan_foot_right, spartan_hand_left, spartan_hand_right, suspension_back,
+      target_driver, target_gastank, target_hull, target_seat, target_wing_left, target_wing_right
+
+----------------------------------------------------------------------------------------------------
+WARTHOG        camera file entry: "Warthog / Warthog passenger"
+----------------------------------------------------------------------------------------------------
+  Part "WarthogVehicle/"
+    Bones (118): Axle_Base_Back_Left, Axle_Base_Back_Right, Axle_Base_Front_Left, Axle_Base_Front_Right,
+      Axle_End_Back_Left, Axle_End_Back_Right, Axle_End_Front_Left, Axle_End_Front_Right,
+      Axle_Hinge_Back_Left, Axle_Hinge_Back_Right, Axle_Hinge_Base_Back_Left,
+      Axle_Hinge_Base_Back_Right, Axle_Hinge_Base_Front_Left, Axle_Hinge_Base_Front_Right,
+      Axle_Hinge_Front_Left, Axle_Hinge_Front_Right, Body, Chassis, Drive_Arm_Back_Left,
+      Drive_Arm_Back_Right, Drive_Arm_Front_Left, Drive_Arm_Front_Right, Drive_Spindle_Back_Left,
+      Drive_Spindle_Back_Right, Drive_Spindle_Front_Left, Drive_Spindle_Front_Right, Emergency_Brake,
+      Hinge_Down_Back_Left, Hinge_Down_Back_Right, Hinge_Down_Front_Left, Hinge_Down_Front_Right,
+      Hinge_Up_Back_Left, Hinge_Up_Back_Right, Hinge_Up_Front_Left, Hinge_Up_Front_Right,
+      Hinge_Up_Offset_Back_Left, Hinge_Up_Offset_Back_Right, Hood_Base, Inner_Shock_Down_Back_Left,
+      Inner_Shock_Down_Back_Right, Inner_Shock_Down_Front_Left, Inner_Shock_Down_Front_Right,
+      Inner_Shock_Up_Back_Left, Inner_Shock_Up_Back_Right, Inner_Shock_Up_Front_Left,
+      Inner_Shock_Up_Front_Right, Outer_Shock_Down_Back_Left, Outer_Shock_Down_Back_Right,
+      Outer_Shock_Down_Front_Left, Outer_Shock_Down_Front_Right, Outer_Shock_Up_Back_Left,
+      Outer_Shock_Up_Back_Right, Outer_Shock_Up_Front_Left, Outer_Shock_Up_Front_Right, Pedestal,
+      Pedestal_Aim_Pitch, Pedestal_Aim_Yaw, Root, Steering_Arm_Back_Left, Steering_Arm_Back_Right,
+      Steering_Arm_Bolt_Back_Left, Steering_Arm_Bolt_Back_Right, Steering_Arm_Bolt_Front_Left,
+      Steering_Arm_Bolt_Front_Right, Steering_Arm_End_Back_Left, Steering_Arm_End_Back_Right,
+      Steering_Arm_End_Front_Left, Steering_Arm_End_Front_Right, Steering_Arm_Front_Left,
+      Steering_Arm_Front_Right, Steering_Arm_Reverse_Back_Left, Steering_Arm_Reverse_Back_Right,
+      Steering_Arm_Reverse_Front_Left, Steering_Arm_Reverse_Front_Right, Steering_Base_Back_Left,
+      Steering_Base_Back_Right, Steering_Base_Front_Left, Steering_Base_Front_Right, Steering_Wheel,
+      Suspension_Arm_Back_Left, Suspension_Arm_Back_Right, Suspension_Arm_End_Back_Left,
+      Suspension_Arm_End_Back_Right, Suspension_Arm_End_Front_Left, Suspension_Arm_End_Front_Right,
+      Suspension_Arm_Front_Left, Suspension_Arm_Front_Right, Suspension_Axle_Back_Left,
+      Suspension_Axle_Back_Right, Suspension_Axle_Front_Left, Suspension_Axle_Front_Right, Tailgate,
+      Tailgate_Backrest, Tailgate_Backrest_Extra, Tailgate_Base, Tailgate_End,
+      Tailgate_Piston_Down_Aim_Left, Tailgate_Piston_Down_Aim_Right, Tailgate_Piston_Down_End_Left,
+      Tailgate_Piston_Down_End_Right, Tailgate_Piston_Down_Left, Tailgate_Piston_Down_Right,
+      Tailgate_Piston_Up_Aim_Left, Tailgate_Piston_Up_Aim_Right, Tailgate_Piston_Up_End_Left,
+      Tailgate_Piston_Up_End_Right, Tailgate_Piston_Up_Left, Tailgate_Piston_Up_Right,
+      Tailgate_Up_LeftOff, Tailgate_Up_RightOff, Wheel_Back_Left, Wheel_Back_Right, Wheel_Front_Left,
+      Wheel_Front_Right, Wheel_Hinge_Back_Left, Wheel_Hinge_Back_Right, Wheel_Hinge_Front_Left,
+      Wheel_Hinge_Front_Right
+    Sockets (93): antenna, BodySocket, camera_driver, camera_rider, camera_rider_back, chud_nav_point,
+      d_front_bumper_elite, d_front_bumper_spartan, d_front_windshield_elite,
+      d_front_windshield_spartan, d_rear_bumper_elite, d_rear_bumper_spartan, d_rear_windshield_elite,
+      d_rear_windshield_spartan, default, driver, driver_enter, engine, handbrake, handbrake_elite,
+      Hood_Radius_grp, hull, left_foot, left_foot_d_elite, left_hand, left_hand_d_elite,
+      marine_d_left_foot, marine_d_left_hand, marine_d_right_foot, marine_d_right_hand,
+      marine_p_left_foot, marine_p_right_foot, mongoose_p_left_foot, mongoose_p_left_hand,
+      mongoose_p_right_foot, off_gas_can, off_hood, off_panel_back_left, off_panel_back_right,
+      off_panel_front_left, off_panel_front_right, off_panel_mid_left, off_panel_mid_right, off_shovel,
+      off_tailgate_panel_upper, off_tailgate_panel_upper_left, off_tailgate_panel_upper_right,
+      passenger, passenger_back, passenger_enter, passenger_enter_back, pathfinding, right_foot,
+      right_foot_d_elite, right_hand, right_hand_d_elite, spartan_d_foot_left, spartan_d_foot_right,
+      spartan_d_hand_left, spartan_d_hand_right, spartan_t_hand_left, target_driver,
+      target_fender_back_left, target_fender_back_right, target_fender_front_left,
+      target_fender_front_right, target_passenger, target_wheel_back_left, target_wheel_back_right,
+      target_wheel_front_left, target_wheel_front_right, turret, VH_Wheel_Back_Left,
+      VH_Wheel_Back_Right, VH_Wheel_Front_Left, VH_Wheel_Front_Right, warthog_b_d, warthog_b_d_board,
+      warthog_b_d_enter, warthog_b_p, warthog_b_p_enter, warthog_p_left_foot, warthog_p_left_foot_elite,
+      warthog_p_right_foot, warthog_p_right_foot_elite, wheel_back_left_friction,
+      wheel_back_left_ground, wheel_back_right_friction, wheel_back_right_ground,
+      wheel_front_left_friction, wheel_front_left_ground, wheel_front_right_friction,
+      wheel_front_right_ground
+
+----------------------------------------------------------------------------------------------------
+WARTHOG CHAINGUN        camera file entry: "Warthog gunner"
+----------------------------------------------------------------------------------------------------
+  Part "WarthogChaingun/"
+    Bones (8): b_aim_pitch, b_aim_yaw, b_barrels, b_belt, b_gun, b_hull, b_pedestal,
+      warthog_chaingun_world
+    Sockets (19): aiming_pivot, left_foot, left_hand, marine_g_left_foot, marine_g_left_hand,
+      marine_g_right_foot, marine_g_right_hand, pathfinding, primary_ejection, primary_trigger,
+      right_foot, right_hand, target_gunner, target_turret, warthog_b_g, warthog_b_g_enter, warthog_g,
+      warthog_g_camera, warthog_g_enter
+
+----------------------------------------------------------------------------------------------------
+SCORPION        camera file entry: "Scorpion"
+----------------------------------------------------------------------------------------------------
+  Part "ScorpionVehicle/"
+    Bones (248): AimPitch, AimYaw, HullBody_M, Pedestal, Root_M, SlideDoor_L; plus tread/track joints:
+      F_Tread_* (46), R_Tread_* (36), Tracks_FL_* (45), Tracks_FR_* (45), Tracks_RL_* (35), Tracks_RR_*
+      (35)
+    Sockets (77): anti_infantry_turret, bl_tread_wheels, br_tread_wheels, cab_hatch, center_back,
+      center_front, center_mid_back, center_mid_front, chud_nav_point, engine, fl_tread_wheels,
+      fr_tread_wheels, Headlight_L, Headlight_R, hull_back, hull_front_right, HullBody_MSocket,
+      lb_pitch, lb_suspension, left_hand_lb, left_hand_lf, left_hand_rb, left_hand_rf, lf_pitch,
+      lf_suspension, marine_left_foot, marine_left_hand, marine_right_foot, marine_right_hand,
+      passenger_lb, passenger_lb_camera, passenger_lb_enter, passenger_lf, passenger_lf_camera,
+      passenger_lf_enter, passenger_rb, passenger_rb_camera, passenger_rb_enter, passenger_rf,
+      passenger_rf_camera, passenger_rf_enter, pelican_lc, rb_pitch, rb_suspension, ReverseLight_L,
+      ReverseLight_R, rf_pitch, rf_suspension, scorpion_b_b, scorpion_b_b_enter, scorpion_b_b_grenade,
+      scorpion_b_d_l, scorpion_b_d_l_enter, scorpion_b_d_l_grenade, scorpion_b_d_r,
+      scorpion_b_d_r_enter, scorpion_b_d_r_grenade, scorpion_d, scorpion_d_enter, target_backhatch,
+      target_cab_hatch, target_driver, target_gunner, target_hull_back_left, target_hull_back_right,
+      target_hull_front_left, target_hull_front_right, target_tread_back_left, target_tread_back_right,
+      target_tread_front_left, target_tread_front_right, target_turret, tread_back_left,
+      tread_back_right, tread_front_left, tread_front_right, turret
+
+----------------------------------------------------------------------------------------------------
+SCORPION CANNON (the turret)        camera file entry: "Scorpion"
+----------------------------------------------------------------------------------------------------
+  Part "ScorpionCannon/"
+    Bones (17): AimPitch, AimYaw, Antenna1_L, Antenna1_R, Antenna2_L, Antenna2_R, Antenna3_L,
+      Antenna3_R, Antenna_L, Antenna_R, Barrel_M, BaseTurret_M, HullTurret_M, MainTurret_M, Pedestal,
+      Root_M, TurretBack_M
+    Sockets (11): aiming_pivot, body, default, medium_antenna, primary_trigger, primary_trigger_vent,
+      safe_trigger, secondary_ejection, secondary_trigger, short_antenna, target_turret
+
+----------------------------------------------------------------------------------------------------
+SCORPION ANTI-INFANTRY GUN        camera file entry: "Scorpion gunner"
+----------------------------------------------------------------------------------------------------
+  Part "ScorpionAntiInfantry/"
+    Bones (6): AimPitch, AimYaw, Gun_M, GunBase_M, Pedestal, Root_M
+    Sockets (15): anti_infantry, chief_g_left_hand, chief_g_right_hand, gunner_left_hand,
+      gunner_right_hand, marine_g_left_foot, marine_g_left_hand, marine_g_right_foot,
+      marine_g_right_hand, primary_trigger, scorpion_g, scorpion_g_camera, scorpion_g_enter,
+      target_gunner, target_turret
+
+----------------------------------------------------------------------------------------------------
+WRAITH        camera file entry: "Wraith"
+----------------------------------------------------------------------------------------------------
+  Part "WraithVehicle/"
+    Bones (16): Aim1_L, Aim1_R, Aim2_L, Aim2_R, AimPitch_M, AimYaw_M, BoostWing_L, BoostWing_R,
+      Canopy_M, Hull_M, Pedestal_M, Root_M, Stabilizers_L, Stabilizers_R, Wing_L, Wing_R
+    Sockets (127): antigrav_light, chud_nav_point, default, dest_fin_left, dest_fin_left_exp,
+      dest_fin_left_v, dest_fin_right, dest_fin_right_exp, dest_fin_right_v, dest_hull,
+      dest_keyarea_pri, dest_keyarea_seat, dest_keyarea_sec_bl1, dest_keyarea_sec_bl2,
+      dest_keyarea_sec_l0, dest_keyarea_sec_l1, dest_keyarea_sec_l2, dest_keyarea_sec_l3,
+      dest_keyarea_sec_l4, dest_keyarea_sec_l5, dest_keyarea_sec_l6, dest_keyarea_sec_r0,
+      dest_keyarea_sec_r1, dest_keyarea_sec_r2, dest_keyarea_sec_r3, dest_keyarea_sec_r4,
+      dest_keyarea_sec_r5, dest_keyarea_sec_r6, dest_keyarea_sec_vent_br1, dest_keyarea_sec_vent_br2,
+      dest_keyarea_sec_vent_l1, dest_keyarea_sec_vent_l2, dest_keyarea_sec_vent_l3,
+      dest_keyarea_sec_vent_l4, dest_keyarea_sec_vent_r1, dest_keyarea_sec_vent_r2,
+      dest_keyarea_sec_vent_r3, dest_keyarea_sec_vent_r4, dest_keyarea_spawn, dest_pipe_l0,
+      dest_pipe_l1, dest_pipe_l2, dest_pipe_r0, dest_pipe_r1, dest_pipe_r2, dest_weakpoint,
+      hatch_marker_lod, l_engine, left_back_antigrav, left_front_antigrav,
+      left_front_antigrav_suspension, left_front_mid_antigrav, off_boost_hood_left,
+      off_boost_hood_right, off_boost_wing_left, off_boost_wing_right, off_canopy_01, off_canopy_02,
+      off_canopy_03, off_canopy_04, off_fin_left, off_fin_right, off_hood, off_hood_01, off_hood_02,
+      off_hood_03, off_hood_04, off_hood_05, off_hood_06, off_hood_07, off_hood_08, off_hood_09,
+      off_stab_inner_left, off_stab_inner_right, off_stab_outer_left, off_stab_outer_right,
+      off_stabilizer_left, off_stabilizer_right, off_wing_half_left, off_wing_half_right,
+      off_wing_left_back_01, off_wing_left_back_02, off_wing_left_front_01, off_wing_left_front_02,
+      off_wing_left_front_03, off_wing_right_back_01, off_wing_right_back_02, off_wing_right_back_03,
+      off_wing_right_front_01, off_wing_right_front_02, off_wing_right_front_03,
+      off_wing_right_front_04, pathfinding, Pedestal_MSocket, r_engine, right_back_antigrav,
+      right_front_antigrav, right_front_antigrav_suspension, right_front_mid_antigrav, stabilizer_left,
+      stabilizer_right, target_backhatch, target_driver, target_hatch, target_hull_front,
+      target_hull_rear, target_rudder_left, target_rudder_right, target_wing_left, target_wing_right,
+      turret, turret_gunner, wing_left, wing_left_foot, wing_right, wing_right_foot, wraith_b_b,
+      wraith_b_b_enter, wraith_b_b_grenade, wraith_b_l, wraith_b_l_enter, wraith_b_l_grenade,
+      wraith_b_r, wraith_b_r_enter, wraith_b_r_grenade, wraith_d, wraith_d_enter
+
+----------------------------------------------------------------------------------------------------
+WRAITH MORTAR        camera file entry: "Wraith"
+----------------------------------------------------------------------------------------------------
+  Part "WraithMortar/"
+    Bones (19): AimPitch_M, AimYaw_M, Deflector_L, Deflector_R, Door_L, Door_R, DoorHinger_L,
+      DoorHinger_R, GunArm1_M, GunArm2_M, GunBase_M, GunShield_M, Hatch_L, Hatch_R, Hinge_L, Hinge_R,
+      MortarHull_M, Pedestal_M, Root_M
+    Sockets (12): driver_camera, off_hood_back_left, off_hood_back_right, off_hood_front_left,
+      off_hood_front_right, off_hood_mid_left, off_hood_mid_right, pathfinding, primary_trigger,
+      target_gun, target_hull_left, target_hull_right
+
+----------------------------------------------------------------------------------------------------
+WRAITH ANTI-INFANTRY GUN        camera file entry: "Wraith turret"
+----------------------------------------------------------------------------------------------------
+  Part "WraithAntiInfantry/"
+    Bones (6): AimPitch_M, AimYaw_M, Pedestal_M, Root_M, Turret_M, TurretSeat_M
+    Sockets (12): Grunt_left_hand, grunt_left_hand, grunt_right_hand, gunner_left_hand,
+      gunner_right_hand, primary_trigger, target_gunner, target_turret, Wraith_G, wraith_g,
+      wraith_g_camera, wraith_g_enter
+
+----------------------------------------------------------------------------------------------------
+SHADE        camera file entry: "Shade"
+----------------------------------------------------------------------------------------------------
+  Part "ShadeVehicle/"
+    Bones (12): AimPitch_M, AimYaw_M, Counter_Ring_M, Guns_M, Pedestal_M, Ring_M, Root_M, Shell_L,
+      Shell_R, Turret_M, Wing_L, Wing_R
+    Sockets (5): body, chud_nav_point, cockpit, target_turret, turret
+  Part "ShadePlasmaCannon/"
+    Bones (12): AimPitch_M, AimYaw_M, Counter_Ring_M, Guns_M, Pedestal_M, Ring_M, Root_M, Shell_L,
+      Shell_R, Turret_M, Wing_L, Wing_R
+    Sockets (22): aiming_pivot, Grunt_left_hand, Grunt_right_hand, left_foot, left_hand,
+      off_base_shield_left, off_base_shield_right, off_mid_panel, off_shield_left, off_shield_right,
+      primary_trigger, right_foot, right_hand, shade_d, shade_d_camera, shade_d_enter, target_gunner,
+      target_turret, target_wing_left, target_wing_right, turret, Turret_MSocket
+
+----------------------------------------------------------------------------------------------------
+PELICAN        camera file entry: "Pelican"
+----------------------------------------------------------------------------------------------------
+  Part "PelicanVehicle/"
+    Bones (24): b_aim_pitch, b_aim_yaw, b_cargo_bay_door, b_engine_l_main, b_engine_l_rear,
+      b_engine_r_main, b_engine_r_rear, b_flaps_l, b_flaps_r, b_gear_front, b_gear_front_tire,
+      b_hatch_lower, b_hatch_upper, b_hull, b_l_gear_hatch, b_landing_l_arm, b_landing_l_gear,
+      b_landing_l_tire, b_landing_r_arm, b_landing_r_gear, b_landing_r_tire, b_pedestal, b_r_gear_hatch,
+      pelican_world
+    Sockets (0): none
+  Part "PelicanChinGun/"
+    Bones (11): AimPitch, AimYaw, GunPart1_M, GunPart2_M, GunPiston1_L, GunPiston1_R, GunPiston2_L,
+      GunPiston2_R, GunSpring_M, Pedestal, Root_M
+    Sockets (5): camera, driver, pathfinding, primary_trigger, vehicle_attach
 

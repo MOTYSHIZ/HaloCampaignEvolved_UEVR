@@ -649,7 +649,8 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"                    the Chief, so it turns with a turret even where the turret's mesh does not);\",\n";
     s += "    \"                    or any other name: a bone or socket on the vehicle, and the camera rides it --\",\n";
     s += "    \"                    e.g. \\\"MainTurret_M\\\", the Scorpion cannon's turret. \\\"Part/Name\\\" picks the part\",\n";
-    s += "    \"                    (\\\"ScorpionCannon/AimYaw\\\"); not found = the vehicle's centre (the log says why)\",\n";
+    s += "    \"                    (\\\"ScorpionCannon/AimYaw\\\"); not found = the vehicle's centre (the log says why).\",\n";
+    s += "    \"                    Every vehicle's bone and socket names: halo_vr_vehicle_mesh_reference.txt\",\n";
     s += "    \"  offset            [forward, right, up] in cm from the origin (negative forward = behind);\",\n";
     s += "    \"                    locationTracking decides whether those directions turn with the vehicle\",\n";
     s += "    \"  locationTracking  which vehicle rotations carry the camera's position round: any of yaw, pitch,\",\n";
@@ -703,7 +704,7 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  hideMeshes = parts of the VEHICLE hidden while you sit in this seat: a list of text found in a part's\",\n";
     s += "    \"  name or in the name of the model it draws (case does not matter) -- for a camera inside the vehicle,\",\n";
     s += "    \"  where the insides a damaged vehicle shows can come up across your view (left out = none). Every\",\n";
-    s += "    \"  vehicle's part names are listed in halo_vr_vehicle_mesh_reference.txt, beside this file.\",\n";
+    s += "    \"  vehicle's mesh names are listed in halo_vr_vehicle_mesh_reference.txt, beside this file.\",\n";
     s += "    \"Your last camera, mode and controls in each seat are kept.\",\n";
     s += "    \"Keys starting with _ are notes and are ignored: add your own anywhere (\\\"_why\\\": \\\"...\\\").\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";
