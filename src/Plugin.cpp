@@ -6441,13 +6441,43 @@ void update() {
                                      "show %s; per-eye projections %s; XR layer head and aim-convergence eye = %s; "
                                      "layer quads %s (xrlayermonoflat=%d, %u samples, swing ring=0x%02X max=%.1f cm)",
                                      declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm),
-                                     shared ? "IDENTICAL (one image serves both eyes)" : "differ (a stereo pair)",
+                                     shared ? "IDENTICAL (one frustum for both eyes: real mono, a symmetric projection override, or symmetric lenses)" : "differ (a stereo pair)",
                                      head_from,
                                      flat ? "FLATTENED to infinity to match the mono image"
                                           : (declared == 3 && halo::viewmode_backend_warps())
                                                 ? "at their real depth (AFW renders the eyes by turns: never flattened)"
                                                 : "at their real depth",
                                      g_cfg.xr_layer_mono_flat, halo::viewmode_samples(), ring, swing);
+            }
+
+            // THE UEVR SETTINGS A BUG REPORT TURNS ON, in one line, whenever any of them changes. A player's
+            // UEVR settings are their own, not the profile's: the report behind this line came from a
+            // session at another rendering method, another world scale and (probably) a symmetric
+            // projection override, and none of that could be read from the log. Twelve string reads on
+            // the 2 s poll, logged on change only. World scale is left out: WORLDSCALE already says it.
+            {
+                static const char* const kKeys[] = {
+                    "VR_RenderingMethod", "VR_SyncedSequentialMethod", "VR_DecoupledPitch", "VR_AimMethod",
+                    "VR_HorizontalProjectionOverride", "VR_VerticalProjectionOverride", "VR_SnapTurn",
+                    "VR_GhostingFix", "VR_NativeStereoFix", "VR_ExtremeCompatibilityMode", "VR_2DScreenMode",
+                    "VR_UncapFramerate",
+                };
+                static char s_said[640] = {0};
+                char line[640] = {0};
+                size_t n = 0;
+                for (const char* key : kKeys) {
+                    char val[24]{};
+                    API::get()->param()->vr->get_mod_value(key, val, sizeof(val));
+                    val[sizeof(val) - 1] = '\0';
+                    const int w = _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "%s%s=%s",
+                                              (n != 0) ? " " : "", key + 3, (val[0] != '\0') ? val : "?");
+                    if (w < 0) break;
+                    n += (size_t)w;
+                }
+                if (strcmp(line, s_said) != 0) {
+                    strcpy_s(s_said, sizeof(s_said), line);
+                    API::get()->log_info("[Halo-CampE-UEVR] UEVR SETTINGS: %s  (? = this backend has no such key)", line);
+                }
             }
         }
 
