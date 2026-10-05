@@ -613,6 +613,12 @@
 # game's seat switch moves to a grip: 1 = the left grip (that grip then no longer brakes; the right grip
 # still does), 2 = the right grip, 0 = left X keeps it, as the game ships.
 #vehseatgrip=1
+# Passenger seats: switch weapon on the left trigger. In a passenger seat (the Warthog's side seat) you
+# keep your own weapons, but left Y steps the vehicle camera there. 1 = squeezing the left trigger
+# switches your weapon, left Y only steps the camera, and the trigger no longer zooms in that seat; a
+# note says so when you sit down. 0 = the trigger and left Y are the game's, as it ships. Driver and
+# gunner seats are never affected.
+#vehpassswap=1
 # Vehicle aim ring. A ring where the vehicle itself is aiming, beside your crosshair; once the vehicle
 # has caught up with your hand it sits around the crosshair. 0 hides it everywhere (each vehicle can
 # also turn it off with "aimMarker" in halo_vr_vehcams.json, and so can each camera and tethering

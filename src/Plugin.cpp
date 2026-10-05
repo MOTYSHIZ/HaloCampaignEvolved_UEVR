@@ -14032,6 +14032,49 @@ public:
                 if (!blocked) state->Gamepad.bLeftTrigger = 0;
             }
         }
+
+        // ---- PASSENGER SEAT: LEFT TRIGGER -> SWITCH WEAPON (vehpassswap; the user, 2026-10-04). A
+        // passenger keeps his own weapons, but the game's switch is left Y (vehpassswapmask: 0x8000), and
+        // in a seat our cameras read left Y as the next camera -- one press, two actions, the same clash
+        // the seat grip above settles for left X. So in a passenger seat a squeeze of the left trigger
+        // sends the switch, and both physical inputs are kept from the game there: left Y steps the
+        // camera only, and the trigger no longer reaches the game's own zoom. Passenger = the game names
+        // the seat and it is neither the driver's nor a gunner's (veh_seat_passenger), so a driver's and
+        // a gunner's trigger are never touched, and nothing happens before the seat is named.
+        //
+        // AFTER the scope block on purpose: that block's edge detectors must see the real trigger on
+        // every poll (a seat is "blocked" there, so it passes the trigger through untouched), and only
+        // then is it taken. The press is a timed pulse, like the holster's swap, and the trigger must be
+        // let go once in the seat before it counts: one held while boarding must not swap. Our own
+        // hysteresis on the scope's threshold. The pause's own Y handling reads the physical snapshot
+        // (raw_btn), so it is unaffected.
+        {
+            static bool s_armed = false, s_down = false;
+            static ULONGLONG s_until = 0;
+            const WORD m = (WORD)g_cfg.veh_pass_swap_mask;
+            if (m == 0 || !veh_seat_passenger() || !veh_controls_live(g_in_menu.load())) {
+                s_armed = false; s_down = false; s_until = 0;
+            } else {
+                const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
+                const uint8_t off_t = (uint8_t)(on_t / 2);
+                const uint8_t lt    = state->Gamepad.bLeftTrigger;
+                const ULONGLONG t   = GetTickCount64();
+                if (lt <= off_t) {
+                    s_armed = true; s_down = false;
+                } else if (s_armed && !s_down && lt >= on_t) {
+                    s_down = true;
+                    s_until = t + (ULONGLONG)(g_cfg.holster_press_ms > 0 ? g_cfg.holster_press_ms : 1);
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: passenger seat -- left trigger: switch weapon "
+                                         "(0x%04X for %d ms)", (unsigned)m, g_cfg.holster_press_ms);
+                }
+                const WORD before = state->Gamepad.wButtons;
+                state->Gamepad.wButtons &= (WORD)~m;                     // left Y: the camera only
+                if (s_until != 0 && t < s_until) state->Gamepad.wButtons |= m;
+                else s_until = 0;
+                if (lt != 0 || state->Gamepad.wButtons != before) state->dwPacketNumber++;
+                state->Gamepad.bLeftTrigger = 0;                         // not the game's zoom in this seat
+            }
+        }
         // ---- HOLSTERS: TAKE THE BUTTONS WE SYNTHESISE, BEFORE WE SYNTHESISE THEM.
         //
         // The swap / throw / grenade-switch masks are real game buttons. Holster.cpp decides when

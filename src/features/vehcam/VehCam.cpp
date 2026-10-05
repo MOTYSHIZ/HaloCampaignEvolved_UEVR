@@ -2407,6 +2407,8 @@ static bool parse_veh_key(const char* key, const char* val, double v) {
     if (_stricmp(key, "vehctrlclick")   == 0) { g_cfg.veh_ctrl_click = (int)v; return true; }
     if (_stricmp(key, "vehseatgrip")    == 0) { g_cfg.veh_seat_grip = (int)v; return true; }
     if (_stricmp(key, "vehseatmask")    == 0) { g_cfg.veh_seat_mask = (int)strtol(val, nullptr, 0); return true; }
+    if (_stricmp(key, "vehpassswap")    == 0) { g_cfg.veh_pass_swap = (int)v; return true; }
+    if (_stricmp(key, "vehpassswapmask") == 0) { g_cfg.veh_pass_swap_mask = (int)strtol(val, nullptr, 0); return true; }
     if (_stricmp(key, "vehcamrecenter") == 0) { g_cfg.veh_cam_recenter = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamrecenterpos") == 0) { g_cfg.veh_cam_recenter_pos = (v != 0.0); return true; }
     if (_stricmp(key, "vehcamresethold") == 0) {

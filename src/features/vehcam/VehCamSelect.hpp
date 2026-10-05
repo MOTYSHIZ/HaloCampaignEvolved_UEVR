@@ -57,6 +57,11 @@ VehActiveCam veh_active_cam();
 // the whole VehActiveCam per call.
 bool veh_cam_selected();
 
+// Any thread, one atomic load: a camera is selected AND the game names your seat a passenger's (neither the
+// driver's nor a gunner's) AND vehpassswap is on -- the seat where the left trigger switches your weapon.
+// False until the game has named the seat. For the input hook.
+bool veh_seat_passenger();
+
 // GAME thread, once at startup: remember the path, write the built-in cameras there if the player
 // has no file (never overwrites one), and load it.
 void vehcam_presets_init(const char* path);

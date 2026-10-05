@@ -1481,6 +1481,17 @@
     // vehseatmask: the pad bit that switch seat is on, as the game sees left X in a seat -- 0x2000,
     // XInput's B (measured: left X reports 0x2000; Config.hpp's button table). Dev key.
     int   veh_seat_mask = 0x2000;
+    // vehpassswap: in a PASSENGER seat (the game names it: neither the driver's nor a gunner's -- the
+    // Warthog's side seat), the LEFT TRIGGER switches your weapon (the user, 2026-10-04). A passenger keeps
+    // his own weapons, but the game's switch is on left Y, which our cameras read as the next camera: one
+    // press, two actions. 1 = a squeeze sends the game's switch weapon, and in that seat left Y only steps
+    // the camera and the trigger's own job (the game's zoom) is kept from the game (default); 0 = both are
+    // the game's, as before. Only while our vehicle cameras run (vehtp), since that is when left Y is taken
+    // and how the seat is known; a trigger held as you sit down does nothing until it has been let go.
+    int   veh_pass_swap = 1;
+    // vehpassswapmask: the pad bit the game's SWITCH WEAPON is on -- 0x8000, XInput's Y, which is how left
+    // Y reaches the game (Plugin.cpp's head-tap pause reads the same bit). Dev key.
+    int   veh_pass_swap_mask = 0x8000;
     // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X, the left stick click (what
     // aims changes), a seat switch -- turn the view so what aims the vehicle points where the vehicle is
     // aiming (yaw only, about your head, through the same turn the right stick uses). What aims it: your aim

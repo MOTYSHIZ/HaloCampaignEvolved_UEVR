@@ -32,6 +32,7 @@ std::atomic<int> s_mode_step{0};             // left X: the camera's tethering m
 std::atomic<int> s_view_reset{0};            // left X or Y held a second, posted by the input hook
 std::atomic<int> s_ctrl_toggle{0};           // left stick click, posted by the input hook
 std::atomic<bool> s_selected{false};         // veh_cam_selected(): the published camera's `valid`
+std::atomic<bool> s_passenger{false};        // veh_seat_passenger(): a camera selected in a passenger seat
 
 void publish(const VehActiveCam& a) {
     const int back = s_active_front.load(std::memory_order_relaxed) ^ 1;
@@ -286,6 +287,56 @@ void clear_selection(const char* why = "out of the vehicle") {
     g_veh_tp_active.store(false, std::memory_order_relaxed);
 }
 
+// A PASSENGER SEAT WITH THE LEFT TRIGGER ON SWITCH WEAPON (vehpassswap; the input hook's lane keys on
+// veh_seat_passenger(), which is this). Passenger = the game names the seat and it is neither the driver's
+// nor a gunner's.
+bool passenger_swap_seat() {
+    return g_cfg.veh_pass_swap != 0 && g_cfg.veh_pass_swap_mask != 0 && s_seat == vcp::kSeatPassenger;
+}
+
+// THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name and
+// its tethering mode's, and what it does. ROTATION TRACKING IS YELLOW: in VR the view turning when you
+// did not turn is what carries the most motion-sickness risk, so the axes that do it stand out.
+// Placed and timed by the xrtext* defaults. `a` = the camera as published (make_active).
+void readout(int vi, int ci, int mi, const VehActiveCam& a) {
+    if (!g_cfg.veh_cam_readout) return;
+    const vcp::Vehicle& v = s_table.vehicles[vi];
+    const int n = static_cast<int>(v.cameras.size());
+    const vcp::Camera& c = v.cameras[ci];
+    const int nm = c.mode_count();
+    const vcp::Tether mode = c.mode(mi);
+    const std::string loc = vcp::location_tracking_text(mode), rot = vcp::rotation_tracking_text(mode);
+    const std::string mlabel = mode_label(mode, mi);
+    std::string md = "# " + v.name + " \xC2\xB7 Camera " + std::to_string(ci + 1) + " of " + std::to_string(n) + "\n";
+    const bool first_person = c.type == vcp::CamType::FirstPerson;
+    const bool modes = nm > 1 && !first_person;
+    if (modes) md += "## " + (c.name.empty() ? mlabel : c.name + " \xC2\xB7 " + mlabel) + "\n";
+    else if (!c.name.empty()) md += "## " + c.name + "\n";
+    if (first_person) {
+        md += "**Type:** First-person seat camera\n";
+    } else {
+        if (modes) md += "**Tethering:** " + std::to_string(mi + 1) + " of " + std::to_string(nm) + " *(left X)*\n";
+        const vcp::Origin o = static_cast<vcp::Origin>(a.origin);   // the mode's, else the camera's
+        md += std::string("**Origin:** ")
+            + (o == vcp::Origin::Seat ? std::string("Seat") : (o == vcp::Origin::Head ? std::string("Player's head")
+               : (o == vcp::Origin::Socket ? std::string(a.socket) : std::string("Vehicle")))) + "\n";
+        char off[96];
+        std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
+        md += off;
+        if (a.leashed) md += "**Leash:** " + vcp::leash_text(a.leash_min, a.leash_max) + "\n";
+        md += "**Location Tracking:** " + loc + "\n";
+        md += "**Rotation Tracking:** " + ((mode.rot_yaw || mode.rot_pitch || mode.rot_roll) ? "==" + rot + "==" : rot) + "\n";
+    }
+    md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
+    // The seat as the GAME reports it -- what an entry's "seat" is matched against.
+    if (s_seat != 0) md += "**Seat:** " + vcp::seat_text(static_cast<uint8_t>(s_seat)) + "\n";
+    // Halo steers a vehicle toward where it aims, so in the driver's seat pointing IS steering.
+    if (motion_on(a) && driver_steers()) md += "*Point to steer and aim*\n";
+    // A passenger's left trigger (vehpassswap): said here, on the panel that names the seat.
+    if (passenger_swap_seat()) md += "*Left trigger: switch weapon*\n";
+    xrtext_show(md);
+}
+
 // recenter: this selection is a camera CHANGE the player made or got (getting in, left Y / X, a seat), so
 // the view turns until what aims the vehicle points where it aims and your head goes back on the camera's
 // point (camera_change(); the eye works both out). A file reload keeps your view where it is: editing a
@@ -333,38 +384,7 @@ void select(int vi, int ci, int mi, const char* why, bool recenter) {
                          motion_on(a) ? "motion" : "stick",
                          s_seat != 0 ? vcp::seat_text(static_cast<uint8_t>(s_seat)).c_str() : "unknown");
 
-    // THE READOUT on the text panel (vehcamreadout): which vehicle, which camera of how many, its name and
-    // its tethering mode's, and what it does. ROTATION TRACKING IS YELLOW: in VR the view turning when you
-    // did not turn is what carries the most motion-sickness risk, so the axes that do it stand out.
-    // Placed and timed by the xrtext* defaults.
-    if (g_cfg.veh_cam_readout) {
-        std::string md = "# " + v.name + " \xC2\xB7 Camera " + std::to_string(ci + 1) + " of " + std::to_string(n) + "\n";
-        const bool first_person = c.type == vcp::CamType::FirstPerson;
-        const bool modes = nm > 1 && !first_person;
-        if (modes) md += "## " + (c.name.empty() ? mlabel : c.name + " \xC2\xB7 " + mlabel) + "\n";
-        else if (!c.name.empty()) md += "## " + c.name + "\n";
-        if (first_person) {
-            md += "**Type:** First-person seat camera\n";
-        } else {
-            if (modes) md += "**Tethering:** " + std::to_string(mi + 1) + " of " + std::to_string(nm) + " *(left X)*\n";
-            const vcp::Origin o = static_cast<vcp::Origin>(a.origin);   // the mode's, else the camera's
-            md += std::string("**Origin:** ")
-                + (o == vcp::Origin::Seat ? std::string("Seat") : (o == vcp::Origin::Head ? std::string("Player's head")
-                   : (o == vcp::Origin::Socket ? std::string(a.socket) : std::string("Vehicle")))) + "\n";
-            char off[96];
-            std::snprintf(off, sizeof(off), "**Offset:** %.0f, %.0f, %.0f cm\n", a.offset[0], a.offset[1], a.offset[2]);
-            md += off;
-            if (a.leashed) md += "**Leash:** " + leash + "\n";
-            md += "**Location Tracking:** " + loc + "\n";
-            md += "**Rotation Tracking:** " + ((mode.rot_yaw || mode.rot_pitch || mode.rot_roll) ? "==" + rot + "==" : rot) + "\n";
-        }
-        md += std::string("**Controls:** ") + (motion_on(a) ? "Motion aim" : "Stick") + "\n";
-        // The seat as the GAME reports it -- what an entry's "seat" is matched against.
-        if (s_seat != 0) md += "**Seat:** " + vcp::seat_text(static_cast<uint8_t>(s_seat)) + "\n";
-        // Halo steers a vehicle toward where it aims, so in the driver's seat pointing IS steering.
-        if (motion_on(a) && driver_steers()) md += "*Point to steer and aim*\n";
-        xrtext_show(md);
-    }
+    readout(vi, ci, mi, a);
 }
 
 // LEFT STICK CLICK: flip this seat between motion controls and stick controls, and say which on the text
@@ -562,6 +582,8 @@ VehActiveCam veh_active_cam() {
     return s_active[s_active_front.load(std::memory_order_acquire)];
 }
 
+bool veh_seat_passenger() { return s_passenger.load(std::memory_order_relaxed); }
+
 bool veh_cam_selected() {
     return s_selected.load(std::memory_order_relaxed);
 }
@@ -672,6 +694,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
         s_mode_step.store(0, std::memory_order_relaxed);
         s_view_reset.store(0, std::memory_order_relaxed);
         s_ctrl_toggle.store(0, std::memory_order_relaxed);
+        s_passenger.store(false, std::memory_order_relaxed);
         decoupled_pitch_update(false);
         return;
     }
@@ -714,8 +737,13 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
                 API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: %s -- the game %s your seat: %s", s_vehicle_name.c_str(),
                                      seat_switched ? "switched" : "names", seat_said.c_str());
                 if (seat_switched) camera_change();
-                if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size()))
-                    publish(make_active(s_vehicle, s_camera, s_mode));
+                if (s_camera >= 0 && s_camera < static_cast<int>(v.cameras.size())) {
+                    const VehActiveCam a = make_active(s_vehicle, s_camera, s_mode);
+                    publish(a);
+                    // A passenger seat's trigger control belongs on the panel, and the readout shown as you
+                    // got in was made before the game named the seat: show it again, seat and all.
+                    if (passenger_swap_seat()) readout(s_vehicle, s_camera, s_mode, a);
+                }
             } else {
                 // This seat's last camera, in its last mode -- by NAME, so a file edit that reorders the
                 // cameras keeps you in the one you are in (select() keeps the memory current).
@@ -767,6 +795,7 @@ void vehcam_select_tick(bool in_vehicle, uintptr_t chassis, const std::wstring& 
     }
 
     const VehActiveCam a = veh_active_cam();
+    s_passenger.store(a.valid && passenger_swap_seat(), std::memory_order_relaxed);
     decoupled_pitch_update(a.valid && g_veh_tp_active.load(std::memory_order_relaxed)
                            && (a.rot_pitch || a.rot_roll));
 }
