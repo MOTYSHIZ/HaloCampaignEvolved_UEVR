@@ -702,7 +702,8 @@ std::string table_to_json(const Table& t, bool guide) {
     s += "    \"  one named hull or body, else the nearest);\",\n";
     s += "    \"  hideMeshes = parts of the VEHICLE hidden while you sit in this seat: a list of text found in a part's\",\n";
     s += "    \"  name or in the name of the model it draws (case does not matter) -- for a camera inside the vehicle,\",\n";
-    s += "    \"  where the insides a damaged vehicle shows can come up across your view (left out = none).\",\n";
+    s += "    \"  where the insides a damaged vehicle shows can come up across your view (left out = none). Every\",\n";
+    s += "    \"  vehicle's part names are listed in halo_vr_vehicle_mesh_reference.txt, beside this file.\",\n";
     s += "    \"Your last camera, mode and controls in each seat are kept.\",\n";
     s += "    \"Keys starting with _ are notes and are ignored: add your own anywhere (\\\"_why\\\": \\\"...\\\").\",\n";
     s += "    \"Saved changes apply within a couple of seconds. This file is yours: updates never overwrite it,\",\n";

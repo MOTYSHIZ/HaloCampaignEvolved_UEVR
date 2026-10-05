@@ -1,0 +1,649 @@
+HALO VR -- VEHICLE MESH REFERENCE
+
+The names "hideMeshes" can use in halo_vr_vehcams.json. This file is documentation only: the mod never
+reads it, and editing it changes nothing.
+
+WHAT hideMeshes IS FOR
+  Some vehicle cameras sit INSIDE the vehicle and see out through its hull. Anything the game draws in
+  there shows up right in front of your eyes: the insides a damaged vehicle reveals, or a stray piece
+  of geometry nobody could see in the flat game. hideMeshes hides parts of the vehicle while you sit in
+  a seat, or only in one of its cameras.
+
+HOW TO USE IT
+  In halo_vr_vehcams.json, on a vehicle entry (every camera of that seat) or on one camera:
+
+      "hideMeshes": ["canopy_m_core_damage", "canopy_m_panel"]
+
+  - Each entry is TEXT FOUND IN A NAME below. Case does not matter. "canopy" hides every part with
+    canopy in its name; "canopy_m_panela_damage" hides exactly one.
+  - A camera's own list REPLACES its seat's list. "hideMeshes": [] on a camera hides nothing there.
+  - Only parts of the vehicle itself are ever hidden, never your own body.
+  - A part comes back the moment you change camera, get out, or press the kill switch.
+  - Saved changes apply within a couple of seconds, so you can try names while sitting in the vehicle.
+
+HOW THE GAME BUILDS A VEHICLE
+  A vehicle is separate pieces hung on a skeleton. Each piece shows its STOCK mesh until that part of
+  the vehicle is damaged, then the game swaps in a DAMAGED mesh. Some parts split into several pieces
+  when damaged (the Banshee's canopy becomes a core and five panels). So:
+  - To clear a view only when the vehicle is damaged, name the damaged meshes.
+  - To remove a part outright, name both its stock and its damaged meshes.
+  - From inside, a stock hull piece is usually see-through already, so hiding it changes nothing.
+
+  The mesh marked "skeleton only" is the skeleton the pieces hang from. It draws almost nothing, but
+  the Banshee's draws one stray triangle at the vehicle's centre, right in the eyes of a camera placed
+  there: "sk_banshee" hides it. The other vehicles' skeletons have not been checked.
+
+  A TURRET IS A VEHICLE OF ITS OWN in the game (the Scorpion's cannon, the Wraith's mortar, the gunner
+  seats). A seat can hide parts of the vehicle it belongs to and of the hull its cameras follow.
+  Hiding a turret's parts from a seat on the hull, or the hull's from some turret seats, is untested:
+  if a name does nothing, that is the likely reason.
+
+Names are the game's own, listed from the Steam release on 2026-10-04. A game update may
+rename or add parts. Debris that flies off a vehicle is not listed: it is not part of the vehicle.
+
+====================================================================================================
+BANSHEE        camera file entry: "Banshee"
+====================================================================================================
+  Skeletal meshes
+    SK_Banshee                                           skeleton only
+  Stock parts
+    SM_Banshee_BoostIn_L_Default
+    SM_Banshee_BoostIn_R_Default
+    SM_Banshee_BoostOut_L_Default
+    SM_Banshee_BoostOut_R_Default
+    SM_Banshee_Canopy_M_Default
+    SM_Banshee_Gun_L_Default
+    SM_Banshee_Gun_R_Default
+    SM_Banshee_Hull_M_Default
+    SM_Banshee_Hull_M_LeftGun_Default
+    SM_Banshee_Hull_M_RightGun_Default
+    SM_Banshee_RearSeal_M_Default
+    SM_Banshee_RudderBottom_L_Default
+    SM_Banshee_RudderBottom_R_Default
+    SM_Banshee_RudderTop_L_Default
+    SM_Banshee_RudderTop_R_Default
+    SM_Banshee_Wing_L_Default
+    SM_Banshee_Wing_R_Default
+  Damaged parts
+    SM_Banshee_Canopy_M_Core_Damage
+    SM_Banshee_Canopy_M_PanelA_Damage
+    SM_Banshee_Canopy_M_PanelB_Damage
+    SM_Banshee_Canopy_M_PanelC_Damage
+    SM_Banshee_Canopy_M_PanelD_Damage
+    SM_Banshee_Canopy_M_PanelE_Damage
+    SM_Banshee_Gun_L_Damage
+    SM_Banshee_Gun_R_Damage
+    SM_Banshee_Hull_M_Core_Damage
+    SM_Banshee_Hull_M_LeftGun_Damage
+    SM_Banshee_Hull_M_RightGun_Damage
+    SM_Banshee_RudderBottom_L_Damage
+    SM_Banshee_RudderTop_L_Damage
+    SM_Banshee_RudderTop_R_Damage
+    SM_Banshee_Wing_L_Front_Damage
+    SM_Banshee_Wing_L_Rear_Damage
+    SM_Banshee_Wing_R_Front_Damage
+    SM_Banshee_Wing_R_Rear_Damage
+
+====================================================================================================
+GHOST        camera file entry: "Ghost"
+====================================================================================================
+  Stock parts
+    SM_Ghost_Chassis_Default_UI
+    SM_Ghost_Default_Body
+    SM_Ghost_Default_Body_Pipe
+    SM_Ghost_Default_Wing_Left
+    SM_Ghost_Default_Wing_Right
+    SM_Ghost_Default_Workaround_Cube
+    SM_Ghost_Engine_Left
+    SM_Ghost_Engine_Right
+    SM_Ghost_Fin_Left
+    SM_Ghost_Fin_Right
+    SM_Ghost_Gun_Left
+    SM_Ghost_Gun_Right
+    SM_Ghost_Hood
+    SM_Ghost_Pedal
+    SM_Ghost_Seat
+    SM_Ghost_Stick_Left
+    SM_Ghost_Stick_Right
+    SM_Ghost_Tail
+  Medium damage parts
+    SM_Ghost_Medium_Gun_Left
+    SM_Ghost_Medium_Gun_Right
+    SM_Ghost_Medium_Hood_Panel_Center_1
+    SM_Ghost_Medium_Hood_Panel_Center_2
+    SM_Ghost_Medium_Hood_Panel_Center_3
+    SM_Ghost_Medium_Hood_Panel_Low_1
+    SM_Ghost_Medium_Hood_Panel_Low_2
+    SM_Ghost_Medium_Hood_Panel_Low_3
+    SM_Ghost_Medium_Hood_Panel_Low_4
+    SM_Ghost_Medium_Hood_Panel_Low_5
+    SM_Ghost_Medium_Hood_Panel_Mid_1
+    SM_Ghost_Medium_Hood_Panel_Mid_2
+    SM_Ghost_Medium_Hood_Panel_Mid_3
+    SM_Ghost_Medium_Hood_Panel_Mid_4
+    SM_Ghost_Medium_Hood_Panel_Mid_5
+    SM_Ghost_Medium_Hood_Panel_Mid_6
+    SM_Ghost_Medium_Tail_Panel_Low_1
+    SM_Ghost_Medium_Tail_Panel_Low_2
+    SM_Ghost_Medium_Tail_Panel_Low_3
+    SM_Ghost_Medium_Tail_Panel_Low_4
+    SM_Ghost_Medium_Tail_Panel_Low_5
+    SM_Ghost_Medium_Tail_Panel_Low_6
+    SM_Ghost_Medium_Tail_Panel_Upper_1
+    SM_Ghost_Medium_Tail_Panel_Upper_2
+    SM_Ghost_Medium_Wing_Left
+    SM_Ghost_Medium_Wing_Right
+  Damaged parts
+    SM_Ghost_Prop_Damaged
+    SM_Ghost_Semi_Damaged_Pedal
+    SM_Ghost_Semi_Damaged_Tail
+
+====================================================================================================
+WARTHOG        camera file entry: "Warthog / Warthog passenger"
+====================================================================================================
+  Skeletal meshes
+    SK_Warthog_Antenna_Default                           skeleton only
+    SK_Warthog_01                                        a full skinned mesh
+  Stock parts
+    SM_Warthog_Base_Axle_Back_Left
+    SM_Warthog_Base_Axle_Back_Right
+    SM_Warthog_Base_Axle_Front_Left
+    SM_Warthog_Base_Axle_Front_Right
+    SM_Warthog_Body
+    SM_Warthog_Body_Panels
+    SM_Warthog_Drive_Axle_Back_Left
+    SM_Warthog_Drive_Axle_Back_Right
+    SM_Warthog_Drive_Axle_Front_Left
+    SM_Warthog_Drive_Axle_Front_Right
+    SM_Warthog_Drive_Spindle_Back_Left
+    SM_Warthog_Drive_Spindle_Back_Right
+    SM_Warthog_Drive_Spindle_Front_Left
+    SM_Warthog_Drive_Spindle_Front_Right
+    SM_Warthog_DriveArm_Back_Left
+    SM_Warthog_DriveArm_Back_Right
+    SM_Warthog_DriveArm_Front_Left
+    SM_Warthog_DriveArm_Front_Right
+    SM_Warthog_EBrake
+    SM_Warthog_Gas_Can
+    SM_Warthog_Hinge_Axle_Back_Left
+    SM_Warthog_Hinge_Axle_Back_Right
+    SM_Warthog_Hinge_Axle_Front_Left
+    SM_Warthog_Hinge_Axle_Front_Right
+    SM_Warthog_Hood
+    SM_Warthog_Hub_Back_Left
+    SM_Warthog_Hub_Back_Right
+    SM_Warthog_Hub_Front_Left
+    SM_Warthog_Hub_Front_Right
+    SM_Warthog_Panel_Back_Left
+    SM_Warthog_Panel_Back_Right
+    SM_Warthog_Panel_Front_Left
+    SM_Warthog_Panel_Front_Right
+    SM_Warthog_Panel_Mid_Left
+    SM_Warthog_Panel_Mid_Right
+    SM_Warthog_Shovel
+    SM_Warthog_SteeringArm_Back_Left
+    SM_Warthog_SteeringArm_Back_Right
+    SM_Warthog_SteeringArm_Front_Left
+    SM_Warthog_SteeringArm_Front_Right
+    SM_Warthog_SteeringWheel
+    SM_Warthog_Suspension_Arm_Back_Left
+    SM_Warthog_Suspension_Arm_Back_Right
+    SM_Warthog_Suspension_Arm_Front_Left
+    SM_Warthog_Suspension_Arm_Front_Right
+    SM_Warthog_Tailgate_BackRest
+    SM_Warthog_Tailgate_Lower
+    SM_Warthog_Tailgate_Mid
+    SM_Warthog_Tailgate_Panel_Upper_Left
+    SM_Warthog_Tailgate_Panel_Upper_Right
+    SM_Warthog_Tailgate_Piston_Lower_Left
+    SM_Warthog_Tailgate_Piston_Lower_Right
+    SM_Warthog_Tailgate_Piston_Upper_Left
+    SM_Warthog_Tailgate_Piston_Upper_Right
+    SM_Warthog_Tailgate_Upper
+    SM_Warthog_Tire_Back_Left
+    SM_Warthog_Tire_Back_Right
+    SM_Warthog_Tire_Front_Left
+    SM_Warthog_Tire_Front_Right
+    SM_Warthog_Windshield
+  Damaged parts
+    SM_Warthog_Damaged_Hood
+    SM_Warthog_Damaged_Panel_Back_Left
+    SM_Warthog_Damaged_Panel_Back_Right
+    SM_Warthog_Damaged_Panel_Front_Left
+    SM_Warthog_Damaged_Panel_Front_Right
+    SM_Warthog_Damaged_Panel_Mid_Left
+    SM_Warthog_Damaged_Panel_Mid_Right
+    SM_Warthog_Damaged_Tailgate_Panel_Upper_Left
+    SM_Warthog_Damaged_Tailgate_Panel_Upper_Right
+    SM_Warthog_Damaged_Tailgate_Upper
+    SM_Warthog_Damaged_Windshield
+    SM_Warthog_Semi_Damaged_Tailgate_Upper_Panel_Left
+    SM_Warthog_Semi_Damaged_Tailgate_Upper_Panel_Right
+
+====================================================================================================
+WARTHOG CHAINGUN        camera file entry: "Warthog gunner"
+====================================================================================================
+  Skeletal meshes
+    SK_Warthog_Chaingun_Common                           skeleton only
+  Stock parts
+    SM_Warthog_Chaingun_Barrel
+    SM_Warthog_Chaingun_Mount
+    SM_Warthog_Chaingun_Mount_Barrel
+    SM_Warthog_Chaingun_Shield
+    SM_Warthog_Chaingun_Shield_Panel
+
+====================================================================================================
+SCORPION        camera file entry: "Scorpion"
+====================================================================================================
+  Skeletal meshes
+    SK_Scorpion                                          skeleton only
+    SK_Scorpion_TreadBL                                  a full skinned mesh
+    SK_Scorpion_TreadBR                                  a full skinned mesh
+    SK_Scorpion_TreadFL                                  a full skinned mesh
+    SK_Scorpion_TreadFR                                  a full skinned mesh
+  Stock parts
+    SM_Scorpion_F_Tread_BackWheel_L_Default
+    SM_Scorpion_F_Tread_BackWheel_R_Default
+    SM_Scorpion_F_Tread_FrontWheel_L_Default
+    SM_Scorpion_F_Tread_FrontWheel_R_Default
+    SM_Scorpion_F_Tread_Inner_L_Default
+    SM_Scorpion_F_Tread_Inner_R_Default
+    SM_Scorpion_F_Tread_Outer_L_Core_Default
+    SM_Scorpion_F_Tread_Outer_L_Front_Default
+    SM_Scorpion_F_Tread_Outer_L_Inner_Default
+    SM_Scorpion_F_Tread_Outer_L_LeftLamp_Default
+    SM_Scorpion_F_Tread_Outer_L_Outer_Default
+    SM_Scorpion_F_Tread_Outer_R_Core_Default
+    SM_Scorpion_F_Tread_Outer_R_Front_Default
+    SM_Scorpion_F_Tread_Outer_R_Outer_Default
+    SM_Scorpion_F_Tread_Outer_R_RightLamp_Default
+    SM_Scorpion_F_Tread_Shield1_L_Default
+    SM_Scorpion_F_Tread_Shield1_R_Default
+    SM_Scorpion_F_Tread_Shield2_L_Default
+    SM_Scorpion_F_Tread_Shield2_R_Default
+    SM_Scorpion_F_Tread_Shield3_L_Default
+    SM_Scorpion_F_Tread_Shield3_R_Default
+    SM_Scorpion_F_Tread_Shield4_L_Default
+    SM_Scorpion_F_Tread_Shield4_R_Default
+    SM_Scorpion_F_Tread_Shield5_L_Default
+    SM_Scorpion_F_Tread_Shield5_R_Default
+    SM_Scorpion_F_Tread_Suspension1_L_Default
+    SM_Scorpion_F_Tread_Suspension1_R_Default
+    SM_Scorpion_F_Tread_Suspension2_L_Default
+    SM_Scorpion_F_Tread_Suspension2_R_Default
+    SM_Scorpion_F_Tread_Suspension3_L_Default
+    SM_Scorpion_F_Tread_Suspension3_R_Default
+    SM_Scorpion_F_Tread_Suspension4_L_Default
+    SM_Scorpion_F_Tread_Suspension4_R_Default
+    SM_Scorpion_F_Tread_Suspension5_L_Default
+    SM_Scorpion_F_Tread_Suspension5_R_Default
+    SM_Scorpion_F_Tread_Suspension6_L_Default
+    SM_Scorpion_F_Tread_Suspension6_R_Default
+    SM_Scorpion_F_Tread_TopWheel1_L_Default
+    SM_Scorpion_F_Tread_TopWheel1_R_Default
+    SM_Scorpion_F_Tread_TopWheel2_L_Default
+    SM_Scorpion_F_Tread_TopWheel2_R_Default
+    SM_Scorpion_F_Tread_Wheel1_L_Default
+    SM_Scorpion_F_Tread_Wheel1_R_Default
+    SM_Scorpion_F_Tread_Wheel2_L_Default
+    SM_Scorpion_F_Tread_Wheel2_R_Default
+    SM_Scorpion_F_Tread_Wheel3_L_Default
+    SM_Scorpion_F_Tread_Wheel3_R_Default
+    SM_Scorpion_F_Tread_Wheel4_L_Default
+    SM_Scorpion_F_Tread_Wheel4_R_Default
+    SM_Scorpion_F_Tread_Wheel5_L_Default
+    SM_Scorpion_F_Tread_Wheel5_R_Default
+    SM_Scorpion_F_Tread_Wheel6_L_Default
+    SM_Scorpion_F_Tread_Wheel6_R_Default
+    SM_Scorpion_Hull
+    SM_Scorpion_HullBack_Right_PanelA_Default
+    SM_Scorpion_HullBack_Right_PanelB_Default
+    SM_Scorpion_HullBody_M_BackHatch_Default
+    SM_Scorpion_HullBody_M_Core_Default
+    SM_Scorpion_HullBody_M_FrontLeft_Default
+    SM_Scorpion_HullBody_M_FrontLeft_Mounts_Default
+    SM_Scorpion_HullBody_M_FrontLeft_SidePanelA_Default
+    SM_Scorpion_HullBody_M_FrontLeft_SidePanelB_Default
+    SM_Scorpion_HullBody_M_FrontLeft_TopPanelA_Default
+    SM_Scorpion_HullBody_M_FrontLeft_WindowPort_Default
+    SM_Scorpion_HullBody_M_FrontRight_Default
+    SM_Scorpion_HullBody_M_FrontRight_SidePanelA_Default
+    SM_Scorpion_HullBody_M_FrontRight_SidePanelB_Default
+    SM_Scorpion_HullBody_M_FrontRight_SidePanelC_Default
+    SM_Scorpion_HullBody_M_FrontRight_SidePanelD_Default
+    SM_Scorpion_HullBody_M_FrontRight_TopPanelA_Default
+    SM_Scorpion_HullBody_M_FrontRight_TopPanelB_Default
+    SM_Scorpion_HullBody_M_FrontRight_TopPanelC_Default
+    SM_Scorpion_HullBody_M_LeftVent_Default
+    SM_Scorpion_HullBody_M_Rear_Left_PanelA_Default
+    SM_Scorpion_HullBody_M_Rear_LeftBumper_Default
+    SM_Scorpion_HullBody_M_Rear_Right_PanelC_Default
+    SM_Scorpion_HullBody_M_RearBar_Default
+    SM_Scorpion_HullBody_M_RearPanels_Default
+    SM_Scorpion_HullBody_M_RightVent_Default
+    SM_Scorpion_R_Tread_BackWheel_L_Default
+    SM_Scorpion_R_Tread_BackWheel_R_Default
+    SM_Scorpion_R_Tread_FrontWheel_L_Default
+    SM_Scorpion_R_Tread_FrontWheel_R_Default
+    SM_Scorpion_R_Tread_Inner_L_Default
+    SM_Scorpion_R_Tread_Inner_R_Default
+    SM_Scorpion_R_Tread_Outer_L_Core_Default
+    SM_Scorpion_R_Tread_Outer_L_Outer_Default
+    SM_Scorpion_R_Tread_Outer_L_Rear_Default
+    SM_Scorpion_R_Tread_Outer_R_Core_Default
+    SM_Scorpion_R_Tread_Outer_R_Outer_Default
+    SM_Scorpion_R_Tread_Outer_R_Rear_Default
+    SM_Scorpion_R_Tread_Shield1_L_Default
+    SM_Scorpion_R_Tread_Shield1_R_Default
+    SM_Scorpion_R_Tread_Shield2_L_Default
+    SM_Scorpion_R_Tread_Shield2_R_Default
+    SM_Scorpion_R_Tread_Shield3_L_Default
+    SM_Scorpion_R_Tread_Shield3_R_Default
+    SM_Scorpion_R_Tread_Shield4_L_Default
+    SM_Scorpion_R_Tread_Shield4_R_Default
+    SM_Scorpion_R_Tread_Suspension1_L_Default
+    SM_Scorpion_R_Tread_Suspension1_R_Default
+    SM_Scorpion_R_Tread_Suspension2_L_Default
+    SM_Scorpion_R_Tread_Suspension2_R_Default
+    SM_Scorpion_R_Tread_Suspension3_L_Default
+    SM_Scorpion_R_Tread_Suspension3_R_Default
+    SM_Scorpion_R_Tread_Suspension4_L_Default
+    SM_Scorpion_R_Tread_Suspension4_R_Default
+    SM_Scorpion_R_Tread_TopWheel1_L_Default
+    SM_Scorpion_R_Tread_TopWheel1_R_Default
+    SM_Scorpion_R_Tread_TopWheel2_L_Default
+    SM_Scorpion_R_Tread_TopWheel2_R_Default
+    SM_Scorpion_R_Tread_Wheel1_L_Default
+    SM_Scorpion_R_Tread_Wheel1_R_Default
+    SM_Scorpion_R_Tread_Wheel2_L_Default
+    SM_Scorpion_R_Tread_Wheel2_R_Default
+    SM_Scorpion_R_Tread_Wheel3_L_Default
+    SM_Scorpion_R_Tread_Wheel3_R_Default
+    SM_Scorpion_R_Tread_Wheel4_L_Default
+    SM_Scorpion_R_Tread_Wheel4_R_Default
+    SM_Scorpion_SlideDoor_L_Default
+    SM_Scorpion_TrackFront_Left
+    SM_Scorpion_TrackFront_Right
+    SM_Scorpion_TrackRear_Left
+    SM_Scorpion_TrackRear_Right
+    SM_Scorpion_TreadFront_Left
+    SM_Scorpion_TreadFront_Right
+    SM_Scorpion_TreadRear_Left
+    SM_Scorpion_TreadRear_Right
+    SM_Scorpion_Turret
+  Damaged parts
+    SM_Scorpion_F_Tread_Outer_L_Core_Damage
+    SM_Scorpion_F_Tread_Outer_L_Front_Damage
+    SM_Scorpion_F_Tread_Outer_L_Front_Minor_Damage
+    SM_Scorpion_F_Tread_Outer_L_Inner_Damage
+    SM_Scorpion_F_Tread_Outer_L_LeftLamp_Damage
+    SM_Scorpion_F_Tread_Outer_L_Outer_Minor_Damage
+    SM_Scorpion_F_Tread_Outer_R_Core_Damage
+    SM_Scorpion_F_Tread_Outer_R_Front_Damage
+    SM_Scorpion_F_Tread_Outer_R_Front_Minor_Damage
+    SM_Scorpion_F_Tread_Outer_R_Inner_Damage
+    SM_Scorpion_F_Tread_Outer_R_Outer_Minor_Damage
+    SM_Scorpion_F_Tread_Outer_R_RightLamp_Damage
+    SM_Scorpion_F_Tread_Shield1_L_Damage
+    SM_Scorpion_F_Tread_Shield1_R_Damage
+    SM_Scorpion_F_Tread_Shield2_L_Damage
+    SM_Scorpion_F_Tread_Shield2_R_Damage
+    SM_Scorpion_F_Tread_Shield3_L_Damage
+    SM_Scorpion_F_Tread_Shield3_R_Damage
+    SM_Scorpion_F_Tread_Shield4_L_Damage
+    SM_Scorpion_F_Tread_Shield5_L_Damage
+    SM_Scorpion_F_Tread_Shield5_R_Damage
+    SM_Scorpion_HullBody_M_BackHatch_Damage
+    SM_Scorpion_HullBody_M_FrontLeft_Damage
+    SM_Scorpion_HullBody_M_FrontLeft_SidePanelA_Damage
+    SM_Scorpion_HullBody_M_FrontLeft_TopPanelA_Damage
+    SM_Scorpion_HullBody_M_FrontLeft_WindowPort_Damage
+    SM_Scorpion_HullBody_M_FrontRight_Damage
+    SM_Scorpion_HullBody_M_HullFrontRight_TopPanelA_Damage
+    SM_Scorpion_HullBody_M_LeftVent_Damage
+    SM_Scorpion_HullBody_M_RightVent_Damage
+    SM_Scorpion_R_Tread_Outer_L_Core_Damage
+    SM_Scorpion_R_Tread_Outer_L_Inner_Damage
+    SM_Scorpion_R_Tread_Outer_L_Outer_Minor_Damage
+    SM_Scorpion_R_Tread_Outer_L_Rear_Minor_Damage
+    SM_Scorpion_R_Tread_Outer_R_Core_Damage
+    SM_Scorpion_R_Tread_Outer_R_Inner_Damage
+    SM_Scorpion_R_Tread_Outer_R_Outer_Minor_Damage
+    SM_Scorpion_R_Tread_Outer_R_Rear_Minor_Damage
+    SM_Scorpion_R_Tread_Shield1_L_Damage
+    SM_Scorpion_R_Tread_Shield1_R_Damage
+    SM_Scorpion_R_Tread_Shield2_L_Damage
+    SM_Scorpion_R_Tread_Shield2_R_Damage
+    SM_Scorpion_R_Tread_Shield3_L_Damage
+    SM_Scorpion_R_Tread_Shield3_R_Damage
+    SM_Scorpion_R_Tread_Shield4_R_Damage
+
+====================================================================================================
+SCORPION CANNON (the turret)        camera file entry: "Scorpion"
+====================================================================================================
+  Skeletal meshes
+    SK_ScorpionCannon                                    skeleton only
+    SK_ScorpionCannon_LeftAntenna                        a full skinned mesh
+    SK_ScorpionCannon_RightAntenna                       a full skinned mesh
+  Stock parts
+    SM_ScorpionCannon_Barrel_M_Default
+    SM_ScorpionCannon_BaseTurret_M_Default
+    SM_ScorpionCannon_HullTurret_M_Left_Default
+    SM_ScorpionCannon_HullTurret_M_Right_Default
+    SM_ScorpionCannon_MainTurret_M_Default
+    SM_ScorpionCannon_MainTurret_M_LeftPanels_Default
+    SM_ScorpionCannon_MainTurret_M_RightPanels_Default
+    SM_ScorpionCannon_TurretBack_M_Default
+  Damaged parts
+    SM_ScorpionCannon_BaseTurret_M_Damage
+    SM_ScorpionCannon_HullTurret_M_Left_Major_Damage
+    SM_ScorpionCannon_HullTurret_M_Left_Medium_Damage
+    SM_ScorpionCannon_HullTurret_M_Right_Major_Damage
+    SM_ScorpionCannon_HullTurret_M_Right_Medium_Damage
+    SM_ScorpionCannon_MainTurret_M_LeftPanels_Damage
+    SM_ScorpionCannon_MainTurret_M_Major_Damage
+    SM_ScorpionCannon_MainTurret_M_Medium_Damage
+    SM_ScorpionCannon_MainTurret_M_RightPanels_Damage
+    SM_ScorpionCannon_TurretBack_M_Damage
+
+====================================================================================================
+SCORPION ANTI-INFANTRY GUN        camera file entry: "Scorpion gunner"
+====================================================================================================
+  Skeletal meshes
+    SK_ScorpionAntiInfantry                              skeleton only
+  Stock parts
+    SM_ScorpionAntiInfantry_Gun_M_Default
+    SM_ScorpionAntiInfantry_Gun_M_Shield_Default
+    SM_ScorpionAntiInfantry_GunBase_M_Default
+    SM_ScorpionAntiInfantry_GunBase_M_ShieldLeft_Default
+    SM_ScorpionAntiInfantry_GunBase_M_ShieldRight_Default
+  Damaged parts
+    SM_ScorpionAntiInfantry_Gun_M_Shield_Damage
+    SM_ScorpionAntiInfantry_GunBase_M_ShieldLeft_Damage
+    SM_ScorpionAntiInfantry_GunBase_M_ShieldRight_Damage
+
+====================================================================================================
+WRAITH        camera file entry: "Wraith"
+====================================================================================================
+  Skeletal meshes
+    SK_Common_Wraith                                     skeleton only
+    SK_Wraith_Default                                    a full skinned mesh
+  Stock parts
+    SM_Wraith_Default_Body_Lower
+    SM_Wraith_Default_Body_Upper
+    SM_Wraith_Default_Boost_Left
+    SM_Wraith_Default_Boost_Right
+    SM_Wraith_Default_Canopy
+    SM_Wraith_Default_Interior
+    SM_Wraith_Default_Stabilizer_Left
+    SM_Wraith_Default_Stabilizer_Right
+    SM_Wraith_Default_Wing_Left
+    SM_Wraith_Default_Wing_Right
+  Damaged parts
+    SM_Wraith_Boost_Hood_Right_Dmg
+    SM_Wraith_Canopy_01_Dmg
+    SM_Wraith_Canopy_02_Dmg
+    SM_Wraith_Canopy_03_Dmg
+    SM_Wraith_Canopy_04_Dmg
+    SM_Wraith_Canopy_M_Dmg
+    SM_Wraith_Damaged
+    SM_Wraith_Hood_01_Dmg
+    SM_Wraith_Hood_02_Dmg
+    SM_Wraith_Hood_03_Dmg
+    SM_Wraith_Hood_04_Dmg
+    SM_Wraith_Hood_05_Dmg
+    SM_Wraith_Hood_06_Dmg
+    SM_Wraith_Hood_07_Dmg
+    SM_Wraith_Hood_08_Dmg
+    SM_Wraith_Hood_09_Dmg
+    SM_Wraith_Hood_10_Dmg
+    SM_Wraith_Hood_11_Dmg
+    SM_Wraith_Hood_12_Dmg
+    SM_Wraith_Root_M_AntiInfantry_Base_Destroyed
+    SM_Wraith_Stab_Fin_Left_Dmg
+    SM_Wraith_Stab_Fin_Right_Dmg
+    SM_Wraith_Stab_Piece_Inner_Left_Dmg
+    SM_Wraith_Stab_Piece_Inner_Right_Dmg
+    SM_Wraith_Stab_Piece_Outer_Left_Dmg
+    SM_Wraith_Stabilizer_Left_Dmg
+    SM_Wraith_Stabilizer_Right_Dmg
+    SM_Wraith_Upper_Body_Dmg
+    SM_Wraith_Wing_Half_Inner_Left_Dmg
+    SM_Wraith_Wing_Half_Inner_Right_Dmg
+    SM_Wraith_Wing_Hood_01_Left_Back_Dmg
+    SM_Wraith_Wing_Hood_01_Left_Front_Dmg
+    SM_Wraith_Wing_Hood_01_Right_Back_Dmg
+    SM_Wraith_Wing_Hood_01_Right_Front_Dmg
+    SM_Wraith_Wing_Hood_02_Left_Back_Dmg
+    SM_Wraith_Wing_Hood_02_Left_Front_Dmg
+    SM_Wraith_Wing_Hood_02_Right_Back_Dmg
+    SM_Wraith_Wing_Hood_02_Right_Front_Dmg
+    SM_Wraith_Wing_Hood_03_Left_Front_Dmg
+    SM_Wraith_Wing_Hood_03_Right_Back_Dmg
+    SM_Wraith_Wing_Hood_03_Right_Front_Dmg
+    SM_Wraith_Wing_Hood_04_Right_Front_Dmg
+    SM_Wraith_Wing_Left_Dmg
+    SM_Wraith_Wing_Right_Dmg
+
+====================================================================================================
+WRAITH MORTAR        camera file entry: "Wraith"
+====================================================================================================
+  Skeletal meshes
+    SK_Wraith_Common_Mortar                              skeleton only
+  Stock parts
+    SM_Wraith_Default_Mortar
+    SM_Wraith_Mortar_Default_Arm
+    SM_Wraith_Mortar_Default_Base
+    SM_Wraith_Mortar_Default_Fan_Left
+    SM_Wraith_Mortar_Default_Fan_Right
+    SM_Wraith_Mortar_Default_Hatch_Left
+    SM_Wraith_Mortar_Default_Hatch_Right
+    SM_Wraith_Mortar_Default_Latch_Left
+    SM_Wraith_Mortar_Default_Latch_Right
+    SM_Wraith_Mortar_Default_LatchDoor_Left
+    SM_Wraith_Mortar_Default_LatchDoor_Right
+    SM_Wraith_Mortar_Default_Vent_Left
+    SM_Wraith_Mortar_Default_Vent_Right
+  Damaged parts
+    SM_Wraith_Mortar_Deflector_L_Dmg
+    SM_Wraith_Mortar_Deflector_R_Dmg
+    SM_Wraith_Mortar_Door_L_Dmg
+    SM_Wraith_Mortar_Door_R_Dmg
+    SM_Wraith_Mortar_DoorHinger_L_Dmg
+    SM_Wraith_Mortar_DoorHinger_R_Dmg
+    SM_Wraith_Mortar_GunArm2_M_Dmg
+    SM_Wraith_Mortar_GunBase_M_Dmg
+    SM_Wraith_Mortar_Hatch_L_Dmg
+    SM_Wraith_Mortar_Hatch_L_Hood_Back_Dmg
+    SM_Wraith_Mortar_Hatch_L_Hood_Front_Dmg
+    SM_Wraith_Mortar_Hatch_L_Hood_Mid_Dmg
+    SM_Wraith_Mortar_Hatch_R_Dmg
+    SM_Wraith_Mortar_Hatch_R_Hood_Back_Dmg
+    SM_Wraith_Mortar_Hatch_R_Hood_Front_Dmg
+    SM_Wraith_Mortar_Hatch_R_Hood_Mid_Dmg
+    SM_Wraith_Mortar_Hinge_L_Dmg
+    SM_Wraith_Mortar_Hinge_R_Dmg
+    SM_Wraith_Mortar_MortarHull_M_Dmg
+    SM_Wraith_Mortar_Root_M_Dmg
+
+====================================================================================================
+WRAITH ANTI-INFANTRY GUN        camera file entry: "Wraith turret"
+====================================================================================================
+  Skeletal meshes
+    SK_Wraith_Common_Anti_Infantry                       skeleton only
+  Stock parts
+    SM_WraithAntiInfantry_Default_Gun
+    SM_WraithAntiInfantry_Default_Seat
+
+====================================================================================================
+SHADE        camera file entry: "Shade"
+====================================================================================================
+  Skeletal meshes
+    SK_Common_Shade                                      skeleton only
+    SK_Shade_PlasmaCannon                                skeleton only
+  Stock parts
+    SM_Shade_BaseShield_Plasma_Left
+    SM_Shade_BaseShield_Plasma_Right
+    SM_Shade_Body_Plasma
+    SM_Shade_Body_Plasma_Leg_Back
+    SM_Shade_Body_Plasma_Leg_Left
+    SM_Shade_Body_Plasma_Leg_Right
+    SM_Shade_Guns_Plasma
+    SM_Shade_Shield_Plasma_Left
+    SM_Shade_Shield_Plasma_Right
+    SM_Shade_Turret_Plasma
+    SM_Shade_Turret_Plasma_Panel_Mid
+  Damaged parts
+    SM_Shade_Body_Plasma_Leg_Back_Dmg
+    SM_Shade_Body_Plasma_Leg_Left_Dmg
+    SM_Shade_Guns_Plasma_Dmg
+    SM_Shade_Turret_Plasma_Dmg
+
+====================================================================================================
+PELICAN        camera file entry: "Pelican"
+====================================================================================================
+  Skeletal meshes
+    SK_Pelican                                           a full skinned mesh
+    SK_Pelican_Common                                    skeleton only
+    SK_PelicanChinGun                                    a full skinned mesh
+  Stock parts
+    SM_Pelican_AimPitton1_L_Default
+    SM_Pelican_AimPitton1_R_Default
+    SM_Pelican_AimPitton3_L_Default
+    SM_Pelican_AimPitton3_R_Default
+    SM_Pelican_BackWing_L_Default
+    SM_Pelican_BackWing_R_Default
+    SM_Pelican_Cabin_PROCESSED
+    SM_Pelican_CargoArm1_L_Default
+    SM_Pelican_CargoArm1_R_Default
+    SM_Pelican_CargoArm2_L_Default
+    SM_Pelican_CargoArm2_R_Default
+    SM_Pelican_CargoArm_M_Default
+    SM_Pelican_CargoArmRotate_M_Default
+    SM_Pelican_ChairHandler_L_Default
+    SM_Pelican_ChairHandler_R_Default
+    SM_Pelican_Controller1_L_Default
+    SM_Pelican_Controller1_R_Default
+    SM_Pelican_Controller2_L_Default
+    SM_Pelican_Controller2_R_Default
+    SM_Pelican_FrontWheel_M_Default
+    SM_Pelican_FrontWing_L_Default
+    SM_Pelican_FrontWing_R_Default
+    SM_Pelican_Hull_M_Cab_Default
+    SM_Pelican_Hull_M_Cabin_Default
+    SM_Pelican_Hull_M_Default
+    SM_Pelican_Hull_M_Default_Glass
+    SM_Pelican_MainDoor_M_Default
+    SM_Pelican_RotatePart_L_Default
+    SM_Pelican_RotatePart_R_Default
+    SM_Pelican_SlideDoor_M_Default
+    SM_Pelican_UpperDoor_M_Default
+    SM_Pelican_Wheel_L_Default
+    SM_Pelican_Wheel_R_Default
+    SM_Pelican_WheelPart2_L_Default
+    SM_Pelican_WheelPart2_R_Default
+    SM_Pelican_WingRear_L_PROCESSED
+    SM_PelicanChinGun_GunPart1_M_Default
+    SM_PelicanChinGun_GunPart2_M_Default
+    SM_PelicanChinGun_Root_M_Default
+

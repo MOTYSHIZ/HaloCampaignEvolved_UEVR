@@ -59,6 +59,8 @@ Copy-Item (Join-Path $repo 'build\XrApiLayer_HALOVR_reticule.dll') (Join-Path $s
 # default -- one was a sample for aimtexfile, the other the retired cutscene2d overlay's art.)
 $required = @('config.txt', 'halo_vr.cfg', 'halo_vr_dev.cfg', 'halo_vr_user_reference.txt',
               'cvars_data.txt', 'user_script.txt',
+              # The names "hideMeshes" (halo_vr_vehcams.json) can use: documentation only, never parsed.
+              'halo_vr_vehicle_mesh_reference.txt',
               'scripts\halo_vr_settings.lua',
               'plugins\halo_vr.dll',
               # The OpenXR API layer ships as a matched SET. The DLL is the code and the manifest is
@@ -103,6 +105,10 @@ if ($missing.Count -gt 0) {
 # placement they never made and no obvious way to know why their gun sits wrong.
 $forbidden = @('halo_vr_user.cfg', 'halo_vr_calib.cfg', 'halo_vr_calib_left.cfg',
                 'halo_vr_weapons.cfg', 'halo_vr_handposes.json', 'halo_vr_palette_calib.cfg',
+                # The vehicle cameras' files are the player's too: the camera file is written once from
+                # the built-in cameras and theirs after that, and the other two are its per-seat memory
+                # and a crash-repair marker. An author's own would overwrite a player's tuning.
+                'halo_vr_vehcams.json', 'halo_vr_vehcams_last.txt', 'halo_vr_vehcams.decoupledpitch.restore',
                 'apilayer\halo_vr_layer.log',
                 # The third-party cutscene-detection plugin was RETIRED 2026-09-08: our own fix
                 # (the movie as an OpenXR quad, cutscenemono=6) replaced it and it is gone from the
