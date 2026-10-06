@@ -346,9 +346,10 @@ Good to know:
 - **The left grip and the passenger trigger must be let go once after you sit down** before they
   act, so one held while boarding does nothing.
 - **The opening Pelican ride** is left to the game's own camera.
-- **The notes need the headset-drawn layer** ([Crisp reticule and waypoints](#crisp-reticule-and-waypoints)),
+- **Don't want the camera panel?** Untick **Camera readout** under Vehicle cameras in Halo VR User
+  Settings, or set `vehcamreadout=0`. `xrtext=0` turns off every text panel.
+- **The panel needs the headset-drawn layer** ([Crisp reticule and waypoints](#crisp-reticule-and-waypoints)),
   so on OpenVR, or with `xrlayer=0`, the cameras work but nothing is shown when they change.
-  `vehcamreadout=0` turns the camera note off.
 - **Cutscenes and deaths** still use the game's own camera and gamepad controls. That switch is
   automatic — the mod works it out from the game's camera leaving first person, so standing on foot
   with no weapon keeps motion controls. If you ever find a case it misses, please report it; as a
