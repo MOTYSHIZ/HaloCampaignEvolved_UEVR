@@ -31,6 +31,8 @@ std::atomic<float> g_cam_x{0.0f}, g_cam_y{0.0f}, g_cam_z{0.0f};
 // rather than there because Plugin.cpp keeps its globals in an anonymous namespace, and this one
 // must have external linkage at namespace-halo scope for Markers/Holster to share it.
 std::atomic<float> g_view_base_yaw{0.0f};
+std::atomic<float> g_view_base_pitch{0.0f};
+std::atomic<float> g_view_base_roll{0.0f};
 
 namespace {
 

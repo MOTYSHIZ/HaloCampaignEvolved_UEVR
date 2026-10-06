@@ -283,6 +283,21 @@ const FeatureRow kFeatures[] = {
       "vehwheelsteersign",
       "vehwheelgrip,vehwheelhand,vehwheellock,vehwheelmarker,vehwheelpos,vehwheelrad,vehwheeltilt",
       "blamangles", FEATURE_INT(vehicle_wheel) },
+    // ---- The author's own vehicle cameras (branch feature/vehicle-aim-camera-decouple). The text panel's
+    // keys sit under the cameras because the camera readout is, for now, the panel's only user.
+    { "vehtp",        1, Tier::Experimental, "Vehicles", "Vehicle cameras",
+      "Your own cameras in vehicles, listed per vehicle in halo_vr_vehcams.json: at your seat or behind the vehicle, level or turning and tilting with it. Left Y steps to the next camera, left X through its tethering modes (held still, or turning with the vehicle), and a short note in front of you says which.",
+      "vehcamhidebody,vehcamreadout,vehcamrecenter,vehcamrecenterpos,vehcamresethold,vehctrlclick,vehseatgrip,vehpassswap,vehmarker,vehmarkeralpha,vehmarkercb,vehmarkercg,"
+      "vehmarkercr,vehmarkerdot,vehmarkerradius,vehmarkersize,vehmarkerthick,"
+      "xrtext,xrtextbg,xrtextdist,xrtextfadein,xrtextfadeout,"
+      "xrtexthold,xrtextright,xrtextscale,xrtextup,xrtextwidth",
+      "vehmeshdump,vehprobe,xrlayertexth,xrlayertextw",
+      "", FEATURE_BOOL(veh_tp) },
+    { "vehaim",       1, Tier::Experimental, "Vehicles", "Aim vehicles with your hand",
+      "In the vehicle cameras the vehicle aims where your controller points, and the right stick turns your view. Clicking the left stick switches a vehicle between this and aiming with the stick.",
+      "vehorbitrate,vehorbitreturn,vehstick",
+      "vehaimfar,vehaimorigin,vehaimpivotz,vehaimray",
+      "vehtp,blamangles", FEATURE_BOOL(veh_aim) },
     { "grenadegunhold", 1, Tier::Experimental, "Melee and grenades", "Hold the weapon through a throw",
       "Keeps the game's grenade throw animation off your weapon under the base mod's arms.",
       "grenadegunholdms",

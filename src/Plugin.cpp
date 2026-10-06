@@ -115,6 +115,7 @@
 // and exposure cannot dim it. Default off, draws alongside the two above, never instead of them.
 #include "XrLayer.hpp"
 #include "XrSource.hpp"
+#include "XrText.hpp"      // the text panel: fading notices on the compositor layer
 #include "CutsceneHint.hpp"
 
 // The weapon scope: LT-toggled magnified pane on the aim ray (native zoom stays suppressed).
@@ -129,6 +130,8 @@
 
 // The aim control loop: Halo's own aim is steered to follow the controller via synthesized stick.
 #include "MotionAimControl.hpp"
+#include "features/vehcam/VehCam.hpp"   // veh_cam_next_prev() / veh_cam_mode_next(): left Y / left X in a vehicle
+#include "features/vehcam/VehCamSelect.hpp"   // vehcam_presets_init/poll: halo_vr_vehcams.json
 #include "AimTrace.hpp"
 #include "MemScan.hpp"
 
@@ -550,6 +553,41 @@ std::atomic<bool> g_brake_pad{false};
 // cutscene's start while the weapon route spans its whole length. Game thread only; atomic for
 // consistency with its neighbours.
 std::atomic<bool> g_cut2d_engaged{false};
+
+// UEVR's own overlay is up. It zeroes the PAD while it is (VR.cpp update_imgui_state_from_xinput_state)
+// but not the ACTIONS, and g_in_menu covers only the game's menus -- so a lane that reads actions, or ORs a
+// button back into the pad, acts behind the overlay unless it asks this. Any thread: a flag read.
+bool uevr_overlay_open() {
+    auto* p = API::get()->param();
+    return p != nullptr && p->functions != nullptr && p->functions->is_drawing_ui != nullptr
+        && p->functions->is_drawing_ui();
+}
+
+// OUR VEHICLE CONTROLS ARE LIVE: a camera from the camera file is selected for the vehicle you are in,
+// and no menu -- the game's or UEVR's -- is up. The seated input lanes (seat grip, left X / Y, the left
+// stick click, the brake's grip split) key on THIS, not on stick mode: stick mode is also every cutscene,
+// death and post-load window, and a seat before its vehicle is identified, where the pad must stay the
+// game's (left X crouches on foot; L3 sprints). Any thread.
+bool veh_controls_live(bool in_menu) {
+    return !in_menu && veh_cam_selected() && !uevr_overlay_open();
+}
+
+// The grip that switches seats right now (vehseatgrip: 1 left, 2 right), or 0 while that lane is off. ONE
+// predicate for the lane that sends it and the brake that must leave that grip alone. Off on a grip the
+// vehicle wheel holds (vehiclewheel with vehwheelgrip; vehwheelhand 0 left, 1 right, 2 both): there every
+// grab of the wheel would also switch seats. Any thread.
+int veh_seat_grip_now(bool in_menu) {
+    if (g_cfg.veh_seat_grip == 0 || g_cfg.veh_seat_mask == 0 || !g_cfg.veh_tp) return 0;
+    const int wheel_side = (g_cfg.veh_seat_grip == 2) ? 1 : 0;
+    if (g_cfg.vehicle_wheel != 0 && g_cfg.veh_wheel_grip != 0
+        && (g_cfg.veh_wheel_hand == 2 || g_cfg.veh_wheel_hand == wheel_side)) return 0;
+    return veh_controls_live(in_menu) ? g_cfg.veh_seat_grip : 0;
+}
+
+// When the head-tap pause last fired (GetTickCount64; 0 = never). XInput hook thread only: written by the
+// pause block and read by the seated left X / Y lane, both in on_xinput_get_state, so that a left Y which
+// paused does not also step the vehicle camera on its release.
+ULONGLONG g_pause_head_at = 0;
 
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
@@ -6353,6 +6391,7 @@ void update() {
         }
         load_config();
         palettearm_hand_poses_poll();   // halo_vr_handposes.json: one stat, read on change
+        vehcam_presets_poll();          // halo_vr_vehcams.json: the same
         features_config_loaded();
         if (menu_applied > 0) {
             API::get()->log_info("[Halo-CampE-UEVR] settings menu: applied %d change(s) to halo_vr_user.cfg",
@@ -6602,6 +6641,9 @@ void update() {
     // Config-only, so it needs nothing that gameplay provides. See scopelayer_configure_cell_early.
     scopelayer_configure_cell_early();
     { PerfScope _perf(PERF_XRLAYER); xrlayer_tick(); }
+    // The text panel (slot 11): keeps a showing notice posed and retires it when its fade is done.
+    // A no-op while nothing is showing.
+    xrtext_tick();
 
     // Hide the in-scene crosshair ONLY while the compositor layer is proven live.
     //
@@ -6905,7 +6947,14 @@ void update() {
     // value that changes at human speed.
     //
     // Above the early-outs, because the divergence accrues whether or not the aim stack is armed.
-    if (g_cfg.hmd_leash || features_leash_block_wanted()) {
+    //
+    // UNDER THE HEAD-ANCHORED VEHICLE CAMERA (vehtp, halo_vr_vehcams.json) the leash is RESPECTED (the user's call,
+    // 2026-09-24): with hmdleash=1 this block runs as on foot and holds the head to the anchor -- the
+    // anchor stands in for the body, and VehCam backs out no head offset of its own. Only with
+    // hmdleash=0 does the block stand down there, so no feature-owned leash slides the standing origin
+    // under a player who chose to lean freely off the anchor (VehCam's captured head offset assumes it
+    // holds still). On exit the leash resumes and re-absorbs any offset, inside the cut to the game's view.
+    if ((g_cfg.hmd_leash || features_leash_block_wanted()) && !(veh_tp_anchor_active() && !g_cfg.hmd_leash)) {
         Vec3 hp{}; Quat hq{};
         const auto hi = API::VR::get_hmd_index();
         if (hi >= 0 && get_pose(hi, &hp, &hq, /*use_aim=*/false) && features_hmd_pose_plausible(hp)) {
@@ -7306,9 +7355,17 @@ void update() {
         // broken lane without ever needing a "disable forever" rule, and lets a lane that faulted
         // once on a transition come back on its own. Markers are cosmetic; the hands are not.
         features_tick_stage("nav_world");
+        // IN A VEHICLE, WHILE OUR OWN CAMERA DRAWS, the world markers stay on. Stick mode stood the lane
+        // down because the view there used to be the game's chase camera, whose flat HUD markers are right
+        // for it; under our camera those flat markers mark the game camera's picture, not the one you see,
+        // and the lane's own in-scene marker was left behind. Lane 2 (the objective's true world position,
+        // the default) needs neither the aim nor the game's projection, so it runs as it does on foot and
+        // hides the flat layer while it does. The projecting lanes (0/1) read the game camera, so not them.
+        // And never past the kill switch: fixes_ok carries g_cfg.enabled, so this half must too.
+        const bool nav_ok = fixes_ok || (g_cfg.enabled && g_cfg.nav_world_src == 2 && veh_tp_anchor_active());
         if (!lane_cooling(PERF_NAVWORLD, tick)) {
             PerfScope _perf(PERF_NAVWORLD);
-            if (!features_nav_world_guarded(fixes_ok, tick)) nav_world_tick(fixes_ok, tick);
+            if (!features_nav_world_guarded(nav_ok, tick)) nav_world_tick(nav_ok, tick);
         }
         // CLEAR THE STEP MARKER ON THE WAY OUT. Without this a fault anywhere later in the tick
         // would report navworld's last engine call and read as damning evidence about a lane it
@@ -7566,7 +7623,8 @@ void update() {
             }
         }
 
-        // ---- VEHICLE HARD BRAKE: either grip -> the brake key, while stick mode is engaged.
+        // ---- VEHICLE HARD BRAKE: either grip -> the brake key, while stick mode is engaged -- except the grip
+        // that switches seats while our vehicle cameras run (vehseatgrip).
         // Sits ABOVE the early-out gates on purpose: every path that stops this function must
         // release the key first, or a pose/HMD loss mid-brake would leave Ctrl logically stuck.
         // (A hard crash mid-brake can still strand the OS key state -- one real Ctrl press clears
@@ -7582,7 +7640,15 @@ void update() {
                     grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
                 }
                 if (grip_action != nullptr) {
-                    want_brake = API::VR::is_action_active_any_joystick(grip_action);
+                    // Not the grip that switches seats (vehseatgrip, the XInput hook): one grip, one job --
+                    // and the same predicate as that lane, so outside our cameras both grips brake again.
+                    const int seat_grip = veh_seat_grip_now(g_in_menu.load());
+                    if (seat_grip == 1)
+                        want_brake = API::VR::is_action_active(grip_action, API::VR::get_right_joystick_source());
+                    else if (seat_grip == 2)
+                        want_brake = API::VR::is_action_active(grip_action, API::VR::get_left_joystick_source());
+                    else
+                        want_brake = API::VR::is_action_active_any_joystick(grip_action);
                 }
             }
             // Pad-side delivery is the default: field testing showed synthesized keyboard never
@@ -11293,9 +11359,31 @@ void update() {
             const Vec3 fwd{cp * std::cos(r_yaw * DEG2RAD),
                            cp * std::sin(r_yaw * DEG2RAD),
                            std::sin(r_pitch * DEG2RAD)};
-            const float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
-                          ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
-            const Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
+            float d = (g_cfg.aim_reticule_dist_veh > 0.0f)
+                    ? g_cfg.aim_reticule_dist_veh : g_cfg.aim_reticule_dist;
+            Vec3 target{origin.x + fwd.x * d, origin.y + fwd.y * d, origin.z + fwd.z * d};
+
+            // THIRD PERSON (our owned boom camera): the ray above starts at the CAMERA, ~10 m off the
+            // vehicle, so the marker would float on a line parallel to the shots. Aiming with the
+            // controller (vehaimray) the reticule sits on the INTENT point -- where the pointing ray
+            // reaches, which the vehicle is aimed through, the infantry rule; otherwise on what the
+            // vehicle's aim actually hits, traced from the seated unit along this same aim. Both from
+            // VehCam.cpp, then pulled toward the eye by the surface offset so it does not sink into
+            // the ground. d becomes the eye-to-marker range, which the apparent-size hold below needs.
+            // First person / native camera: unchanged.
+            {
+                Vec3 vt{};
+                if (veh_tp_reticle_target(r_yaw, r_pitch, &vt)) {
+                    float tx = vt.x - origin.x, ty = vt.y - origin.y, tz = vt.z - origin.z;
+                    const float tl = std::sqrt(tx * tx + ty * ty + tz * tz);
+                    if (tl > 1.0f) {
+                        const float back = std::fmin(g_cfg.aim_reticule_surface_off, tl * 0.5f);
+                        tx /= tl; ty /= tl; tz /= tl;
+                        target = Vec3{vt.x - tx * back, vt.y - ty * back, vt.z - tz * back};
+                        d = tl - back;
+                    }
+                }
+            }
 
             g_ret_origin = origin;
             g_have_ret_origin = true;
@@ -11325,8 +11413,11 @@ void update() {
             // Compositor reticule, seated branch -- see the on-foot call for why it takes the
             // camera pose. g_ret_scale_mul already carries the seated distance compensation above,
             // so the layer inherits it and the three reticules stay the same apparent size.
-            xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
-                                                            g_ret_scale_mul.load());   // seated; see the on-foot call
+            // STANDS DOWN while the third-person eye stamps it every frame on the live controller
+            // ray (vehaimray): the layer's snapshot takes one writer, and the stamp is the fresher.
+            if (!veh_tp_reticle_stamp_owns())
+                xrlayer_notice_reticule(layer_anchor(halo::XRLAYER_SLOT_RETICULE, target),
+                                                                g_ret_scale_mul.load());   // seated; see the on-foot call
 
             // ---- FORCE VISIBLE WHILE SEATED, and prove where it landed.
             //
@@ -11750,6 +11841,15 @@ public:
             else
                 strcpy_s(hp, MAX_PATH, "halo_vr_handposes.json");
             palettearm_hand_poses_init(hp);
+        }
+        {   // The vehicle cameras: their own JSON file, same rule -- written from the built-in cameras
+            // if absent, user-owned after that.
+            char vc[MAX_PATH] = {0};
+            if (n > 0 && n < MAX_PATH)
+                sprintf_s(vc, MAX_PATH, "%s\\UnrealVRMod\\HaloCampaignEvolved\\halo_vr_vehcams.json", appdata);
+            else
+                strcpy_s(vc, MAX_PATH, "halo_vr_vehcams.json");
+            vehcam_presets_init(vc);
         }
         load_config();                // writes a commented default halo_vr.cfg if none exists
 
@@ -12770,6 +12870,10 @@ public:
             halo::g_cam_y.store(py, std::memory_order_relaxed);
             halo::g_cam_z.store(pz, std::memory_order_relaxed);
             g_view_base_yaw.store(g_dbg_view_out.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            // The base is LEVEL unless a vehicle camera tilts it: zeroed here, first in the frame, and
+            // set by VehCam's view override (later in this same callback) while one does.
+            halo::g_view_base_pitch.store(0.0f, std::memory_order_relaxed);
+            halo::g_view_base_roll.store(0.0f, std::memory_order_relaxed);
             g_have_view_pos = true;
             features_stereo_pre_eye(index, position, is_double);
 
@@ -13301,6 +13405,11 @@ public:
         features_stereo_post_eye_publish(index);
         features_stereo_post_eye_late(index);
         if (g_have_eye_pos.load()) {
+            // The view BASE's rotation for this frame -- what room-relative quads (the text panel) are
+            // rebuilt against. Set by this callback's view override, so it is this frame's.
+            halo::xrlayer_note_view_base(halo::g_view_base_pitch.load(std::memory_order_relaxed),
+                                         halo::g_view_base_yaw.load(std::memory_order_relaxed),
+                                         halo::g_view_base_roll.load(std::memory_order_relaxed));
             halo::xrlayer_note_eye(index,
                                    Vec3{g_eye_pos_x.load(), g_eye_pos_y.load(), g_eye_pos_z.load()},
                                    Vec3{g_view_pos_x.load(), g_view_pos_y.load(), g_view_pos_z.load()},
@@ -13717,12 +13826,146 @@ public:
         //
         // Gated on raw_btn (the physical snapshot), NOT live state: the grip brake injects
         // brake_mask=A on its own further down, so reading live state would make every grip-brake
-        // also fire the trick. Same raw_btn discipline as the grenade remap. !g_in_menu is belt-
-        // and-braces -- pausing drops stick mode -- and costs nothing.
+        // also fire the trick. Same raw_btn discipline as the grenade remap. !g_in_menu matters: stick
+        // mode holds through a pause (its detector has no menu term; logs show IN_MENU flip inside one
+        // stick window).
         if (g_cfg.veh_a_mask != 0 && g_stick_mode.load() && !g_in_menu.load()
             && (raw_btn & XINPUT_GAMEPAD_A) != 0) {
             state->Gamepad.wButtons |= (WORD)g_cfg.veh_a_mask;
             state->dwPacketNumber++;
+        }
+
+        // ---- VEHICLE SWITCH SEAT ON A GRIP (vehseatgrip). Another vehicle-only lane beside the trick. In a
+        // seat the pad is native, so left X reaches the game as vehseatmask (0x2000, XInput B) -- the game's
+        // own switch seat -- while our cameras read the same press as the next tethering mode: one press,
+        // two actions (the user, 2026-09-27). So while our cameras run, that bit is kept from the game and
+        // the chosen grip sends it instead; the brake above then leaves that grip alone. The grip is read by
+        // UEVR ACTION on its own hand, like left X / Y below, and must be let go once after you sit down
+        // before it counts: a grip held while boarding must not switch you straight out of the seat.
+        // Only while our controls are live (veh_seat_grip_now: a camera selected, no menu, no UEVR
+        // overlay, not a grip the vehicle wheel holds).
+        {
+            static UEVR_ActionHandle s_seat_grip_action = nullptr;
+            static bool s_seat_grip_armed = false;
+            const int seat_grip = veh_seat_grip_now(g_in_menu.load());
+            if (seat_grip == 0) {
+                s_seat_grip_armed = false;
+            } else {
+                if (s_seat_grip_action == nullptr)
+                    s_seat_grip_action = API::VR::get_action_handle("/actions/default/in/Grip");
+                const auto src = (seat_grip == 2) ? API::VR::get_right_joystick_source()
+                                                  : API::VR::get_left_joystick_source();
+                const bool grip = s_seat_grip_action != nullptr && API::VR::is_action_active(s_seat_grip_action, src);
+                if (!grip) s_seat_grip_armed = true;
+                const WORD m = (WORD)g_cfg.veh_seat_mask;
+                const WORD before = state->Gamepad.wButtons;
+                state->Gamepad.wButtons &= (WORD)~m;                        // left X: the tethering mode only
+                if (grip && s_seat_grip_armed) state->Gamepad.wButtons |= m; // the grip: the game's switch seat
+                if (state->Gamepad.wButtons != before) state->dwPacketNumber++;
+            }
+        }
+
+        // ---- SEATED PRESS EDGES, for the stick-click binding below (left X / Y read their own action
+        // states): the buttons that went DOWN on this poll, taken off the physical snapshot whether or not
+        // you are seated. A binding acts only on a press that STARTS while seated. Edges computed on
+        // (seated && button) fired on every boarding:
+        // the button that boards the vehicle is still held when stick mode engages, so the camera
+        // stepped the moment you sat down (both rides in the 2026-09-25 log: "(entered)", then
+        // "(left X: next)" 6 ms later), and a sprint held into a seat would have flipped the controls
+        // on its release.
+        static WORD s_seat_prev_btn = 0;
+        const WORD seat_btn_down = (WORD)(raw_btn & ~s_seat_prev_btn);
+        s_seat_prev_btn = raw_btn;
+
+        // ---- VEHICLE LEFT Y -> NEXT CAMERA, LEFT X -> THE CAMERA'S NEXT TETHERING MODE. Each vehicle has
+        // its own list of cameras in halo_vr_vehcams.json, each with its tethering modes (what turns your
+        // view, what carries the camera round, where it sits); VehCamSelect.cpp applies both on the game tick.
+        //
+        // READ BY UEVR ACTION, NOT BY PAD MASK. The masks do not follow the controller's labels here
+        // (Config.hpp, measured: left X arrives as 0x2000, which XInput calls B, and the right
+        // controller's B as 0x4000, "X"), so the old test for 0x4000 never saw left X -- and stepped the
+        // camera on RIGHT B, reload, instead. AButtonLeft / BButtonLeft on the left hand ARE the
+        // physical X and Y whatever the pad calls them (the grenade swallow reads the same action).
+        // Polled at most every 4 ms, and only while seated; the first poll of a seat only records the
+        // state, so a button held while boarding never fires. Additive: both still reach the game as
+        // whatever the pad calls them.
+        //
+        // HOLD EITHER -> RESET THE VIEW (the user, 2026-09-27): lined up with the vehicle's aim and your head
+        // back on the camera's point, in the camera and mode you are in. So a press acts on RELEASE -- a tap
+        // steps, a hold resets and steps nothing -- and the reset fires the moment the hold reaches
+        // vehcamresethold (a second by default; 0 = never), not on release, so you know when to let go.
+        {
+            static decltype(API::VR::get_action_handle("")) s_ax = nullptr, s_ay = nullptr;
+            static bool s_tried = false, s_primed = false, s_x = false, s_y = false;
+            static ULONGLONG s_at = 0;
+            static ULONGLONG s_x_down = 0, s_y_down = 0;   // when a press that started seated began; 0 = none
+            static bool s_x_held = false, s_y_held = false; // that press already reset the view
+            // Our controls, not stick mode: and not behind UEVR's overlay, where left X is its own "back".
+            const bool seated = veh_controls_live(g_in_menu.load());
+            if (!seated) {
+                s_primed = false;
+                s_x_down = s_y_down = 0;
+            } else {
+                if (!s_tried) {
+                    s_tried = true;
+                    s_ax = API::VR::get_action_handle("/actions/default/in/AButtonLeft");
+                    s_ay = API::VR::get_action_handle("/actions/default/in/BButtonLeft");
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: left Y (camera) / left X (tethering mode) read by action: "
+                                         "AButtonLeft %s, BButtonLeft %s",
+                                         s_ax ? "resolved" : "NOT found", s_ay ? "resolved" : "NOT found");
+                }
+                const ULONGLONG t = GetTickCount64();
+                if (t - s_at >= 4) {
+                    s_at = t;
+                    const auto left = API::VR::get_left_joystick_source();
+                    const bool x = s_ax != nullptr && API::VR::is_action_active(s_ax, left);
+                    const bool y = s_ay != nullptr && API::VR::is_action_active(s_ay, left);
+                    if (s_primed) {
+                        // One button: a press that started seated; a hold of vehcamresethold resets; a tap acts
+                        // on release. A left Y that PAUSED (the head-tap pause, below, fired within a quarter
+                        // second of this press -- the two read Y from different sources, a poll apart) is the
+                        // pause's alone: it steps no camera and resets nothing.
+                        const int hold_ms = g_cfg.veh_cam_reset_hold_ms;
+                        auto button = [t, hold_ms](bool now, bool was, ULONGLONG& down, bool& held, void (*tap)()) {
+                            if (now && !was) { down = t; held = false; }
+                            if (down != 0 && !held && g_pause_head_at != 0 && g_pause_head_at + 250 >= down) held = true;
+                            if (now && down != 0 && !held && hold_ms > 0 && t - down >= (ULONGLONG)hold_ms) {
+                                held = true;
+                                veh_cam_view_reset();
+                            }
+                            if (!now && was) {
+                                if (down != 0 && !held) tap();
+                                down = 0;
+                            }
+                        };
+                        button(x, s_x, s_x_down, s_x_held, [] { veh_cam_mode_next(); });        // X: the camera's next tethering mode
+                        button(y, s_y, s_y_down, s_y_held, [] { veh_cam_next_prev(+1); });     // Y: next camera
+                    }
+                    s_x = x; s_y = y; s_primed = true;
+                }
+            }
+        }
+
+        // ---- VEHICLE LEFT STICK CLICK -> MOTION / STICK CONTROLS (vehctrlclick). In any seat our vehicle
+        // cameras run in, flips that vehicle between aiming with the controller and aiming with the right
+        // stick; VehCamSelect.cpp applies it on the game tick and says which on the text panel. Fires on
+        // RELEASE of a press that started seated (the press edges above -- a sprint held into the seat is
+        // not a click), and not at all if the right stick click joined it: L3 + R3 is UEVR's menu chord,
+        // and UEVR reads the pad before this hook, so opening the menu must not also switch controls.
+        // Kept from the game while seated (vehctrlclick=1): what L3 does in a seat is unmeasured, and a
+        // click that also did it would be two actions at once. On foot L3 is sprint and none of this
+        // runs; with vehtp off the click is the game's, as before.
+        {
+            static bool s_l3_armed = false, s_l3_chord = false;
+            const bool seated = g_cfg.veh_ctrl_click != 0 && veh_controls_live(g_in_menu.load());
+            const bool l3 = (raw_btn & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+            if (seated && (seat_btn_down & XINPUT_GAMEPAD_LEFT_THUMB) != 0) { s_l3_armed = true; s_l3_chord = false; }
+            if (s_l3_armed && (raw_btn & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) s_l3_chord = true;
+            if (s_l3_armed && !l3) {
+                if (seated && !s_l3_chord) veh_ctrl_toggle();
+                s_l3_armed = false;
+            }
+            if (seated && l3 && g_cfg.veh_ctrl_click == 1) state->Gamepad.wButtons &= (WORD)~XINPUT_GAMEPAD_LEFT_THUMB;
         }
 
         // ---- WEAPON SCOPE TRIGGER. The toggle edge lives in Scope.cpp; eating LT here is what
@@ -13818,6 +14061,49 @@ public:
                 // zoom. Gated on it, scopeeat=0 made every throw also fire the game's zoom, with its
                 // viewmodel hide and HUD vignette. Menus and seats keep the game's own meaning.
                 if (!blocked) state->Gamepad.bLeftTrigger = 0;
+            }
+        }
+
+        // ---- PASSENGER SEAT: LEFT TRIGGER -> SWITCH WEAPON (vehpassswap; the user, 2026-10-04). A
+        // passenger keeps his own weapons, but the game's switch is left Y (vehpassswapmask: 0x8000), and
+        // in a seat our cameras read left Y as the next camera -- one press, two actions, the same clash
+        // the seat grip above settles for left X. So in a passenger seat a squeeze of the left trigger
+        // sends the switch, and both physical inputs are kept from the game there: left Y steps the
+        // camera only, and the trigger no longer reaches the game's own zoom. Passenger = the game names
+        // the seat and it is neither the driver's nor a gunner's (veh_seat_passenger), so a driver's and
+        // a gunner's trigger are never touched, and nothing happens before the seat is named.
+        //
+        // AFTER the scope block on purpose: that block's edge detectors must see the real trigger on
+        // every poll (a seat is "blocked" there, so it passes the trigger through untouched), and only
+        // then is it taken. The press is a timed pulse, like the holster's swap, and the trigger must be
+        // let go once in the seat before it counts: one held while boarding must not swap. Our own
+        // hysteresis on the scope's threshold. The pause's own Y handling reads the physical snapshot
+        // (raw_btn), so it is unaffected.
+        {
+            static bool s_armed = false, s_down = false;
+            static ULONGLONG s_until = 0;
+            const WORD m = (WORD)g_cfg.veh_pass_swap_mask;
+            if (m == 0 || !veh_seat_passenger() || !veh_controls_live(g_in_menu.load())) {
+                s_armed = false; s_down = false; s_until = 0;
+            } else {
+                const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);
+                const uint8_t off_t = (uint8_t)(on_t / 2);
+                const uint8_t lt    = state->Gamepad.bLeftTrigger;
+                const ULONGLONG t   = GetTickCount64();
+                if (lt <= off_t) {
+                    s_armed = true; s_down = false;
+                } else if (s_armed && !s_down && lt >= on_t) {
+                    s_down = true;
+                    s_until = t + (ULONGLONG)(g_cfg.holster_press_ms > 0 ? g_cfg.holster_press_ms : 1);
+                    API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: passenger seat -- left trigger: switch weapon "
+                                         "(0x%04X for %d ms)", (unsigned)m, g_cfg.holster_press_ms);
+                }
+                const WORD before = state->Gamepad.wButtons;
+                state->Gamepad.wButtons &= (WORD)~m;                     // left Y: the camera only
+                if (s_until != 0 && t < s_until) state->Gamepad.wButtons |= m;
+                else s_until = 0;
+                if (lt != 0 || state->Gamepad.wButtons != before) state->dwPacketNumber++;
+                state->Gamepad.bLeftTrigger = 0;                         // not the game's zoom in this seat
             }
         }
         // ---- HOLSTERS: TAKE THE BUTTONS WE SYNTHESISE, BEFORE WE SYNTHESISE THEM.
@@ -14145,11 +14431,16 @@ public:
             const bool y_now = (raw_btn & XINPUT_GAMEPAD_Y) != 0;   // Y = 0x8000 = left-hand upper face button
 
             // NEAR THE HEAD -- same test as the d-pad shift: nearest controller-to-HMD distance with
-            // arm/release hysteresis. Gated out in a menu or stick mode (vehicle/cutscene/death), so
-            // a pause can only be initiated from live gameplay. An empty (0,0,0) pose is a tracking
-            // dropout, not a hand at the head, and is skipped -- the same guard AimPoseGuard exists for.
+            // arm/release hysteresis, from the tracked poses alone (no arms or rig involved). ALWAYS BUT
+            // THE FRONTEND (the user, 2026-09-27: "the pause near head input should essentially always
+            // work" -- on foot, in a vehicle seat, dead, in a cutscene, loading -- "even while paused ...
+            // that's a natural seeming unpause button": in the pause menu the same START resumes). It
+            // used to stand down in all of stick mode and in every menu. Only the frontend's own
+            // PlayerController (g_frontend_active) keeps it out: there START means something else. An
+            // empty (0,0,0) pose is a tracking dropout, not a hand at the head, and is skipped -- the
+            // same guard AimPoseGuard exists for.
             bool near_now = false;
-            if (!g_stick_mode.load() && !g_in_menu.load()) {
+            if (!halo::g_frontend_active.load(std::memory_order_relaxed)) {
                 const auto hi = API::VR::get_hmd_index();
                 Vec3 hp{}; Quat hq{};
                 if (hi >= 0 && get_pose((int32_t)hi, &hp, &hq, /*use_aim=*/false)) {
@@ -14175,8 +14466,11 @@ public:
             if (y_now && !s_pau_y_prev && near_now) {
                 s_pau_pulse = 3;
                 s_pau_ate_y = true;
+                g_pause_head_at = GetTickCount64();   // the seated left Y lane leaves this press alone
                 if (g_cfg.map_btn_log)
-                    API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START");
+                    API::get()->log_info("[Halo-CampE-UEVR] PAUSE-HEAD: Y near head -> inject START%s",
+                                         g_in_menu.load() ? " (a menu is up: resume)"
+                                         : (g_stick_mode.load() ? " (stick mode: a seat, a death, a cutscene or a load)" : ""));
             }
             if (!y_now) s_pau_ate_y = false;   // Y released: stop eating, so a later Y swaps normally
             s_pau_y_prev = y_now;

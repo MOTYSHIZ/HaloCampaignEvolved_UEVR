@@ -59,7 +59,8 @@ bool fname_is_sane(const std::string& n);
 // so it is safe on a per-element, per-tick path where uobject_live()'s array walk is not.
 // Fails CLOSED (false) when the array is unavailable: the caller is about to dereference.
 bool uobject_slot_valid(const uevr::API::UObject* p);
-// The same check, returning the verified slot index, or -1.
+// The same check, returning the verified slot index, or -1 -- for a TrackedObject (set_at) without the
+// O(n) walk, which TrackedObject::set itself now uses first.
 int32_t uobject_slot_index(const uevr::API::UObject* p);
 
 // A pointer PLUS its slot in the global object array, so a recycled slot can be detected instead of

@@ -81,4 +81,57 @@ void vehicle_body_update();
 // while stick mode holds the sim publish's normal path off. No-op when the key is 0.
 void seat_direct_refresh();
 
+// vehaim: true when the motion controller should drive the aim IN A VEHICLE (owned TP camera on,
+// motion aim on for this vehicle -- its "motionAim" in halo_vr_vehcams.json, else vehaim -- the
+// chassis resolved so we know we are actually in a vehicle, not a cutscene or death, which also raise
+// stick mode, AND our eye drew last frame). The Blam aim write consults this to lift its stick-mode
+// hold-off. Any thread (reads g_cfg + atomics); called from the sim orientation getter.
+bool veh_tp_motion_aim_active();
+// The same without the eye: what the selected camera asks for. Any thread.
+bool veh_tp_motion_aim_selected();
+
+// True while our HEAD-ANCHORED camera is actually drawing. With hmdleash=0 the leash block stands down
+// on it (it would slide the standing origin onto the head and cancel the free 6DoF lean off the
+// anchor); with hmdleash=1 the leash keeps running and holds the head to the anchor as it holds it to
+// the body on foot. Any thread.
+bool veh_tp_anchor_active();
+
+// RUNTIME third-person-camera state: true while a chase camera from halo_vr_vehcams.json is selected
+// for the vehicle you are in (VehCamSelect.cpp). The TP gates read this.
+extern std::atomic<bool> g_veh_tp_active;
+// Any thread: the plugin holds a TEMPORARY value in UEVR's config right now -- the cutscene flatten's
+// VR_2DScreenMode or 0.01 mono-collapse world scale -- so asking UEVR to save its config would persist it.
+// The decoupled-pitch restore's save (VehCamSelect.cpp) waits for this to clear.
+bool veh_uevr_override_active();
+// Left Y in a vehicle: +1 = next camera, -1 = previous. Called from the input hook.
+void veh_cam_next_prev(int dir);
+// Left X in a vehicle: the current camera's next tethering mode. Called from the input hook.
+void veh_cam_mode_next();
+
+// vehaimray: the vehicle aim toward WHERE THE CONTROLLER POINTS (UE degrees), computed on the game
+// tick by tracing the controller's world ray and aiming through the hit from the game's own chase
+// camera (vehaimorigin=1: the guns converge on that camera's line) or the seated unit (0). True
+// only when vehicle motion aim is active, vehaimray is on and a fresh solution exists; the caller
+// then uses these angles INSTEAD of desired_aim_now() + aim_converge_apply(). Any thread.
+bool veh_aim_ray_angles(float* yaw, float* pitch);
+
+// Third-person placement for the vehicle reticules on the TICK. Aiming with the controller
+// (vehaimray): the point the pointing ray reaches, which the vehicle is aimed through -- the infantry
+// rule; `yaw`/`pitch` are then unused. Otherwise: trace from the seated unit along the given aim (UE
+// degrees -- pass the reticule's own ray angles) and return the hit, or the far end of the ray on a
+// miss. False when our third-person camera is not up, and the caller keeps its camera-origin
+// placement (correct while the eye sits in the vehicle). GAME THREAD only.
+bool veh_tp_reticle_target(float yaw, float pitch, Vec3* out);
+
+// True while the third-person camera's eye callback stamps the ONE compositor reticule itself, every
+// frame, on the live controller ray (vehaimray). The tick's compositor publish must stand down on it:
+// the layer's snapshot takes one writer at a time. Any thread.
+bool veh_tp_reticle_stamp_owns();
+
+// Every component of `actor`, up to `max` into `out`: its attachment tree from its root down (which takes
+// in whatever hangs on it -- a rider, a turret actor), plus the meshes the last ride scan found it owning
+// directly or through one of its components, attached or not. Each is a live object when returned; nothing
+// is held. For the vehicle's own parts ("hideMeshes", VehMeshes.cpp). GAME THREAD.
+int vehcam_actor_tree(uevr::API::UObject* actor, uevr::API::UObject** out, int max);
+
 } // namespace halo
