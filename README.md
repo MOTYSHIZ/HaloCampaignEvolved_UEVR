@@ -63,6 +63,10 @@ appropriately.
   movement, so walls and collision still hold him. Your view height follows your real height, ducking
   in the room crouches him, and your head is kept out of walls. Calibrate height from the in-game
   menu; each part can be switched off there.
+- **Vehicles in VR** — your own cameras in every vehicle seat and turret (at your seat, at the
+  Chief's head, or behind the vehicle; held level or turning with it), and you aim the vehicle with
+  your hand. Every camera is yours to edit in `halo_vr_vehcams.json`. See
+  [Controls in vehicles and turrets](#controls-in-vehicles-and-turrets).
 - **VR control layout** — crouch on right-stick-down, equipment on left-X, and the d-pad on the
   right stick whenever a hand is near your head (or on the left stick while you hold
   right-stick-up), all remappable. Menu-aware: in menus your right controller's B acts as *back* and
@@ -79,8 +83,7 @@ appropriately.
   [Updating](#updating-install-every-release-fresh).)
 - **Experimental features** — early previews, off by default, in the menu's own panel: manual
   reloads, racking the slide, a wrist HUD with the motion tracker, ForceTube gunstock kicks and more,
-  contributed by [blindcowboy24](https://github.com/blindcowboy24); and
-  [vehicle cameras with hand aim](#vehicle-cameras-and-hand-aim-experimental). Expect rough edges.
+  contributed by [blindcowboy24](https://github.com/blindcowboy24). Expect rough edges.
 
 ## Requirements
 
@@ -303,11 +306,70 @@ sit right in your hand, or shots don't land where you're pointing, see **Custom 
 
 ## Controls in vehicles and turrets
 
-Halo aims its vehicle camera at whatever you're aiming at, so hand-aim would drag the whole camera
-around with your hand. **For now, getting into any vehicle seat or mounted turret switches the mod
-to classic gamepad controls**, and motion aim steps aside until you get out. Your head still looks
-around freely, and motion aim comes back on its own — calibration intact — the moment you're back
-on foot.
+Getting into a vehicle seat or a mounted turret gives you **the mod's own vehicle cameras**, and
+**you aim the vehicle with your hand**. Both are on by default, and each has its own switch.
+
+- **Cameras.** Every seat has a list of cameras to step through: at your seat, at the Chief's head,
+  or behind and around the vehicle. Each camera has **tethering modes**: in *Untethered* only your
+  head turns your view (the comfortable one), and the *Tethered* modes turn your view with the
+  vehicle as well. A short note in front of you says which vehicle, camera and mode you are in
+  whenever it changes; anything that turns your view is shown in yellow.
+- **Hand aim.** The vehicle aims where your controller points, with a ring showing where the
+  vehicle itself is aiming as it catches up. In a driver's seat pointing also steers, because Halo
+  steers a vehicle toward where it aims. The right stick turns your view.
+
+| Input | Action |
+|---|---|
+| Your aiming hand | Aim the vehicle — and steer it, in a driver's seat |
+| Left stick | Drive — throttle and steering |
+| Right stick | Turn your view |
+| Left Y | Next camera |
+| Left X | The camera's next tethering mode |
+| Left X or left Y, held a second | Reset the view: lined up with the vehicle, your head back on the camera's point |
+| Left stick click | Switch that seat between aiming with your hand and aiming with the stick |
+| Left grip | Switch seat |
+| Right grip | Hard brake |
+| Right A | Banshee trick — flip/roll (still the hard brake in ground vehicles) |
+| Left trigger (hold) | Handbrake — the sharp, quick turn. **In passenger seats: switch weapon** |
+| Right trigger | Fire |
+| Head | Free look, as always. Left Y with a controller near your head still pauses |
+
+Good to know:
+
+- **The left stick click is remembered per seat**, along with your last camera and tethering mode,
+  in `halo_vr_vehcams_last.txt`. A seat switched to the stick is aimed with the right stick, as on
+  a gamepad. Delete the file with the game closed to start every seat from its defaults again.
+- **The right stick turns your view smoothly** (120 degrees a second, whatever your on-foot turn
+  setting), and the view stays where you leave it. `vehstick=2` gives the stick back to the game.
+- **In a passenger seat** you keep your own weapons, so the left trigger switches weapon there
+  (left Y is the camera). `vehpassswap=0` gives both back to the game.
+- **The left grip and the passenger trigger must be let go once after you sit down** before they
+  act, so one held while boarding does nothing.
+- **The opening Pelican ride** is left to the game's own camera.
+- **The notes need the headset-drawn layer** ([Crisp reticule and waypoints](#crisp-reticule-and-waypoints)),
+  so on OpenVR, or with `xrlayer=0`, the cameras work but nothing is shown when they change.
+  `vehcamreadout=0` turns the camera note off.
+- **Cutscenes and deaths** still use the game's own camera and gamepad controls. That switch is
+  automatic — the mod works it out from the game's camera leaving first person, so standing on foot
+  with no weapon keeps motion controls. If you ever find a case it misses, please report it; as a
+  stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
+  `halo_vr_dev.cfg`) to force gamepad controls on, and remove it to go back to automatic.
+
+### Make the cameras your own
+
+The cameras live in `halo_vr_vehcams.json`, next to your settings file. It is yours: the mod writes
+it once, from its built-in cameras, and never touches it again. Edit it while you sit in a vehicle
+and a saved change applies within a couple of seconds; a mistake leaves the cameras you had and
+tells you what is wrong. The file opens with its own guide to every setting, and
+`halo_vr_vehicle_mesh_reference.txt` beside it lists each vehicle's part names for hiding parts of
+the vehicle (`hideMeshes`) and its bone and socket names for placing a camera on a moving part
+(`origin`). **Delete `halo_vr_vehcams.json` to get the built-in cameras back.**
+
+### The game's own vehicle camera and controls
+
+Prefer vehicles the way the game ships them? Untick **Vehicle cameras** in Halo VR User Settings
+(`vehtp=0`). Getting into a seat then switches the mod to classic gamepad controls with the game's
+own chase camera, and motion aim steps aside until you get out:
 
 | Input | Action |
 |---|---|
@@ -319,69 +381,9 @@ on foot.
 | Right trigger | Fire |
 | Head | Free look, as always |
 
-Motion aim, snap turn and the VR-specific button remaps all stand down while you're seated, so
-every other button does what the game's normal gamepad layout does. The one exception is the
-head-tap pause: left Y with a controller near your head still pauses, in a seat as on foot.
-
-The switch is automatic, and it also applies during cutscenes — the mod works it out from the game's
-camera leaving first person, so standing on foot with no weapon keeps motion controls. If you ever
-find a seat it misses, please report it; as a
-stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
-`halo_vr_dev.cfg`) to force these controls on, and remove it to go back to automatic.
-
-### Vehicle cameras and hand aim (Experimental)
-
-Two switches under **Halo VR Experimental** in the [settings menu](#configuration) change the
-section above. Both are off until you switch them on, and both are early previews.
-
-- **Vehicle cameras** (`vehtp=1`) gives every vehicle seat its own list of cameras: at your seat,
-  at the Chief's head, or behind and around the vehicle. Each camera has **tethering modes**:
-  in *Untethered* only your head turns your view (the comfortable one), and the *Tethered* modes
-  turn your view with the vehicle as well. A short note in front of you says
-  which vehicle, camera and mode you are in whenever it changes; anything that turns your view is
-  shown in yellow.
-- **Aim vehicles with your hand** (`vehaim=1`, needs Vehicle cameras) aims the vehicle where your
-  controller points, and the right stick turns your view instead. In a driver's seat pointing also
-  steers, because Halo steers a vehicle toward where it aims.
-
-With Vehicle cameras on, these controls are added while you are seated:
-
-| Input | Action |
-|---|---|
-| Left Y | Next camera |
-| Left X | The camera's next tethering mode |
-| Left X or left Y, held a second | Reset the view: lined up with the vehicle, your head back on the camera's point |
-| Left stick click | Switch that seat between aiming with your hand and aiming with the stick |
-| Left grip | Switch seat (the game's own, moved off left X; this grip no longer brakes, the right grip still does) |
-| Left trigger, **passenger seats only** | Switch weapon (left Y no longer does there, and the trigger no longer zooms) |
-
-The cameras live in `halo_vr_vehcams.json`, next to your settings file. It is yours: the mod writes
-it once, from its built-in cameras, and never touches it again. Edit it while you sit in a vehicle
-and a saved change applies within a couple of seconds; a mistake leaves the cameras you had and
-tells you what is wrong. The file opens with its own guide to every setting, and
-`halo_vr_vehicle_mesh_reference.txt` beside it lists each vehicle's part names for hiding parts of
-the vehicle (`hideMeshes`) and its bone and socket names for placing a camera on a moving part
-(`origin`). **Delete `halo_vr_vehcams.json` to get the built-in cameras back.**
-The opening Pelican ride is left to the game's own camera.
-
-Good to know:
-
-- **The left stick click works with hand aim off too.** It switches that seat to hand aim and
-  remembers it; `vehaim` sets what each seat starts as (changing it later resets the seats you had
-  switched by hand). Your last camera, tethering mode and
-  controls in each seat are kept in `halo_vr_vehcams_last.txt`; delete it with the game closed to start every seat from
-  its defaults again.
-- **With hand aim on, the right stick turns your view smoothly** (120 degrees a second, whatever
-  your on-foot turn setting), and the view stays where you leave it. `vehstick=2` gives the stick
-  back to the game.
-- **The grip and the passenger trigger must be let go once after you sit down** before they act, so
-  one held while boarding does nothing.
-- **The notes need the headset-drawn layer** ([Crisp reticule and waypoints](#crisp-reticule-and-waypoints)),
-  so on OpenVR, or with `xrlayer=0`, the cameras work but nothing is shown when they change.
-
-The settings for all of this are in the menu and in `halo_vr_user_reference.txt` under **Vehicle
-cameras**: turn the readout off with `vehcamreadout=0`, give the seat switch or the passenger
-trigger back to the game with `vehseatgrip=0` and `vehpassswap=0`.
+To keep the cameras and only give up hand aim, untick **Aim vehicles with your hand** (`vehaim=0`):
+every seat then starts out aimed with the right stick, and the left stick click still switches a
+seat to your hand.
 
 ## Configuration
 
@@ -438,9 +440,8 @@ thumbsticks) and scroll to **Script UI** — five panels live there, in this ord
 - **Halo VR Experimental** — early previews, every one off until you switch it on: manual reload,
   racking the slide, a wrist HUD with the motion tracker, a grenade throw on grip release, ForceTube
   gunstock kicks, a vehicle seat camera and more, contributed by
-  [blindcowboy24](https://github.com/blindcowboy24); and
-  [vehicle cameras with hand aim](#vehicle-cameras-and-hand-aim-experimental). They are works in
-  progress and may break things or feel unfinished.
+  [blindcowboy24](https://github.com/blindcowboy24). They are works in progress and may break
+  things or feel unfinished.
 
 This ships as `scripts/halo_vr_settings.lua` and needs nothing extra: UEVR's built-in Lua
 scripting loads it automatically.
@@ -566,9 +567,11 @@ delete it and recapture rather than fighting it.
 - **PureDark's AFW build of UEVR: doubled reticle and waypoint markers.** 0.6.x drew them doubled
   there. 0.7.0 changes how the mod reads AFW's alternating eyes, but we have no AFW setup to test it
   on. If they still double, set `xrlayer=0` and `xrlayernav=0`, and please tell us.
-- **Vehicle cameras (Experimental):** changing camera can hitch for a moment while its note is
-  drawn, and the first boarding of a session can hitch once. Rarely, after spawning into a vehicle
-  from a checkpoint, the cameras sit in the wrong place; get out and back in.
+- **Vehicles:** the first time you board a vehicle in a session can hitch once. Rarely, after
+  spawning into a vehicle from a checkpoint, the cameras sit in the wrong place; get out and back in.
+  The vehicle cameras were developed on the Steam version and have not been tried on the Microsoft
+  Store / Game Pass version: if vehicles misbehave there, `vehtp=0` gives the game's own camera and
+  controls back, and please tell us.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered.
   **[Our UEVR build](#our-uevr-build-recommended), attached to each release, addresses the hang**, so

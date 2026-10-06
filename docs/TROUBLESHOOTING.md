@@ -54,6 +54,23 @@ then look at which folder appears under `%APPDATA%\UnrealVRMod\` and make your p
 The two builds are genuinely different binaries, so if something misbehaves on only one of them,
 please say which store you play on when you report it.
 
+## Vehicles
+
+**Vehicles feel different since 0.7, and I want the old camera and controls back.**
+From 0.7 a vehicle seat gives you the mod's own cameras, and the vehicle aims where your controller
+points. In **Halo VR User Settings**, untick **Vehicle cameras** (`vehtp=0`) for the game's own chase
+camera with gamepad controls, or untick only **Aim vehicles with your hand** (`vehaim=0`) to keep the
+cameras and aim with the right stick. In a single seat, clicking the left stick switches between
+hand and stick aim. See [Controls in vehicles and turrets](../README.md#controls-in-vehicles-and-turrets).
+
+**My view turns with the vehicle and it is uncomfortable.**
+You are in one of a camera's *Tethered* modes. Press left X to step back to *Untethered*, where only
+your head turns your view; the note that appears shows anything that turns your view in yellow.
+
+**The left grip no longer brakes in a vehicle.**
+It switches seat now, because left X steps the camera's tethering mode. The right grip still brakes.
+`vehseatgrip=0` puts the seat switch back on left X and the brake back on both grips.
+
 ## Injection
 
 **The game hangs when I inject.**
