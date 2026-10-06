@@ -14,6 +14,11 @@ extern std::atomic<float> g_cam_x, g_cam_y, g_cam_z;
 
 // The rendered base yaw (degrees), published by Plugin.cpp's view callback each frame.
 extern std::atomic<float> g_view_base_yaw;
+// ...and the base's pitch and roll: the rotation UEVR turns your whole room by, before your head's own.
+// Zero except while a vehicle camera tilts your view with the vehicle (VehCam's view override sets
+// them; Plugin.cpp's view callback zeroes them first every frame). Degrees, UE rotator convention.
+extern std::atomic<float> g_view_base_pitch;
+extern std::atomic<float> g_view_base_roll;
 
 uevr::API::UObject* holster_marker_spawn_mesh(uevr::API::UObject* owner, uevr::API::UObject* mesh, double scale);
 void holster_marker_set_mesh(uevr::API::UObject* comp, uevr::API::UObject* mesh);

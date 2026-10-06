@@ -9,7 +9,7 @@ UEVR load it, followed by the mod's own banner and the UEVR build it is running 
 
 ```
 [PluginLoader] Loaded ...\UnrealVRMod\HaloCampaignEvolved\plugins\halo_vr.dll
-[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v0.6.0  (halo_vr.dll)
+[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v0.7.0  (halo_vr.dll)
 [Halo-CampE-UEVR] UEVR backend: tag=... branch=... commit=...
 ```
 
@@ -32,7 +32,8 @@ earlier version left behind stays and keeps applying, and that mixed folder is n
 was tested as. If the mod behaves oddly right after an update, this is the first thing to rule out.
 
 You can copy `halo_vr_user.cfg` (your settings) and your calibration files — `halo_vr_calib.cfg`,
-`halo_vr_weapons.cfg`, `halo_vr_handposes.json` — out first and put them back afterwards, but that is
+`halo_vr_weapons.cfg`, `halo_vr_handposes.json`, and `halo_vr_vehcams.json` if you edited your vehicle
+cameras — out first and put them back afterwards, but that is
 a convenience and not a guarantee: settings change between releases, and an old value can behave
 differently on a new build. If anything feels wrong after restoring them, delete them and use the
 shipped defaults.
@@ -53,6 +54,23 @@ then look at which folder appears under `%APPDATA%\UnrealVRMod\` and make your p
 The two builds are genuinely different binaries, so if something misbehaves on only one of them,
 please say which store you play on when you report it.
 
+## Vehicles
+
+**Vehicles feel different since 0.7, and I want the old camera and controls back.**
+From 0.7 a vehicle seat gives you the mod's own cameras, and the vehicle aims where your controller
+points. In **Halo VR User Settings**, untick **Vehicle cameras** (`vehtp=0`) for the game's own chase
+camera with gamepad controls, or untick only **Aim vehicles with your hand** (`vehaim=0`) to keep the
+cameras and aim with the right stick. In a single seat, clicking the left stick switches between
+hand and stick aim. See [Controls in vehicles and turrets](../README.md#controls-in-vehicles-and-turrets).
+
+**My view turns with the vehicle and it is uncomfortable.**
+You are in one of a camera's *Tethered* modes. Press left X to step back to *Untethered*, where only
+your head turns your view; the note that appears shows anything that turns your view in yellow.
+
+**The left grip no longer brakes in a vehicle.**
+It switches seat now, because left X steps the camera's tethering mode. The right grip still brakes.
+`vehseatgrip=0` puts the seat switch back on left X and the brake back on both grips.
+
 ## Injection
 
 **The game hangs when I inject.**
@@ -66,6 +84,11 @@ It happens, and it is intermittent rather than a setup problem. Two shapes:
 
 Same remedy for both: force-kill the game, relaunch, and inject again at the main menu. A retry
 normally works, and nothing needs reconfiguring in between.
+
+**For the hang, use our UEVR build.** `UEVR-HaloVR-01139.zip`, attached to each release, fixes the
+causes we found for it, and injecting has been far more reliable with it — see
+[Our UEVR build](../README.md#our-uevr-build-recommended) in the README. If you are on stock UEVR,
+switching is the first thing to try.
 
 This is a **UEVR-side problem, not a mod bug**, on the evidence we have. The hang has been seen with
 the plugin removed from the profile entirely, so it happens with no mod code loaded at all; and
@@ -108,7 +131,7 @@ button press that is expected — it is exactly what the press above fixes. If i
 middle of play, you are looking at the frozen-hands problem below, and a press brings it back.
 
 If controllers read 1 and the gun still ignores you, `log.txt` can tell you whether poses are
-arriving at all. About every 20 seconds on foot it logs a line like:
+arriving at all. About every 20 seconds it logs a line like:
 
 ```
 [Halo-CampE-UEVR]   rig: travel=0.000m rigOff=(0.0,0.0,0.0)cm ...
@@ -249,7 +272,8 @@ is meant to be inert outside this game.
 
 ## Logs
 
-Everything the mod does is logged with a `[Halo-CampE-UEVR]` prefix in
+Nearly everything the mod does is logged with a `[Halo-CampE-UEVR]` prefix (the layer bridge logs as
+`[XRBRIDGE]`) in
 `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\log.txt`. Include the tail of that file in bug reports,
 and say whether you play on Steam or Game Pass.
 

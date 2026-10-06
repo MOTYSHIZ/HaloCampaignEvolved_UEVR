@@ -2080,7 +2080,10 @@ struct Config {
     //   1 (default) = while the callbacks read as one centre view per frame, UEVR declares
     //                 method 3, AND both eyes report the same projection matrix (the physical
     //                 signature of one image serving both eyes; a stereo pair reports mirrored
-    //                 frustums), every quad slides out along its own ray to xrlayermonofar metres
+    //                 frustums -- unless a symmetric projection override is on), AND the backend
+    //                 is not PureDark's AFW build (there method 3 renders the eyes by turns and
+    //                 warps the other, so the headset shows depth -- player report 2026-09-30),
+    //                 every quad slides out along its own ray to xrlayermonofar metres
     //                 with its angular size held, so its disparity matches the image (~0).
     //   0           = never.
     //   2           = always -- an A/B of the mechanism that needs no mono session.
@@ -2283,7 +2286,10 @@ struct Config {
     // the pause menu by injecting the pad START button -- which the game reads even when UNFOCUSED,
     // unlike its native Escape. Shares the dpad_head_cm/hyst radius (one notion of "near the head");
     // no dwell, because the Y press is itself the deliberate trigger. Y is otherwise weapon-swap, so
-    // a pausing press is eaten (it does not also switch weapons).
+    // a pausing press is eaten (it does not also switch weapons). Poses only -- no arms or rig -- and
+    // live EVERYWHERE BUT THE FRONTEND (2026-09-27): on foot, in a vehicle seat (where the pausing Y
+    // also steps no vehicle camera), dead, in a cutscene, loading -- and in the pause menu, where the
+    // same START resumes, so one gesture pauses and unpauses.
     bool  pause_head      = true;
     int   map_rstick_down = 0x2000;   // right stick DOWN -> B, crouch on this game's pad map
     float map_rstick_dz   = 0.65f;    // deflection needed; high so turning never trips it

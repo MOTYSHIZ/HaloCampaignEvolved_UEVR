@@ -30,7 +30,7 @@
 // ============================================================================================
 // WHAT THIS MODULE DOES
 // ============================================================================================
-// Classifies the topology FROM THE CALLBACKS THEMSELVES, on the render thread, with no engine
+// Classifies the topology FROM THE CALLBACKS THEMSELVES, on whichever thread they arrive, with no engine
 // call and no logging:
 //   * a slot that has not reported within the last few callbacks is STALE -> one view per frame;
 //   * one view per frame whose position SWINGS by two IPDs with alternating sign is ALTERNATING;
@@ -43,34 +43,52 @@
 // Warthog, so the verdict no longer depends on how fast the player is going.
 // The declared VR_RenderingMethod is read separately on the game thread's 2 s poll and kept
 // alongside, for the log line and for the one decision that must not rest on a heuristic alone
-// (flattening the compositor quads, XrLayer.cpp). That decision needs THREE things to agree:
+// (flattening the compositor quads, XrLayer.cpp). That decision needs FIVE things to agree:
 //   1. the topology reads Mono (one view per frame that does not alternate);
 //   2. UEVR declares method 3;
 //   3. BOTH EYES REPORT THE SAME PROJECTION MATRIX (get_ue_projection_matrix per eye, also read on
-//      the poll). This is the one that measures what flattening actually depends on: the monofix
-//      mono path gives every eye the union-FOV projection, so left and right come back identical,
-//      while every stereo-pair mode -- Native, AFR, Synchronized, AFW -- hands back mirror images
-//      of each other because a headset's per-eye FOV is asymmetric. A backend whose method 3
-//      rendered ONE FIXED eye would still report that eye's projection, distinct from the other's,
-//      and fail this test. Residual false positive: a symmetric-FOV headset (or the SimVR rig,
-//      whose eyes are symmetric) on such a backend -- not a real configuration.
-// The same fact also OVERRIDES the alternation vote: a single view whose two projections are
-// identical is classified Mono without consulting the ring, because an alternating pair cannot
-// have identical frustums. Needed on this title, where the view position swings by several cm
-// per frame^2 with alternating sign while the player walks with the scope open -- enough to win
-// the vote for a second at a time and flicker the flattening (2026-09-15 headset report).
+//      the poll): the monofix mono path gives every eye the union-FOV projection, so left and
+//      right come back identical. NECESSARY, NOT SUFFICIENT -- see below;
+//   4. the backend is not PureDark's AFW, where method 3 means something else entirely;
+//   5. Extreme Compatibility Mode is off: it forces the alternating plumbing under every method,
+//      and our own Mono yields to it (review of 2026-10-05, from the monofix source).
+//
+// IDENTICAL PROJECTIONS DO NOT MEAN MONO, and this module believed they did until 2026-10-05.
+// UEVR's HorizontalProjectionOverride=Symmetric gives both eyes one frustum under ANY rendering
+// method on ANY backend (OpenXR.cpp get_mat: both eyes take the max half-angle), and a headset
+// with symmetric lenses does the same unasked. So the shared projection may short-circuit the
+// alternation vote ONLY together with conditions 2 and 4 -- on the one backend and method where it
+// is the signature of real mono. There the shortcut is still needed: on this title the mono view's
+// position swings by several cm per frame^2 with alternating sign while the player walks with the
+// scope open, enough to win the vote for a second at a time (2026-09-15 headset report). Everywhere
+// else the positions decide, which is what they are for.
 //
 // The detector rather than the declaration decides how the consumers average, because the
 // declaration can be true and inert: an older backend ignores VR_RenderingMethod=3 and renders
-// stereo; the PureDark AFW backend reads 3 as Alternate Frame Warping, which renders the eyes by
-// turns and therefore reads Alternating here. What the callbacks DO is the only fact that matters
-// to a consumer of the callbacks; the projection test above covers the one case they cannot tell.
+// stereo. What the callbacks DO is the only fact that matters to a consumer of the callbacks.
+//
+// PUREDARK'S AFW, FROM ITS SOURCE (PureDark/UEVR at c40eaab, the commit in the player's log).
+// Method 3 there is ALTERNATE_FRAMEWARP: is_using_afr() is true for it, the stereo hook sets
+// true_index = g_frame_count % 2 and subtracts THAT eye's offset every frame, and the other eye is
+// synthesised by warping (the first 90 frames after injection run as plain synchronized AFR). So
+// the eyes render BY TURNS and the callbacks alternate -- exactly what this file first assumed.
+// What went wrong twice:
+//   v0.6.0  the player's projections were identical, the shortcut above called it Mono, the quads
+//           were flattened to infinity AND every consumer took one eye as the head.
+//   v0.6.1  read the same log as "one centre view warped into a stereo pair" WITHOUT reading the
+//           source, and only stopped the flattening. The head still hopped between the eyes each
+//           frame, so the reticule stayed doubled (the player's second log, 2026-10-05).
+// The backend is identified from UEVR's own tag and branch ("AFW" in either).
 //
 // HEADLESS CAVEAT: under the SimVR/OpenVR harness the runtime reports no HMD, UEVR's eye offsets
 // are zero, and AFR is indistinguishable from Mono by construction -- an AFR arm reading "mono"
 // there is the rig, not the detector.
 //
-// Render thread: plain working state, one atomic to publish. Game thread: atomics only.
+// The stereo callback: plain working state, one atomic to publish. The 2 s poll: atomics only.
+// WHICH THREAD IS THE CALLBACK ON? Stock UE 5.5 calls CalculateStereoViewOffset from
+// ULocalPlayer's view setup inside the viewport draw, i.e. the GAME thread -- these comments
+// said "render thread" until the 2026-10-05 review. Nothing here depends on the answer: the
+// working state has one writer either way, and everything shared is an atomic.
 
 #pragma once
 
@@ -84,7 +102,7 @@ enum class ViewMode : int {
     Mono        = 3,   // one view per frame, the centre eye: this sample IS the head
 };
 
-// RENDER THREAD, from on_post_calculate_stereo_view_offset, BEFORE aim_converge_note_post and
+// THE STEREO CALLBACK, from on_post_calculate_stereo_view_offset, BEFORE aim_converge_note_post and
 // xrlayer_note_eye -- both ask viewmode_current() inside the same callback and must see this
 // sample counted. Position in game units (UE cm), the post-hook (rendered) view position.
 void viewmode_note_post(int view_index, float x, float y, float z);
@@ -102,9 +120,23 @@ int  viewmode_declared();
 void viewmode_set_shared_projection(bool shared);
 bool viewmode_shared_projection();
 
-// True when the single rendered view is the CENTRE eye by construction: the topology reads Mono,
-// UEVR declares the Mono method (3), AND both eyes share one projection. All three are required --
-// see the header comment.
+// GAME THREAD, on the same poll: whether the backend is PureDark's AFW build (its UEVR tag or branch
+// names AFW). There, method 3 is Alternate Frame Warping -- the eyes render by turns -- so neither
+// the Mono shortcut nor the flattening may ever apply (see the header comment). False until the
+// poll has looked.
+void viewmode_set_backend_warps(bool warps);
+bool viewmode_backend_warps();
+
+// GAME THREAD, on the same poll: UEVR's VR_ExtremeCompatibilityMode. It forces the alternating
+// (synchronized-AFR) plumbing under EVERY rendering method, and our own backend's Mono yields to it,
+// so method 3 with it on renders the eyes by turns. False until the poll has looked.
+void viewmode_set_extreme_compat(bool on);
+bool viewmode_extreme_compat();
+
+// True when the single rendered view is the CENTRE eye by construction AND that one image is what
+// both eyes see: the topology reads Mono, UEVR declares method 3, both eyes share one projection,
+// the backend is not AFW, AND Extreme Compatibility Mode is off. All five are required -- see the
+// header comment. Never relax it to fewer.
 bool viewmode_is_mono();
 
 // Number of post-callbacks counted so far. A consumer that averages "this sample with the

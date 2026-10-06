@@ -60,6 +60,20 @@ uintptr_t resolve_unit_object(uintptr_t rec_base, uint32_t* out_idx) {
 // Resolve ANY object datum through the same table walk. SIM THREAD ONLY (gs:[0x58]).
 // Found 2026-08-20: the biped's +0x0C holds its parent object's datum while mounted (the
 // Warthog's unit) and 0xFFFFFFFF on foot -- this is the door into vehicle state.
+//
+// THE OFFSETS IN THIS FILE ARE INLINE LITERALS, which Check-AddressHygiene.ps1 cannot see (it matches
+// `constexpr ... = 0x` definitions only), so their paper trail is written here instead:
+//   object table chain (tls +0x20 -> +0x50 -> idx*24 +0x10)
+//       ADDR-HYGIENE: structural -- the chain BlamAim's resolve_object uses, re-derived independently
+//       from the biped vtable (docs\BLAM_AIM_FINDINGS.md); read_ptr guards every hop.
+//   biped +0x0C, the parent datum (THE MOUNT FLAG)
+//       ADDR-HYGIENE: guarded -- a ride also needs stick mode, and once the game's reflected seats
+//       (BlamUnitComponent.GetSeatStates, VehCam seat_resolve) have named your seat this session, a ride
+//       they do not back gets no vehicle camera. A misread flag can start a vehicle search, not a camera.
+//   unit +0x20 (position), +0x50 (facing), vehicle +0x1D4 (vehfacingoff), +0x380..+0x383 (grenades)
+//       ADDR-HYGIENE: UNGUARDED -- measured on the Steam build (+0x20 fitted over 972 samples against the
+//       rendered camera; +0x1D4 by spinning the Warthog; grenades against the HUD). Consumers fall back
+//       when the unit is unresolved; nothing proves them right on another build.
 uintptr_t resolve_object_by_datum(uint32_t datum) {
     const auto read_ptr = host::g_blamdrive_state.read_ptr;
     const uint32_t& g_tls_index = *host::g_blamdrive_state.tls_index;

@@ -172,7 +172,39 @@ constexpr int XRLAYER_SLOT_PANE     = 9;
 // single-scalar API. See xrlayer_notice_quad's `world_cm_h`.
 constexpr int XRLAYER_SLOT_GUIDE    = 10;
 
-constexpr int XRLAYER_SLOTS         = 11;
+// SLOT 11 -- THE TEXT PANEL. A short notice in front of the player that fades in, holds and fades out
+// (XrText.cpp owns what it says and where it sits; this module presents it). Like the guide its art is
+// GENERATED -- rasterised text, not a capture -- but unlike the guide it CHANGES: each notice redraws
+// the cell, and the fade rewrites its alpha in steps. Its cell is the one NON-SQUARE cell, a row of its
+// own laid under everything else at bring-up (xrlayertextw x xrlayertexth), so no existing cell moves.
+constexpr int XRLAYER_SLOT_TEXT     = 11;
+
+// SLOT 12 -- THE VEHICLE-FACING MARKER. In a vehicle camera, the generated ring (the reticule's own
+// fallback picture) placed where the VEHICLE points, beside the crosshair that shows where you point.
+// With a camera that turns with the vehicle the view only settles once the two meet, and this is how a
+// player sees where that is. Its own cell because the reticule's cell may hold the game's captured
+// crosshair, and this must always be the ring: generated once at bring-up (and on a colour/ring-shape
+// change), laid in spare atlas space like the guide, so no other cell moves. VehCam.cpp poses it every
+// rendered frame (the eye callback), on the vehicle's live frame.
+constexpr int XRLAYER_SLOT_VEHAIM   = 12;
+
+constexpr int XRLAYER_SLOTS         = 13;
+
+// ---- THE TEXT PANEL'S PIXELS (slot 11) ---------------------------------------------------------
+//
+// GAME THREAD. The text cell's size, as the atlas actually granted it at bring-up: 0 x 0 when there
+// was no room (the notice then simply never shows) or the layer is not up yet. Rasterise to exactly
+// this size -- a panel of any other size is refused.
+void xrlayer_text_cell(int* w, int* h);
+// GAME THREAD. Hand the layer a finished panel: premultiplied RGBA, w x h, top row first, in the
+// swapchain's own channel order (bgra = xrlayer_text_is_bgra()). Copied; the submit thread uploads it
+// once the GPU has finished with the previous one. `fade_*` drive the alpha from `t0_ms`
+// (GetTickCount64): ramp up over fade_in, hold, ramp down over fade_out. The quad itself is posed by
+// the caller with xrlayer_notice_quad(XRLAYER_SLOT_TEXT, ...) and retired when the fade is done.
+bool xrlayer_text_set(const uint8_t* rgba, int w, int h, uint64_t t0_ms,
+                      uint32_t fade_in_ms, uint32_t hold_ms, uint32_t fade_out_ms);
+// GAME THREAD. True when the layer's swapchain stores B,G,R,A (so a caller writes that order).
+bool xrlayer_text_is_bgra();
 
 // GAME THREAD, tick rate. Same contract as xrlayer_notice_reticule: one snapshot write, no OpenXR,
 // cheap enough to call unconditionally.
@@ -285,6 +317,17 @@ void xrlayer_clear_quad_orientation(int slot);
 // something that moves WITH the player (the aim reticule, the grab guide) -- it is what stops them
 // trailing a tick of travel behind during locomotion.
 void xrlayer_set_quad_head_relative(int slot, bool on);
+
+// GAME THREAD. Treat this slot's next target as an offset IN THE ROOM'S OWN AXES (forward, right, up
+// of the view BASE -- the rotation UEVR turns your whole room by, before your head's own) from the mono
+// camera. Rebuilt every rendered frame against the base's rotation AS IT IS THEN, so the quad stays put
+// in your room when the room itself turns -- a vehicle camera that yaws, pitches or rolls with the
+// vehicle -- as well as when it moves. Head-relative only cancels the movement, which is why the text
+// panel swung away in exactly those cameras. Takes precedence over head-relative; cleared on retire.
+void xrlayer_set_quad_view_relative(int slot, bool on);
+
+// RENDER THREAD, each frame before xrlayer_note_eye: the view base's rotation for this frame.
+void xrlayer_note_view_base(float pitch, float yaw, float roll);
 
 // RENDER THREAD. The rig's world rotation for the frame being drawn.
 //

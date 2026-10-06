@@ -4,6 +4,7 @@
 #include "features/hooks/BlamDriveHooks.hpp"
 #include "Math.hpp"
 #include "MotionAimControl.hpp"
+#include "features/vehcam/VehCam.hpp"   // veh_tp_motion_aim_active(): lift the stick-mode aim hold in a vehicle
 #include "AimConverge.hpp"
 #include "AimDirect.hpp"
 #include "addrcascade/AddressCascade.hpp"
@@ -652,7 +653,8 @@ int g_layout_strikes = 0;
 
 // Sampling opportunities counted so far toward LAYOUT_SETTLE_SAMPLES. At namespace scope rather
 // than a local static because blam_drive_tick() has to be able to RESET it: stick mode (cutscenes,
-// vehicles, death) returns above layout_gate entirely, so the gate cannot notice it came and went.
+// vehicles, death) never reaches the settle -- cutscenes and death return above layout_gate, a vehicle
+// ride returns from it first -- so the gate cannot notice it came and went.
 // A level that STARTS in a cutscene is fine either way -- the counter simply never starts. The case
 // this exists for is a cutscene that interrupts a measurement already in progress, where the
 // counter would otherwise still be satisfied and we would sample the view teleport on the way out.
@@ -738,6 +740,39 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     if (g_layout == Layout::Proven)    return true;
     if (g_layout == Layout::Unverified) return true;
     if (g_layout == Layout::Wrong)     return false;
+
+    // A VEHICLE RIDE CANNOT VERIFY, so it must not wait for a verdict. The check needs LAYOUT_REF_DEG of
+    // ControlRotation movement while this write is held, and a player aiming the vehicle by hand makes
+    // none; worse, the settle restarts every ~2 s in stick mode (blam_drive_tick). So a session that
+    // began in a vehicle held vehicle aim for the whole ~90 s give-up deadline. Whether record and
+    // ControlRotation even agree in a seat is unmeasured, so sampling here could condemn a good build.
+    // Write UNVERIFIED for the ride -- the doctrine above: could not verify is not known-bad -- and
+    // leave the state Unproven, so on-foot play still verifies it and a Wrong verdict still stops this.
+    if (g_stick_mode_active.load(std::memory_order_relaxed) && veh_tp_motion_aim_active()) {
+        // ...but only into something that at least HOLDS angles. Unverified is not unchecked: a yaw and a
+        // pitch in radians are small finite numbers, and a field that is not (a pointer, a count, a
+        // position in world units) means the layout moved. Held then, and said once (review, 2026-10-05).
+        const float* cur = (const float*)rec;
+        if (!std::isfinite(cur[0]) || !std::isfinite(cur[1]) || std::fabs(cur[0]) > 6.4f || std::fabs(cur[1]) > 1.7f) {
+            static bool s_refused = false;
+            if (!s_refused) {
+                s_refused = true;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] BLAMLAYOUT: in a vehicle before the record layout was verified, and the "
+                    "record does not hold angles (%.4g, %.4g) -- vehicle aim is HELD OFF until on-foot play "
+                    "verifies the layout.", (double)cur[0], (double)cur[1]);
+            }
+            return false;
+        }
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            API::get()->log_info(
+                "[Halo-CampE-UEVR] BLAMLAYOUT: in a vehicle before the record layout was verified -- vehicle "
+                "aim writes UNVERIFIED during rides; on-foot play verifies it (a seat cannot).");
+        }
+        return true;
+    }
 
     // Once aimdirect owns the view the comparison is no longer meaningful -- see above.
     if (aim_direct_ready()) {
@@ -833,9 +868,13 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     // and express the record in UE degrees.
     constexpr float RAD2DEG_L = 57.2957795f;
     float rec_yaw_ue = -(src[0] * RAD2DEG_L);
-    while (rec_yaw_ue >  180.0f) rec_yaw_ue -= 360.0f;
-    while (rec_yaw_ue < -180.0f) rec_yaw_ue += 360.0f;
-    const float rec_pitch_ue = src[1] * RAD2DEG_L;
+    // Wrapped by remainder, never by subtracting 360 until in range: this is the one read whose whole
+    // job is to notice that the layout moved, so src[0] may be anything. Past ~1e9 a float no longer
+    // changes when 360 is subtracted and infinity never does, and a loop here would hang the sim
+    // thread instead of calling the layout wrong (review, 2026-10-05). A non-finite value becomes a
+    // constant, which the sampler reads as a field that does not follow the view -- a mismatch.
+    rec_yaw_ue = std::isfinite(rec_yaw_ue) ? std::remainder(rec_yaw_ue, 360.0f) : 180.0f;
+    const float rec_pitch_ue = std::isfinite(src[1]) ? src[1] * RAD2DEG_L : 0.0f;
 
 #if HALO_VR_DEV
     // FAULT INJECTION (blamfault 0x200): freeze the candidate -- the offset landing on something
@@ -945,7 +984,16 @@ static void drive_angles_impl(bool off_thread) {
     // stick mode exists. The control law is disarmed at the stick-mode gate in Plugin.cpp, but this
     // write is driven from the sim's orientation getter and is NOT on that code path, so without
     // this it kept steering the seat camera from the hand while the player's stick did nothing.
-    if (g_stick_mode_active.load(std::memory_order_relaxed)) return features_sim_stick_mode_hold(off_thread);
+    // VEHICLE MOTION AIM (vehaim): with the owned third-person camera we no longer read Halo's
+    // aim-bound chase cam, so the reason this hold-off exists -- a motion aim swinging the seat
+    // camera -- is gone in a vehicle. Let the aim write through so the controller drives the
+    // turret/hull; the TP camera stays a comfortable chase. Cutscenes and death also raise stick
+    // mode but resolve no chassis, so veh_tp_motion_aim_active() is false there and they still hold.
+    if (g_stick_mode_active.load(std::memory_order_relaxed)) {
+        if (!veh_tp_motion_aim_active()) return features_sim_stick_mode_hold(off_thread);
+        // Still publish seat/unit state, but do NOT return -- fall through to the aim write below.
+        features_sim_stick_mode_hold(off_thread);
+    }
 
     uintptr_t rec = g_ctl_rec.load(std::memory_order_relaxed);
     if (rec == 0 || IsBadWritePtr((void*)rec, 8)) {
@@ -1022,14 +1070,29 @@ static void drive_angles_impl(bool off_thread) {
     if (!layout_gate(rec, off_thread)) return;
 
     float yaw = 0.0f, pitch = 0.0f;
-    if (!desired_aim_now(&yaw, &pitch)) return;
+    if (veh_aim_ray_angles(&yaw, &pitch)) {
+        // VEHICLE RAY AIM (vehaimray): already the CONVERGED direction -- from the seated unit
+        // through the point the controller's world ray hits (VehCam.cpp) -- so it must NOT also be
+        // bent by aim_converge_apply, whose delta and range describe the infantry eye, not this
+        // geometry. Only reachable in a vehicle with the owned third-person camera on.
+    } else if (g_stick_mode_active.load(std::memory_order_relaxed) && g_cfg.veh_aim_ray) {
+        // IN A VEHICLE WITH NO FRESH RAY SOLUTION -- the first ticks of a ride, before our camera has
+        // drawn; the controller losing tracking; a failed pawn read. HOLD: leave the record as it is.
+        // Falling through to desired_aim_now() below would aim the vehicle with the INFANTRY mapping,
+        // which in a vehicle reads 70-90 deg off the camera (measured 2026-09-23) -- a lurch on every
+        // tracking blip. (Stick mode reaches here only with vehicle motion aim on; see the gate above.
+        // vehaimray=0 is the deliberate infantry-mapping A/B, and still takes the path below.)
+        return;
+    } else {
+        if (!desired_aim_now(&yaw, &pitch)) return;
 
-    // 6DoF CONVERGENCE. desired_aim_now() returns the INTENT -- where the player is pointing --
-    // which is a direction and therefore only lands on the target when the shot leaves from the
-    // player's eye. It does not: it leaves from Blam's own origin. Bending the intent onto the
-    // traced range is what makes the two agree. Declines to act while the head is leashed, so this
-    // is a no-op in the shipped configuration. See AimConverge.hpp.
-    aim_converge_apply(&yaw, &pitch);
+        // 6DoF CONVERGENCE. desired_aim_now() returns the INTENT -- where the player is pointing --
+        // which is a direction and therefore only lands on the target when the shot leaves from the
+        // player's eye. It does not: it leaves from Blam's own origin. Bending the intent onto the
+        // traced range is what makes the two agree. Declines to act while the head is leashed, so
+        // this is a no-op in the shipped configuration. See AimConverge.hpp.
+        aim_converge_apply(&yaw, &pitch);
+    }
     features_sim_record_written(yaw, pitch);
 
     // YAW SIGN. desired_aim_now() returns UE-convention degrees, but this record stores BLAM yaw,
@@ -1084,11 +1147,11 @@ void blam_drive_tick() {
         addrcascade::set_fault_mask(g_cfg.blam_fault);
     }
 
-    // STICK MODE RESTARTS THE SETTLE, but only while the layout is still undecided. Cutscenes,
-    // vehicles and death return above layout_gate entirely, so the gate itself cannot tell that one
-    // came and went -- it would resume sampling straight into the view teleport on the way out,
-    // which is the same transient the settle exists to skip. Costs nothing once Proven, because the
-    // gate returns before any of this.
+    // STICK MODE RESTARTS THE SETTLE, but only while the layout is still undecided. Stick mode never
+    // samples -- cutscenes and death return above layout_gate, and a vehicle ride returns from it before
+    // the settle (writing unverified) -- so the gate itself cannot tell that one came and went. It would
+    // resume sampling straight into the view teleport on the way out, which is the same transient the
+    // settle exists to skip. Costs nothing once Proven, because the gate returns before any of this.
     if (g_layout != Layout::Proven && g_layout != Layout::Unverified
         && g_stick_mode_active.load(std::memory_order_relaxed)) {
         g_layout_settle = 0;

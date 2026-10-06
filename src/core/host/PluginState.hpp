@@ -65,6 +65,10 @@ struct PluginState {
     int                 perf_count;         // PERF_COUNT
     int                 perf_tick;          // PERF_TICK, the whole tick
     int                 perf_palarm;        // PERF_PALARM, the palette arm driver's tick half
+    // ---- the game's cutscene state (the vehicle cameras stand down in one). GAME THREAD ONLY: plain
+    // bools, written by the cutscene block in update().
+    const bool*         cine_active;        // g_cine_active: IsCinematicInProgress(), when it answers
+    const bool*         cine_answering;     // g_cine_answering: whether that subsystem answers at all
 };
 
 extern const PluginState g_plugin_state;
@@ -110,4 +114,6 @@ extern const PluginState g_plugin_state;
         PERF_COUNT,                                                        \
         PERF_TICK,                                                         \
         PERF_PALARM,                                                       \
+        &g_cine_active,                                                    \
+        &g_cine_answering,                                                 \
     };

@@ -63,6 +63,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -377,6 +378,10 @@ std::atomic<bool>     g_tgt_live[XRLAYER_SLOTS]{};
 // back at render rate, so the two sides of the subtraction come from the same instant and the
 // translation cancels. What remains is sub-frame, not sub-tick.
 std::atomic<bool>     g_tgt_headrel[XRLAYER_SLOTS]{};
+// TARGET IS AN OFFSET IN THE ROOM'S OWN AXES (see xrlayer_set_quad_view_relative): rebuilt at render
+// rate as mono camera + R(view base) . offset, against the base rotation noted for that frame.
+std::atomic<bool>     g_tgt_viewrel[XRLAYER_SLOTS]{};
+std::atomic<float>    g_vb_pitch{0.0f}, g_vb_yaw{0.0f}, g_vb_roll{0.0f};
 // The MONO camera the head-relative offsets were measured against, published for readers on the
 // SUBMIT thread that need to turn an offset back into a world point. note_eye writes it every
 // frame. Anything reading g_tgt_* for WORLD-SPACE maths must add this back when the slot's
@@ -456,8 +461,28 @@ int32_t      g_sc_w = 0, g_sc_h = 0;
 // the swapchain" to "source dims must equal ITS CELL".
 struct Cell {
     int32_t x = 0, y = 0, dim = 0;   // dim 0 = this slot has no cell
+    // HEIGHT, for the one cell that is not square (the text panel, slot 11); 0 = square, which every
+    // other cell is. `dim` is then the width. Read through cell_h() so no call site can forget it.
+    int32_t h = 0;
 };
+inline int32_t cell_h(const Cell& c) { return (c.h > 0) ? c.h : c.dim; }
 Cell g_cell[XRLAYER_SLOTS]{};
+
+// ---- THE TEXT PANEL (slot 11) ---------------------------------------------------------------------
+//
+// The panel's pixels cross from the game thread (XrText.cpp rasterises them) to the submit thread
+// (which writes them into the staging buffer) under a mutex the submit side only ever TRY-locks: a
+// frame that finds it busy simply uploads next frame. Timing is plain atomics.
+std::mutex            g_text_mx;
+std::vector<uint8_t>  g_text_px;                 // premultiplied RGBA, the text cell's size; g_text_mx
+std::atomic<uint32_t> g_text_gen{0};             // bumped per new panel
+std::atomic<uint64_t> g_text_t0{0};              // GetTickCount64 at show
+std::atomic<uint32_t> g_text_in_ms{0}, g_text_hold_ms{0}, g_text_out_ms{0};
+// SUBMIT THREAD ONLY: what the staging buffer holds now.
+uint32_t              g_text_up_gen = 0;
+int                   g_text_up_level = -1;      // alpha step last written (0..kTextSteps)
+std::atomic<bool>     g_text_reupload{false};    // fill_upload wiped the cell: write it again
+constexpr int         kTextSteps = 16;           // fade resolution: 16 rewrites over a fade, no more
 
 // The generated ring's cell edge when no atlas is built (nav off) -- kept as its own name so the
 // reticule-only layout reads the same as it did before slots existed.
@@ -1025,17 +1050,18 @@ constexpr int RING_DIM = 128;
 // `stride` is the destination's row pitch in BYTES and `out` already points at the cell's top-left
 // pixel, so the same generator serves a whole-image bitmap (stride = dim*4) and cell 0 of an atlas
 // (stride = atlas_w*4) with no second code path. Everything else is unchanged.
-void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
-                     bool bgra) {
+// THE RING, with its geometry passed in (fractions of the cell): the reticule's fallback ring and the
+// vehicle aim marker are the same drawing with different numbers, tuned apart. dot_frac <= 0 draws no
+// centre dot at all (a zero-radius dot still feathers into a faint speck at the centre pixel).
+void generate_ring(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a, bool bgra,
+                   float radius_frac, float thick_frac, float dot_frac) {
     const float c  = (float)dim * 0.5f - 0.5f;
-    float rf = g_cfg.xr_layer_ring_radius; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
+    float rf = radius_frac; if (rf < 0.02f) rf = 0.02f; if (rf > 0.48f) rf = 0.48f;
     const float R  = (float)dim * rf;      // ring radius, px
-    // Thickness and dot are PLAYER-TUNABLE. This ring is the FALLBACK the player looks through
-    // whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of scene
-    // (reported 2026-09-19: "this ring blocks so much of the view"). Clamped so a bad value can
-    // neither erase the ring nor fill the cell.
-    float tf = g_cfg.xr_layer_ring_thick; if (tf < 0.004f) tf = 0.004f; if (tf > 0.200f) tf = 0.200f;
-    float df = g_cfg.xr_layer_ring_dot;   if (df < 0.000f) df = 0.000f; if (df > 0.200f) df = 0.200f;
+    // Clamped so a bad value can neither erase the ring nor fill the cell.
+    float tf = thick_frac; if (tf < 0.004f) tf = 0.004f; if (tf > 0.200f) tf = 0.200f;
+    const bool  no_dot = !(dot_frac > 0.0f);
+    float df = dot_frac;  if (df < 0.000f) df = 0.000f; if (df > 0.200f) df = 0.200f;
     const float T  = (float)dim * tf;      // ring half-thickness, px
     const float D  = (float)dim * df;      // centre dot radius, px
     const float AA = 1.25f;                // edge softness, px
@@ -1050,7 +1076,7 @@ void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, flo
             if (ring > 1.0f) ring = 1.0f;
             if (ring < 0.0f) ring = 0.0f;
 
-            float dot = 1.0f - (d - D) / AA;
+            float dot = no_dot ? 0.0f : 1.0f - (d - D) / AA;
             if (dot > 1.0f) dot = 1.0f;
             if (dot < 0.0f) dot = 0.0f;
 
@@ -1068,6 +1094,17 @@ void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, flo
             p[3] = (uint8_t)(cov * 255.0f + 0.5f);
         }
     }
+}
+
+// The reticule's FALLBACK ring: thickness and dot are PLAYER-TUNABLE. This ring is what the player
+// looks through whenever the game's own crosshair art cannot be resolved, so a fat band hides a lot of
+// scene (reported 2026-09-19: "this ring blocks so much of the view"). A dot of 0 still draws the faint
+// centre speck it always has -- only the vehicle aim marker asks for no dot at all.
+void generate_bitmap(uint8_t* out, int dim, size_t stride, float r, float g, float b, float a,
+                     bool bgra) {
+    const float df = g_cfg.xr_layer_ring_dot;
+    generate_ring(out, dim, stride, r, g, b, a, bgra, g_cfg.xr_layer_ring_radius, g_cfg.xr_layer_ring_thick,
+                  df > 0.0f ? df : 1e-6f);
 }
 
 // THE GRAB GUIDE'S ART: a feathered capsule, generated once.
@@ -1243,24 +1280,50 @@ void generate_label(uint8_t* out, int dim, size_t stride, float r, float g, floa
 // D3D12 plumbing
 // ============================================================================================
 
-// The pane's present-submitted lists (see g_pane). Their executions were submitted by the SUBMIT
-// thread, not this one, so none of this thread's fences covers them: wait (bounded -- teardown only,
-// never a frame) for the last one before releasing the allocators and lists it executes from.
-// Callers run this only where produce_layers cannot be submitting (not Armed, or hook removed).
-void release_pane_jobs() {
-    g_pane_pending.store(-1, std::memory_order_release);
-    if (g_pane_fence != nullptr) {
-        uint64_t last = 0;
-        for (auto& j : g_pane) {
-            const uint64_t f = j.fence.load(std::memory_order_relaxed);
-            if (f > last) last = f;
-        }
-        for (int ms = 0; ms < 500; ++ms) {
-            const uint64_t done = g_pane_fence->GetCompletedValue();
-            if (done >= last || done == UINT64_MAX) break;   // UINT64_MAX: the device is gone
+// EVERY LIST THIS MODULE SUBMITTED MUST FINISH BEFORE WHAT IT REFERENCES IS DESTROYED: the swapchain
+// images the blit writes, the owned atlas, the staging buffer, and the allocators the lists were
+// recorded from. Releasing any of those under an executing list is undefined behaviour -- a device
+// removal, not a glitch -- and until this existed only the pane's lists were waited for (found by
+// the v0.6.0 release review). Three producers, three fences: the submit thread's blit (g_fence), the
+// game thread's batch (g_gt_fence), the pane's present-submitted lists (g_pane_fence).
+//
+// BOUNDED, because this runs on the game thread: teardown only (xrlayer off, shutdown, a failed
+// bring-up), never on a frame. It gives up on a removed device, whose fences read UINT64_MAX.
+// Callers run it only where nothing new can be submitted: the submit side unhooked (remove_hook --
+// the bridge rung blocks until an in-flight call has returned) or never armed.
+void wait_for_our_gpu_work() {
+    uint64_t pane_last = 0;
+    for (auto& j : g_pane) {
+        const uint64_t f = j.fence.load(std::memory_order_relaxed);
+        if (f > pane_last) pane_last = f;
+    }
+    struct Pending { ID3D12Fence* fence; uint64_t value; const char* what; };
+    const Pending all[] = {
+        {g_fence,      g_fence_v,    "overlay blit"},
+        {g_gt_fence,   g_gt_fence_v, "game-thread capture"},
+        {g_pane_fence, pane_last,    "scope pane copy"},
+    };
+    const uint64_t t0 = GetTickCount64();
+    for (const Pending& p : all) {
+        if (p.fence == nullptr || p.value == 0) continue;
+        for (;;) {
+            const uint64_t done = p.fence->GetCompletedValue();
+            if (done >= p.value || done == UINT64_MAX) break;   // UINT64_MAX: the device is gone
+            if (GetTickCount64() - t0 > 500) {
+                logf("teardown: the %s list (fence %llu, at %llu) had not finished after 500 ms -- "
+                     "releasing anyway rather than hang the game thread.",
+                     p.what, (unsigned long long)p.value, (unsigned long long)done);
+                return;
+            }
             Sleep(1);
         }
     }
+}
+
+// The pane's present-submitted lists (see g_pane). release_d3d() has already waited for them
+// (wait_for_our_gpu_work); the other caller, a failed create, never submitted one.
+void release_pane_jobs() {
+    g_pane_pending.store(-1, std::memory_order_release);
     for (auto& j : g_pane) {
         if (j.list  != nullptr) { j.list->Release();  j.list  = nullptr; }
         if (j.alloc != nullptr) { j.alloc->Release(); j.alloc = nullptr; }
@@ -1277,7 +1340,9 @@ void release_d3d() {
     // runs on the game thread, so anything released while that pointer is still visible is a
     // use-after-free of exactly the kind this rework exists to remove.
     g_source_override.store(nullptr, std::memory_order_release);
-    // The pane's lists reference g_owned, so they go (and finish) before it does.
+    // Nothing below may be released under a list still executing on the GPU.
+    wait_for_our_gpu_work();
+    // The pane's lists reference g_owned, so they go before it does.
     release_pane_jobs();
     for (int i = 0; i < XRLAYER_SLOTS; ++i) {
         g_capture_src[i] = nullptr;
@@ -1340,6 +1405,16 @@ bool fill_upload(float r, float g, float b, float a) {
         generate_bitmap(tex.data() + ((size_t)c0.y * g_sc_w + c0.x) * 4, c0.dim,
                         (size_t)g_sc_w * 4, r, g, b, a, g_is_bgra);
     }
+    // The vehicle aim marker: a ring of its OWN -- its own radius, thickness, dot and colour (vehmarker*),
+    // so it can frame the crosshair without touching the on-foot fallback ring. Its own cell, so it is
+    // the ring even while cell 0 shows the game's captured crosshair. Regenerated on any change to its
+    // settings (g_regen, see the config poll).
+    const Cell& cv = g_cell[XRLAYER_SLOT_VEHAIM];
+    if (cv.dim > 0) {
+        generate_ring(tex.data() + ((size_t)cv.y * g_sc_w + cv.x) * 4, cv.dim, (size_t)g_sc_w * 4,
+                      g_cfg.veh_marker_cr, g_cfg.veh_marker_cg, g_cfg.veh_marker_cb, g_cfg.veh_marker_alpha,
+                      g_is_bgra, g_cfg.veh_marker_radius, g_cfg.veh_marker_thick, g_cfg.veh_marker_dot);
+    }
     // THE GUIDE'S CELL, filled from the same staging pass. It is a generated shape like the
     // fallback ring, not captured art, so it belongs here rather than anywhere near XrSource --
     // no widget, no render target, no capture, nothing to re-resolve. Filled ONCE with the rest of
@@ -1361,6 +1436,9 @@ bool fill_upload(float r, float g, float b, float a) {
                            g_is_bgra);
         }
     }
+    // The text panel's cell is left at zero here like any unfed cell -- and this pass has just wiped
+    // whatever notice it held, so the submit thread writes the current one back in.
+    g_text_reupload.store(true, std::memory_order_relaxed);
 
     void* mapped = nullptr;
     D3D12_RANGE none{0, 0};
@@ -1374,6 +1452,57 @@ bool fill_upload(float r, float g, float b, float a) {
                (size_t)g_sc_w * 4);
     }
     g_upload->Unmap(0, nullptr);
+    return true;
+}
+
+// THE TEXT PANEL'S STAGING WRITE. SUBMIT THREAD, before this frame's copy: a new panel, the next step
+// of its fade, or a re-write after fill_upload wiped the cell. It NEVER blocks -- the staging buffer may
+// only be written once the GPU has finished every copy already issued from it, and on a frame where it
+// has not (or the game thread holds the panel's pixels) this simply tries again next frame. A fade is
+// kTextSteps rewrites of one cell, each a few hundred KB of plain stores: nothing per frame beyond a
+// handful of atomic loads while nothing changes. Returns true when it wrote (the caller dirties images).
+bool text_upload_step(uint64_t now) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (tc.dim <= 0 || g_upload == nullptr) return false;
+    const uint32_t gen = g_text_gen.load(std::memory_order_acquire);
+    const uint64_t t0  = g_text_t0.load(std::memory_order_relaxed);
+    const uint64_t fin = g_text_in_ms.load(std::memory_order_relaxed);
+    const uint64_t hld = g_text_hold_ms.load(std::memory_order_relaxed);
+    const uint64_t fot = g_text_out_ms.load(std::memory_order_relaxed);
+    float a = 0.0f;
+    if (gen != 0 && t0 != 0 && now >= t0) {
+        const uint64_t t = now - t0;
+        if (t < fin)                    a = (float)t / (float)fin;
+        else if (t < fin + hld)         a = 1.0f;
+        else if (t < fin + hld + fot)   a = 1.0f - (float)(t - fin - hld) / (float)fot;
+    }
+    const int level = (int)(a * (float)kTextSteps + 0.5f);
+    const bool reup = g_text_reupload.load(std::memory_order_relaxed);
+    if (gen == g_text_up_gen && level == g_text_up_level && !reup) return false;
+    if (g_fence != nullptr && g_fence_v != 0 && g_fence->GetCompletedValue() < g_fence_v) return false;
+    std::unique_lock<std::mutex> lk(g_text_mx, std::try_to_lock);
+    if (!lk.owns_lock()) return false;
+
+    const int w = tc.dim, h = cell_h(tc);
+    const bool have = g_text_px.size() == (size_t)w * (size_t)h * 4;
+    const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+                           ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    void* mapped = nullptr;
+    D3D12_RANGE none{0, 0};
+    if (FAILED(g_upload->Map(0, &none, &mapped)) || mapped == nullptr) return false;
+    // PREMULTIPLIED, so a fade scales all four channels alike (the layer treats cells as premultiplied).
+    const uint32_t sc = (uint32_t)(level * 256 / kTextSteps);   // 0..256
+    for (int y = 0; y < h; ++y) {
+        uint8_t* d = (uint8_t*)mapped + (size_t)(tc.y + y) * row_pitch + (size_t)tc.x * 4;
+        if (!have || level <= 0) { memset(d, 0, (size_t)w * 4); continue; }
+        const uint8_t* s = g_text_px.data() + (size_t)y * (size_t)w * 4;
+        if (level >= kTextSteps) { memcpy(d, s, (size_t)w * 4); continue; }
+        for (int i = 0; i < w * 4; ++i) d[i] = (uint8_t)(((uint32_t)s[i] * sc) >> 8);
+    }
+    g_upload->Unmap(0, nullptr);
+    g_text_up_gen = gen;
+    g_text_up_level = level;
+    g_text_reupload.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -1574,7 +1703,8 @@ constexpr D3D12_RESOURCE_STATES ENGINE_SRC_COLOR =
 //
 // Every upstream instrument said "healthy", because every upstream stage WAS healthy. The one
 // question none of them asked is whether the pixels the quad points at survived the frame.
-bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell) {
+bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool guide_cell, bool text_cell,
+               bool vehaim_cell) {
     if (dst == nullptr || g_list == nullptr || g_queue == nullptr) return false;
 
     // Pick this frame's allocator and wait ONLY if the GPU has not finished what that allocator
@@ -1633,8 +1763,9 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 
     // The staging-buffer path: either the WHOLE generated atlas (nothing captured yet), or the
     // GENERATED cells laid back over a captured atlas -- cell 0 for the reticule's stale fall-back,
-    // and the guide's cell whenever the guide is being drawn.
-    if (src == nullptr || ring_cell0 || guide_cell) {
+    // the guide's cell whenever the guide is being drawn, the text panel's while a notice shows, and the
+    // vehicle-facing marker's while it is posed.
+    if (src == nullptr || ring_cell0 || guide_cell || text_cell || vehaim_cell) {
         const UINT row_pitch = (g_sc_w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
                                ~(UINT)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 
@@ -1674,7 +1805,7 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
                 box.top    = (UINT)c.y;
                 box.front  = 0;
                 box.right  = (UINT)(c.x + c.dim);
-                box.bottom = (UINT)(c.y + c.dim);
+                box.bottom = (UINT)(c.y + cell_h(c));
                 box.back   = 1;
                 g_list->CopyTextureRegion(&dl, (UINT)c.x, (UINT)c.y, 0, &s, &box);
             };
@@ -1683,6 +1814,10 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
             // 32x32 -- 4 KB, and only on frames the guide is actually drawn. The per-frame cost of
             // NOT doing this was an invisible feature, which is the more expensive of the two.
             if (guide_cell)  lay_back(g_cell[XRLAYER_SLOT_GUIDE]);
+            // The text panel, on the same terms: only while a notice is showing.
+            if (text_cell)   lay_back(g_cell[XRLAYER_SLOT_TEXT]);
+            // The vehicle-facing marker's ring, likewise: only while it is posed.
+            if (vehaim_cell) lay_back(g_cell[XRLAYER_SLOT_VEHAIM]);
         }
     }
 
@@ -1722,6 +1857,9 @@ bool blit_into(ID3D12Resource* dst, ID3D12Resource* src, bool ring_cell0, bool g
 // ============================================================================================
 
 void destroy_swapchain() {
+    // The blit writes these images: none may be destroyed under a copy still executing on the GPU.
+    // (xrlayer_shutdown destroys the swapchain BEFORE release_d3d, so the wait has to be here too.)
+    wait_for_our_gpu_work();
     if (g_swapchain != XR_NULL_HANDLE && g_xr.destroy_swapchain != nullptr) {
         g_xr.destroy_swapchain(g_swapchain);
     }
@@ -2344,16 +2482,54 @@ void build_atlas_layout() {
              GUIDE_DIM, g_ret_dim, w);
     }
 
+    // THE VEHICLE-FACING MARKER'S CELL (slot 12): spare space again, on the guide's terms -- beside the
+    // guide, else under it -- so no existing cell moves and the atlas does not grow. No room = no marker.
+    constexpr int VEHAIM_DIM = 128;
+    if (g_ret_dim + GUIDE_DIM + VEHAIM_DIM <= w && VEHAIM_DIM <= g_ret_dim) {
+        g_cell[XRLAYER_SLOT_VEHAIM] = Cell{(int32_t)(g_ret_dim + GUIDE_DIM), 0, (int32_t)VEHAIM_DIM};
+    } else if (g_ret_dim + VEHAIM_DIM <= w && GUIDE_DIM + VEHAIM_DIM <= g_ret_dim) {
+        g_cell[XRLAYER_SLOT_VEHAIM] = Cell{(int32_t)g_ret_dim, (int32_t)GUIDE_DIM, (int32_t)VEHAIM_DIM};
+    } else {
+        logf("no slack in the atlas for the vehicle-facing marker's cell -- it will not present.");
+    }
+
+    // THE TEXT PANEL'S ROW (slot 11), laid UNDER everything above -- so every existing cell keeps its
+    // exact rectangle -- and the one cell that is not square. Unlike the guide it cannot live in slack:
+    // readable lines of text need a wide cell, and the slack is 128px tall. It is the FIRST thing to go
+    // when the cap is tight, being the least essential thing on the layer: reticule, markers, pane,
+    // guide, then this. The size is read here, at bring-up, and only here -- the atlas is never
+    // resized under a live submit thread (see the header), so xrlayertextw/h apply at the next start.
+    {
+        int tw = g_cfg.xr_text_cell_w, th = g_cfg.xr_text_cell_h;
+        if (tw < 64 || tw > CAP) tw = 512;
+        if (th < 32 || th > CAP) th = 320;
+        const int nw = (tw > g_sc_w) ? tw : g_sc_w;
+        if (!g_cfg.xr_text) {
+            logf("text panel: off (xrtext=0) -- no cell reserved.");
+        } else if (g_sc_h + th > CAP || nw > CAP) {
+            logf("text panel: a %dx%d row would make the atlas %dx%d, over the %d cap -- no text "
+                 "panel this session (lower xrlayertextw/xrlayertexth).", tw, th, nw, g_sc_h + th, CAP);
+        } else {
+            g_cell[XRLAYER_SLOT_TEXT] = Cell{0, (int32_t)g_sc_h, (int32_t)tw, (int32_t)th};
+            g_sc_h += th;
+            g_sc_w = nw;
+        }
+    }
+
     // The guide is stated POSITIVELY here, not left to be inferred from the absence of the "no
     // slack" warning above. Inferring presence from a missing line is the weaker evidence, and it
     // reads identically to "that code never ran" -- which is exactly the ambiguity that cost a
     // round of guessing when the guide did not appear.
     const Cell& gc = g_cell[XRLAYER_SLOT_GUIDE];
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    const Cell& vc = g_cell[XRLAYER_SLOT_VEHAIM];
     logf("atlas: %dx%d -- cell 0 reticule %dpx at (0,0), %d navpoint cells %dpx from y=%d, "
-         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s",
+         "pane %dpx at y=%d%s, guide %dpx at (%d,%d)%s, text %dx%d at y=%d%s, vehicle marker %dpx at (%d,%d)%s",
          g_sc_w, g_sc_h, g_ret_dim, XRLAYER_NAV_COUNT, nd, g_ret_dim,
          pane, g_ret_dim + rows * nd, pane > 0 ? "" : " (none)",
-         gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)");
+         gc.dim, gc.x, gc.y, gc.dim > 0 ? "" : " (NONE -- no atlas slack, guide will not present)",
+         tc.dim, cell_h(tc), tc.y, tc.dim > 0 ? "" : " (none)",
+         vc.dim, vc.x, vc.y, vc.dim > 0 ? "" : " (none)");
 }
 
 // HOW MANY COMPOSITION LAYERS WILL THIS RUNTIME ACCEPT? Ask it. GAME THREAD, once.
@@ -2714,6 +2890,12 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
 
         if (s == XRLAYER_SLOT_RETICULE) {
             ret_stale = !fresh;
+        } else if (s == XRLAYER_SLOT_TEXT) {
+            // EXEMPT, like the guide below: generated art (XrText.cpp rasterises it), nothing to
+            // capture, so the beat never moves. The pose's liveness above is the real gate.
+        } else if (s == XRLAYER_SLOT_VEHAIM) {
+            // EXEMPT, like the guide: the generated ring, nothing to capture. Posed every frame while
+            // wanted and retired when not, so the pose's liveness above is the whole gate.
         } else if (s == XRLAYER_SLOT_GUIDE) {
             // EXEMPT, for the same reason slot 0 is: its art is GENERATED, not captured.
             //
@@ -2887,6 +3069,10 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
             for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
         }
     }
+    // The text panel: a new notice or the next step of its fade into the staging buffer (never waits).
+    if (text_upload_step(now)) {
+        for (size_t i = 0; i < g_image_dirty.size(); ++i) g_image_dirty[i] = true;
+    }
 
     // The generated atlas never changes, so while nothing has been captured each image is written
     // once and then reused -- acquire/wait/release and nothing else. Once real art is arriving the
@@ -2901,9 +3087,18 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
     const bool guide_cell = from_atlas &&
                             g_tgt_live[XRLAYER_SLOT_GUIDE].load(std::memory_order_relaxed) &&
                             g_cell[XRLAYER_SLOT_GUIDE].dim > 0;
+    // The text panel's cell, on the guide's terms: re-laid over captured art while a notice shows.
+    const bool text_cell  = from_atlas &&
+                            g_tgt_live[XRLAYER_SLOT_TEXT].load(std::memory_order_relaxed) &&
+                            g_cell[XRLAYER_SLOT_TEXT].dim > 0;
+    // The vehicle-facing marker's ring cell, on the guide's terms: re-laid over captured art while posed.
+    const bool vehaim_cell = from_atlas &&
+                             g_tgt_live[XRLAYER_SLOT_VEHAIM].load(std::memory_order_relaxed) &&
+                             g_cell[XRLAYER_SLOT_VEHAIM].dim > 0;
     const bool need_copy  = from_atlas || (idx < g_image_dirty.size() && g_image_dirty[idx]);
     if (need_copy && idx < g_images.size()) {
-        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell) && idx < g_image_dirty.size()) {
+        if (blit_into(g_images[idx], atlas, ring_cell0, guide_cell, text_cell, vehaim_cell) &&
+            idx < g_image_dirty.size()) {
             g_image_dirty[idx] = false;
         }
     }
@@ -2969,7 +3164,7 @@ uint32_t produce_layers(XrSession session, const XrFrameEndInfo* info,
         q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         q.subImage.swapchain        = g_swapchain;
         q.subImage.imageRect.offset = {c.x, c.y};
-        q.subImage.imageRect.extent = {c.dim, c.dim};
+        q.subImage.imageRect.extent = {c.dim, cell_h(c)};
         q.subImage.imageArrayIndex  = 0;
         q.pose = fr.slot[s].pose;
         // Non-square when the caller asked for it (the grab guide); square otherwise, which is
@@ -3432,6 +3627,32 @@ void xrlayer_notice_quad(int slot, const Vec3& world_pos, float world_cm, float 
     g_tgt_tick[slot].store(g_game_tick.load(std::memory_order_relaxed), std::memory_order_release);
 }
 
+void xrlayer_text_cell(int* w, int* h) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (w != nullptr) *w = (g_state.load(std::memory_order_relaxed) == State::Armed) ? tc.dim : 0;
+    if (h != nullptr) *h = (g_state.load(std::memory_order_relaxed) == State::Armed) ? cell_h(tc) : 0;
+}
+
+bool xrlayer_text_is_bgra() { return g_is_bgra; }
+
+bool xrlayer_text_set(const uint8_t* rgba, int w, int h, uint64_t t0_ms,
+                      uint32_t fade_in_ms, uint32_t hold_ms, uint32_t fade_out_ms) {
+    const Cell& tc = g_cell[XRLAYER_SLOT_TEXT];
+    if (rgba == nullptr || tc.dim <= 0 || w != tc.dim || h != cell_h(tc)) return false;
+    {
+        // The submit thread only try-locks this, so holding it for one memcpy never stalls a frame.
+        std::lock_guard<std::mutex> lk(g_text_mx);
+        g_text_px.assign(rgba, rgba + (size_t)w * (size_t)h * 4);
+    }
+    g_text_in_ms.store(fade_in_ms, std::memory_order_relaxed);
+    g_text_hold_ms.store(hold_ms, std::memory_order_relaxed);
+    g_text_out_ms.store(fade_out_ms, std::memory_order_relaxed);
+    g_text_t0.store(t0_ms != 0 ? t0_ms : 1, std::memory_order_relaxed);
+    // RELEASE LAST: the submit thread reads the generation first, then the timing and the pixels.
+    g_text_gen.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
 void xrlayer_retire_quad(int slot) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     // The CAPTURE is deliberately left alone. A navpoint that blinks out for a tick and comes back
@@ -3444,6 +3665,8 @@ void xrlayer_retire_quad(int slot) {
     // stale WEAPON ANGLE inherited by whatever occupies this slot next would point a quad somewhere
     // nothing asked for. Retirement is the one moment we know the slot's meaning may change.
     g_slot_orient_on[slot].store(false, std::memory_order_release);
+    // Same reasoning for room-relative: the next user of the slot must opt in, not inherit it.
+    g_tgt_viewrel[slot].store(false, std::memory_order_relaxed);
 }
 
 void xrlayer_invalidate_capture(int slot) {
@@ -3475,6 +3698,17 @@ void xrlayer_set_quad_orientation(int slot, const Vec3& fwd_world, const Vec3& u
 void xrlayer_set_quad_head_relative(int slot, bool on) {
     if (slot < 0 || slot >= XRLAYER_SLOTS) return;
     g_tgt_headrel[slot].store(on, std::memory_order_relaxed);
+}
+
+void xrlayer_set_quad_view_relative(int slot, bool on) {
+    if (slot < 0 || slot >= XRLAYER_SLOTS) return;
+    g_tgt_viewrel[slot].store(on, std::memory_order_relaxed);
+}
+
+void xrlayer_note_view_base(float pitch, float yaw, float roll) {
+    g_vb_pitch.store(pitch, std::memory_order_relaxed);
+    g_vb_yaw.store(yaw, std::memory_order_relaxed);
+    g_vb_roll.store(roll, std::memory_order_relaxed);
 }
 
 // Clamped HERE as well as at the caller. The caller clamps because an off-pane impact point should
@@ -3786,15 +4020,21 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     //     between two points half an IPD apart every frame -- a shimmer, and a far more obvious
     //     artefact than the constant offset it would be replacing. The midpoint IS the head, which
     //     is what get_pose() reports, so the correspondence is exact.
-    //   Alternating (AFR: one view per frame, eyes by turns, always index 0): the midpoint of THIS
-    //     sample and the PREVIOUS one, which was the other eye. Half a frame of head motion stale,
-    //     which is millimetres; the per-index slot would have hopped half an IPD at 45 Hz.
+    //   Alternating (AFR/AFW: one view per frame, eyes by turns, always index 0): THIS frame's
+    //     camera plus the average of this sample's and the previous sample's OFFSET FROM THE CAMERA
+    //     (the previous one was the other eye). The eye offsets cancel; what is left stale is half
+    //     a frame of HEAD motion in the room, which is millimetres. NOT the midpoint of the two
+    //     absolute positions: that also lags by half a frame of CAMERA travel -- 3 to 12 cm while
+    //     walking or driving -- which is small on a far reticule and large on everything placed
+    //     relative to the head, the view or the rig (review, 2026-10-05). AimConverge and EyeTrace
+    //     already average offsets for the same reason.
     //   Mono (one view per frame, the centre eye): this sample IS the head, with no IPD residual at
     //     all -- UEVR hands us the midpoint of the two eye offsets. The slot for the other index is
     //     IGNORED here even if it once reported: after a live method flip it holds the last eye seen
     //     under the old method, wherever the player stood at the time, and averaging that in put
     //     every quad off by half the distance walked since. That was the 2026-09-15 report.
-    //   Unknown (first frames): this sample, as for Mono.
+    //   Unknown (one view per frame, verdict pending): averaged exactly as Alternating -- a
+    //     half-frame of head motion if it turns out to be Mono, right if it turns out to be AFR.
     g_eye_x[eye_index].store(eye_pos.x, std::memory_order_relaxed);
     g_eye_y[eye_index].store(eye_pos.y, std::memory_order_relaxed);
     g_eye_z[eye_index].store(eye_pos.z, std::memory_order_relaxed);
@@ -3812,12 +4052,12 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     g_view_roll.store(view_roll, std::memory_order_relaxed);
     g_view_have.store(true, std::memory_order_release);
 
-    // The previous sample, for the Alternating and Unknown cases. Render thread only, like
-    // everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
+    // The previous sample's offset from ITS camera, for the Alternating and Unknown cases. Same
+    // thread as everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
     // the previous sample was taken HERE: the early returns above skip this function while the
     // layer is off or not yet armed, and the first sample after it comes back must not be
     // averaged with one from before that (review finding, 2026-09-15).
-    static Vec3     s_prev_eye{};
+    static Vec3     s_prev_off{};
     static unsigned s_prev_seq  = 0;
     static bool     s_prev_have = false;
     const unsigned  seq = viewmode_samples();
@@ -3835,24 +4075,27 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
         // still pending): the same average is a half-frame lag if it turns out to be Mono and
         // exactly right if it turns out to be AFR -- never ONE eye alone, which under AFR is the
         // half-IPD hop this exists to remove.
-        head.x = 0.5f * (eye_pos.x + s_prev_eye.x);
-        head.y = 0.5f * (eye_pos.y + s_prev_eye.y);
-        head.z = 0.5f * (eye_pos.z + s_prev_eye.z);
+        // Offsets, not absolute positions: the camera's own travel since the last frame must not
+        // be averaged in (see the table above).
+        head.x = mono_view_pos.x + 0.5f * ((eye_pos.x - mono_view_pos.x) + s_prev_off.x);
+        head.y = mono_view_pos.y + 0.5f * ((eye_pos.y - mono_view_pos.y) + s_prev_off.y);
+        head.z = mono_view_pos.z + 0.5f * ((eye_pos.z - mono_view_pos.z) + s_prev_off.z);
     } else {
         // Mono (exact: the view IS the centre eye), or no usable previous sample. On the very
         // first frame of a stereo session the error is half an IPD and CONSTANT, which is not
         // the drift this function exists to remove.
         head = eye_pos;
     }
-    s_prev_eye  = eye_pos;
+    s_prev_off  = Vec3{eye_pos.x - mono_view_pos.x, eye_pos.y - mono_view_pos.y, eye_pos.z - mono_view_pos.z};
     s_prev_seq  = seq;
     s_prev_have = true;
 
     // FLATTEN TO INFINITY under the Mono rendering method (compute_pose explains why). Gated on
-    // THREE things agreeing (viewmode_is_mono): the observed topology, UEVR's declared method, and
-    // both eyes reporting one projection matrix -- an older backend ignores VR_RenderingMethod=3
-    // and keeps rendering stereo, PureDark's reads 3 as AFW, and flattening a stereo scene's quads
-    // would destroy the parallax the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
+    // everything viewmode_is_mono() requires (ViewMode.hpp lists the five): the observed topology,
+    // UEVR's declared method, one projection for both eyes, a backend that is not AFW, and Extreme
+    // Compatibility off -- an older backend ignores VR_RenderingMethod=3 and keeps rendering stereo,
+    // PureDark's reads 3 as AFW, and flattening a stereo scene's quads would destroy the parallax
+    // the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
     const int   flat_mode = g_cfg.xr_layer_mono_flat;
     const float flat_m    = (flat_mode == 2 || (flat_mode == 1 && viewmode_is_mono()))
                               ? g_cfg.xr_layer_mono_far_m : 0.0f;
@@ -3964,7 +4207,26 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
         //
         // The mono pre-hook camera is the same value for both eyes, so the offset survives the
         // round trip unchanged and compute_pose's per-eye subtraction still produces parallax.
-        if (g_tgt_headrel[s].load(std::memory_order_relaxed)) {
+        //
+        // ROOM-RELATIVE (view-relative) goes one step further: the stored vector is in the view
+        // BASE's own axes, so it is turned by this frame's base rotation as well as moved by its
+        // position -- a quad that stays put in your room when the room itself turns with a vehicle.
+        if (g_tgt_viewrel[s].load(std::memory_order_relaxed)) {
+            const double D2R = 0.01745329252;
+            const double p = (double)g_vb_pitch.load(std::memory_order_relaxed) * D2R;
+            const double y = (double)g_vb_yaw.load(std::memory_order_relaxed) * D2R;
+            const double r = (double)g_vb_roll.load(std::memory_order_relaxed) * D2R;
+            const double cp = std::cos(p), sp = std::sin(p), cy = std::cos(y), sy = std::sin(y);
+            const double cr = std::cos(r), sr = std::sin(r);
+            // UE's FRotationMatrix rows: the base's forward / right / up in the world.
+            const double X[3] = { cp * cy, cp * sy, sp };
+            const double Y[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp };
+            const double Z[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+            const double lx = tgt.x, ly = tgt.y, lz = tgt.z;
+            tgt.x = mono_view_pos.x + (float)(lx * X[0] + ly * Y[0] + lz * Z[0]);
+            tgt.y = mono_view_pos.y + (float)(lx * X[1] + ly * Y[1] + lz * Z[1]);
+            tgt.z = mono_view_pos.z + (float)(lx * X[2] + ly * Y[2] + lz * Z[2]);
+        } else if (g_tgt_headrel[s].load(std::memory_order_relaxed)) {
             tgt.x += mono_view_pos.x; tgt.y += mono_view_pos.y; tgt.z += mono_view_pos.z;
         }
 
@@ -4329,6 +4591,19 @@ void xrlayer_tick() {
             s_ring_t = g_cfg.xr_layer_ring_thick;
             s_ring_d = g_cfg.xr_layer_ring_dot;
             if (!first) g_regen.store(true, std::memory_order_relaxed);   // not on the first poll
+        }
+    }
+    // ...AND FOR THE VEHICLE AIM MARKER'S RING (vehmarker*): its own picture in its own cell, generated
+    // by the same pass, so a live edit of its shape or colour has to re-run that pass too.
+    {
+        static float s_mk[7] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+        const float now_mk[7] = { g_cfg.veh_marker_radius, g_cfg.veh_marker_thick, g_cfg.veh_marker_dot,
+                                  g_cfg.veh_marker_cr, g_cfg.veh_marker_cg, g_cfg.veh_marker_cb,
+                                  g_cfg.veh_marker_alpha };
+        if (std::memcmp(s_mk, now_mk, sizeof(now_mk)) != 0) {
+            const bool first = (s_mk[0] < 0.0f);
+            std::memcpy(s_mk, now_mk, sizeof(now_mk));
+            if (!first) g_regen.store(true, std::memory_order_relaxed);
         }
     }
 

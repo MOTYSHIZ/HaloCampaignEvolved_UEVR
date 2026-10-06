@@ -1409,6 +1409,167 @@
     // to decide whether a vehicle exposes a weapon aim distinct from the chase-camera value.
     // Read-only. See docs\VEHICLE_AIM_DECOUPLE_PROBE.md.
     bool  veh_probe = false;
+    // VEHICLE PARTS LISTING (dev, vehmeshdump). Seated + dev build only: lists every part of the vehicle you
+    // sit in when you get in -- class, name, mesh, where it hangs, shown or not -- and watches them while you
+    // ride, logging a part that appears, goes, shows, hides or changes mesh (a damage state) and writing the
+    // list again to data\halo_vr_vehmeshes_<vehicle>.txt. For choosing "hideMeshes". Read-only.
+    bool  veh_mesh_dump = false;
+    // ROUTE A P0: owned vehicle cameras -- a sibling OPTION to bc24's first-person veh_cam (never
+    // modifies it), for players who get motion sick in first person. 1 = on: in a vehicle, the
+    // cameras listed for it in halo_vr_vehcams.json, stepped with left Y; left X steps the camera's
+    // tethering modes (what turns your view, what carries the camera, where it sits).
+    // EVERY per-camera setting lives in that file -- offset, origin (vehicle or seat), what carries the
+    // offset, which vehicle motions the view follows, collision, body hiding -- so each vehicle and
+    // each camera can differ. (The vehtpboom / vehtpyaw / vehtpanchor / vehtpattitude / vehtpcollide*
+    // keys that did this globally are gone; the file replaced them.) Always head-anchored: your head,
+    // not the play-space origin, is what rides the vehicle, and hmdleash is respected -- on, the leash
+    // holds your head to the camera's point as it holds it to your body on foot; off, you lean freely.
+    // Runs in a RIDE: stick mode + the game's mount flag, never in a cutscene or a death. 0 = off: the
+    // game's own vehicle camera and gamepad controls. ON by default from 0.7.0 (the user's call).
+    bool  veh_tp = true;
+    // vehaim: 1 = while the owned third-person camera is on IN A VEHICLE, let the motion controller
+    // drive the aim (turret/hull), the same direct-drive write infantry uses. Safe only because we
+    // own the camera -- the historic reason the aim write is held off in stick mode is that Halo
+    // binds the chase cam to the aim, and we no longer read that camera. ON by default from 0.7.0 (the
+    // user's call); a seat's "motionAim" in the camera file, or the left stick click, says otherwise
+    // per seat. Gated on the chassis being resolved (= actually in a vehicle).
+    bool  veh_aim = true;
+    // vehstick: with motion aim on (vehaim), what the right thumbstick does in a vehicle. 1 = TURN your
+    // view (default -- the aim is on the controller, so the stick is free; see vehorbitrate); 2 = leave
+    // the stick to the game (no turn). Both live; may become per-vehicle later.
+    int   veh_stick_mode = 1;
+    // vehorbitrate: deg/sec the right stick X TURNS YOUR VIEW (a smooth turn) when vehstick=1. It turns
+    // the view yaw only -- pivoting on your head, never moving the anchor -- so you stay put relative to
+    // the vehicle and simply look another way (a camera whose offset rides the VIEW orbits instead). Uncapped. (Name kept from the
+    // first cut, which orbited the camera around the vehicle; the headset said a turn is what it wants.)
+    float veh_orbit_rate = 120.0f;
+    // vehorbitreturn: deg/sec the turn eases back to zero when the stick is idle. 0 = HOLD (default):
+    // the view stays where you turned it. The first cut defaulted to 60, and in-headset that read as
+    // "the stick lerps my head yaw back to the front of the vehicle".
+    float veh_orbit_return = 0.0f;
+    // vehaimray: with vehaim on, aim the vehicle at WHERE THE CONTROLLER POINTS (1, default) --
+    // trace the controller's world ray, then aim from the seated unit through the hit -- instead of
+    // the infantry mapping (0), which turns hand ROTATION into aim rotation and, with the camera 10 m
+    // off the vehicle, reads as "rotate the controller in 3DoF to steer" (measured 2026-09-23: des
+    // pitch -85..-95 deg and a 70-90 deg yaw offset from the on-foot calibration frame). The reticule
+    // follows the same rule as on foot: drawn every frame on the pointing ray at the traced depth.
+    bool  veh_aim_ray = true;
+    // vehaimfar: cm, how far the pointing ray is traced; also the range the reticle uses before anything
+    // is hit. 1 km (was 100 m until 2026-09-27): a surface beyond it counts as a MISS, and on a miss the
+    // aim can only run parallel to the hand -- right at infinity, off by the game camera's offset over the
+    // range at any real distance. A tank engages well past 100 m, so reach them as hits.
+    float veh_aim_far = 100000.0f;
+    // vehcamreadout: 1 = a short readout on the text panel whenever the vehicle camera changes (you get
+    // in, step with left Y / X, or the camera file is saved): the vehicle, the camera's number and name,
+    // its tethering mode, and its settings -- the rotation tracking in yellow. Placed and timed by the xrtext* defaults below.
+    bool  veh_cam_readout = true;
+    // vehctrlclick: the LEFT STICK CLICK in a vehicle (any seat our cameras run in, vehtp) flips that
+    // vehicle between motion controls (the controller aims; the right stick turns your view) and stick
+    // controls (the right stick aims, as on a gamepad), says which on the text panel, and remembers it
+    // for that vehicle for the session. A file edit of that vehicle's motionAim, or of vehaim, wins over
+    // a choice made against the old value. Acts on RELEASE and never when the right stick click joined
+    // it -- L3 + R3 is UEVR's menu, and UEVR reads the pad first. 1 = on, and the click is kept from the
+    // game while seated (default: on foot it is sprint and untouched; what it does in a seat is not
+    // measured); 2 = on, and the game gets the click too; 0 = off, the click is the game's.
+    int   veh_ctrl_click = 1;
+    // vehseatgrip: the game's own SWITCH SEAT, moved off left X. In a seat the pad is native, so left X
+    // reaches the game as vehseatmask and switches seats -- while our cameras read the same press as the
+    // next tethering mode: one press, two actions (the user, 2026-09-27). 1 = the LEFT grip sends it
+    // instead and left X no longer does (default); 2 = the right grip; 0 = left X keeps it, as the game
+    // ships. The grip that switches seats no longer hard-brakes (the other grip still does). Only while
+    // our vehicle cameras run (vehtp), since that is when left X is taken; a grip held as you sit down does
+    // nothing until it has been let go.
+    int   veh_seat_grip = 1;
+    // vehseatmask: the pad bit that switch seat is on, as the game sees left X in a seat -- 0x2000,
+    // XInput's B (measured: left X reports 0x2000; Config.hpp's button table). Dev key.
+    int   veh_seat_mask = 0x2000;
+    // vehpassswap: in a PASSENGER seat (the game names it: neither the driver's nor a gunner's -- the
+    // Warthog's side seat), the LEFT TRIGGER switches your weapon (the user, 2026-10-04). A passenger keeps
+    // his own weapons, but the game's switch is on left Y, which our cameras read as the next camera: one
+    // press, two actions. 1 = a squeeze sends the game's switch weapon, and in that seat left Y only steps
+    // the camera and the trigger's own job (the game's zoom) is kept from the game (default); 0 = both are
+    // the game's, as before. Only while our vehicle cameras run (vehtp), since that is when left Y is taken
+    // and how the seat is known; a trigger held as you sit down does nothing until it has been let go.
+    int   veh_pass_swap = 1;
+    // vehpassswapmask: the pad bit the game's SWITCH WEAPON is on -- 0x8000, XInput's Y, which is how left
+    // Y reaches the game (Plugin.cpp's head-tap pause reads the same bit). Dev key.
+    int   veh_pass_swap_mask = 0x8000;
+    // vehcamrecenter: 1 = on every camera CHANGE -- getting in, left Y / left X, the left stick click (what
+    // aims changes), a seat switch -- turn the view so what aims the vehicle points where the vehicle is
+    // aiming (yaw only, about your head, through the same turn the right stick uses). What aims it: your aim
+    // hand while your hand aims this vehicle, else your head. Where it is aiming: in a camera that turns
+    // with the vehicle, the vehicle's own heading -- the only place such a camera rests, so it does not start
+    // the vehicle turning; in one that holds its heading, where the vehicle is already aimed (the hand's ray
+    // aim, or until that has a solution the game's own camera, which follows the aim), so nothing swings; on
+    // getting in, its forward. Not on a camera-file reload (editing a number must not spin you round).
+    // 0 = the view keeps its turn.
+    bool  veh_cam_recenter = true;
+    // vehcamrecenterpos: 1 = on the same camera changes, put your HEAD back on the camera's point -- wherever
+    // you had leaned or walked to in the room. Matters most with hmdleash off, where nothing else brings you
+    // back (the user, 2026-09-27); with the leash on it clears whatever lean the leash radius allowed.
+    // 0 = your head keeps its offset from the camera's point from one camera to the next. Holding left X or
+    // left Y (vehcamresethold) resets both whatever these two say (Plugin.cpp's seated X / Y block).
+    bool  veh_cam_recenter_pos = true;
+    // vehcamresethold: ms that left X or left Y must be HELD in a seat to reset the view -- lined up with the
+    // vehicle and your head back on the camera's point, in the camera and mode you are in. A press shorter
+    // than this steps the mode (X) / camera (Y) on release. 0 = holding never resets; a press of any length
+    // steps. Live. Measured from the press, on the input hook's own clock (the user, 2026-09-27: "the hold
+    // feels longer than a second" -- it was a fixed second then).
+    int   veh_cam_reset_hold_ms = 1000;
+    // vehcamhidebody: your character's body in the vehicle cameras. 0 = never hidden (default -- you see
+    // the Chief in the seat, the user's call 2026-09-26); 1 = hidden in the cameras whose "hideBody" says
+    // so (left out = the seat cameras); 2 = hidden and shrunk, for a body that draws whatever its visibility
+    // says. Live. Only the player character's own mesh parts are found: in the Ghost and the Wraith turret
+    // that hid armour pieces and left the body drawn, so the seated body there is some other mesh.
+    // (bc24's seat camera has its own switch, vehhidebody.)
+    int   veh_cam_hide_body = 0;
+    // ---- THE VEHICLE AIM MARKER (and the camera file's per-vehicle "aimMarker"): a ring where the
+    // VEHICLE is aiming -- its own heading (the Chief's, for a playerhead camera) at the game's aim pitch,
+    // along the line the vehicle's guns converge on -- beside the crosshair where YOU point. Once the
+    // vehicle has caught up with your hand the ring sits around the crosshair; the gap while it has not is
+    // how far the vehicle's aim is behind. Its OWN picture, apart from the reticule's fallback ring
+    // (xrlayerring*), so the two are tuned apart. All live.
+    bool  veh_marker = true;            // vehmarker: 0 = never shown, whatever the camera file says
+    float veh_marker_radius = 0.40f;    // vehmarkerradius: ring radius, a fraction of its picture (0.02-0.48)
+    float veh_marker_thick = 0.008f;    // vehmarkerthick: ring half-thickness, a fraction of its picture
+    float veh_marker_dot = 0.0f;        // vehmarkerdot: centre dot radius; 0 = none -- it frames the crosshair
+    float veh_marker_size = 1.0f;       // vehmarkersize: its size against the vehicle reticule's
+    float veh_marker_cr = 0.80f, veh_marker_cg = 0.55f, veh_marker_cb = 1.00f;   // vehmarkercr/cg/cb: light purple
+                                                                                // (the user's call, 2026-09-26;
+                                                                                // green canonized from their
+                                                                                // 0.55, 2026-09-27 -- was 0.60)
+    float veh_marker_alpha = 0.9f;      // vehmarkeralpha
+    // ---- THE TEXT PANEL (XrText.cpp): a short notice on the compositor layer that fades in, holds
+    // and fades out -- never occluded, never lit, crisp. Any feature can show one; these are the
+    // DEFAULTS for a caller that does not place or time its own. Distances are UE cm, like every
+    // distance here. All live -- except the panel's pixel size, which applies at the next start (the
+    // compositor's atlas is laid out once and is never resized under a live submit thread).
+    bool  xr_text = true;             // xrtext: 0 = no panel at all (no atlas row is reserved)
+    int   xr_text_cell_w = 512;       // xrlayertextw: the panel's pixels, width  (next start)
+    int   xr_text_cell_h = 320;       // xrlayertexth: the panel's pixels, height (next start)
+    // REAL centimetres, scaled by the player's world scale where they are used (XrText.cpp). The author
+    // tuned 130 / -50 / 48 in the headset as UE cm at the profile's 1.312; these are those, in real cm.
+    float xr_text_dist_cm = 99.0f;    // xrtextdist: how far in front of your eyes
+    float xr_text_up_cm = -38.0f;     // xrtextup: above (+) / below (-) your eye line
+    float xr_text_right_cm = 0.0f;    // xrtextright: right (+) / left (-) of where you look
+    float xr_text_width_cm = 37.0f;   // xrtextwidth: the panel's width; its height follows its shape
+    int   xr_text_fade_in_ms = 150;   // xrtextfadein
+    int   xr_text_hold_ms = 3000;     // xrtexthold: fully visible this long -- was 1500 (the user, 2026-09-27)
+    int   xr_text_fade_out_ms = 1500; // xrtextfadeout
+    float xr_text_bg = 0.55f;         // xrtextbg: the backing panel's opacity, 0 = text only
+    float xr_text_scale = 1.0f;       // xrtextscale: text size within the panel (shrinks to fit)
+    // vehaimpivotz: cm above the seated unit (the pawn) that the vehicle's aim is taken from, under
+    // vehaimorigin=0.
+    float veh_aim_pivot_z = 0.0f;
+    // vehaimorigin: where the vehicle's aim is taken FROM, toward the point the controller reaches.
+    //   1 = the GAME'S OWN CHASE CAMERA (default). A vehicle's guns converge on what that camera's
+    //       line of sight hits, so the aim has to put THAT line through your crosshair. The camera
+    //       orbits a pivot along the aim, so aiming from wherever it sits converges on the exact line
+    //       from any start (error x D/(range + D) per tick: fast at range, slower up close).
+    //   0 = the seated unit (pawn + vehaimpivotz). Measured 2026-09-24 on the Banshee: the camera's
+    //       line ran 1.5-3 m off the seat-to-crosshair line -- mostly ABOVE it on level and downward
+    //       aims -- and shots "regularly landed above the crosshair". Kept for A/B.
+    int   veh_aim_origin = 1;
     // SEAT FROM THE ENGINE'S CAMERA. 1 = seat is the chase cam moved forward along the aim boom
     // (measured rigid in the aim frame: lateral scatter +-10 cm, against +-513 in world axes);
     // 0 = the old synthesised path. 2 = RIGID: camera bolted to the hog's drawn Body component,
