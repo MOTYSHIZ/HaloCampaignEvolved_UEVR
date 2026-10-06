@@ -276,10 +276,39 @@ bool rasterise(const std::string& markup, int w, int h, bool bgra, const Style& 
         const float caution[3] = {1.00f, 0.86f, 0.22f};   // yellow
         out.assign((size_t)w * (size_t)h * 4, 0);
         const uint8_t* src = (const uint8_t*)bits;
+        // THE COMMON PIXELS, WITHOUT THE MATHS. A notice is drawn on the game thread, and the full path
+        // below ran for every one of the panel's 163,840 pixels: 12 ms a notice (measured standalone,
+        // 2026-10-05), about a dropped frame each time you board or change camera. But a pixel with no
+        // text on it is either clear of the backing (nothing -- `out` is zero already) or well inside it
+        // (one constant colour). Only pixels with text on them, or within 2 px of the backing's edge, or
+        // in its corner squares, take the full path -- which is unchanged, so the picture is the same
+        // bit for bit (the distance is <= -2 or >= 2 wherever the shortcut is taken).
+        const bool backed = bg_a > 0.0f && !vl.empty();
+        uint8_t fill[4] = {0, 0, 0, 0};
+        if (backed) {
+            const uint8_t R = (uint8_t)std::lround(std::clamp(bgc[0] * bg_a, 0.0f, 1.0f) * 255.0f);
+            const uint8_t G = (uint8_t)std::lround(std::clamp(bgc[1] * bg_a, 0.0f, 1.0f) * 255.0f);
+            const uint8_t B = (uint8_t)std::lround(std::clamp(bgc[2] * bg_a, 0.0f, 1.0f) * 255.0f);
+            fill[0] = bgra ? B : R; fill[1] = G; fill[2] = bgra ? R : B;
+            fill[3] = (uint8_t)std::lround(std::clamp(bg_a, 0.0f, 1.0f) * 255.0f);
+        }
         for (int y = 0; y < h; ++y) {
             const float* tc = row_accent[(size_t)y] ? accent : body;
+            const float py = (float)y + 0.5f;
+            const bool row_clear = !backed || py < by0 - 2.0f || py > by1 + 2.0f;
+            const bool row_deep = backed && py >= by0 + 2.0f && py <= by1 - 2.0f;
+            const bool row_corner = py < by0 + rad + 1.0f || py > by1 - rad - 1.0f;
             for (int x = 0; x < w; ++x) {
                 const uint8_t* s = src + ((size_t)y * (size_t)w + (size_t)x) * 4;   // B, G, R, x
+                if (s[1] == 0 && s[2] == 0) {
+                    const float px = (float)x + 0.5f;
+                    if (row_clear || px < bx0 - 2.0f || px > bx1 + 2.0f) continue;          // clear of the backing
+                    if (row_deep && px >= bx0 + 2.0f && px <= bx1 - 2.0f
+                        && !(row_corner && (px < bx0 + rad + 1.0f || px > bx1 - rad - 1.0f))) {
+                        std::memcpy(out.data() + ((size_t)y * (size_t)w + (size_t)x) * 4, fill, 4);
+                        continue;                                                           // deep inside it
+                    }
+                }
                 const float cn = (float)s[1] / 255.0f;   // ordinary text (green)
                 const float cc = (float)s[2] / 255.0f;   // caution text (red)
                 const float cov = std::max(cn, cc);
