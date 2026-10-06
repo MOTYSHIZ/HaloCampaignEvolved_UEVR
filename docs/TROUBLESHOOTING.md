@@ -9,7 +9,7 @@ UEVR load it, followed by the mod's own banner and the UEVR build it is running 
 
 ```
 [PluginLoader] Loaded ...\UnrealVRMod\HaloCampaignEvolved\plugins\halo_vr.dll
-[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v0.6.1  (halo_vr.dll)
+[Halo-CampE-UEVR] Halo: Campaign Evolved VR  v0.7.0  (halo_vr.dll)
 [Halo-CampE-UEVR] UEVR backend: tag=... branch=... commit=...
 ```
 
