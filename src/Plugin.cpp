@@ -6407,7 +6407,7 @@ void update() {
 
         // VIEW TOPOLOGY: which VR_RenderingMethod UEVR declares, which one the stereo callbacks
         // actually exhibit, and what the per-eye consumers are doing about it (ViewMode.hpp).
-        // Read HERE, on the poll, because the render thread must not log and get_mod_value is
+        // Read HERE, on the poll, because the stereo callback must not log and get_mod_value is
         // not for a hot path. The value is a decimal string ("0".."3"); an older backend that
         // lacks the key answers nothing.
         {
@@ -6416,12 +6416,22 @@ void update() {
             const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
             // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping: the eyes render
             // BY TURNS and the other is warped, so it must never be read as mono (ViewMode.hpp has the
-            // source trace and the two releases that got this wrong). The backend names itself in its
-            // tag or branch; both are fixed for the session, so read them once -- and publish this
-            // BEFORE the declared method below, so the render thread never sees method 3 without it.
+            // source trace and the two releases that got this wrong). Fixed for the session, so read
+            // until it is SETTLED -- and published BEFORE the declared method below, so the callback
+            // never sees method 3 without it.
+            //
+            // TWO INDEPENDENT SIGNS, EITHER IS ENOUGH. The tag and branch are compile-time strings from
+            // git describe on the machine that built the backend, so an AFW built from a detached
+            // HEAD, an untagged commit or a renamed tag carries no "afw" -- and missing it fails OPEN
+            // (the mono shortcut and the flattening come back). So also ask for AFW's own setting:
+            // VR_AFW_FramewarpMode is declared in AFW's VR.hpp (m_framewarp_mode) and in neither
+            // praydog's UEVR nor our own backend, and get_mod_value leaves the buffer untouched for a
+            // key the backend does not have (PluginLoader.cpp), so an empty answer means "not AFW".
+            // ...OR that the settings lane is not answering yet. So "not AFW" is only settled on a poll
+            // where VR_RenderingMethod DID answer; until then this asks again (one string read per 2 s).
             {
-                static int s_warps = -1;
-                if (s_warps < 0) {
+                static bool s_settled = false;
+                if (!s_settled) {
                     const auto* fns = API::get()->param()->functions;
                     auto names_afw = [](const char* s) {
                         if (s == nullptr) return false;
@@ -6433,22 +6443,42 @@ void update() {
                         }
                         return false;
                     };
-                    s_warps = (names_afw(fns->get_tag()) || names_afw(fns->get_branch())) ? 1 : 0;
-                    halo::viewmode_set_backend_warps(s_warps == 1);
-                    if (s_warps == 1) {
-                        API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: AFW backend (tag=%s branch=%s) -- "
-                                             "VR_RenderingMethod=3 there renders the eyes by turns (the other is warped), "
-                                             "so it is never treated as mono and the quads are never flattened.",
-                                             fns->get_tag(), fns->get_branch());
+                    const char* const tag    = fns->get_tag();
+                    const char* const branch = fns->get_branch();
+                    char afw_mode[8]{};
+                    API::get()->param()->vr->get_mod_value("VR_AFW_FramewarpMode", afw_mode, sizeof(afw_mode));
+                    const bool by_name    = names_afw(tag) || names_afw(branch);
+                    const bool by_setting = afw_mode[0] != '\0';
+                    const bool afw = by_name || by_setting;
+                    halo::viewmode_set_backend_warps(afw);
+                    s_settled = afw || declared >= 0;
+                    if (afw) {
+                        API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: AFW backend (tag=%s branch=%s; named AFW: %s, "
+                                             "has VR_AFW_FramewarpMode: %s) -- VR_RenderingMethod=3 there renders the "
+                                             "eyes by turns (the other is warped), so it is never treated as mono and "
+                                             "the quads are never flattened.",
+                                             tag != nullptr ? tag : "?", branch != nullptr ? branch : "?",
+                                             by_name ? "yes" : "no", by_setting ? "yes" : "no");
                     }
                 }
             }
 
+            // EXTREME COMPATIBILITY MODE forces the alternating plumbing under EVERY rendering method,
+            // and our own backend's Mono yields to it (is_using_afr / is_mono_rendering in UEVR's
+            // VR.hpp). A toggle the player can flip live, so read every poll -- and, like the AFW flag,
+            // published before the declared method.
+            {
+                char ec[8]{};
+                API::get()->param()->vr->get_mod_value("VR_ExtremeCompatibilityMode", ec, sizeof(ec));
+                halo::viewmode_set_extreme_compat(ec[0] == 't' || ec[0] == 'T' || ec[0] == '1');
+            }
+
             halo::viewmode_set_declared(declared);
 
-            // ONE PROJECTION FOR BOTH EYES? The physical test behind quad flattening (ViewMode.hpp):
+            // ONE PROJECTION FOR BOTH EYES? One of the five tests behind quad flattening (ViewMode.hpp):
             // the monofix mono path gives every eye the union-FOV projection, so the two matrices
-            // come back identical, while every stereo-pair mode returns mirrored per-eye frustums.
+            // come back identical. NOT proof of mono by itself: a symmetric projection override or
+            // symmetric lenses give an ordinary stereo pair one frustum too.
             // Two 64-byte reads and sixteen compares, here on the poll -- never per frame. An
             // all-zero matrix (runtime not up yet) compares equal to itself and must NOT count.
             bool shared = false;
@@ -6501,28 +6531,44 @@ void update() {
             // session at another rendering method, another world scale and (probably) a symmetric
             // projection override, and none of that could be read from the log. Twelve string reads on
             // the 2 s poll, logged on change only. World scale is left out: WORLDSCALE already says it.
+            //
+            // TWO OF THESE THE MOD WRITES ITSELF, temporarily: VR_2DScreenMode around cutscenes and
+            // VR_DecoupledPitch in tilting vehicle cameras. They are printed (starred) but do NOT
+            // trigger the line -- otherwise every cutscene and every seat change would log one, and the
+            // value shown would be ours rather than the player's (review, 2026-10-05).
             {
-                static const char* const kKeys[] = {
-                    "VR_RenderingMethod", "VR_SyncedSequentialMethod", "VR_DecoupledPitch", "VR_AimMethod",
-                    "VR_HorizontalProjectionOverride", "VR_VerticalProjectionOverride", "VR_SnapTurn",
-                    "VR_GhostingFix", "VR_NativeStereoFix", "VR_ExtremeCompatibilityMode", "VR_2DScreenMode",
-                    "VR_UncapFramerate",
+                struct Key { const char* name; bool mod_writes; };
+                static const Key kKeys[] = {
+                    {"VR_RenderingMethod", false},  {"VR_SyncedSequentialMethod", false},
+                    {"VR_DecoupledPitch", true},    {"VR_AimMethod", false},
+                    {"VR_HorizontalProjectionOverride", false}, {"VR_VerticalProjectionOverride", false},
+                    {"VR_SnapTurn", false},         {"VR_GhostingFix", false},
+                    {"VR_NativeStereoFix", false},  {"VR_ExtremeCompatibilityMode", false},
+                    {"VR_2DScreenMode", true},      {"VR_UncapFramerate", false},
                 };
-                static char s_said[640] = {0};
-                char line[640] = {0};
-                size_t n = 0;
-                for (const char* key : kKeys) {
+                static char s_said[640] = {0};   // the player's own keys only: what triggers the line
+                char line[640]  = {0};
+                char steady[640] = {0};
+                size_t n = 0, m = 0;
+                for (const Key& k : kKeys) {
                     char val[24]{};
-                    API::get()->param()->vr->get_mod_value(key, val, sizeof(val));
+                    API::get()->param()->vr->get_mod_value(k.name, val, sizeof(val));
                     val[sizeof(val) - 1] = '\0';
-                    const int w = _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "%s%s=%s",
-                                              (n != 0) ? " " : "", key + 3, (val[0] != '\0') ? val : "?");
+                    const char* const shown = (val[0] != '\0') ? val : "?";
+                    const int w = _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "%s%s=%s%s",
+                                              (n != 0) ? " " : "", k.name + 3, shown, k.mod_writes ? "*" : "");
                     if (w < 0) break;
                     n += (size_t)w;
+                    if (!k.mod_writes) {
+                        const int v = _snprintf_s(steady + m, sizeof(steady) - m, _TRUNCATE, "%s=%s ", k.name, shown);
+                        if (v < 0) break;
+                        m += (size_t)v;
+                    }
                 }
-                if (strcmp(line, s_said) != 0) {
-                    strcpy_s(s_said, sizeof(s_said), line);
-                    API::get()->log_info("[Halo-CampE-UEVR] UEVR SETTINGS: %s  (? = this backend has no such key)", line);
+                if (strcmp(steady, s_said) != 0) {
+                    strcpy_s(s_said, sizeof(s_said), steady);
+                    API::get()->log_info("[Halo-CampE-UEVR] UEVR SETTINGS: %s  (* = the mod also writes this one, around "
+                                         "cutscenes and in vehicle cameras; ? = this backend has no such key)", line);
                 }
             }
         }

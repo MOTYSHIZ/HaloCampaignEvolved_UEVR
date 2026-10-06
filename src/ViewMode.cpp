@@ -1,7 +1,7 @@
 // View topology detector. The doctrine and the per-method table are in ViewMode.hpp.
 //
 // DEPENDENCY-FREE ON PURPOSE: no API.hpp, no Config.hpp, no logging. It is exercised out of tree
-// by a synthetic callback sequence (the render thread cannot be driven from a test, and the
+// by a synthetic callback sequence (the stereo callback cannot be driven from a test, and the
 // SimVR rig cannot render AFR or Mono), so anything it pulled in would have to be stubbed there.
 
 #include "ViewMode.hpp"
@@ -19,14 +19,15 @@ std::atomic<int>      g_mode{(int)ViewMode::Unknown};
 std::atomic<int>      g_declared{-1};
 std::atomic<bool>     g_shared_projection{false};
 std::atomic<bool>     g_backend_warps{false};
+std::atomic<bool>     g_extreme_compat{false};
 std::atomic<unsigned> g_samples{0};
 // Diagnostics for the VIEWMODE line: the vote ring as of the last sample, and the largest
-// second difference seen since the poll last read it (in game cm). Relaxed stores; the render
-// thread never waits on them.
+// second difference seen since the poll last read it (in game cm). Relaxed stores; the callback
+// never waits on them.
 std::atomic<unsigned> g_diag_ring{0};
 std::atomic<float>    g_diag_swing_max{0.0f};
 
-// Render-thread working state. Touched only inside viewmode_note_post, which runs on the one
+// The callback's working state. Touched only inside viewmode_note_post, which runs on the one
 // thread that dispatches the stereo callbacks, so plain fields are correct here -- the atomics
 // above are the publication boundary, not the working storage.
 uint32_t s_seq = 0;
@@ -123,12 +124,19 @@ void viewmode_note_post(int view_index, float x, float y, float z) {
     s_last_seq[i] = s_seq;
     s_seen[i]     = true;
 
+    // WHAT UEVR SAYS IT IS DOING, for the two decisions below that the positions cannot make alone.
+    // Extreme Compatibility Mode forces the alternating plumbing under EVERY method (is_using_afr()
+    // in UEVR's VR.hpp), and our own Mono yields to it (is_mono_rendering()).
+    const int  declared = g_declared.load(std::memory_order_relaxed);
+    const bool warps    = g_backend_warps.load(std::memory_order_relaxed);
+    const bool extreme  = g_extreme_compat.load(std::memory_order_relaxed);
+    const bool declared_alternating =
+        extreme || declared == 1 || declared == 2 || (declared == 3 && warps);
+
     ViewMode m;
     if (other_fresh) {
         m = ViewMode::Stereo;
-    } else if (g_shared_projection.load(std::memory_order_relaxed) &&
-               g_declared.load(std::memory_order_relaxed) == 3 &&
-               !g_backend_warps.load(std::memory_order_relaxed)) {
+    } else if (g_shared_projection.load(std::memory_order_relaxed) && declared == 3 && !warps && !extreme) {
         // ONE PROJECTION FOR BOTH EYES, ON THE MONO METHOD OF A BACKEND THAT HAS ONE, SETTLES IT.
         // Needed because on this title the mono view's position DOES swing while scoped and
         // walking (2026-09-15 log: the ring voted Alternating for a second at a time, flattening
@@ -143,11 +151,20 @@ void viewmode_note_post(int view_index, float x, float y, float z) {
         // projections in a player's log, so this branch called it Mono, every consumer took ONE EYE
         // as the head, and the reticule was placed from the left eye one frame and the right eye the
         // next: the doubled reticule of 2026-09-30 and 2026-10-05, which survived v0.6.1's removal of
-        // the flattening. So the shortcut now also needs the declared method to be 3 and the backend
-        // not to be AFW; everything else is decided by what the positions actually do, below.
+        // the flattening. So the shortcut now also needs the declared method to be 3, the backend
+        // not to be AFW, and Extreme Compatibility off (it makes method 3 alternate on our own
+        // backend too); everything else is decided by what the positions actually do, below.
         m = ViewMode::Mono;
     } else if (s_hist_n >= 8) {
-        m = (popcount8(s_hist) >= kAltVotes) ? ViewMode::Alternating : ViewMode::Mono;
+        // A SINGLE VIEW IS NEVER MONO WHILE UEVR DECLARES AN ALTERNATING METHOD. The ring cannot see
+        // the alternation when the two eyes nearly coincide -- a swing under kSwingGameCm, i.e. a
+        // world scale below ~0.3, an inactive HMD, or the 0.01 our own cutscene collapse writes --
+        // and used to answer Mono there. Consumers then took ONE eye as the head for the ~7 frames
+        // the ring needs after the eyes separate again: a half-IPD hop of the reticule and markers
+        // after every such cutscene on AFR/AFW (review, 2026-10-05). Averaging two consecutive
+        // samples is exact when the eyes coincide, so Alternating costs nothing there.
+        const bool alternating = popcount8(s_hist) >= kAltVotes;
+        m = (alternating || declared_alternating) ? ViewMode::Alternating : ViewMode::Mono;
     } else {
         m = ViewMode::Unknown;
     }
@@ -184,9 +201,17 @@ bool viewmode_backend_warps() {
     return g_backend_warps.load(std::memory_order_relaxed);
 }
 
+void viewmode_set_extreme_compat(bool on) {
+    g_extreme_compat.store(on, std::memory_order_relaxed);
+}
+
+bool viewmode_extreme_compat() {
+    return g_extreme_compat.load(std::memory_order_relaxed);
+}
+
 bool viewmode_is_mono() {
     return viewmode_current() == ViewMode::Mono && viewmode_declared() == 3 &&
-           viewmode_shared_projection() && !viewmode_backend_warps();
+           viewmode_shared_projection() && !viewmode_backend_warps() && !viewmode_extreme_compat();
 }
 
 unsigned viewmode_samples() {
