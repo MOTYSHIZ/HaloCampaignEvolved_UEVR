@@ -584,6 +584,12 @@
 #vehwheelsteersign=-1
 
 # ------------------------------------------------------------------------- VEHICLE CAMERAS (vehtp)
+# Your own cameras in vehicles, listed per seat in halo_vr_vehcams.json: at your seat, at the Chief's
+# head, or behind and around the vehicle. Left Y steps to the next camera and left X through its
+# tethering modes (your view held still, or turning with the vehicle).
+#
+# 1 = on, 0 = the game's own vehicle camera, with the gamepad controls the game ships.
+#vehtp=1
 # Camera readout. A short note in front of you whenever the vehicle camera changes: the vehicle, the
 # camera's number and name, its tethering mode, what it does (anything that turns your view is in
 # yellow), and which controls it uses.
@@ -668,6 +674,12 @@
 #xrtextscale=1.0
 
 # ------------------------------------------------------------ AIM VEHICLES WITH YOUR HAND (vehaim)
+# In the vehicle cameras the vehicle aims where your controller points, and the right stick turns your
+# view. In a driver's seat pointing also steers. Needs the vehicle cameras (vehtp). The left stick
+# click switches one seat between this and aiming with the stick, whatever this is set to.
+#
+# 1 = seats start out aimed by hand, 0 = seats start out aimed with the right stick.
+#vehaim=1
 # Right stick in a vehicle. 1 turns your view, since your hand does the aiming; 2 leaves the stick to
 # the game.
 #vehstick=1

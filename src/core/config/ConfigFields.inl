@@ -1424,14 +1424,16 @@
     // keys that did this globally are gone; the file replaced them.) Always head-anchored: your head,
     // not the play-space origin, is what rides the vehicle, and hmdleash is respected -- on, the leash
     // holds your head to the camera's point as it holds it to your body on foot; off, you lean freely.
-    // Runs in a RIDE: stick mode + the game's mount flag, never in a cutscene or a death. 0 = off.
-    bool  veh_tp = false;
+    // Runs in a RIDE: stick mode + the game's mount flag, never in a cutscene or a death. 0 = off: the
+    // game's own vehicle camera and gamepad controls. ON by default from 0.7.0 (the user's call).
+    bool  veh_tp = true;
     // vehaim: 1 = while the owned third-person camera is on IN A VEHICLE, let the motion controller
     // drive the aim (turret/hull), the same direct-drive write infantry uses. Safe only because we
     // own the camera -- the historic reason the aim write is held off in stick mode is that Halo
-    // binds the chase cam to the aim, and we no longer read that camera. Default OFF (opt-in) until
-    // proven per vehicle. Gated on the chassis being resolved (= actually in a vehicle).
-    bool  veh_aim = false;
+    // binds the chase cam to the aim, and we no longer read that camera. ON by default from 0.7.0 (the
+    // user's call); a seat's "motionAim" in the camera file, or the left stick click, says otherwise
+    // per seat. Gated on the chassis being resolved (= actually in a vehicle).
+    bool  veh_aim = true;
     // vehstick: with motion aim on (vehaim), what the right thumbstick does in a vehicle. 1 = TURN your
     // view (default -- the aim is on the controller, so the stick is free; see vehorbitrate); 2 = leave
     // the stick to the game (no turn). Both live; may become per-vehicle later.
