@@ -79,7 +79,8 @@ appropriately.
   [Updating](#updating-install-every-release-fresh).)
 - **Experimental features** — early previews, off by default, in the menu's own panel: manual
   reloads, racking the slide, a wrist HUD with the motion tracker, ForceTube gunstock kicks and more,
-  contributed by [blindcowboy24](https://github.com/blindcowboy24). Expect rough edges.
+  contributed by [blindcowboy24](https://github.com/blindcowboy24); and
+  [vehicle cameras with hand aim](#vehicle-cameras-and-hand-aim-experimental). Expect rough edges.
 
 ## Requirements
 
@@ -115,8 +116,8 @@ It is an unofficial build — please do not report problems with it to the UEVR 
 
 **Stock UEVR also works.** The minimum is below.
 
-**Minimum: [nightly-01138](https://github.com/praydog/UEVR/releases/tag/nightly-01138). Newer is
-fine.**
+**Minimum: [nightly-01138](https://github.com/praydog/UEVR-nightly/releases/tag/nightly-01138-158232aa0703f39014931a8a2320e0633c3c47d4).
+Newer is fine.**
 
 **Anything older will not work**, and this is the one hard rule here. Halo: Campaign Evolved runs a
 nonstandard UE 5.5.4 that needs the double-precision view-matrix handling introduced in 01138 —
@@ -137,8 +138,9 @@ already in your `log.txt` — but please do not assume it is the cause and reins
    `UEVR-HaloVR-01139.zip` (our [UEVR build](#uevr-version), recommended).
 2. Extract `UEVR-HaloVR-01139.zip` into a folder of its own and run its `UEVRInjector.exe` once so
    it creates its folders. (Stock [UEVR nightly-01138 or newer](#uevr-version) works too.)
-3. In the UEVR frontend, click **Import Config** and select the downloaded zip.
-   - **Manual install (no Import Config):** instead of clicking Import Config, extract the zip into
+3. In the UEVR frontend, click **Import Config** and select `HaloCampaignEvolved.zip`.
+   - **Manual install (no Import Config):** instead of clicking Import Config, extract
+     `HaloCampaignEvolved.zip` into
      `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\` so that `config.txt` sits directly in that folder.
 4. Launch Halo: Campaign Evolved flat, and wait at the **main menu**.
 5. In UEVR, select `HaloCampaignEvolved` and click **Inject**.
@@ -166,6 +168,7 @@ copy these out of the folder before deleting it and put them back afterwards:
 | `halo_vr_calib.cfg` | your calibration |
 | `halo_vr_weapons.cfg` | per-weapon adjustments |
 | `halo_vr_handposes.json` | your edited hand poses |
+| `halo_vr_vehcams.json` | your vehicle cameras, if you edited them |
 
 Settings get added, renamed and re-tuned between releases, and a value measured against an older
 build can leave you worse off than the new defaults. So treat restoring them as a convenience, not a
@@ -311,7 +314,8 @@ on foot.
 | Head | Free look, as always |
 
 Motion aim, snap turn and the VR-specific button remaps all stand down while you're seated, so
-every other button does exactly what the game's normal gamepad layout does.
+every other button does what the game's normal gamepad layout does. The one exception is the
+head-tap pause: left Y with a controller near your head still pauses, in a seat as on foot.
 
 The switch is automatic, and it also applies during cutscenes — the mod works it out from the game's
 camera leaving first person, so standing on foot with no weapon keeps motion controls. If you ever
@@ -319,11 +323,66 @@ find a seat it misses, please report it; as a
 stopgap you can add `stickforce=1` to `halo_vr_user.cfg` (the key is documented in
 `halo_vr_dev.cfg`) to force these controls on, and remove it to go back to automatic.
 
+### Vehicle cameras and hand aim (Experimental)
+
+Two switches under **Halo VR Experimental** in the [settings menu](#configuration) change the
+section above. Both are off until you switch them on, and both are early previews.
+
+- **Vehicle cameras** (`vehtp=1`) gives every vehicle seat its own list of cameras: at your seat,
+  at the Chief's head, or behind and around the vehicle. Each camera has **tethering modes**:
+  in *Untethered* only your head turns your view (the comfortable one), and the *Tethered* modes
+  turn your view with the vehicle as well. A short note in front of you says
+  which vehicle, camera and mode you are in whenever it changes; anything that turns your view is
+  shown in yellow.
+- **Aim vehicles with your hand** (`vehaim=1`, needs Vehicle cameras) aims the vehicle where your
+  controller points, and the right stick turns your view instead. In a driver's seat pointing also
+  steers, because Halo steers a vehicle toward where it aims.
+
+With Vehicle cameras on, these controls are added while you are seated:
+
+| Input | Action |
+|---|---|
+| Left Y | Next camera |
+| Left X | The camera's next tethering mode |
+| Left X or left Y, held a second | Reset the view: lined up with the vehicle, your head back on the camera's point |
+| Left stick click | Switch that seat between aiming with your hand and aiming with the stick |
+| Left grip | Switch seat (the game's own, moved off left X; this grip no longer brakes, the right grip still does) |
+| Left trigger, **passenger seats only** | Switch weapon (left Y no longer does there, and the trigger no longer zooms) |
+
+The cameras live in `halo_vr_vehcams.json`, next to your settings file. It is yours: the mod writes
+it once, from its built-in cameras, and never touches it again. Edit it while you sit in a vehicle
+and a saved change applies within a couple of seconds; a mistake leaves the cameras you had and
+tells you what is wrong. The file opens with its own guide to every setting, and
+`halo_vr_vehicle_mesh_reference.txt` beside it lists each vehicle's part names for hiding parts of
+the vehicle (`hideMeshes`) and its bone and socket names for placing a camera on a moving part
+(`origin`). **Delete `halo_vr_vehcams.json` to get the built-in cameras back.**
+The opening Pelican ride is left to the game's own camera.
+
+Good to know:
+
+- **The left stick click works with hand aim off too.** It switches that seat to hand aim and
+  remembers it; `vehaim` sets what each seat starts as (changing it later resets the seats you had
+  switched by hand). Your last camera, tethering mode and
+  controls in each seat are kept in `halo_vr_vehcams_last.txt`; delete it with the game closed to start every seat from
+  its defaults again.
+- **With hand aim on, the right stick turns your view smoothly** (120 degrees a second, whatever
+  your on-foot turn setting), and the view stays where you leave it. `vehstick=2` gives the stick
+  back to the game.
+- **The grip and the passenger trigger must be let go once after you sit down** before they act, so
+  one held while boarding does nothing.
+- **The notes need the headset-drawn layer** ([Crisp reticule and waypoints](#crisp-reticule-and-waypoints)),
+  so on OpenVR, or with `xrlayer=0`, the cameras work but nothing is shown when they change.
+
+The settings for all of this are in the menu and in `halo_vr_user_reference.txt` under **Vehicle
+cameras**: turn the readout off with `vehcamreadout=0`, give the seat switch or the passenger
+trigger back to the game with `vehseatgrip=0` and `vehpassswap=0`.
+
 ## Configuration
 
 Your settings file is `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\halo_vr_user.cfg` (created on
 first run). Every available setting — with comments and its default — is listed in
-`halo_vr_user_reference.txt` next to it: copy the keys you want into your file, remove the
+`halo_vr_user_reference.txt` next to it (the on/off switches of the Experimental features are the
+exception: those are in the menu's Halo VR Experimental panel): copy the keys you want into your file, remove the
 leading `#`, set your value, save. It applies live while you play (~2 s), and the file is yours —
 nothing the mod does rewrites it. (When you install a new release you delete the whole folder, so
 keep a copy if you want to try carrying it over: see
@@ -351,14 +410,15 @@ change — which is also what makes it the one file worth keeping a copy of acro
 **Deleting it resets every setting to the built-in defaults** (a fresh template regenerates on
 the next launch), and that is a perfectly good place to be.
 
-**Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press both thumbsticks) and
-scroll to **Script UI** — five panels live there, in this order:
+**Prefer menus?** Open the UEVR overlay (Insert on the keyboard, or press and hold both
+thumbsticks) and scroll to **Script UI** — five panels live there, in this order:
 
 - **Halo VR Controls (rebinding)** — put one of the mod's own actions (crouch, melee, reload, the
   scope toggle, the d-pad shift) on a button of your choice: press Rebind, close the menu, then
   press the button, and it records what your controller actually sends.
-- **Halo VR User Settings** — every player setting, grouped exactly as in the catalog with the
-  catalog's own comments as tooltips; overridden settings get an `x` button back to the default.
+- **Halo VR User Settings** — every released player setting, grouped exactly as in the catalog with
+  the catalog's own comments as tooltips (an Experimental feature's settings sit under that feature
+  in Halo VR Experimental); overridden settings get an `x` button back to the default.
   Saves to `halo_vr_user.cfg`, exactly as a hand edit would, and applies live within a couple of
   seconds.
 - **Halo VR DEV Settings** — the internal research knobs, behind a warning. Leave them alone
@@ -372,8 +432,9 @@ scroll to **Script UI** — five panels live there, in this order:
 - **Halo VR Experimental** — early previews, every one off until you switch it on: manual reload,
   racking the slide, a wrist HUD with the motion tracker, a grenade throw on grip release, ForceTube
   gunstock kicks, a vehicle seat camera and more, contributed by
-  [blindcowboy24](https://github.com/blindcowboy24). They are works in progress and may break things
-  or feel unfinished.
+  [blindcowboy24](https://github.com/blindcowboy24); and
+  [vehicle cameras with hand aim](#vehicle-cameras-and-hand-aim-experimental). They are works in
+  progress and may break things or feel unfinished.
 
 This ships as `scripts/halo_vr_settings.lua` and needs nothing extra: UEVR's built-in Lua
 scripting loads it automatically.
@@ -410,7 +471,7 @@ thing to suspect.
 
 | Panel button | Calibration | Workflow |
 |---|---|---|
-| **Calibrate weapon pose** | **Pose-match** (grip) | Line your controller up with the frozen on-screen weapon, then save. This aligns the weapon's grip to how you actually hold your controller. `End` works in place of the trigger while this is armed. |
+| **Calibrate weapon pose** | **Pose-match** (grip) | Line your controller up with the frozen on-screen weapon, then save. This aligns the weapon's grip to how you actually hold your controller. |
 | **Calibrate weapon pose — THIS WEAPON only** | **Per-weapon pose** | The same gesture, stored as an adjustment for the weapon in your hands. Every other weapon keeps the global fit. |
 | **Calibrate weapon grip (off-centre handles)** | **Front handle** | Click it and the weapon freezes. Put your support hand where that weapon's front handle really is, then click **SAVE grip**. Only the two-handed hold changes. |
 | **Arm per-weapon scope trim** / **Arm BASE scope calibration** | **Scope placement** | The scope pane stays visible while either is armed. Hold `Delete`, move the lens to where you want it on the gun, then release. With the per-weapon trim armed it's stored for the weapon in your hands; otherwise it's stored for every weapon — including when you hold `Delete` without arming anything. |
@@ -457,8 +518,9 @@ appears once you've calibrated; `halo_vr_weapons.cfg` is created on first launch
 template listing the weapon names, and comes back that way if you delete it.
 
 Once you have a calibration you like, copy those files somewhere safe, along with `halo_vr_user.cfg`
-if you've changed settings. They're small, plain text, and they're the only things in the profile
-that are specific to *you* — everything else can be re-downloaded. That copy is what lets you *try*
+if you've changed settings. They're small, plain text, and yours — as are `halo_vr_handposes.json`
+and `halo_vr_vehcams.json` if you edited them; everything else can be re-downloaded. That copy is
+what lets you *try*
 carrying your fit into the next release, which we recommend installing fresh
 ([Updating](#updating-install-every-release-fresh)); if the restored fit feels wrong on a new build,
 delete it and recapture rather than fighting it.
@@ -494,7 +556,13 @@ delete it and recapture rather than fighting it.
   auto height can't find your real floor, so it follows your eye level instead and physical crouch
   stays off.
 - **The scope pane can jump out of place after shooting or reloading.** To fix it for now: switch
-  weapons, then close the scope and open it again. Also work in progress.
+  weapons, then close the scope and open it again. Work in progress.
+- **PureDark's AFW build of UEVR: doubled reticle and waypoint markers.** 0.6.x drew them doubled
+  there. 0.7.0 changes how the mod reads AFW's alternating eyes, but we have no AFW setup to test it
+  on. If they still double, set `xrlayer=0` and `xrlayernav=0`, and please tell us.
+- **Vehicle cameras (Experimental):** changing camera can hitch for a moment while its note is
+  drawn, and the first boarding of a session can hitch once. Rarely, after spawning into a vehicle
+  from a checkpoint, the cameras sit in the wrong place; get out and back in.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
   comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
   intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
@@ -554,7 +622,11 @@ of these projects stands on, for the nonstandard 5.5.4 fix that had this game re
 days of its release, and for the plugin SDK this mod is written against. Hail to the king.
 
 **Special thanks to [blindcowboy24](https://github.com/blindcowboy24)** — My main direct contributor to the project! He's responsible for many neat feature additions and fixes (per-weapon calibration, directional melee including the left-hand directional melee, over the shoulder holster, and more on the way). 
-Unparalleled patience and politeness in his manner of contribution, with great communication and flexibility in direction. Honestly wasn't expecting this kind of big help. Can't thank you enough, bro! 
+Unparalleled patience and politeness in his manner of contribution, with great communication and flexibility in direction. Honestly wasn't expecting this kind of big help. Can't thank you enough, bro!
+
+The vehicle cameras added in 0.7 stand on his work too: they know you are in a seat from his seat
+detection, hide your body with his hider, and take several of their safeguards (which mesh is the
+vehicle, one view for both eyes) from his seat camera. 
 
 - **[Pande4360](https://github.com/Pande4360) and [deterministicj](https://github.com/deterministicj)** — For welcoming me into the Flat2VR community as a modder and providing useful learning/community resources!
 - **[pancreations / Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR)** — independent prior

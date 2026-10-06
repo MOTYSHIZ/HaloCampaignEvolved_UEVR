@@ -32,7 +32,8 @@ earlier version left behind stays and keeps applying, and that mixed folder is n
 was tested as. If the mod behaves oddly right after an update, this is the first thing to rule out.
 
 You can copy `halo_vr_user.cfg` (your settings) and your calibration files — `halo_vr_calib.cfg`,
-`halo_vr_weapons.cfg`, `halo_vr_handposes.json` — out first and put them back afterwards, but that is
+`halo_vr_weapons.cfg`, `halo_vr_handposes.json`, and `halo_vr_vehcams.json` if you edited your vehicle
+cameras — out first and put them back afterwards, but that is
 a convenience and not a guarantee: settings change between releases, and an old value can behave
 differently on a new build. If anything feels wrong after restoring them, delete them and use the
 shipped defaults.
@@ -108,7 +109,7 @@ button press that is expected — it is exactly what the press above fixes. If i
 middle of play, you are looking at the frozen-hands problem below, and a press brings it back.
 
 If controllers read 1 and the gun still ignores you, `log.txt` can tell you whether poses are
-arriving at all. About every 20 seconds on foot it logs a line like:
+arriving at all. About every 20 seconds it logs a line like:
 
 ```
 [Halo-CampE-UEVR]   rig: travel=0.000m rigOff=(0.0,0.0,0.0)cm ...
@@ -249,7 +250,8 @@ is meant to be inert outside this game.
 
 ## Logs
 
-Everything the mod does is logged with a `[Halo-CampE-UEVR]` prefix in
+Nearly everything the mod does is logged with a `[Halo-CampE-UEVR]` prefix (the layer bridge logs as
+`[XRBRIDGE]`) in
 `%APPDATA%\UnrealVRMod\HaloCampaignEvolved\log.txt`. Include the tail of that file in bug reports,
 and say whether you play on Steam or Game Pass.
 

@@ -1149,22 +1149,11 @@ local function draw_calib()
     print_text_block("The shipped fit was measured on Quest Touch controllers; calibrating " ..
                      "writes YOUR fit to halo_vr_calib.cfg, which overrides it and survives updates.")
     imgui.spacing()
-    print_text_block("RECOMMENDED: the KEYBOARD gestures. Hold End (pose match) or Page Down " ..
-                     "(aim ray), align, release to save. Holding the key IS the calibration state " ..
-                     "-- nothing stays armed, nothing to cancel, no ambiguity about whether you " ..
-                     "are calibrating.")
-    print_text_block("NOTE: the keys only register while the GAME WINDOW IS FOCUSED (background " ..
-                     "keystrokes are deliberately ignored -- click the game window first).")
-    imgui.spacing()
-    print_text_block("The SUPPORT HAND calibration below has no key at all -- its button IS the " ..
-                     "gesture. Everything after arming is the same as the other two.")
-    imgui.spacing()
-    print_text_block("No keyboard in reach? The buttons below arm the same gestures:")
+    print_text_block("The buttons below ARM a calibration; the triggers then save it:")
     print_text_block("  1. Press a Calibrate button, then CLOSE this menu -- controller input " ..
                      "does not reach the game (or the mod) while the UEVR menu is open.\n" ..
                      "  2. Align: pose match = hold your controller on the on-screen weapon; " ..
-                     "aim ray = point your controller at the frozen reticle; support hand = put " ..
-                     "your real off hand where the frozen one is.\n" ..
+                     "support hand = put your real off hand where the frozen one is.\n" ..
                      "  3. RIGHT trigger = save & finish. LEFT trigger = save & re-arm on " ..
                      "release, for consecutive passes. Triggers will not fire your weapon while " ..
                      "armed.")
@@ -1187,8 +1176,9 @@ local function draw_calib()
     if imgui.button("Use shipped calibration for EVERYTHING") then fire("calibreset:all") end
     if imgui.is_item_hovered() then
         imgui.set_tooltip("Deletes halo_vr_calib.cfg (this hand) -- the shipped Quest Touch fit\n" ..
-                          "applies again within ~2 s. That is ALL THREE gestures at once: weapon\n" ..
-                          "pose, aim ray and support hand. Recalibrate to redo them.")
+                          "applies again within ~2 s. That is everything in it at once: weapon\n" ..
+                          "pose, captured barrel lines, the global scope placement and the\n" ..
+                          "support hand. Per-weapon adjustments (halo_vr_weapons.cfg) are kept.")
     end
     imgui.spacing()
 
@@ -1218,7 +1208,7 @@ local function draw_calib()
     local pose_on = (calib_mode == 1)
     if pose_on then imgui.push_style_color(21, 0xFF2288DD) end
     if imgui.button(pose_on and "ARMED: weapon pose -- RIGHT trigger saves"
-                             or  "Calibrate weapon pose (End)") then
+                             or  "Calibrate weapon pose") then
         fire(pose_on and "calib:off" or "calib:pose")
     end
     if pose_on then imgui.pop_style_color(1) end
@@ -1226,8 +1216,7 @@ local function draw_calib()
         imgui.set_tooltip("How the weapon sits in your hand. Hold the controller so it lines up\n" ..
                           "with the on-screen weapon, then save with the trigger.\n" ..
                           "LEFT trigger saves and stays armed for another go; RIGHT trigger\n" ..
-                          "saves and finishes. Neither reaches your weapon.\n" ..
-                          "End does the same, but ONLY while this is armed.")
+                          "saves and finishes. Neither reaches your weapon.")
     end
     if any_key_active(POSE_KEYS) then
         imgui.same_line()
@@ -1267,10 +1256,12 @@ local function draw_calib()
     imgui.pop_id()
 
     imgui.push_id("calaim")
-    if imgui.button("Calibrate aim ray (Page Down)") then fire("calib:aim") end
+    if imgui.button("Capture this weapon's barrel line (Page Down)") then fire("calib:aim") end
     if imgui.is_item_hovered() then
-        imgui.set_tooltip("Where shots go relative to the weapon. The reticle freezes; point your\n" ..
-                          "controller at it, then save with the trigger.")
+        imgui.set_tooltip("Where shots go relative to the weapon. Aim needs no calibration unless a\n" ..
+                          "weapon shoots off its barrel. The capture happens the moment you press\n" ..
+                          "this, with the weapon as you are holding it -- so the Page Down key,\n" ..
+                          "tapped while you hold the weapon steady in game, is the easier way.")
     end
     if any_key_active(AIM_KEYS) then
         imgui.same_line()

@@ -6,7 +6,8 @@ Names for two settings in halo_vr_vehcams.json, the vehicle camera file:
   PART 2   "origin"       what a camera sits on and is measured from   -> the built-in names, or a
                                                                          BONE or SOCKET name
 
-The two take different names: a mesh name does nothing as an origin, and a bone name hides nothing.
+The two take different names: a mesh name does nothing as an origin, and hideMeshes reads mesh names
+(a bone name hides something only where the same text is part of a mesh name).
 This file is documentation only. The mod never reads it, and editing it changes nothing.
 
 Names are the game's own, listed from the Steam release on 2026-10-04. A game update may
@@ -32,7 +33,8 @@ HOW TO USE IT
     name; "canopy_m_panela_damage" hides exactly one.
   - A camera's own list REPLACES its seat's list. "hideMeshes": [] on a camera hides nothing there.
   - Only parts of the vehicle itself are ever hidden, never your own body.
-  - A part comes back the moment you change camera, get out, or press the kill switch.
+  - A part comes back the moment you change to a camera that does not hide it, get out, or press the
+    kill switch.
   - Saved changes apply within a couple of seconds, so you can try names while sitting in the vehicle.
 
 HOW THE GAME BUILDS A VEHICLE
