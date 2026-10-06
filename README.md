@@ -100,19 +100,25 @@ appropriately.
 
 ## UEVR version
 
-**Recommended: our UEVR build, `UEVR-HaloVR-01139.zip`, attached to each release.** It is stock UEVR
-nightly-01139 plus a handful of changes made for this mod (all source diffs ship inside the zip):
+### Our UEVR build (recommended)
+
+**`UEVR-HaloVR-01139.zip`, attached to each release.** It is stock UEVR nightly-01139 plus a handful
+of changes made for this mod (all source diffs ship inside the zip):
 
 - **Capacitive touch on the trigger and the thumbstick.** Stock UEVR does not expose them, so a finger
   resting on the trigger or a thumb resting on the stick is invisible to a mod. With them, your
   in-game index finger follows your real one without pulling the trigger, and your thumb goes down
   when it rests on the stick. Quest-style controllers; others simply use the trigger pull.
 - **Mono rendering** (optional) — one view shown to both eyes, for roughly one eye's cost.
-- **Fixes** for injection reliability on this game, a plugin deadlock during hitches, and the crash
-  at game exit.
+- **Injection fixes for this game.** Stock UEVR sometimes hangs the game while injecting (see
+  [Known issues](#known-issues)). This build fixes the causes we found for that hang, and injecting
+  has been far more reliable with it.
+- **Fixes** for a plugin deadlock during hitches and the crash at game exit.
 
 Unzip it into its own folder (not inside your normal UEVR) and inject with its `UEVRInjector.exe`.
 It is an unofficial build — please do not report problems with it to the UEVR project.
+
+### Stock UEVR
 
 **Stock UEVR also works.** The minimum is below.
 
@@ -564,10 +570,13 @@ delete it and recapture rather than fighting it.
   drawn, and the first boarding of a session can hitch once. Rarely, after spawning into a vehicle
   from a checkpoint, the cameras sit in the wrong place; get out and back in.
 - **Injection sometimes fails even at the main menu.** It either hangs the game during injection, or
-  comes up rendering **only one eye** once a mission is entered. Force-kill the game, relaunch, and inject again — it's
-  intermittent, and a retry normally works. As far as we can tell this is a UEVR issue rather than a
-  mod bug: the hang has been observed with the plugin removed from the profile entirely, and stereo
-  rendering is UEVR's own hook, which this mod never touches.
+  comes up rendering **only one eye** once a mission is entered.
+  **[Our UEVR build](#our-uevr-build-recommended), attached to each release, addresses the hang**, so
+  if you are on stock UEVR, switching to it is the first thing to try. Otherwise force-kill the
+  game, relaunch, and inject again — it's intermittent, and a retry normally works. As far as we
+  can tell this is a UEVR issue rather than a mod bug: the hang has been observed with the plugin
+  removed from the profile entirely, and stereo rendering is UEVR's own hook, which this mod never
+  touches.
 - Mid-mission injection is unreliable — expect rendering glitches or a hang. Always inject at the
   main menu.
 

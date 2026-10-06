@@ -68,6 +68,11 @@ It happens, and it is intermittent rather than a setup problem. Two shapes:
 Same remedy for both: force-kill the game, relaunch, and inject again at the main menu. A retry
 normally works, and nothing needs reconfiguring in between.
 
+**For the hang, use our UEVR build.** `UEVR-HaloVR-01139.zip`, attached to each release, fixes the
+causes we found for it, and injecting has been far more reliable with it — see
+[Our UEVR build](../README.md#our-uevr-build-recommended) in the README. If you are on stock UEVR,
+switching is the first thing to try.
+
 This is a **UEVR-side problem, not a mod bug**, on the evidence we have. The hang has been seen with
 the plugin removed from the profile entirely, so it happens with no mod code loaded at all; and
 stereo rendering belongs to UEVR's hook, which this plugin never touches — it only starts once
