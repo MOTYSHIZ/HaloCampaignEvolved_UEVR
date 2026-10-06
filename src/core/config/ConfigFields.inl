@@ -1545,11 +1545,12 @@
     bool  xr_text = true;             // xrtext: 0 = no panel at all (no atlas row is reserved)
     int   xr_text_cell_w = 512;       // xrlayertextw: the panel's pixels, width  (next start)
     int   xr_text_cell_h = 320;       // xrlayertexth: the panel's pixels, height (next start)
-    float xr_text_dist_cm = 130.0f;   // xrtextdist: how far in front of your eyes
-    float xr_text_up_cm = -50.0f;     // xrtextup: above (+) / below (-) your eye line -- was -20, moved down by
-                                      //   the panel's own height (48 x 320/512 = 30 cm; the user, 2026-09-27)
+    // REAL centimetres, scaled by the player's world scale where they are used (XrText.cpp). The author
+    // tuned 130 / -50 / 48 in the headset as UE cm at the profile's 1.312; these are those, in real cm.
+    float xr_text_dist_cm = 99.0f;    // xrtextdist: how far in front of your eyes
+    float xr_text_up_cm = -38.0f;     // xrtextup: above (+) / below (-) your eye line
     float xr_text_right_cm = 0.0f;    // xrtextright: right (+) / left (-) of where you look
-    float xr_text_width_cm = 48.0f;   // xrtextwidth: the panel's width; its height follows its shape
+    float xr_text_width_cm = 37.0f;   // xrtextwidth: the panel's width; its height follows its shape
     int   xr_text_fade_in_ms = 150;   // xrtextfadein
     int   xr_text_hold_ms = 3000;     // xrtexthold: fully visible this long -- was 1500 (the user, 2026-09-27)
     int   xr_text_fade_out_ms = 1500; // xrtextfadeout

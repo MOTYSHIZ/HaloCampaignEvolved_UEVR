@@ -1032,7 +1032,14 @@ int read_seats(API::UObject* unit, SeatRow* rows, int max) {
         for (int i = 0; i < arr->num; ++i) {   // every seat's path, not only the ones read
             auto* s = reinterpret_cast<FRawString*>(arr->data + static_cast<size_t>(i) * static_cast<size_t>(s_sr.elem)
                                                     + s_sr.soft_str_off);
-            if (s->data != nullptr) m->free(s->data);
+            // Freed only when it LOOKS like a string the engine allocated: a build whose soft pointer is
+            // laid out differently would otherwise hand free() whatever sits here. Else left alone (a
+            // few bytes leak per read, never a free of the wrong pointer) -- review, 2026-10-05.
+            if (s->data == nullptr) continue;
+            if (s->num < 0 || s->max < s->num || s->max > 4096
+                || IsBadReadPtr(s->data, static_cast<size_t>(s->num) * (s_sr.soft_str_utf8 ? 1 : sizeof(wchar_t))))
+                continue;
+            m->free(s->data);
             s->data = nullptr; s->num = 0; s->max = 0;
         }
     }
@@ -1120,7 +1127,12 @@ bool seat_resolve(API::UObject* const* me, int nme, const double p[3], SeatFix* 
         out->valid = true;
         out->actor = cand[k]->owner; out->unit = cand[k]->o; out->unit_idx = cand[k]->i;
         out->seat = mine; out->nseats = n;
-        out->bits = vehcampresets::seat_bits(rows[mine].driver, rows[mine].gunner);
+        // The role only when the game's driver and gunner flags BOTH resolved on this build. Without them
+        // every seat would read "neither", which is what a passenger is -- and the passenger lanes (the
+        // left trigger's weapon switch) would run in a driver's seat. Unknown (0) instead: seat entries
+        // stand down and nothing seat-specific runs (review, 2026-10-05).
+        out->bits = (s_sr.drv_off >= 0 && s_sr.gun_off >= 0)
+                  ? vehcampresets::seat_bits(rows[mine].driver, rows[mine].gunner) : static_cast<uint8_t>(0);
         out->by_path = via_path;
         s_seats_proven = true;
 #if HALO_VR_DEV
@@ -2077,7 +2089,9 @@ bool veh_ride_update(bool stick) {
     ++s_unmounted;
     if (s_in_ride && s_unmounted < 16) return true;          // a flicker mid-ride
     s_in_ride = false;
-    if (s_unmounted == 64 && !s_said) {                      // ~2 s: say once why nothing is searched
+    // ~2 s: say once why nothing is searched. Only with our cameras on: with them off nothing is searched
+    // anyway and the seat publish does not run, so the line would print in a real ride and mean nothing.
+    if (s_unmounted == 64 && !s_said && g_cfg.veh_tp) {
         s_said = true;
         API::get()->log_info("[Halo-CampE-UEVR] VEHCAM: stick mode without the mount flag -- not a vehicle seat "
                              "(a death, a load or a scripted scene), so no vehicle search");
@@ -2656,7 +2670,9 @@ void vehcam_game_tick_vehicle() {
                 if (ride_scan_done() >= s_ch_wait) {
                     s_ch_wait = 0;
                     if (pick_tp_chassis()) resolved_now = true;
-                    else s_ch_retry = s_seats_proven ? 8 : 90;          // ~0.25 s to re-ask the seats; ~3 s to re-walk
+                    // ~0.25 s to re-ask the seats while asks remain; else ~3 s to the next walk. Without the
+                    // second test a ride the seats never back ran its walks back to back (review, 2026-10-05).
+                    else s_ch_retry = (s_seats_proven && s_ch_seat_tries < 12) ? 8 : 90;
                 }
             } else if (s_ch_retry > 0 && --s_ch_retry == 0) {
                 if (s_seats_proven && s_ch_seat_tries < 12) {

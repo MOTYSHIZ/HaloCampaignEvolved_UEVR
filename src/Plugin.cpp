@@ -589,6 +589,13 @@ int veh_seat_grip_now(bool in_menu) {
 // paused does not also step the vehicle camera on its release.
 ULONGLONG g_pause_head_at = 0;
 
+// When the game's SWITCH SEAT bit last went out to the game from a vehicle seat (GetTickCount64; 0 =
+// never). XInput hook thread only. The seat's role is asked of the game about every two seconds, so for
+// that long after a switch it is the OLD seat's: the passenger lane stands down across it rather than
+// take a new driver's trigger.
+ULONGLONG g_seat_switch_sent_at = 0;
+constexpr ULONGLONG kSeatSwitchSettleMs = 2500;
+
 // Pose-match calibration button state. The geometry lives further down, with the quaternion
 // helpers it depends on.
 std::atomic<bool> g_calib_held{false};
@@ -13865,6 +13872,11 @@ public:
             }
         }
 
+        // A seat switch going out to the game (the grip above, or left X with vehseatgrip=0): stamp it for
+        // the passenger lane below.
+        if (g_cfg.veh_seat_mask != 0 && (state->Gamepad.wButtons & (WORD)g_cfg.veh_seat_mask) != 0 && veh_cam_selected())
+            g_seat_switch_sent_at = GetTickCount64();
+
         // ---- SEATED PRESS EDGES, for the stick-click binding below (left X / Y read their own action
         // states): the buttons that went DOWN on this poll, taken off the physical snapshot whether or not
         // you are seated. A binding acts only on a press that STARTS while seated. Edges computed on
@@ -14083,7 +14095,10 @@ public:
             static bool s_armed = false, s_down = false;
             static ULONGLONG s_until = 0;
             const WORD m = (WORD)g_cfg.veh_pass_swap_mask;
-            if (m == 0 || !veh_seat_passenger() || !veh_controls_live(g_in_menu.load())) {
+            // Not for kSeatSwitchSettleMs after a seat switch went out: the role is the old seat's until the
+            // game is asked again, and a new driver's trigger (the handbrake) must not be taken meanwhile.
+            const bool settling = g_seat_switch_sent_at != 0 && GetTickCount64() - g_seat_switch_sent_at < kSeatSwitchSettleMs;
+            if (m == 0 || settling || !veh_seat_passenger() || !veh_controls_live(g_in_menu.load())) {
                 s_armed = false; s_down = false; s_until = 0;
             } else {
                 const uint8_t on_t  = (uint8_t)(g_cfg.scope_thresh * 255.0f);

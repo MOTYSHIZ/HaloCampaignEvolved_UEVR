@@ -235,8 +235,24 @@ struct Hide {
 };
 Hide s_h;
 
-void put_back(Part& p) {
+// A held part's component, if its slot still holds it AND it is still the kind of object we hid. The slot
+// check alone is not enough for what follows: after a level reload between two ticks the same slot can
+// hold another object at the same address, and hold() and put_back() read raw offsets in it and write one
+// raw byte (the tick option). So: still a scene component, and still a skinned mesh where we changed its
+// tick option -- else the part is dropped (review, 2026-10-05).
+API::UObject* held(Part& p) {
     API::UObject* c = p.obj.get();
+    if (c == nullptr) return nullptr;
+    if (s_rf.scene == nullptr || !c->is_a(s_rf.scene)
+        || (p.tick >= 0 && (s_rf.skinned == nullptr || !c->is_a(s_rf.skinned)))) {
+        p.obj = TrackedObject{};
+        return nullptr;
+    }
+    return c;
+}
+
+void put_back(Part& p) {
+    API::UObject* c = held(p);
     if (c == nullptr) return;                              // gone with its vehicle: nothing to put back
     if (p.how == How::Shrunk) {
         if (is_shrunk(c)) set_scale(c, p.scale);           // only while it is still ours
@@ -343,7 +359,7 @@ void hold() {
     int w = 0;
     for (int k = 0; k < s_h.n; ++k) {
         Part& p = s_h.parts[k];
-        API::UObject* c = p.obj.get();
+        API::UObject* c = held(p);
         if (c == nullptr) continue;
         bool fought = false;
         if (p.how == How::Shrunk) {

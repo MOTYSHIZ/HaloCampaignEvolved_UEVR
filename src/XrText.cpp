@@ -11,6 +11,7 @@
 #include "XrLayer.hpp"
 #include "XrTextRaster.hpp"
 #include "core/host/PluginState.hpp"
+#include "core/WorldScale.hpp"    // uevr_world_scale(): the placement is real cm
 
 #include <Windows.h>
 
@@ -69,6 +70,7 @@ bool xrtext_show(const std::string& markup, const XrTextPlacement& where, const 
     // here are the ROOM's: on a tilted cockpit camera the panel sits relative to the cockpit's floor.
     // Or at a world point, for a notice about a place or a thing.
     Vec3 pos{};
+    double ws = 1.0;   // a View placement's real cm -> UE cm; a World one is in UE cm already
     if (where.anchor == XrTextAnchor::View) {
         Vec3 fwd{}, up{}, mono{};
         if (!xrlayer_view_basis(&fwd, &up) || !xrlayer_mono_view_pos(&mono)) return false;
@@ -99,9 +101,13 @@ bool xrtext_show(const std::string& markup, const XrTextPlacement& where, const 
         const double fl = std::sqrt(fx * fx + fy * fy);
         if (fl < 1e-3) { fx = 1.0; fy = 0.0; } else { fx /= fl; fy /= fl; }   // level IN THE ROOM
         const double rx = -fy, ry = fx;                                    // UE: the right of that
-        pos = Vec3{(float)(h[0] + fx * where.dist_cm + rx * where.right_cm),
-                   (float)(h[1] + fy * where.dist_cm + ry * where.right_cm),
-                   (float)(h[2] + where.up_cm)};
+        // The placement is REAL centimetres from your eyes, and this frame is UE cm: one real cm is
+        // world-scale UE cm (core/WorldScale). Unscaled, "130 cm" sat 99 real cm away at the profile's
+        // 1.312 and somewhere else at every other scale (review, 2026-10-05).
+        ws = (double)uevr_world_scale();
+        pos = Vec3{(float)(h[0] + (fx * where.dist_cm + rx * where.right_cm) * ws),
+                   (float)(h[1] + (fy * where.dist_cm + ry * where.right_cm) * ws),
+                   (float)(h[2] + where.up_cm * ws)};
     } else {
         pos = where.world;
     }
@@ -119,7 +125,7 @@ bool xrtext_show(const std::string& markup, const XrTextPlacement& where, const 
 
     s_anchor = where.anchor;
     s_pos = pos;
-    s_w_cm = std::max(1.0f, where.width_cm);
+    s_w_cm = std::max(1.0f, where.width_cm) * (float)ws;
     s_h_cm = s_w_cm * (float)h / (float)w;
     s_end_ms = now + fin + hld + fot;
     s_showing = true;

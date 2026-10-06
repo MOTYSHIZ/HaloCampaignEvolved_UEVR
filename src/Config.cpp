@@ -1267,8 +1267,8 @@ static bool parse_xrlayer_key(const char* key, double v) {
     if (_stricmp(key, "xrlayertextw")  == 0) { g_cfg.xr_text_cell_w = (int)clampf((float)v, 64.0f, 2048.0f); return true; }
     if (_stricmp(key, "xrlayertexth")  == 0) { g_cfg.xr_text_cell_h = (int)clampf((float)v, 32.0f, 2048.0f); return true; }
     if (_stricmp(key, "xrtextdist")    == 0) { g_cfg.xr_text_dist_cm = clampf((float)v, 10.0f, 5000.0f); return true; }
-    if (_stricmp(key, "xrtextup")      == 0) { g_cfg.xr_text_up_cm = (float)v; return true; }
-    if (_stricmp(key, "xrtextright")   == 0) { g_cfg.xr_text_right_cm = (float)v; return true; }
+    if (_stricmp(key, "xrtextup")      == 0) { if (std::isfinite(v)) g_cfg.xr_text_up_cm = clampf((float)v, -5000.0f, 5000.0f); return true; }
+    if (_stricmp(key, "xrtextright")   == 0) { if (std::isfinite(v)) g_cfg.xr_text_right_cm = clampf((float)v, -5000.0f, 5000.0f); return true; }
     if (_stricmp(key, "xrtextwidth")   == 0) { g_cfg.xr_text_width_cm = clampf((float)v, 1.0f, 2000.0f); return true; }
     if (_stricmp(key, "xrtextfadein")  == 0) { g_cfg.xr_text_fade_in_ms = (int)clampf((float)v, 0.0f, 60000.0f); return true; }
     if (_stricmp(key, "xrtexthold")    == 0) { g_cfg.xr_text_hold_ms = (int)clampf((float)v, 0.0f, 600000.0f); return true; }

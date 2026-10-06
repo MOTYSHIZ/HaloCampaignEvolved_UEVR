@@ -749,6 +749,21 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     // Write UNVERIFIED for the ride -- the doctrine above: could not verify is not known-bad -- and
     // leave the state Unproven, so on-foot play still verifies it and a Wrong verdict still stops this.
     if (g_stick_mode_active.load(std::memory_order_relaxed) && veh_tp_motion_aim_active()) {
+        // ...but only into something that at least HOLDS angles. Unverified is not unchecked: a yaw and a
+        // pitch in radians are small finite numbers, and a field that is not (a pointer, a count, a
+        // position in world units) means the layout moved. Held then, and said once (review, 2026-10-05).
+        const float* cur = (const float*)rec;
+        if (!std::isfinite(cur[0]) || !std::isfinite(cur[1]) || std::fabs(cur[0]) > 6.4f || std::fabs(cur[1]) > 1.7f) {
+            static bool s_refused = false;
+            if (!s_refused) {
+                s_refused = true;
+                API::get()->log_info(
+                    "[Halo-CampE-UEVR] BLAMLAYOUT: in a vehicle before the record layout was verified, and the "
+                    "record does not hold angles (%.4g, %.4g) -- vehicle aim is HELD OFF until on-foot play "
+                    "verifies the layout.", (double)cur[0], (double)cur[1]);
+            }
+            return false;
+        }
         static bool s_said = false;
         if (!s_said) {
             s_said = true;
@@ -853,9 +868,13 @@ bool layout_gate(uintptr_t rec, bool off_thread) {
     // and express the record in UE degrees.
     constexpr float RAD2DEG_L = 57.2957795f;
     float rec_yaw_ue = -(src[0] * RAD2DEG_L);
-    while (rec_yaw_ue >  180.0f) rec_yaw_ue -= 360.0f;
-    while (rec_yaw_ue < -180.0f) rec_yaw_ue += 360.0f;
-    const float rec_pitch_ue = src[1] * RAD2DEG_L;
+    // Wrapped by remainder, never by subtracting 360 until in range: this is the one read whose whole
+    // job is to notice that the layout moved, so src[0] may be anything. Past ~1e9 a float no longer
+    // changes when 360 is subtracted and infinity never does, and a loop here would hang the sim
+    // thread instead of calling the layout wrong (review, 2026-10-05). A non-finite value becomes a
+    // constant, which the sampler reads as a field that does not follow the view -- a mismatch.
+    rec_yaw_ue = std::isfinite(rec_yaw_ue) ? std::remainder(rec_yaw_ue, 360.0f) : 180.0f;
+    const float rec_pitch_ue = std::isfinite(src[1]) ? src[1] * RAD2DEG_L : 0.0f;
 
 #if HALO_VR_DEV
     // FAULT INJECTION (blamfault 0x200): freeze the candidate -- the offset landing on something

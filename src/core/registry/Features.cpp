@@ -294,7 +294,7 @@ const FeatureRow kFeatures[] = {
       "vehmeshdump,vehprobe,xrlayertexth,xrlayertextw",
       "", FEATURE_BOOL(veh_tp) },
     { "vehaim",       1, Tier::Experimental, "Vehicles", "Aim vehicles with your hand",
-      "In the vehicle cameras the vehicle aims where your controller points, and the right stick turns your view. Clicking the left stick switches a vehicle between this and aiming with the stick.",
+      "In the vehicle cameras the vehicle aims where your controller points, and the right stick turns your view. Clicking the left stick switches a seat between this and aiming with the stick.",
       "vehorbitrate,vehorbitreturn,vehstick",
       "vehaimfar,vehaimorigin,vehaimpivotz,vehaimray",
       "vehtp,blamangles", FEATURE_BOOL(veh_aim) },

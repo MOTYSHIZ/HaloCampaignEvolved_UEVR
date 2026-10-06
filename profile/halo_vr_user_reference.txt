@@ -121,10 +121,12 @@
 # a menu is open).
 #mapmenuback=0x4000
 
-# ---- Keyboard shortcuts. (The in-game Calibration panel does the same without a keyboard.)
-# Hold to calibrate how the weapon sits in your hand; release to save. Default: End.
+# ---- Keyboard shortcuts.
+# Weapon pose key. Does nothing on its own: the weapon pose is calibrated from the Calibration panel
+# and saved with a trigger. Default: End.
 #calibkey=0x23
-# Hold to calibrate where shots go; release to save. Default: Page Down.
+# Barrel line key. Tap to capture the held weapon's barrel line as you are holding it: hold the
+# weapon steady where it should point, then tap. Default: Page Down.
 #aimcalibkey=0x22
 
 # (Aim behaviour itself is the tested core of the mod, not a preference -- its tuning lives in
@@ -601,11 +603,11 @@
 # never resets.
 #vehcamresethold=1000
 # Hide your body in the seat cameras. 0 shows your character in the seat; 1 hides it in the cameras
-# that sit at your seat (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
+# that sit at your seat or at the Chief's head (a camera's "hideBody" in halo_vr_vehcams.json can say otherwise); 2 also
 # shrinks it, for a body that shows through the hide. In the Ghost and the Wraith turret only armour
 # pieces hide.
 #vehcamhidebody=0
-# Left stick click in a vehicle. 1 switches that vehicle between aiming with your hand and aiming with
+# Left stick click in a vehicle. 1 switches that seat between aiming with your hand and aiming with
 # the stick, says which, and keeps the click from the game while seated; 2 does the same and the game
 # gets the click too; 0 leaves the click to the game.
 #vehctrlclick=1
@@ -615,8 +617,8 @@
 #vehseatgrip=1
 # Passenger seats: switch weapon on the left trigger. In a passenger seat (the Warthog's side seat) you
 # keep your own weapons, but left Y steps the vehicle camera there. 1 = squeezing the left trigger
-# switches your weapon, left Y only steps the camera, and the trigger no longer zooms in that seat; a
-# note says so when you sit down. 0 = the trigger and left Y are the game's, as it ships. Driver and
+# switches your weapon, left Y only steps the camera, and the trigger no longer zooms in that seat; the
+# camera readout says so when you sit down. 0 = the trigger and left Y are the game's, as it ships. Driver and
 # gunner seats are never affected.
 #vehpassswap=1
 # Vehicle aim ring. A ring where the vehicle itself is aiming, beside your crosshair; once the vehicle
@@ -647,13 +649,13 @@
 # Text notices. Short notes in front of you, such as the camera readout; 0 turns them all off.
 #xrtext=1
 # Notice distance. How far in front of your eyes a notice appears, in centimetres.
-#xrtextdist=130
+#xrtextdist=99
 # Notice height. How far above (+) or below (-) your eye line a notice appears, in centimetres.
-#xrtextup=-50
+#xrtextup=-38
 # Notice sideways. How far right (+) or left (-) of where you look a notice appears, in centimetres.
 #xrtextright=0
 # Notice width. How wide a notice is, in centimetres; its height follows its shape.
-#xrtextwidth=48
+#xrtextwidth=37
 # Notice fade in. How long a notice takes to appear, in milliseconds.
 #xrtextfadein=150
 # Notice hold. How long a notice stays fully visible, in milliseconds.
@@ -804,8 +806,7 @@
 #
 # pahands=1
 
-# Contributed by blindcowboy24 (PR #7). Everything here is OFF or neutral by default -- copy a
-# line into halo_vr_user.cfg and uncomment it to turn a feature on.
+# Contributed by blindcowboy24 (PR #7).
 
 # ---------------------------------------------------------------- TWO-HANDED AIMING
 # Put your other hand where you would really hold the front of the weapon and squeeze its
@@ -841,9 +842,9 @@
 # points slightly away from its barrel when you do:
 #
 # You can record where a weapon's handle really is, once, and it is remembered for that
-# weapon. In the mod's Script UI, press "Calibrate weapon grip", close the menu, then hold
-# the weapon calibration key: the weapon FREEZES in place. Put your support hand where that
-# weapon's handle actually is and release. Nothing else about the weapon's fit changes.
+# weapon. In the mod's Script UI, press "Calibrate weapon grip": the weapon FREEZES in place.
+# Put your support hand where that weapon's handle actually is, then press the button again
+# to save. Nothing else about the weapon's fit changes.
 #
 # Master switch for every recorded handle. 0 ignores them all without deleting anything.
 #gripoffsets=1
@@ -1251,10 +1252,10 @@
 # wpnoff=AssaultRifle,0.0,0.0,1.5,-3.0
 # wpnoff=RocketLauncher,0.0,-1.0,3.0
 
-# PER-WEAPON CAPTURE KEY. Same gesture as the global calibration on END: hold
-# it, the weapon freezes, line your controller up with where it should sit,
-# release. The only difference is the destination -- this stores a DELTA for
-# the weapon in your hands and leaves the global calibration alone.
+# PER-WEAPON CAPTURE KEY. Does nothing on its own. A per-weapon fit is captured
+# from the Calibration panel ("Calibrate weapon pose -- THIS WEAPON only") and
+# saved with a trigger; it stores a DELTA for the weapon in your hands and
+# leaves the global calibration alone.
 #
 # Captures are written to halo_vr_weapons.cfg, which the plugin owns and
 # rewrites in full. It is YOURS: updates never overwrite it, and DELETING IT

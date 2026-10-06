@@ -223,7 +223,7 @@ void memory_save() {
                      m.ctrl_base == 1 ? "motion" : (m.ctrl_base == 0 ? "stick" : "-"));
     }
     fclose(f);
-    if (!MoveFileExA(tmp, s_mem_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!MoveFileExA(tmp, s_mem_path, MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileA(tmp);
         s_memory_dirty = true;
     }
