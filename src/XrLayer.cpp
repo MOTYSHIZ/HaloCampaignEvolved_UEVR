@@ -4020,15 +4020,21 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     //     between two points half an IPD apart every frame -- a shimmer, and a far more obvious
     //     artefact than the constant offset it would be replacing. The midpoint IS the head, which
     //     is what get_pose() reports, so the correspondence is exact.
-    //   Alternating (AFR: one view per frame, eyes by turns, always index 0): the midpoint of THIS
-    //     sample and the PREVIOUS one, which was the other eye. Half a frame of head motion stale,
-    //     which is millimetres; the per-index slot would have hopped half an IPD at 45 Hz.
+    //   Alternating (AFR/AFW: one view per frame, eyes by turns, always index 0): THIS frame's
+    //     camera plus the average of this sample's and the previous sample's OFFSET FROM THE CAMERA
+    //     (the previous one was the other eye). The eye offsets cancel; what is left stale is half
+    //     a frame of HEAD motion in the room, which is millimetres. NOT the midpoint of the two
+    //     absolute positions: that also lags by half a frame of CAMERA travel -- 3 to 12 cm while
+    //     walking or driving -- which is small on a far reticule and large on everything placed
+    //     relative to the head, the view or the rig (review, 2026-10-05). AimConverge and EyeTrace
+    //     already average offsets for the same reason.
     //   Mono (one view per frame, the centre eye): this sample IS the head, with no IPD residual at
     //     all -- UEVR hands us the midpoint of the two eye offsets. The slot for the other index is
     //     IGNORED here even if it once reported: after a live method flip it holds the last eye seen
     //     under the old method, wherever the player stood at the time, and averaging that in put
     //     every quad off by half the distance walked since. That was the 2026-09-15 report.
-    //   Unknown (first frames): this sample, as for Mono.
+    //   Unknown (one view per frame, verdict pending): averaged exactly as Alternating -- a
+    //     half-frame of head motion if it turns out to be Mono, right if it turns out to be AFR.
     g_eye_x[eye_index].store(eye_pos.x, std::memory_order_relaxed);
     g_eye_y[eye_index].store(eye_pos.y, std::memory_order_relaxed);
     g_eye_z[eye_index].store(eye_pos.z, std::memory_order_relaxed);
@@ -4046,12 +4052,12 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
     g_view_roll.store(view_roll, std::memory_order_relaxed);
     g_view_have.store(true, std::memory_order_release);
 
-    // The previous sample, for the Alternating and Unknown cases. Render thread only, like
-    // everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
+    // The previous sample's offset from ITS camera, for the Alternating and Unknown cases. Same
+    // thread as everything above. CONSECUTIVE means the ViewMode sample counter moved by exactly one since
     // the previous sample was taken HERE: the early returns above skip this function while the
     // layer is off or not yet armed, and the first sample after it comes back must not be
     // averaged with one from before that (review finding, 2026-09-15).
-    static Vec3     s_prev_eye{};
+    static Vec3     s_prev_off{};
     static unsigned s_prev_seq  = 0;
     static bool     s_prev_have = false;
     const unsigned  seq = viewmode_samples();
@@ -4069,24 +4075,27 @@ void xrlayer_note_eye(int eye_index, const Vec3& eye_pos, const Vec3& mono_view_
         // still pending): the same average is a half-frame lag if it turns out to be Mono and
         // exactly right if it turns out to be AFR -- never ONE eye alone, which under AFR is the
         // half-IPD hop this exists to remove.
-        head.x = 0.5f * (eye_pos.x + s_prev_eye.x);
-        head.y = 0.5f * (eye_pos.y + s_prev_eye.y);
-        head.z = 0.5f * (eye_pos.z + s_prev_eye.z);
+        // Offsets, not absolute positions: the camera's own travel since the last frame must not
+        // be averaged in (see the table above).
+        head.x = mono_view_pos.x + 0.5f * ((eye_pos.x - mono_view_pos.x) + s_prev_off.x);
+        head.y = mono_view_pos.y + 0.5f * ((eye_pos.y - mono_view_pos.y) + s_prev_off.y);
+        head.z = mono_view_pos.z + 0.5f * ((eye_pos.z - mono_view_pos.z) + s_prev_off.z);
     } else {
         // Mono (exact: the view IS the centre eye), or no usable previous sample. On the very
         // first frame of a stereo session the error is half an IPD and CONSTANT, which is not
         // the drift this function exists to remove.
         head = eye_pos;
     }
-    s_prev_eye  = eye_pos;
+    s_prev_off  = Vec3{eye_pos.x - mono_view_pos.x, eye_pos.y - mono_view_pos.y, eye_pos.z - mono_view_pos.z};
     s_prev_seq  = seq;
     s_prev_have = true;
 
     // FLATTEN TO INFINITY under the Mono rendering method (compute_pose explains why). Gated on
-    // THREE things agreeing (viewmode_is_mono): the observed topology, UEVR's declared method, and
-    // both eyes reporting one projection matrix -- an older backend ignores VR_RenderingMethod=3
-    // and keeps rendering stereo, PureDark's reads 3 as AFW, and flattening a stereo scene's quads
-    // would destroy the parallax the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
+    // everything viewmode_is_mono() requires (ViewMode.hpp lists the five): the observed topology,
+    // UEVR's declared method, one projection for both eyes, a backend that is not AFW, and Extreme
+    // Compatibility off -- an older backend ignores VR_RenderingMethod=3 and keeps rendering stereo,
+    // PureDark's reads 3 as AFW, and flattening a stereo scene's quads would destroy the parallax
+    // the comment below fought for. xrlayermonoflat=2 forces it for an A/B.
     const int   flat_mode = g_cfg.xr_layer_mono_flat;
     const float flat_m    = (flat_mode == 2 || (flat_mode == 1 && viewmode_is_mono()))
                               ? g_cfg.xr_layer_mono_far_m : 0.0f;
