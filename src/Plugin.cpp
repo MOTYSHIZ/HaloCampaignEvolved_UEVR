@@ -6407,12 +6407,11 @@ void update() {
             char cur[16]{};
             API::get()->param()->vr->get_mod_value("VR_RenderingMethod", cur, sizeof(cur));
             const int declared = (cur[0] >= '0' && cur[0] <= '9') ? atoi(cur) : -1;
-            halo::viewmode_set_declared(declared);
-
-            // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping, which looks
-            // exactly like mono to every test we can run on the callbacks, yet shows the headset a
-            // stereo pair -- so flattening the quads doubled the reticule (ViewMode.hpp). The backend
-            // names itself in its tag or branch; both are fixed for the session, so read them once.
+            // IS THIS PUREDARK'S AFW BACKEND? There method 3 is Alternate Frame Warping: the eyes render
+            // BY TURNS and the other is warped, so it must never be read as mono (ViewMode.hpp has the
+            // source trace and the two releases that got this wrong). The backend names itself in its
+            // tag or branch; both are fixed for the session, so read them once -- and publish this
+            // BEFORE the declared method below, so the render thread never sees method 3 without it.
             {
                 static int s_warps = -1;
                 if (s_warps < 0) {
@@ -6431,12 +6430,14 @@ void update() {
                     halo::viewmode_set_backend_warps(s_warps == 1);
                     if (s_warps == 1) {
                         API::get()->log_info("[Halo-CampE-UEVR] VIEWMODE: AFW backend (tag=%s branch=%s) -- "
-                                             "VR_RenderingMethod=3 there warps one view into a stereo pair, so "
-                                             "the compositor quads are never flattened on it.",
+                                             "VR_RenderingMethod=3 there renders the eyes by turns (the other is warped), "
+                                             "so it is never treated as mono and the quads are never flattened.",
                                              fns->get_tag(), fns->get_branch());
                     }
                 }
             }
+
+            halo::viewmode_set_declared(declared);
 
             // ONE PROJECTION FOR BOTH EYES? The physical test behind quad flattening (ViewMode.hpp):
             // the monofix mono path gives every eye the union-FOV projection, so the two matrices
@@ -6479,13 +6480,43 @@ void update() {
                                      "show %s; per-eye projections %s; XR layer head and aim-convergence eye = %s; "
                                      "layer quads %s (xrlayermonoflat=%d, %u samples, swing ring=0x%02X max=%.1f cm)",
                                      declared, halo::viewmode_method_name(declared), halo::viewmode_name(vm),
-                                     shared ? "IDENTICAL (one image serves both eyes)" : "differ (a stereo pair)",
+                                     shared ? "IDENTICAL (one frustum for both eyes: real mono, a symmetric projection override, or symmetric lenses)" : "differ (a stereo pair)",
                                      head_from,
                                      flat ? "FLATTENED to infinity to match the mono image"
                                           : (declared == 3 && halo::viewmode_backend_warps())
-                                                ? "at their real depth (AFW shows a stereo pair, never flattened)"
+                                                ? "at their real depth (AFW renders the eyes by turns: never flattened)"
                                                 : "at their real depth",
                                      g_cfg.xr_layer_mono_flat, halo::viewmode_samples(), ring, swing);
+            }
+
+            // THE UEVR SETTINGS A BUG REPORT TURNS ON, in one line, whenever any of them changes. A player's
+            // UEVR settings are their own, not the profile's: the report behind this line came from a
+            // session at another rendering method, another world scale and (probably) a symmetric
+            // projection override, and none of that could be read from the log. Twelve string reads on
+            // the 2 s poll, logged on change only. World scale is left out: WORLDSCALE already says it.
+            {
+                static const char* const kKeys[] = {
+                    "VR_RenderingMethod", "VR_SyncedSequentialMethod", "VR_DecoupledPitch", "VR_AimMethod",
+                    "VR_HorizontalProjectionOverride", "VR_VerticalProjectionOverride", "VR_SnapTurn",
+                    "VR_GhostingFix", "VR_NativeStereoFix", "VR_ExtremeCompatibilityMode", "VR_2DScreenMode",
+                    "VR_UncapFramerate",
+                };
+                static char s_said[640] = {0};
+                char line[640] = {0};
+                size_t n = 0;
+                for (const char* key : kKeys) {
+                    char val[24]{};
+                    API::get()->param()->vr->get_mod_value(key, val, sizeof(val));
+                    val[sizeof(val) - 1] = '\0';
+                    const int w = _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "%s%s=%s",
+                                              (n != 0) ? " " : "", key + 3, (val[0] != '\0') ? val : "?");
+                    if (w < 0) break;
+                    n += (size_t)w;
+                }
+                if (strcmp(line, s_said) != 0) {
+                    strcpy_s(s_said, sizeof(s_said), line);
+                    API::get()->log_info("[Halo-CampE-UEVR] UEVR SETTINGS: %s  (? = this backend has no such key)", line);
+                }
             }
         }
 
